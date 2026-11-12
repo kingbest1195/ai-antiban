@@ -100,6 +100,7 @@ pub fn run() {
             commands::audit::unblock_provider_cmd,
             commands::interception::resolve_interception,
             commands::interception::simulate_interception,
+            commands::interception::take_pending_alert,
             commands::sysproxy::toggle_sysproxy,
             commands::sysproxy::enable_cli_protection,
             commands::sysproxy::disable_cli_protection,

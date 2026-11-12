@@ -432,3 +432,199 @@ async fn test_upstream_proxy_selective_routing() {
     srv_handle.abort();
     mock_socks_handle.abort();
 }
+
+fn sample_report(provider: zastava_lib::auditor::ProviderId) -> zastava_lib::auditor::RiskReport {
+    use zastava_lib::auditor::{CheckResult, OverallStatus};
+    let ok = CheckResult::ok("T", "t");
+    zastava_lib::auditor::RiskReport {
+        provider,
+        overall_status: OverallStatus::Yellow,
+        trust_score: 70,
+        telemetry: NetworkTelemetry {
+            ip: "9.9.9.9".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: Some(1),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        },
+        geo_result: ok.clone(),
+        pinning_result: ok.clone(),
+        travel_result: ok.clone(),
+        dnsbl_result: ok.clone(),
+        dnsbl_clean_count: "0/0".to_string(),
+        asn_result: ok.clone(),
+        ipv6_result: ok.clone(),
+        timezone_result: ok.clone(),
+        checks: vec![ok],
+    }
+}
+
+fn detecting_payload(id: &str) -> zastava_lib::proxy::RiskInterceptPayload {
+    use zastava_lib::auditor::ProviderId;
+    use zastava_lib::proxy::hold_queue::{NetworkChange, PHASE_DETECTING};
+    zastava_lib::proxy::RiskInterceptPayload {
+        id: id.to_string(),
+        provider: ProviderId::Anthropic,
+        host: "Смена сети · все ИИ-сервисы".to_string(),
+        report: None,
+        ttl_seconds: 60,
+        scope: "network".to_string(),
+        network_change: Some(NetworkChange {
+            old_ip: Some("1.1.1.1".to_string()),
+            old_country: Some("DE".to_string()),
+            new_ip: Some("9.9.9.9".to_string()),
+            new_country: None,
+        }),
+        is_simulation: false,
+        detected_at_ms: 1_700_000_000_000,
+        phase: PHASE_DETECTING.to_string(),
+    }
+}
+
+/// Contract of `interceptor://risk-detected` (window-first, phase "detecting") and of
+/// `interceptor://enriched`: the exact JSON shape the alert window is written against.
+#[test]
+fn test_alert_event_payload_shapes() {
+    use zastava_lib::auditor::ProviderId;
+    use zastava_lib::proxy::hold_queue::{EnrichedPayload, NetworkChange, PHASE_READY};
+
+    let detecting = serde_json::to_value(detecting_payload("net-1")).unwrap();
+    let mut keys: Vec<&str> = detecting
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "detected_at_ms",
+            "host",
+            "id",
+            "is_simulation",
+            "network_change",
+            "phase",
+            "provider",
+            "report",
+            "scope",
+            "ttl_seconds"
+        ]
+    );
+    assert_eq!(detecting["phase"], "detecting");
+    assert!(detecting["report"].is_null());
+    assert_eq!(detecting["scope"], "network");
+    assert_eq!(detecting["network_change"]["old_ip"], "1.1.1.1");
+    assert_eq!(detecting["network_change"]["old_country"], "DE");
+    assert_eq!(detecting["network_change"]["new_ip"], "9.9.9.9");
+    assert!(detecting["network_change"]["new_country"].is_null());
+
+    // Before the new IP is probed both new_* fields are null, never missing.
+    let mut unknown = detecting_payload("net-2");
+    unknown.network_change.as_mut().unwrap().new_ip = None;
+    let unknown = serde_json::to_value(unknown).unwrap();
+    assert!(unknown["network_change"]["new_ip"].is_null());
+    assert!(
+        unknown["network_change"]
+            .as_object()
+            .unwrap()
+            .contains_key("new_country")
+    );
+
+    let enriched = EnrichedPayload {
+        id: "net-1".to_string(),
+        epoch: 7,
+        phase: PHASE_READY.to_string(),
+        report: Some(sample_report(ProviderId::Anthropic)),
+        network_change: NetworkChange {
+            old_ip: Some("1.1.1.1".to_string()),
+            old_country: Some("DE".to_string()),
+            new_ip: Some("9.9.9.9".to_string()),
+            new_country: Some("NL".to_string()),
+        },
+    };
+    let v = serde_json::to_value(&enriched).unwrap();
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["epoch", "id", "network_change", "phase", "report"]);
+    assert_eq!(v["epoch"], 7);
+    assert_eq!(v["phase"], "ready");
+    assert_eq!(v["report"]["telemetry"]["country_code"], "NL");
+    assert_eq!(v["network_change"]["new_country"], "NL");
+
+    // A payload written by an older build (no phase / detected_at_ms / nullable fields) still reads.
+    let old: zastava_lib::proxy::RiskInterceptPayload = serde_json::from_value(serde_json::json!({
+        "id": "x", "provider": "anthropic", "host": "h", "ttl_seconds": 60,
+        "report": serde_json::to_value(sample_report(ProviderId::Anthropic)).unwrap(),
+        "network_change": {"old_ip": null, "old_country": null, "new_ip": "9.9.9.9", "new_country": "NL"}
+    }))
+    .unwrap();
+    assert_eq!(old.phase, "ready");
+    assert!(old.report.is_some());
+}
+
+/// `take_pending_alert` serves the hold queue's alert snapshot: it carries the minimal payload
+/// first, picks up `enriched` data, and is gone once the hold is resolved or removed.
+#[tokio::test]
+async fn test_pending_alert_snapshot_lifecycle() {
+    use zastava_lib::auditor::ProviderId;
+    use zastava_lib::proxy::hold_queue::{
+        EnrichedPayload, NetworkChange, PHASE_FAILED, PHASE_READY,
+    };
+
+    let queue = HoldQueue::new();
+    assert!(queue.current_alert().is_none());
+
+    let _rx = queue.register("net-1".into(), "all").await;
+    queue.set_alert(detecting_payload("net-1"));
+    let snap = queue.current_alert().expect("alert after set");
+    assert_eq!(
+        (snap.id.as_str(), snap.phase.as_str()),
+        ("net-1", "detecting")
+    );
+    assert!(snap.report.is_none());
+    // Reading does not consume it (the window may ask again after a reload).
+    assert!(queue.current_alert().is_some());
+
+    let change = NetworkChange {
+        old_ip: Some("1.1.1.1".to_string()),
+        old_country: Some("DE".to_string()),
+        new_ip: Some("9.9.9.9".to_string()),
+        new_country: Some("NL".to_string()),
+    };
+    // Enriched data of another alert is ignored.
+    queue.update_alert(&EnrichedPayload {
+        id: "other".to_string(),
+        epoch: 1,
+        phase: PHASE_FAILED.to_string(),
+        report: None,
+        network_change: change.clone(),
+    });
+    assert_eq!(queue.current_alert().unwrap().phase, "detecting");
+
+    queue.update_alert(&EnrichedPayload {
+        id: "net-1".to_string(),
+        epoch: 1,
+        phase: PHASE_READY.to_string(),
+        report: Some(sample_report(ProviderId::Anthropic)),
+        network_change: change,
+    });
+    let snap = queue.current_alert().unwrap();
+    assert_eq!(snap.phase, "ready");
+    assert!(snap.report.is_some());
+    assert_eq!(
+        snap.network_change.unwrap().new_country.as_deref(),
+        Some("NL")
+    );
+
+    // Resolving the hold clears it; so does removing it.
+    assert!(queue.resolve("net-1", HoldResolution::Block).await);
+    assert!(queue.current_alert().is_none());
+    queue.set_alert(detecting_payload("net-2"));
+    let _rx2 = queue.register("net-2".into(), "all").await;
+    queue.remove("net-2").await;
+    assert!(queue.current_alert().is_none());
+}

@@ -7,6 +7,13 @@ use crate::auditor::RiskReport;
 
 pub const DEFAULT_HOLD_TTL_SECS: u64 = 60;
 
+/// `RiskInterceptPayload::phase` / `EnrichedPayload::phase`: the window is open, data still loading.
+pub const PHASE_DETECTING: &str = "detecting";
+/// The report is complete.
+pub const PHASE_READY: &str = "ready";
+/// The audit failed or timed out; the gate stays closed and the window is not reopened.
+pub const PHASE_FAILED: &str = "failed";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoldResolution {
     Allow,
@@ -29,8 +36,12 @@ pub enum InterceptionAction {
 pub struct NetworkChange {
     pub old_ip: Option<String>,
     pub old_country: Option<String>,
-    pub new_ip: String,
-    pub new_country: String,
+    /// `None` while the new egress IP has not been probed yet.
+    #[serde(default)]
+    pub new_ip: Option<String>,
+    /// `None` until the geo lookup of the new IP has finished.
+    #[serde(default)]
+    pub new_country: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +49,9 @@ pub struct RiskInterceptPayload {
     pub id: String,
     pub provider: ProviderId,
     pub host: String,
-    pub report: RiskReport,
+    /// `None` while `phase == "detecting"` (the window is shown before the audit finishes).
+    #[serde(default)]
+    pub report: Option<RiskReport>,
     pub ttl_seconds: u64,
     /// `"provider"` — single held CONNECT; `"network"` — global pause after IP change.
     #[serde(default = "default_scope")]
@@ -47,10 +60,32 @@ pub struct RiskInterceptPayload {
     pub network_change: Option<NetworkChange>,
     #[serde(default)]
     pub is_simulation: bool,
+    /// Unix time (ms) when the change was detected.
+    #[serde(default)]
+    pub detected_at_ms: u64,
+    /// `"detecting"` (minimal payload, `report == None`) or `"ready"`.
+    #[serde(default = "default_phase")]
+    pub phase: String,
+}
+
+/// `interceptor://enriched`: data that arrives after the window was already shown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrichedPayload {
+    pub id: String,
+    /// Guard epoch of the alert this data belongs to (stale epochs must be ignored).
+    pub epoch: u64,
+    /// `"ready"` or `"failed"`.
+    pub phase: String,
+    pub report: Option<RiskReport>,
+    pub network_change: NetworkChange,
 }
 
 fn default_scope() -> String {
     "provider".to_string()
+}
+
+fn default_phase() -> String {
+    PHASE_READY.to_string()
 }
 
 struct HoldEntry {
@@ -61,12 +96,49 @@ struct HoldEntry {
 #[derive(Clone, Default)]
 pub struct HoldQueue {
     entries: Arc<RwLock<HashMap<String, HoldEntry>>>,
+    /// Snapshot of the alert the popup currently shows (for `take_pending_alert`): a hidden
+    /// window may not have registered its event listeners yet when the first event is emitted.
+    alert: Arc<std::sync::Mutex<Option<RiskInterceptPayload>>>,
 }
 
 impl HoldQueue {
     pub fn new() -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
+            alert: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn alert_slot(&self) -> std::sync::MutexGuard<'_, Option<RiskInterceptPayload>> {
+        self.alert.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Remembers the alert that was just emitted. Cleared when its hold is resolved or removed.
+    pub fn set_alert(&self, payload: RiskInterceptPayload) {
+        *self.alert_slot() = Some(payload);
+    }
+
+    /// Folds an `interceptor://enriched` update into the remembered alert (same id only).
+    pub fn update_alert(&self, enriched: &EnrichedPayload) {
+        let mut slot = self.alert_slot();
+        let Some(cur) = slot.as_mut().filter(|cur| cur.id == enriched.id) else {
+            return;
+        };
+        cur.phase = enriched.phase.clone();
+        cur.report = enriched.report.clone();
+        cur.network_change = Some(enriched.network_change.clone());
+    }
+
+    /// The alert that is currently waiting for a decision, with all data known so far.
+    /// Not consumed: it disappears when the hold is resolved or removed.
+    pub fn current_alert(&self) -> Option<RiskInterceptPayload> {
+        self.alert_slot().clone()
+    }
+
+    fn clear_alert_if(&self, id: &str) {
+        let mut slot = self.alert_slot();
+        if slot.as_ref().is_some_and(|a| a.id == id) {
+            *slot = None;
         }
     }
 
@@ -91,6 +163,7 @@ impl HoldQueue {
     /// Resolves a single held connection by ID.
     pub async fn resolve(&self, id: &str, resolution: HoldResolution) -> bool {
         let mut w = self.entries.write().await;
+        self.clear_alert_if(id);
         if let Some(entry) = w.remove(id) {
             let _ = entry.sender.send(resolution);
             true
@@ -110,6 +183,7 @@ impl HoldQueue {
             .collect();
 
         for key in keys_to_remove {
+            self.clear_alert_if(&key);
             if let Some(entry) = w.remove(&key) {
                 let _ = entry.sender.send(resolution);
                 resolved += 1;
@@ -121,6 +195,7 @@ impl HoldQueue {
     /// Removes an entry without sending resolution (e.g. on client abort).
     pub async fn remove(&self, id: &str) {
         let mut w = self.entries.write().await;
+        self.clear_alert_if(id);
         w.remove(id);
     }
 }

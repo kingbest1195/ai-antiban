@@ -201,17 +201,35 @@ pub async fn simulate_interception(
         id: hold_id,
         provider: provider_id,
         host: "ДЕМО-ТЕСТ: api.anthropic.com:443".to_string(),
-        report,
+        report: Some(report),
         ttl_seconds: proxy::hold_queue::DEFAULT_HOLD_TTL_SECS,
         scope: "simulation".to_string(),
         network_change: None,
         is_simulation: true,
+        detected_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        phase: proxy::hold_queue::PHASE_READY.to_string(),
     };
 
-    show_and_position_alert_popup(&app);
+    // Emit first, then show: the hidden window must not display its placeholder content.
+    proxy_manager.hold_queue.set_alert(payload.clone());
     let _ = app.emit("interceptor://risk-detected", &payload);
+    show_and_position_alert_popup(&app);
 
     Ok(())
+}
+
+/// Snapshot of the alert that is waiting for a decision (or `None`). The alert popup calls it
+/// after its event listeners are registered: a hidden window can miss the first
+/// `interceptor://risk-detected`. The snapshot carries everything known so far (`phase`,
+/// `report`, `network_change`); it is not consumed and disappears once the hold is resolved.
+#[tauri::command]
+pub fn take_pending_alert(
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+) -> Option<proxy::RiskInterceptPayload> {
+    proxy_manager.hold_queue.current_alert()
 }
 
 #[tauri::command]
