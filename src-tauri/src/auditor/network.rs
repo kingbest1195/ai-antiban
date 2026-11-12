@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
-use crate::auditor::geo_matrix::CheckResult;
+use crate::auditor::geo_matrix::{CheckResult, UnknownReason};
 use crate::routing::net::resolve_entry_checked;
 use crate::routing::{route_fingerprint, route_id_for_raw_key, Entry, EntryProto, Route};
 use crate::state::UpstreamProxyConfig;
@@ -240,6 +240,9 @@ pub struct NetworkResolver {
     resolve_lock: Arc<tokio::sync::Mutex<()>>,
     /// Port of the local gateway (0 = unknown), used to refuse entry nodes that point back at it.
     gateway_port: Arc<AtomicU16>,
+    /// Provider-independent check results (DNSBL, IPv6, OS); dropped together with the telemetry
+    /// whenever the network changes.
+    check_cache: Arc<crate::auditor::cache::CheckCache>,
 }
 
 impl Default for NetworkResolver {
@@ -264,7 +267,13 @@ impl NetworkResolver {
             cache: Arc::new(RwLock::new(HashMap::new())),
             resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
             gateway_port: Arc::new(AtomicU16::new(0)),
+            check_cache: Arc::default(),
         }
+    }
+
+    /// The TTL cache of the provider-independent checks, shared by every audit of this resolver.
+    pub fn check_cache(&self) -> &Arc<crate::auditor::cache::CheckCache> {
+        &self.check_cache
     }
 
     /// Registers the port of the local gateway (called by the proxy server when it binds).
@@ -279,6 +288,7 @@ impl NetworkResolver {
     /// Invalidate all cached telemetry (direct and every route).
     pub async fn invalidate_cache(&self) {
         self.cache.write().await.clear();
+        self.check_cache.clear().await;
     }
 
     /// Invalidate cached telemetry of one route.
@@ -614,12 +624,19 @@ pub fn evaluate_reverse_dns_ptr(telemetry: &NetworkTelemetry) -> CheckResult {
         }
     }
 
-    let detail = telemetry
-        .hostname
-        .as_deref()
-        .or(telemetry.isp.as_deref())
-        .or(telemetry.org.as_deref())
-        .unwrap_or("чистый хостинг");
+    fn non_empty(v: &Option<String>) -> Option<&str> {
+        v.as_deref().filter(|t| !t.trim().is_empty())
+    }
+    let Some(detail) = non_empty(&telemetry.hostname)
+        .or(non_empty(&telemetry.isp))
+        .or(non_empty(&telemetry.org))
+    else {
+        return CheckResult::unknown(
+            "REVERSE_DNS_NO_DATA",
+            "Reverse DNS не проверен: источник геолокации не передал имя узла, провайдера и организацию.",
+            UnknownReason::NoData,
+        );
+    };
 
     CheckResult::ok(
         "REVERSE_DNS_CLEAN",
@@ -647,6 +664,15 @@ pub fn evaluate_dns_country_consistency(
                 Some(crate::auditor::geo_matrix::GUIDE_OS_PRIVACY.to_string()),
             );
         }
+    }
+
+    if secondary_country.is_none_or(|c| c.trim().is_empty()) {
+        // No independent source to compare with: nothing was verified.
+        return CheckResult::unknown(
+            "DNS_COUNTRY_NO_SOURCE",
+            "Согласованность страны DNS и выходного узла не проверена: нет независимого источника для сравнения.",
+            UnknownReason::NoData,
+        );
     }
 
     CheckResult::ok(
@@ -821,6 +847,31 @@ mod tests {
         let clean_res = evaluate_dns_country_consistency(&tel, Some("NL"));
         assert_eq!(clean_res.status, crate::auditor::geo_matrix::CheckStatus::Ok);
         assert_eq!(clean_res.code, "DNS_COUNTRY_CONSISTENT");
+
+        // No independent source: unknown, never "consistent"
+        let none_res = evaluate_dns_country_consistency(&tel, None);
+        assert_eq!(
+            none_res.status,
+            crate::auditor::geo_matrix::CheckStatus::Unknown
+        );
+        assert_eq!(none_res.reason, Some(UnknownReason::NoData));
+    }
+
+    #[test]
+    fn test_reverse_dns_without_any_data_is_unknown() {
+        let bare = NetworkTelemetry {
+            ip: "185.10.10.1".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: Some(1),
+            org: None,
+            isp: Some("  ".to_string()),
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        let res = evaluate_reverse_dns_ptr(&bare);
+        assert_eq!(res.status, crate::auditor::geo_matrix::CheckStatus::Unknown);
+        assert_eq!(res.reason, Some(UnknownReason::NoData));
     }
 
     #[test]

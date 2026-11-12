@@ -20,9 +20,25 @@ pub async fn audit_connection(
 ) -> Result<auditor::RiskReport, String> {
     let provider_id = auditor::ProviderId::from_id(&provider)
         .ok_or_else(|| format!("Неизвестный провайдер: {provider}"))?;
-    let report = auditor
+    let report = match auditor
         .evaluate_all(provider_id, &state, force_refresh.unwrap_or(false))
-        .await?;
+        .await
+    {
+        Ok(report) => report,
+        Err(e) => {
+            // A failed primary audit must not leave the previous (possibly green) tray state;
+            // a stop/block state stays as it is.
+            if provider_id == auditor::ProviderId::Anthropic {
+                let st = state.get_data().await;
+                let has_blocked =
+                    !st.blocked_providers.is_empty() || guard.gate() != proxy::Gate::Open;
+                if !has_blocked {
+                    crate::tray::update_tray_no_data(&app, None);
+                }
+            }
+            return Err(e);
+        }
+    };
 
     // Sync system tray status whenever Anthropic or primary audit runs
     if provider_id == auditor::ProviderId::Anthropic || force_refresh.unwrap_or(false) {

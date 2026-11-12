@@ -1,4 +1,4 @@
-use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_PRIVACY};
+use crate::auditor::geo_matrix::{CheckResult, UnknownReason, GUIDE_OS_PRIVACY};
 
 pub const RUSSIAN_TIMEZONES: &[&str] = &[
     "Europe/Moscow",
@@ -44,9 +44,10 @@ pub fn evaluate_system_timezone(
     let system_tz = match iana_time_zone::get_timezone() {
         Ok(tz) => tz,
         Err(_) => {
-            return CheckResult::ok(
+            return CheckResult::unknown(
                 "TIMEZONE_UNKNOWN",
-                "Системный часовой пояс не определен.",
+                "Часовой пояс не проверен: системный часовой пояс ОС не определен.",
+                UnknownReason::NoData,
             );
         }
     };
@@ -92,6 +93,17 @@ pub fn evaluate_system_timezone(
         }
     }
 
+    // Nothing to compare with: the geolocation source gave no time zone for the exit IP.
+    if ip_timezone.is_none_or(|t| t.trim().is_empty()) {
+        return CheckResult::unknown(
+            "TZ_NO_IP_DATA",
+            format!(
+                "Часовой пояс не сопоставлен: источник геолокации не передал часовой пояс IP (системный: {system_tz})."
+            ),
+            UnknownReason::NoData,
+        );
+    }
+
     CheckResult::ok(
         "TIMEZONE_MATCH",
         format!("Системный часовой пояс ({system_tz}) совпадает с локацией IP."),
@@ -111,6 +123,18 @@ pub fn evaluate_locale_env_hygiene(synced_ai_tz: Option<&str>) -> CheckResult {
 
     let lang = std::env::var("LANG").unwrap_or_default();
     let lc_all = std::env::var("LC_ALL").unwrap_or_default();
+    evaluate_locale_values(lang, lc_all)
+}
+
+/// The decision of [`evaluate_locale_env_hygiene`] for already read `LANG` / `LC_ALL` values.
+fn evaluate_locale_values(lang: String, lc_all: String) -> CheckResult {
+    if lang.trim().is_empty() && lc_all.trim().is_empty() {
+        return CheckResult::unknown(
+            "LOCALE_ENV_NOT_SET",
+            "Локаль не проверена: в окружении Заставы не заданы LANG и LC_ALL, системная локаль не читалась.",
+            UnknownReason::NoData,
+        );
+    }
 
     let is_sanctioned = |val: &str| {
         let v = val.to_ascii_uppercase();
@@ -135,11 +159,23 @@ pub fn evaluate_locale_env_hygiene(synced_ai_tz: Option<&str>) -> CheckResult {
 }
 
 /// Checks OS Location Services status (BSSID Wi-Fi triangulation).
+/// Only Windows exposes a setting that can be read; elsewhere the check does not apply.
+#[cfg(not(target_os = "windows"))]
 pub fn check_os_location_services() -> CheckResult {
-    #[cfg(target_os = "windows")]
+    CheckResult::unknown(
+        "OS_LOCATION_NOT_APPLICABLE",
+        "Геолокация ОС по Wi-Fi (BSSID) на этой системе не проверяется: состояние службы геолокации не читается.",
+        UnknownReason::NotApplicable,
+    )
+}
+
+/// Checks OS Location Services status (BSSID Wi-Fi triangulation).
+#[cfg(target_os = "windows")]
+pub fn check_os_location_services() -> CheckResult {
     {
         // 1. Check machine-wide policy first in HKLM.
         // If Deny, location services are globally disabled for the entire machine.
+        let mut registry_read = false;
         if let Ok(hklm_output) = crate::sysproxy::silent_command("reg")
             .args([
                 "query",
@@ -149,6 +185,7 @@ pub fn check_os_location_services() -> CheckResult {
             ])
             .output()
         {
+            registry_read = true;
             let hklm_text = String::from_utf8_lossy(&hklm_output.stdout);
             if hklm_text.contains("Deny") {
                 return CheckResult::ok(
@@ -178,11 +215,13 @@ pub fn check_os_location_services() -> CheckResult {
                 }
             }
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // On macOS CoreLocation queries BSSIDs in the background
+        if !registry_read {
+            return CheckResult::unknown(
+                "OS_LOCATION_UNREADABLE",
+                "Геолокация Windows не проверена: не удалось прочитать настройку службы геолокации.",
+                UnknownReason::InternalError,
+            );
+        }
     }
 
     CheckResult::ok(
@@ -224,7 +263,43 @@ mod tests {
     #[test]
     fn test_os_location_services_check() {
         let res = check_os_location_services();
-        assert!(res.code == "OS_LOCATION_SAFE" || res.code == "OS_LOCATION_ENABLED");
         assert!(res.message.contains("Wi-Fi"));
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(res.is_not_applicable());
+            assert_eq!(res.code, "OS_LOCATION_NOT_APPLICABLE");
+        }
+        #[cfg(target_os = "windows")]
+        assert!(
+            res.code == "OS_LOCATION_SAFE"
+                || res.code == "OS_LOCATION_ENABLED"
+                || res.code == "OS_LOCATION_UNREADABLE"
+        );
+    }
+
+    #[test]
+    fn test_locale_values() {
+        use crate::auditor::geo_matrix::CheckStatus;
+        let r = evaluate_locale_values(String::new(), "  ".to_string());
+        assert_eq!(r.status, CheckStatus::Unknown);
+        assert_eq!(r.reason, Some(UnknownReason::NoData));
+        assert_eq!(
+            evaluate_locale_values("ru_RU.UTF-8".into(), String::new()).status,
+            CheckStatus::Warning
+        );
+        assert_eq!(
+            evaluate_locale_values("en_US.UTF-8".into(), String::new()).status,
+            CheckStatus::Ok
+        );
+    }
+
+    #[test]
+    fn test_timezone_without_ip_timezone_is_never_a_match() {
+        use crate::auditor::geo_matrix::CheckStatus;
+        let r = evaluate_system_timezone(None, None);
+        // Depends on the host zone: a Russian zone is a legitimate Warning, anything else has
+        // nothing to compare with.
+        assert_ne!(r.status, CheckStatus::Ok);
+        assert!(r.code != "TIMEZONE_MATCH");
     }
 }

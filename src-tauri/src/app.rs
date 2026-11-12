@@ -256,31 +256,47 @@ fn spawn_tray_status_watcher(
     let watcher_guard = guard;
     tauri::async_runtime::spawn(async move {
         let mut initial_synced = false;
+        // Local time (HH:MM) of the last audit that produced a report.
+        let mut last_checked: Option<String> = None;
         loop {
-            if let Ok(report) = watcher_auditor
+            match watcher_auditor
                 .evaluate_all(auditor::ProviderId::Anthropic, &watcher_state, false)
                 .await
             {
-                let st = watcher_state.get_data().await;
-                let is_pinned = st
-                    .pinned_ip
-                    .as_ref()
-                    .map(|p| p.trim() == report.telemetry.ip.trim())
-                    .unwrap_or(false);
-                let has_blocked = !st.blocked_providers.is_empty()
-                    || watcher_guard.gate() != proxy::Gate::Open;
+                Ok(report) => {
+                    last_checked = Some(chrono::Local::now().format("%H:%M").to_string());
+                    let st = watcher_state.get_data().await;
+                    let is_pinned = st
+                        .pinned_ip
+                        .as_ref()
+                        .map(|p| p.trim() == report.telemetry.ip.trim())
+                        .unwrap_or(false);
+                    let has_blocked = !st.blocked_providers.is_empty()
+                        || watcher_guard.gate() != proxy::Gate::Open;
 
-                update_tray_from_report(&watcher_handle, &report, is_pinned, has_blocked);
+                    update_tray_from_report(&watcher_handle, &report, is_pinned, has_blocked);
 
-                if !initial_synced {
-                    initial_synced = true;
-                    let _ = watcher_handle.emit("network://changed", &report);
+                    if !initial_synced {
+                        initial_synced = true;
+                        let _ = watcher_handle.emit("network://changed", &report);
+                    }
+                    tokio::time::sleep(Duration::from_secs(10)).await;
                 }
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            } else if !initial_synced {
-                tokio::time::sleep(Duration::from_millis(1200)).await;
-            } else {
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                Err(_) => {
+                    // Never leave the previous (possibly green) state on screen after a failed
+                    // audit. A stop/block state is more important than "no data": keep it.
+                    let st = watcher_state.get_data().await;
+                    let has_blocked = !st.blocked_providers.is_empty()
+                        || watcher_guard.gate() != proxy::Gate::Open;
+                    if !has_blocked {
+                        crate::tray::update_tray_no_data(&watcher_handle, last_checked.as_deref());
+                    }
+                    if !initial_synced {
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                }
             }
         }
     });
