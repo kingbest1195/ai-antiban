@@ -42,6 +42,9 @@ pub enum Resource {
     Pac { service: ServiceId },
     /// Explicit HTTP/HTTPS proxy of one macOS service.
     Chain { service: ServiceId },
+    /// Proxy bypass domains of one macOS service (a snapshot taken before its explicit proxy is
+    /// switched off, so the list comes back exactly as the user had it).
+    Bypass { service: ServiceId },
     /// One variable of the user environment (launchctl / `HKCU\Environment`).
     UserEnv { name: String },
     /// One WinINet value (`AutoConfigURL`, `ProxyEnable`, ...).
@@ -70,6 +73,7 @@ impl Resource {
         match self {
             Resource::Pac { service } => format!("pac:{}", service.key()),
             Resource::Chain { service } => format!("chain:{}", service.key()),
+            Resource::Bypass { service } => format!("bypass:{}", service.key()),
             Resource::UserEnv { name } => format!("env:{name}"),
             Resource::Inet { name } => format!("inet:{name}"),
             Resource::JsonKey { file, path } => {
@@ -111,6 +115,8 @@ impl Resource {
 pub enum Value {
     Pac(PacState),
     Chain(ChainState),
+    /// Bypass domains of a service; empty = none.
+    Bypass(Vec<String>),
     Env(Option<String>),
     Reg(Option<RegValue>),
     /// The exact JSON text of a value in a JSONC file; `None` = the key is absent.
@@ -127,6 +133,7 @@ impl Value {
             (self, res),
             (Value::Pac(_), Resource::Pac { .. })
                 | (Value::Chain(_), Resource::Chain { .. })
+                | (Value::Bypass(_), Resource::Bypass { .. })
                 | (Value::Env(_), Resource::UserEnv { .. })
                 | (Value::Reg(_), Resource::Inet { .. })
                 | (Value::Json(_), Resource::JsonKey { .. })
@@ -314,6 +321,7 @@ fn read_value(fs: &dyn Fs, platform: &dyn Platform, res: &Resource) -> PResult<V
     Ok(match res {
         Resource::Pac { service } => Value::Pac(platform.get_pac(service)?),
         Resource::Chain { service } => Value::Chain(platform.get_chain(service)?),
+        Resource::Bypass { service } => Value::Bypass(platform.get_proxy_bypass_domains(service)?),
         Resource::UserEnv { name } => Value::Env(platform.get_user_env(name)?),
         Resource::Inet { name } => Value::Reg(platform.get_inet(name)?),
         Resource::JsonKey { .. }
@@ -339,6 +347,7 @@ fn notify(platform: &dyn Platform, res: &Resource) -> Notified {
         Resource::UserEnv { .. } => platform.broadcast_env_change(),
         Resource::Pac { .. }
         | Resource::Chain { .. }
+        | Resource::Bypass { .. }
         | Resource::JsonKey { .. }
         | Resource::JsonObject { .. }
         | Resource::TextBlock { .. }
@@ -364,14 +373,18 @@ fn write_value(
     }
     match (res, v) {
         (Resource::Pac { service }, Value::Pac(p)) => {
-            // An absent URL is restored by clearing it (networksetup has no "unset").
+            // An absent URL is restored by clearing it (networksetup has no "unset"); an unknown
+            // flag means the PAC was not in use before us, so it is switched off.
             let pac = PacState {
                 url: Some(p.url.clone().unwrap_or_default()),
-                enabled: p.enabled,
+                enabled: p.enabled.or(Some(false)),
             };
             platform.set_pac(service, &pac)?;
         }
         (Resource::Chain { service }, Value::Chain(c)) => platform.set_chain(service, c)?,
+        (Resource::Bypass { service }, Value::Bypass(d)) => {
+            platform.set_proxy_bypass_domains(service, d)?
+        }
         (Resource::UserEnv { name }, Value::Env(Some(s))) => platform.set_user_env(name, s)?,
         (Resource::UserEnv { name }, Value::Env(None)) => platform.unset_user_env(name)?,
         (Resource::Inet { name }, Value::Reg(Some(r))) => platform.set_inet(name, r)?,

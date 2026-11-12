@@ -132,7 +132,25 @@ pub(crate) fn state() -> &'static SysState {
 
 const ZASTAVA_RC_START: &str = "# >>> Zastava AI CLI & IDE Guard >>>";
 const ZASTAVA_RC_END: &str = "# <<< Zastava AI CLI & IDE Guard <<<";
-const NO_PROXY_VALUE: &str = "localhost,127.0.0.1,::1,.local";
+/// `NO_PROXY` Zastava writes: loopback, `.local` (Bonjour, AirPrint / IPP printers) and every
+/// private range, so local-network traffic never goes through a proxy. One constant for every
+/// place (shell profiles, IDE and agent `settings.json`, Windows environment, PAC bypass list).
+/// Note: not every client understands CIDR (`10.0.0.0/8`); the ones that do not simply ignore it.
+pub(crate) const NO_PROXY_VALUE: &str =
+    "localhost,127.0.0.1,::1,.local,*.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16";
+
+/// The `NO_PROXY` that Zastava 2.0.0 wrote. Still recognised as "ours", otherwise what 2.0.0
+/// left in a profile, a settings file or the user environment would never be rolled back.
+pub(crate) const NO_PROXY_VALUE_2_0: &str = "localhost,127.0.0.1,::1,.local";
+
+/// Every `NO_PROXY` value a Zastava build ever wrote (old and new).
+pub(crate) const KNOWN_NO_PROXY_VALUES: [&str; 2] = [NO_PROXY_VALUE, NO_PROXY_VALUE_2_0];
+
+/// Whether `value` is a `NO_PROXY` written by some Zastava version.
+pub(crate) fn is_known_no_proxy_value(value: &str) -> bool {
+    let v = value.trim();
+    KNOWN_NO_PROXY_VALUES.contains(&v)
+}
 
 /// Returns the currently discovered/configured upstream chained proxy (e.g. "127.0.0.1:10808"), if any.
 pub fn get_chained_proxy() -> Option<String> {
@@ -826,6 +844,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_proxy_covers_loopback_bonjour_and_every_private_range() {
+        assert_eq!(
+            NO_PROXY_VALUE,
+            "localhost,127.0.0.1,::1,.local,*.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16"
+        );
+        let items: Vec<&str> = NO_PROXY_VALUE.split(',').collect();
+        for must in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            ".local",
+            "*.local",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+        ] {
+            assert!(items.contains(&must), "{must}");
+        }
+    }
+
+    #[test]
+    fn both_generations_of_no_proxy_are_known_and_nothing_else() {
+        assert!(is_known_no_proxy_value(NO_PROXY_VALUE));
+        assert!(is_known_no_proxy_value(NO_PROXY_VALUE_2_0));
+        assert!(is_known_no_proxy_value(
+            "  localhost,127.0.0.1,::1,.local \n"
+        ));
+        assert_eq!(NO_PROXY_VALUE_2_0, "localhost,127.0.0.1,::1,.local");
+        assert!(!is_known_no_proxy_value("localhost,corp.example"));
+        assert!(!is_known_no_proxy_value(""));
+    }
+
+    #[test]
     fn app_identifier_matches_tauri_conf() {
         let conf = include_str!("../../tauri.conf.json");
         assert!(conf.contains(&format!("\"identifier\": \"{APP_IDENTIFIER}\"")));
@@ -917,6 +969,17 @@ mod tests {
         assert!(!home.join(".zshrc").exists());
         assert!(!home.join(".claude").exists());
         assert!(dry_run_blocked_calls() > before);
+        // No `launchctl setenv` for the GUI session, with or without a timezone sync.
+        let with_tz =
+            enable_cli_and_ide_protection_with_tz("127.0.0.1:8899", Some("Europe/Berlin"));
+        assert!(with_tz.enabled);
+        assert!(
+            !dry_run_blocked_programs()
+                .iter()
+                .any(|w| w.contains("launchctl") || w.contains("user_env")),
+            "the GUI session stays clean: {:?}",
+            dry_run_blocked_programs()
+        );
         disable_cli_protection();
         assert!(!state().cli_protection_active());
     }

@@ -186,6 +186,11 @@ pub trait Platform: Send + Sync {
     fn set_pac(&self, svc: &ServiceId, pac: &PacState) -> PResult<()>;
     fn get_chain(&self, svc: &ServiceId) -> PResult<ChainState>;
     fn set_chain(&self, svc: &ServiceId, chain: &ChainState) -> PResult<()>;
+    /// Proxy bypass domains of a service (`networksetup -getproxybypassdomains`); empty = none.
+    fn get_proxy_bypass_domains(&self, svc: &ServiceId) -> PResult<Vec<String>>;
+    /// Replaces the bypass domains of a service; an empty list means "none". Writes only when the
+    /// list really differs from what the service holds.
+    fn set_proxy_bypass_domains(&self, svc: &ServiceId, domains: &[String]) -> PResult<()>;
     /// Read-only: does an active VPN keep temporary DNS settings that differ from the saved ones?
     fn temp_dns_overrides(&self) -> PResult<bool>;
     /// User environment: `launchctl getenv` (macOS) / `HKCU\Environment` (Windows).
@@ -249,6 +254,17 @@ pub fn parse_webproxy(output: &str) -> ProxyEndpoint {
         }
     }
     ep
+}
+
+/// `networksetup -getproxybypassdomains` -> domains, one per line. Quirk: an empty list is
+/// printed as "There aren't any bypass domains set on <service>." and means no domains.
+pub fn parse_bypass_domains(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("There aren't any bypass domains"))
+        .map(str::to_string)
+        .collect()
 }
 
 /// `networksetup -listnetworkserviceorder` -> services with device + hardware port + enabled flag.
@@ -458,6 +474,20 @@ fn run_ok(program: &'static str, args: &[&str], op: &'static str) -> PResult<()>
     }
 }
 
+/// The one place that knows how a PAC URL is cleared. `networksetup` has no "unset"; clearing it
+/// with an empty argument (`-setautoproxyurl <service> ""`) is the assumed way and is still to be
+/// confirmed on a real macOS (manual gate S2c). If it turns out wrong, only this function changes.
+fn clear_pac_url(service_name: &str) -> PResult<()> {
+    run_ok(
+        "networksetup",
+        &["-setautoproxyurl", service_name, ""],
+        "set_pac",
+    )
+}
+
+/// `networksetup -setproxybypassdomains` takes the word `Empty` for "no domains".
+const BYPASS_EMPTY_ARG: &str = "Empty";
+
 /// The production implementation. Used only from non-test code in `sysproxy`.
 pub struct RealPlatform;
 
@@ -519,16 +549,25 @@ impl Platform for RealPlatform {
             return Ok(());
         }
         let name = self.current_name(svc, "set_pac")?;
-        if let Some(url) = &pac.url {
-            run_ok("networksetup", &["-setautoproxyurl", &name, url], "set_pac")?;
-        }
-        if let Some(on) = pac.enabled {
-            let st = if on { "on" } else { "off" };
+        let set_state = |on: bool| {
             run_ok(
                 "networksetup",
-                &["-setautoproxystate", &name, st],
+                &["-setautoproxystate", &name, if on { "on" } else { "off" }],
                 "set_pac",
-            )?;
+            )
+        };
+        // Switching on: the URL first, then the flag. Switching off: the flag first, so the
+        // service never holds an enabled PAC without an address.
+        if pac.enabled == Some(false) {
+            set_state(false)?;
+        }
+        match pac.url.as_deref() {
+            Some("") => clear_pac_url(&name)?,
+            Some(url) => run_ok("networksetup", &["-setautoproxyurl", &name, url], "set_pac")?,
+            None => {}
+        }
+        if pac.enabled == Some(true) {
+            set_state(true)?;
         }
         Ok(())
     }
@@ -593,6 +632,39 @@ impl Platform for RealPlatform {
             }
         }
         Ok(())
+    }
+
+    fn get_proxy_bypass_domains(&self, svc: &ServiceId) -> PResult<Vec<String>> {
+        Self::require_macos("get_proxy_bypass_domains")?;
+        dry_run_gate("networksetup:getproxybypassdomains")?;
+        let name = self.current_name(svc, "get_proxy_bypass_domains")?;
+        let (ok, text) = run(
+            "networksetup",
+            &["-getproxybypassdomains", &name],
+            "get_proxy_bypass_domains",
+        )?;
+        if !ok {
+            return Err(PlatformError::Failed("get_proxy_bypass_domains"));
+        }
+        Ok(parse_bypass_domains(&text))
+    }
+
+    fn set_proxy_bypass_domains(&self, svc: &ServiceId, domains: &[String]) -> PResult<()> {
+        Self::require_macos("set_proxy_bypass_domains")?;
+        if !write_gate("networksetup:setproxybypassdomains")? {
+            return Ok(());
+        }
+        if self.get_proxy_bypass_domains(svc)? == domains {
+            return Ok(()); // already as wanted: no call
+        }
+        let name = self.current_name(svc, "set_proxy_bypass_domains")?;
+        let mut args: Vec<&str> = vec!["-setproxybypassdomains", &name];
+        if domains.is_empty() {
+            args.push(BYPASS_EMPTY_ARG);
+        } else {
+            args.extend(domains.iter().map(String::as_str));
+        }
+        run_ok("networksetup", &args, "set_proxy_bypass_domains")
     }
 
     fn temp_dns_overrides(&self) -> PResult<bool> {
@@ -925,6 +997,8 @@ mod fake {
         SetPac,
         GetChain,
         SetChain,
+        GetBypass,
+        SetBypass,
         TempDns,
         GetEnv,
         SetEnv,
@@ -943,6 +1017,7 @@ mod fake {
         services: Vec<ServiceId>,
         pac: BTreeMap<String, PacState>,
         chain: BTreeMap<String, ChainState>,
+        bypass: BTreeMap<String, Vec<String>>,
         env: BTreeMap<String, String>,
         inet: BTreeMap<String, RegValue>,
         temp_dns: bool,
@@ -989,6 +1064,13 @@ mod fake {
         pub fn seed_chain(&self, svc: &ServiceId, chain: ChainState) {
             self.st.lock().unwrap().chain.insert(svc.key(), chain);
         }
+        pub fn seed_bypass(&self, svc: &ServiceId, domains: &[&str]) {
+            self.st
+                .lock()
+                .unwrap()
+                .bypass
+                .insert(svc.key(), domains.iter().map(|d| d.to_string()).collect());
+        }
         pub fn seed_env(&self, key: &str, value: &str) {
             self.st
                 .lock()
@@ -1020,6 +1102,15 @@ mod fake {
                 .lock()
                 .unwrap()
                 .chain
+                .get(&svc.key())
+                .cloned()
+                .unwrap_or_default()
+        }
+        pub fn bypass_of(&self, svc: &ServiceId) -> Vec<String> {
+            self.st
+                .lock()
+                .unwrap()
+                .bypass
                 .get(&svc.key())
                 .cloned()
                 .unwrap_or_default()
@@ -1143,6 +1234,47 @@ mod fake {
                     dst.enabled = src.enabled;
                 }
             }
+            Ok(())
+        }
+
+        fn get_proxy_bypass_domains(&self, svc: &ServiceId) -> PResult<Vec<String>> {
+            self.enter(
+                PlatOp::GetBypass,
+                "get_proxy_bypass_domains",
+                &svc.key(),
+                false,
+            )?;
+            if !self.has_service(svc) {
+                return Err(PlatformError::NotFound("get_proxy_bypass_domains"));
+            }
+            Ok(self.bypass_of(svc))
+        }
+
+        fn set_proxy_bypass_domains(&self, svc: &ServiceId, domains: &[String]) -> PResult<()> {
+            // Like the real one: no call and no write when the list already is as wanted.
+            if self.has_service(svc) && self.bypass_of(svc) == domains {
+                self.st
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .push(format!("set_proxy_bypass_domains:{}:same", svc.key()));
+                return Ok(());
+            }
+            self.enter(
+                PlatOp::SetBypass,
+                "set_proxy_bypass_domains",
+                &svc.key(),
+                true,
+            )?;
+            if !self.has_service(svc) {
+                self.st.lock().unwrap().os_writes -= 1;
+                return Err(PlatformError::NotFound("set_proxy_bypass_domains"));
+            }
+            self.st
+                .lock()
+                .unwrap()
+                .bypass
+                .insert(svc.key(), domains.to_vec());
             Ok(())
         }
 
@@ -1384,5 +1516,29 @@ mod tests {
         assert_eq!(p.os_writes(), 1);
         // The log names resources but carries no values.
         assert!(p.calls().iter().all(|c| !c.contains('=')));
+    }
+
+    #[test]
+    fn bypass_domains_parse_the_empty_list_quirk() {
+        assert!(parse_bypass_domains("There aren't any bypass domains set on Wi-Fi.\n").is_empty());
+        assert!(parse_bypass_domains("").is_empty());
+        assert_eq!(
+            parse_bypass_domains("*.local\n169.254/16\n\n  corp.example \n"),
+            vec!["*.local", "169.254/16", "corp.example"]
+        );
+    }
+
+    #[test]
+    fn fake_bypass_write_is_skipped_when_the_list_is_unchanged() {
+        let p = FakePlatform::new();
+        let svc = ServiceId::new("en0", "Wi-Fi", "Wi-Fi");
+        p.add_service(svc.clone());
+        p.seed_bypass(&svc, &["a", "b"]);
+        let same = vec!["a".to_string(), "b".to_string()];
+        p.set_proxy_bypass_domains(&svc, &same).unwrap();
+        assert_eq!(p.os_writes(), 0);
+        p.set_proxy_bypass_domains(&svc, &[]).unwrap();
+        assert_eq!(p.os_writes(), 1);
+        assert!(p.get_proxy_bypass_domains(&svc).unwrap().is_empty());
     }
 }

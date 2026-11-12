@@ -2,8 +2,9 @@
 //! the ownership journal and the one-time, signature-based cleanup of 1.3.x leftovers.
 
 use super::journal::{self, Journal, Outcome, RecoveryReport, ReportItem, Resource};
+use super::platform::PacState;
 use super::platform::{Platform, PlatformError, RegKind, RegValue};
-use super::{NO_PROXY_VALUE, Run, state, with_journal};
+use super::{Run, is_known_no_proxy_value, state, with_journal};
 use std::collections::BTreeMap;
 use std::sync::Once;
 
@@ -92,12 +93,37 @@ fn is_zastava_env_signature(value: &str, gateway_port: Option<u16>) -> bool {
     port == 8899 || port == 8900 || gateway_port.is_some_and(|gp| gp > 0 && port == gp)
 }
 
-/// Decides which `HKCU\Environment` values were written by Zastava and may be deleted.
+/// Whether `url` is a PAC address of Zastava's own gateway: exactly
+/// `http://127.0.0.1|localhost:<our port>/proxy.pac` (8899, 8900 or the current gateway port).
+/// Nothing else (another path, `https`, a query, another host or port) counts as ours.
+fn is_zastava_pac_signature(url: &str, gateway_port: Option<u16>) -> bool {
+    let Some(rest) = url.trim().strip_prefix("http://") else {
+        return false;
+    };
+    let Some((host_port, path)) = rest.split_once('/') else {
+        return false;
+    };
+    path == "proxy.pac" && is_zastava_env_signature(host_port, gateway_port)
+}
+
+/// Whether `value` is a locale Zastava itself wrote (`en_US.UTF-8`).
+fn is_zastava_locale_value(value: &str) -> bool {
+    value.trim() == "en_US.UTF-8"
+}
+
+/// Decides which user-environment values (launchd / `HKCU\Environment`) were written by an
+/// older Zastava and may be deleted.
 ///
 /// The set counts as written by Zastava only when at least one of `HTTP(S)_PROXY` / `ALL_PROXY`
-/// carries the Zastava gateway signature (`127.0.0.1:8899`, `:8900`). Then the proxy variables that
-/// carry the signature, `NO_PROXY` with Zastava's own value, `TZ`, `LANG` and `LC_*` are returned;
-/// otherwise nothing is: a user's own `HTTPS_PROXY=http://corp:3128` or `TZ=Europe/Berlin` stays.
+/// carries the Zastava gateway signature (`127.0.0.1:8899`, `:8900`, the gateway port): this is
+/// the "co-signature". Then are returned:
+/// * the proxy variables that carry the signature themselves,
+/// * `NO_PROXY` with a value a Zastava build wrote (old or new),
+/// * `TZ` (co-signed),
+/// * `LANG` / `LC_*` only when the value is `en_US.UTF-8`, the one Zastava wrote.
+///
+/// Otherwise nothing is: a user's own `HTTPS_PROXY=http://corp:3128`, `TZ=Europe/Berlin` or
+/// `LANG=ru_RU.UTF-8` stays, even next to a signed proxy variable.
 pub fn legacy_env_plan(env: &BTreeMap<String, String>) -> Vec<String> {
     legacy_env_plan_with_gateway(env, state().gateway_port())
 }
@@ -124,11 +150,13 @@ pub fn legacy_env_plan_with_gateway(
             if is_proxy_var(k) {
                 is_zastava_env_signature(v, gateway_port)
             } else if k.eq_ignore_ascii_case("NO_PROXY") {
-                v.trim() == NO_PROXY_VALUE
+                is_known_no_proxy_value(v)
+            } else if k.eq_ignore_ascii_case("TZ") {
+                true
+            } else if k.eq_ignore_ascii_case("LANG") || k.to_ascii_uppercase().starts_with("LC_") {
+                is_zastava_locale_value(v)
             } else {
-                k.eq_ignore_ascii_case("TZ")
-                    || k.eq_ignore_ascii_case("LANG")
-                    || k.to_ascii_uppercase().starts_with("LC_")
+                false
             }
         })
         .map(|(k, _)| k.clone())
@@ -157,36 +185,51 @@ const LEGACY_ENV_NAMES: [&str; 18] = [
     "LC_ADDRESS",
 ];
 
-/// Marker of the finished one-time migration (stored in the journal, same lock, atomic).
+/// Marker of the finished one-time migration of PAC / WinINet leftovers (stored in the journal,
+/// same lock, atomic).
 pub(super) const LEGACY_MIGRATION_MARK: &str = "legacy-1.3-signature-cleanup";
+
+/// Marker of the finished one-time cleanup of the user environment (launchd / `HKCU\Environment`)
+/// that 2.0.0 and 1.3.x left behind. Separate from [`LEGACY_MIGRATION_MARK`], which may already be
+/// set by an earlier 2.1 build that did not know the 2.1 rules for the GUI session.
+pub(super) const LAUNCHD_MIGRATION_MARK: &str = "legacy-2.0-launchctl-cleanup";
 
 fn gateway_port_now() -> Option<u16> {
     state().gateway_port()
 }
 
-/// One-time cleanup of what builds without a journal (1.3.x, 2.0) left behind. Without a journal
-/// the previous state cannot be known, so only values carrying Zastava's own signature
-/// (`127.0.0.1` / `localhost` on 8899, 8900 or the current gateway port) are touched:
-/// * user environment: the set selected by [`legacy_env_plan_with_gateway`] (proxy variables with
-///   the signature, our `NO_PROXY`, `TZ`, `LANG`, `LC_*` - only when at least one proxy variable
-///   is signed), so a user's own `HTTPS_PROXY=http://corp:3128` or `TZ=Europe/Berlin` stays;
-/// * macOS: a PAC that is switched on and points at the signature is switched off (the URL stays);
-/// * Windows: an `AutoConfigURL` with the signature is deleted (`ProxyEnable` is never touched).
-///
-/// Resources already in the journal belong to the journal and are skipped. The marker is set only
-/// when every step could be examined, so a transient failure is retried at the next start.
+/// One-time cleanups of what builds without a journal (1.3.x, 2.0) left behind: the user
+/// environment ([`migrate_launchd_leftovers`]) and PAC / WinINet ([`migrate_legacy_pac`]). Each
+/// has its own marker and runs until it has examined everything once.
 pub(super) fn migrate_legacy(
     j: &mut Journal,
     p: &dyn Platform,
     gateway_port: Option<u16>,
 ) -> Vec<ReportItem> {
+    let mut items = migrate_launchd_leftovers(j, p, gateway_port);
+    items.extend(migrate_legacy_pac(j, p, gateway_port));
+    items
+}
+
+/// User environment (launchd on macOS, `HKCU\Environment` on Windows). Since 2.1 Zastava puts
+/// nothing there, so what 2.0.0 left is removed, by its signature only: the set selected by
+/// [`legacy_env_plan_with_gateway`] (proxy variables whose value is our loopback address, our
+/// `NO_PROXY`, `TZ` when a signed proxy variable is there too, `LANG` / `LC_*` with the value
+/// `en_US.UTF-8`). A user's own `HTTPS_PROXY=http://corp:3128` or `TZ=Europe/Berlin` stays, and
+/// so does everything the journal manages (the journal restores it by the general rule
+/// "current value equals what we wrote"). The marker is set only when every name could be
+/// examined, so a transient failure is retried at the next start; the second run changes
+/// nothing and calls nothing.
+pub(super) fn migrate_launchd_leftovers(
+    j: &mut Journal,
+    p: &dyn Platform,
+    gateway_port: Option<u16>,
+) -> Vec<ReportItem> {
     let mut items = Vec::new();
-    if j.has_mark(LEGACY_MIGRATION_MARK) {
+    if j.has_mark(LAUNCHD_MIGRATION_MARK) {
         return items;
     }
     let mut complete = true;
-
-    // 1. User environment.
     let mut names: Vec<String> = LEGACY_ENV_NAMES.iter().map(|s| s.to_string()).collect();
     if let Ok(listed) = p.list_user_env_names() {
         for n in listed {
@@ -229,6 +272,31 @@ pub(super) fn migrate_legacy(
         let _ = p.broadcast_env_change(); // only after a real change
     }
 
+    if complete && j.set_mark(p, LAUNCHD_MIGRATION_MARK).is_err() {
+        // The marker is not durable: the (idempotent) migration simply runs again next time.
+    }
+    items
+}
+
+/// One-time cleanup of PAC / WinINet values with the Zastava signature (see
+/// [`LEGACY_MIGRATION_MARK`]):
+/// * macOS: a PAC that is switched on and points at `http://127.0.0.1|localhost:<our port>/proxy.pac`
+///   is switched off and its URL is cleared (the URL is ours, so nothing foreign is lost);
+/// * Windows: an `AutoConfigURL` with the same signature is deleted (`ProxyEnable` is never
+///   touched).
+///
+/// Resources already in the journal belong to the journal and are skipped.
+fn migrate_legacy_pac(
+    j: &mut Journal,
+    p: &dyn Platform,
+    gateway_port: Option<u16>,
+) -> Vec<ReportItem> {
+    let mut items = Vec::new();
+    if j.has_mark(LEGACY_MIGRATION_MARK) {
+        return items;
+    }
+    let mut complete = true;
+
     // 2. macOS PAC with the signature, left switched on by a build that was killed.
     match p.list_services() {
         Ok(services) => {
@@ -246,7 +314,7 @@ pub(super) fn migrate_legacy(
                         let signed = st
                             .url
                             .as_deref()
-                            .is_some_and(|u| is_zastava_env_signature(u, gateway_port));
+                            .is_some_and(|u| is_zastava_pac_signature(u, gateway_port));
                         if signed && st.enabled == Some(true) {
                             candidates.push(svc.clone());
                         }
@@ -262,8 +330,8 @@ pub(super) fn migrate_legacy(
                         let ok = p
                             .set_pac(
                                 &svc,
-                                &super::platform::PacState {
-                                    url: None,
+                                &PacState {
+                                    url: Some(String::new()),
                                     enabled: Some(false),
                                 },
                             )
@@ -297,7 +365,7 @@ pub(super) fn migrate_legacy(
             Ok(Some(RegValue {
                 kind: RegKind::Sz,
                 data,
-            })) if is_zastava_env_signature(&data, gateway_port) => {
+            })) if is_zastava_pac_signature(&data, gateway_port) => {
                 let ok = p.delete_inet("AutoConfigURL").is_ok();
                 if ok {
                     let _ = p.notify_inet_refresh();
@@ -342,7 +410,10 @@ impl Scope {
 }
 
 fn is_network_setting(r: &Resource) -> bool {
-    matches!(r, Resource::Pac { .. } | Resource::Chain { .. })
+    matches!(
+        r,
+        Resource::Pac { .. } | Resource::Chain { .. } | Resource::Bypass { .. }
+    )
 }
 
 /// Restores the journal resources in `scope`. PAC and chain are written through `networksetup`;
@@ -448,7 +519,8 @@ mod tests {
         ChainState, FakePlatform, PacState, PlatOp, ProxyEndpoint, ServiceId,
     };
     use crate::sysproxy::{
-        SysProxy, dry_run_blocked_calls, is_sysproxy_active, os_effects_enabled,
+        NO_PROXY_VALUE, NO_PROXY_VALUE_2_0, SysProxy, dry_run_blocked_calls, is_sysproxy_active,
+        os_effects_enabled,
     };
     use std::path::Path;
     use std::sync::Arc;
@@ -712,6 +784,7 @@ mod tests {
         for n in ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "TZ"] {
             assert_eq!(p.env_of(n), None, "{n}");
         }
+        assert!(j.has_mark(LAUNCHD_MIGRATION_MARK));
         assert!(j.has_mark(LEGACY_MIGRATION_MARK));
         assert!(
             p.calls()
@@ -739,7 +812,7 @@ mod tests {
             "no change, no broadcast"
         );
         assert!(
-            j.has_mark(LEGACY_MIGRATION_MARK),
+            j.has_mark(LAUNCHD_MIGRATION_MARK) && j.has_mark(LEGACY_MIGRATION_MARK),
             "examined completely, so done"
         );
     }
@@ -754,7 +827,7 @@ mod tests {
         // Leftovers that appear later are no longer "legacy": the migration does not run again.
         p.seed_env("HTTPS_PROXY", "http://127.0.0.1:8899");
         let mut j = open(&fs);
-        assert!(j.has_mark(LEGACY_MIGRATION_MARK));
+        assert!(j.has_mark(LAUNCHD_MIGRATION_MARK));
         assert!(migrate_legacy(&mut j, &p, None).is_empty());
         assert_eq!(
             p.env_of("HTTPS_PROXY"),
@@ -774,10 +847,10 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i.outcome, Outcome::Failed(_)))
         );
-        assert!(!j.has_mark(LEGACY_MIGRATION_MARK));
+        assert!(!j.has_mark(LAUNCHD_MIGRATION_MARK));
         migrate_legacy(&mut j, &p, None);
         assert_eq!(p.env_of("HTTPS_PROXY"), None);
-        assert!(j.has_mark(LEGACY_MIGRATION_MARK));
+        assert!(j.has_mark(LAUNCHD_MIGRATION_MARK));
     }
 
     #[test]
@@ -821,6 +894,7 @@ mod tests {
         let mut j = open(&fs);
         migrate_legacy(&mut j, &p, None);
         assert_eq!(p.pac_of(&wifi()).enabled, Some(false));
+        assert_eq!(p.pac_of(&wifi()).url, None, "our own URL is cleared too");
         assert_eq!(p.pac_of(&usb).enabled, Some(true));
         assert_eq!(p.pac_of(&usb).url.as_deref(), Some("http://corp/p.pac"));
     }
@@ -879,6 +953,182 @@ mod tests {
         let mut j = open(&fs);
         migrate_legacy(&mut j, &p, None);
         assert_eq!(p.env_of("LC_IDENTIFICATION"), None);
+    }
+
+    // --- WP-23: 2.0.0 leftovers in the GUI session, by signature ------------------------------
+
+    fn signed_proxy_env(p: &FakePlatform) {
+        p.seed_env("HTTP_PROXY", "http://127.0.0.1:8899");
+        p.seed_env("HTTPS_PROXY", "http://127.0.0.1:8899");
+        p.seed_env("ALL_PROXY", "http://127.0.0.1:8899");
+    }
+
+    #[test]
+    fn no_proxy_of_2_0_0_is_still_ours_and_the_new_one_too() {
+        for v in [NO_PROXY_VALUE_2_0, NO_PROXY_VALUE] {
+            let env = env_of(&[("HTTP_PROXY", "http://127.0.0.1:8899"), ("NO_PROXY", v)]);
+            let plan = legacy_env_plan_with_gateway(&env, None);
+            assert!(plan.contains(&"NO_PROXY".to_string()), "{v}");
+        }
+        let foreign = env_of(&[
+            ("HTTP_PROXY", "http://127.0.0.1:8899"),
+            ("NO_PROXY", "localhost,corp.example"),
+        ]);
+        assert_eq!(
+            legacy_env_plan_with_gateway(&foreign, None),
+            vec!["HTTP_PROXY".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_users_locale_next_to_a_signed_proxy_stays() {
+        let env = env_of(&[
+            ("HTTP_PROXY", "http://127.0.0.1:8899"),
+            ("LANG", "ru_RU.UTF-8"),
+            ("LC_TIME", "ru_RU.UTF-8"),
+            ("LC_ALL", "en_US.UTF-8"),
+        ]);
+        let mut plan = legacy_env_plan_with_gateway(&env, None);
+        plan.sort();
+        assert_eq!(plan, vec!["HTTP_PROXY".to_string(), "LC_ALL".to_string()]);
+    }
+
+    #[test]
+    fn migration_removes_2_0_0_leftovers_with_the_loopback_signature() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        signed_proxy_env(&p);
+        p.seed_env("NO_PROXY", NO_PROXY_VALUE_2_0);
+        p.seed_env("TZ", "Europe/Amsterdam");
+        let mut j = open(&fs);
+        migrate_legacy(&mut j, &p, None);
+        for n in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "TZ"] {
+            assert_eq!(p.env_of(n), None, "{n}");
+        }
+    }
+
+    #[test]
+    fn migration_keeps_a_foreign_corporate_proxy_next_to_our_leftovers() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_env("HTTPS_PROXY", "http://corp:3128");
+        p.seed_env("HTTP_PROXY", "http://localhost:8900");
+        let mut j = open(&fs);
+        migrate_legacy(&mut j, &p, None);
+        assert_eq!(p.env_of("HTTPS_PROXY"), Some("http://corp:3128".into()));
+        assert_eq!(p.env_of("HTTP_PROXY"), None);
+    }
+
+    #[test]
+    fn migration_removes_tz_and_locale_only_with_the_co_signature() {
+        // With a signed proxy in the same session: TZ and our locale go, the user's locale stays.
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_env("HTTP_PROXY", "http://127.0.0.1:8899");
+        p.seed_env("TZ", "Europe/Berlin");
+        p.seed_env("LC_ALL", "en_US.UTF-8");
+        p.seed_env("LANG", "ru_RU.UTF-8");
+        migrate_legacy(&mut open(&fs), &p, None);
+        assert_eq!(p.env_of("TZ"), None);
+        assert_eq!(p.env_of("LC_ALL"), None);
+        assert_eq!(p.env_of("LANG"), Some("ru_RU.UTF-8".into()));
+
+        // Without it nothing is touched, even a value that looks like ours.
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_env("TZ", "Europe/Berlin");
+        p.seed_env("LC_ALL", "en_US.UTF-8");
+        p.seed_env("LANG", "en_US.UTF-8");
+        p.seed_env("HTTPS_PROXY", "http://corp:3128");
+        migrate_legacy(&mut open(&fs), &p, None);
+        assert_eq!(p.os_writes(), 0);
+        assert_eq!(p.env_of("LC_ALL"), Some("en_US.UTF-8".into()));
+    }
+
+    #[test]
+    fn the_second_migration_run_makes_no_calls_at_all() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        signed_proxy_env(&p);
+        let mut j = open(&fs);
+        migrate_legacy(&mut j, &p, None);
+        assert!(j.has_mark(LAUNCHD_MIGRATION_MARK));
+        p.clear_calls();
+        assert!(migrate_legacy(&mut j, &p, None).is_empty());
+        assert!(p.calls().is_empty(), "{:?}", p.calls());
+        // And after a restart (the mark is durable).
+        drop(j);
+        let mut j2 = open(&fs);
+        assert!(migrate_legacy(&mut j2, &p, None).is_empty());
+        assert!(p.calls().is_empty());
+    }
+
+    #[test]
+    fn the_old_1_3_mark_does_not_hide_2_0_0_leftovers() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        j.set_mark(&p, LEGACY_MIGRATION_MARK).unwrap();
+        signed_proxy_env(&p);
+        p.seed_env("TZ", "Asia/Tokyo");
+        migrate_legacy(&mut j, &p, None);
+        assert_eq!(p.env_of("HTTPS_PROXY"), None);
+        assert_eq!(p.env_of("TZ"), None);
+        assert!(j.has_mark(LAUNCHD_MIGRATION_MARK));
+    }
+
+    #[test]
+    fn migration_leaves_variables_the_journal_owns_to_the_journal_rule() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        j.apply(&p, &env_res("TZ"), Value::Env(Some("Europe/Oslo".into())))
+            .unwrap();
+        signed_proxy_env(&p);
+        migrate_legacy(&mut j, &p, None);
+        assert_eq!(p.env_of("TZ"), Some("Europe/Oslo".into()));
+        // The general rule: restored only while the value still is the one we wrote.
+        let rep = restore_with(&mut j, &p, Scope::UserEnv);
+        assert_eq!(rep.restored(), 1);
+        assert_eq!(p.env_of("TZ"), None);
+        p.seed_env("TZ", "Europe/Oslo");
+        drop(j);
+        let mut j = open(&fs);
+        j.apply(&p, &env_res("TZ"), Value::Env(Some("Europe/Oslo".into())))
+            .unwrap();
+        p.seed_env("TZ", "mine");
+        assert_eq!(restore_with(&mut j, &p, Scope::UserEnv).external(), 1);
+        assert_eq!(p.env_of("TZ"), Some("mine".into()));
+    }
+
+    #[test]
+    fn only_the_exact_pac_address_of_our_gateway_is_a_signature() {
+        assert!(is_zastava_pac_signature(
+            "http://127.0.0.1:8899/proxy.pac",
+            None
+        ));
+        assert!(is_zastava_pac_signature(
+            "http://localhost:9123/proxy.pac",
+            Some(9123)
+        ));
+        for bad in [
+            "https://127.0.0.1:8899/proxy.pac",
+            "http://127.0.0.1:8899/other.pac",
+            "http://127.0.0.1:8899/proxy.pac?x=1",
+            "http://127.0.0.1:8899",
+            "http://10.0.0.1:8899/proxy.pac",
+            "http://127.0.0.1:9123/proxy.pac",
+            "http://corp/p.pac",
+        ] {
+            assert!(!is_zastava_pac_signature(bad, None), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_pac_with_a_look_alike_address_is_left_alone() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.add_service(wifi());
+        let st = PacState {
+            url: Some("http://127.0.0.1:8899/other.pac".into()),
+            enabled: Some(true),
+        };
+        p.seed_pac(&wifi(), st.clone());
+        migrate_legacy(&mut open(&fs), &p, None);
+        assert_eq!(p.pac_of(&wifi()), st);
+        assert_eq!(p.os_writes(), 0);
     }
 
     #[test]
