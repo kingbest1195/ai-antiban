@@ -502,6 +502,12 @@ impl NetworkGuard {
         self.gate_tx.send_replace(effective);
     }
 
+    /// Test seam: sets the gate directly (e.g. `Pending`, which only a real network change sets).
+    #[cfg(test)]
+    pub(crate) fn set_gate_for_test(&self, gate: Gate) {
+        self.set_gate(gate);
+    }
+
     /// Engages the kill flag and blocks the gate as one step with respect to `set_gate`.
     fn engage_kill(&self) {
         let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());

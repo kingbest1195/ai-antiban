@@ -16,9 +16,17 @@ use crate::proxy::guard::{gate_closed, wait_open, Gate, NetworkGuard};
 use crate::proxy::hold_queue::{
     DEFAULT_HOLD_TTL_SECS, HoldQueue, HoldResolution, PHASE_READY, RiskInterceptPayload,
 };
+use crate::proxy::http_forward::{
+    find_head_end, parse_request, relay_exchange, split_authority, ParsedRequest, RequestForm,
+    MAX_HEAD_BYTES,
+};
 use crate::proxy::pac::generate_pac_script;
 use crate::proxy::route_watch::RouteWatch;
-use crate::proxy::upstream::{connect_via_route, UpstreamStream};
+use crate::proxy::transit::Transit;
+use crate::proxy::upstream::{
+    connect_chained_tcp, connect_via_chained_proxy, connect_via_route, ChainedError,
+    UpstreamStream,
+};
 use crate::routing::{Route, RouteDownReason, RouteSelection, INVALID_PROFILE_ROUTE_ID};
 use crate::state::{AppState, IpHistoryEntry};
 
@@ -26,6 +34,12 @@ pub const DEFAULT_PROXY_PORT: u16 = 8899;
 pub const FALLBACK_PROXY_PORT: u16 = 8900;
 const FIRST_REQUEST_TIMEOUT_SECS: u64 = 10;
 const UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 15;
+/// A plain HTTP exchange with no byte from either side for this long is abandoned. Not applied to
+/// CONNECT tunnels (long downloads, SSH and the like may be silent).
+const PLAIN_HTTP_IDLE_TIMEOUT_SECS: u64 = 60;
+/// Connect (+ CONNECT handshake) timeout for the chained proxy; after it transit traffic falls
+/// back to a direct connection once.
+const CHAINED_CONNECT_TIMEOUT_SECS: u64 = 8;
 const MAX_CONCURRENT_CONNECTIONS: usize = 256;
 const ALLOWED_TUNNEL_PORTS: &[u16] = &[80, 443, 8443];
 /// Per-entry connect timeout when tunneling through a route.
@@ -71,6 +85,8 @@ pub struct ProxyServer {
     conn_limiter: Arc<Semaphore>,
     route_alerts: std::sync::Mutex<HashMap<String, Instant>>,
     direct_connects: AtomicU64,
+    /// Outbound side for transit (non-AI) traffic: DNS cache, Happy Eyeballs, chained proxy.
+    transit: Arc<Transit>,
 }
 
 impl ProxyServer {
@@ -107,6 +123,7 @@ impl ProxyServer {
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             route_alerts: std::sync::Mutex::new(HashMap::new()),
             direct_connects: AtomicU64::new(0),
+            transit: Arc::new(Transit::system()),
         })
     }
 
@@ -136,7 +153,15 @@ impl ProxyServer {
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             route_alerts: std::sync::Mutex::new(HashMap::new()),
             direct_connects: AtomicU64::new(0),
+            transit: Arc::new(Transit::system()),
         })
+    }
+
+    /// Replaces the outbound side for transit traffic (test seam: resolver, dialer, clock and
+    /// chained proxy are injected; the SSRF policy itself is not part of it).
+    pub fn with_transit(mut self, transit: Transit) -> Self {
+        self.transit = Arc::new(transit);
+        self
     }
 
     /// Number of direct (non-routed) outbound connections attempted, including the test redirect.
@@ -206,13 +231,10 @@ impl ProxyServer {
         let method = parts.next().unwrap_or("");
         let target = parts.next().unwrap_or("");
 
-        // 1. Route GET /proxy.pac or /pac.js (supports relative "/proxy.pac" or full "http://127.0.0.1:8899/proxy.pac")
-        if method == "GET"
-            && (target.starts_with("/proxy.pac")
-                || target.contains("/proxy.pac")
-                || target.starts_with("/pac.js")
-                || target.contains("/pac.js"))
-        {
+        // 1. Route GET /proxy.pac or /pac.js (supports relative "/proxy.pac" or full "http://127.0.0.1:8899/proxy.pac").
+        // An absolute URI counts only when it points at the gateway itself: a request for some
+        // other site's /proxy.pac is plain HTTP to forward.
+        if method == "GET" && self.is_pac_target(target) {
             // A PAC download is counted apart from AI requests.
             self.coverage.record_incoming(
                 client_addr.port(),
@@ -229,11 +251,16 @@ impl ProxyServer {
                 .await;
         }
 
-        // Generic HTTP health / info response
-        let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nZastava Gateway Active\n";
-        client.write_all(resp.as_bytes()).await?;
-        client.flush().await?;
-        Ok(())
+        // 3. Absolute-form request (`GET http://host/path`): plain HTTP through the gateway.
+        if is_absolute_http_target(target) {
+            return self
+                .handle_plain_http(&mut client, &buffer[..bytes_read], client_addr.port())
+                .await;
+        }
+
+        // 4. Generic HTTP health / info response: only for requests to the gateway itself
+        // (origin-form `GET /` and the like).
+        send_gateway_info(&mut client).await
     }
 
     async fn handle_pac_request(&self, client: &mut TcpStream) -> Result<(), std::io::Error> {
@@ -262,6 +289,195 @@ impl ProxyServer {
         client.write_all(response.as_bytes()).await?;
         client.flush().await?;
         Ok(())
+    }
+
+    /// True for `/proxy.pac` / `/pac.js` asked of the gateway: origin-form, or an absolute URI whose
+    /// authority is the gateway.
+    fn is_pac_target(&self, target: &str) -> bool {
+        let path = if is_absolute_http_target(target) {
+            let rest = &target[7..];
+            let (authority, path) = match rest.find('/') {
+                Some(i) => (&rest[..i], &rest[i..]),
+                None => (rest, ""),
+            };
+            if !self.is_gateway_authority(authority) {
+                return false;
+            }
+            path
+        } else {
+            target
+        };
+        path.starts_with("/proxy.pac")
+            || path.contains("/proxy.pac")
+            || path.starts_with("/pac.js")
+            || path.contains("/pac.js")
+    }
+
+    /// True when `authority` (`host[:port]`) addresses this gateway (loopback name / address with
+    /// the bound port).
+    fn is_gateway_authority(&self, authority: &str) -> bool {
+        let Some((host, port)) = split_authority(authority) else {
+            return false;
+        };
+        if port.unwrap_or(80) != self.bound_addr.port() {
+            return false;
+        }
+        host == "localhost"
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback() || ip == self.bound_addr.ip())
+    }
+
+    /// Plain HTTP forwarding (`GET http://host/path`, POST, HEAD, ...) for public non-AI hosts.
+    /// Hosts of AI services are never forwarded this way: they work over HTTPS and must pass the
+    /// gateway's policy (audit, route, gate). Requests addressed to the gateway itself are not
+    /// forwarded (loop) and get the info page.
+    async fn handle_plain_http(
+        &self,
+        client: &mut TcpStream,
+        first: &[u8],
+        _peer_port: u16,
+    ) -> Result<(), std::io::Error> {
+        let mut buf = first.to_vec();
+        let head_end = loop {
+            if let Some(n) = find_head_end(&buf) {
+                break n;
+            }
+            if buf.len() >= MAX_HEAD_BYTES {
+                return send_status(client, "431 Request Header Fields Too Large", "Request head is too large.").await;
+            }
+            let mut chunk = [0u8; 4096];
+            let n = match tokio::time::timeout(
+                Duration::from_secs(FIRST_REQUEST_TIMEOUT_SECS),
+                client.read(&mut chunk),
+            )
+            .await
+            {
+                Ok(res) => res?,
+                Err(_) => return Ok(()),
+            };
+            if n == 0 {
+                return Ok(());
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        };
+
+        let req = match parse_request(&buf[..head_end]) {
+            Ok(r) => r,
+            Err(e) => {
+                let status = match e {
+                    crate::proxy::http_forward::HeadError::Malformed(_) => "400 Bad Request",
+                    crate::proxy::http_forward::HeadError::Unsupported(_) => "501 Not Implemented",
+                };
+                return send_status(client, status, e.message()).await;
+            }
+        };
+        let (host, port) = (req.host.clone(), req.port);
+
+        // A request for the gateway's own address: the info page, never a forward (no loop).
+        let own_authority = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+        if self.is_gateway_authority(&own_authority) {
+            return send_gateway_info(client).await;
+        }
+
+        // Same policy as a CONNECT to this host: port, internal names, loopback / private IPs.
+        // The port list (80 / 443 / 8443) is deliberately not widened for plain HTTP: the gateway
+        // must not become a port scanner or a bridge to arbitrary local-style services.
+        if let Err(reason) = validate_tunnel_target(&host, port, self.bound_addr.port()) {
+            return send_forbidden(client, reason).await;
+        }
+
+        let custom_domains = self.state.get_custom_ai_domains().await;
+        if let Some(provider) = ProviderId::from_host_with_custom(&host, &custom_domains) {
+            self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
+            return send_forbidden(
+                client,
+                "AI services are reachable over HTTPS only: Zastava does not forward plain HTTP requests to them.",
+            )
+            .await;
+        }
+
+        self.state.stats().record_direct_bypassed_host(&host);
+        self.forward_plain_http(client, &req, &buf[head_end..]).await
+    }
+
+    /// Connects to the chained proxy and sends the absolute-form request head. `None` when there
+    /// is no chained proxy or it cannot be reached (the caller then goes direct, once).
+    async fn open_chained_plain(&self, req: &ParsedRequest) -> Option<TcpStream> {
+        if self.upstream_redirect.is_some() {
+            return None;
+        }
+        let gateway_port = self.bound_addr.port();
+        let cp = self.transit.chained_proxy(gateway_port)?;
+        let mut s = connect_chained_tcp(
+            &cp,
+            Duration::from_secs(CHAINED_CONNECT_TIMEOUT_SECS),
+            gateway_port,
+        )
+        .await
+        .ok()?;
+        s.write_all(&req.build_head(RequestForm::Absolute)).await.ok()?;
+        Some(s)
+    }
+
+    async fn forward_plain_http(
+        &self,
+        client: &mut TcpStream,
+        req: &ParsedRequest,
+        body_prefix: &[u8],
+    ) -> Result<(), std::io::Error> {
+        // The manual kill-switch ("СТОП СЕТИ") stops everything that goes through Zastava.
+        let mut kill_rx = self.guard.subscribe_killswitch();
+        if *kill_rx.borrow_and_update() {
+            return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
+        }
+
+        // Through the chained proxy first (absolute-form, the proxy does the rest). Only a failure
+        // to connect / send the head counts as "unreachable": the answer of the proxy is final.
+        let chained_stream = self.open_chained_plain(req).await;
+
+        let mut upstream = match chained_stream {
+            Some(s) => s,
+            None => {
+                let connected = if let Some(redirect_addr) = self.upstream_redirect {
+                    self.direct_connects.fetch_add(1, Ordering::SeqCst);
+                    TcpStream::connect(redirect_addr).await
+                } else {
+                    self.connect_direct(&req.host, req.port).await
+                };
+                let mut s = match connected {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let msg = format!("Failed to connect to target {}:{}: {e}", req.host, req.port);
+                        send_bad_gateway(client, &msg).await?;
+                        return Err(e);
+                    }
+                };
+                if let Err(e) = s.write_all(&req.build_head(RequestForm::Origin)).await {
+                    send_bad_gateway(client, "Failed to send the request to the target.").await?;
+                    return Err(e);
+                }
+                s
+            }
+        };
+
+        // Transit traffic is not tied to the gate: a network re-check never cuts a transfer.
+        // Only the manual kill-switch cuts it (and the idle timeout).
+        let relay = relay_exchange(
+            client,
+            &mut upstream,
+            &req.body,
+            body_prefix,
+            Duration::from_secs(PLAIN_HTTP_IDLE_TIMEOUT_SECS),
+        );
+        let res = tokio::select! {
+            res = relay => res,
+            _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+        };
+        match res {
+            Err(e) if is_peer_gone(&e) => Ok(()),
+            other => other,
+        }
     }
 
     async fn handle_connect_request(
@@ -545,56 +761,92 @@ impl ProxyServer {
         }
     }
 
+    /// Direct connection for transit traffic: cached DNS, SSRF check of every answer and Happy
+    /// Eyeballs across address families (see [`Transit::connect_direct`]).
     async fn connect_direct(&self, host: &str, port: u16) -> Result<TcpStream, std::io::Error> {
         self.direct_connects.fetch_add(1, Ordering::SeqCst);
-        let addrs: Vec<SocketAddr> = match tokio::time::timeout(
-            Duration::from_secs(UPSTREAM_CONNECT_TIMEOUT_SECS),
-            tokio::net::lookup_host((host, port)),
-        )
-        .await
-        {
-            Ok(Ok(resolved)) => resolved.collect(),
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "DNS lookup timeout",
-                ));
+        self.transit.connect_direct(host, port).await
+    }
+
+    /// Outbound connection for a transit (non-AI) CONNECT: through the chained proxy when there is
+    /// one, with a single fallback to a direct connection if the proxy cannot be reached (not if
+    /// it answers with an error status).
+    async fn connect_transit(&self, host: &str, port: u16) -> Result<UpstreamStream, std::io::Error> {
+        let gateway_port = self.bound_addr.port();
+        if let Some(cp) = self.transit.chained_proxy(gateway_port) {
+            match connect_via_chained_proxy(
+                &cp,
+                host,
+                port,
+                Duration::from_secs(CHAINED_CONNECT_TIMEOUT_SECS),
+                gateway_port,
+            )
+            .await
+            {
+                Ok(s) => return Ok(s),
+                Err(ChainedError::Refused { status }) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("the upstream proxy refused the tunnel (status {status})"),
+                    ));
+                }
+                Err(ChainedError::Unreachable(_)) => {} // fall back to direct, once
+            }
+        }
+        self.connect_direct(host, port).await.map(UpstreamStream::Plain)
+    }
+
+    /// Transit (non-AI) CONNECT: no audit, no gate. The relay never looks at the guard, so a
+    /// network re-check (`Gate::Pending`) neither delays new transit connections nor cuts running ones.
+    async fn transit_tunnel(
+        &self,
+        client: &mut TcpStream,
+        host: &str,
+        port: u16,
+    ) -> Result<(), std::io::Error> {
+        // The manual kill-switch ("СТОП СЕТИ") stops transit traffic too; subscribe first so a
+        // switch-on during the connect is noticed.
+        let mut kill_rx = self.guard.subscribe_killswitch();
+        if *kill_rx.borrow_and_update() {
+            return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
+        }
+        let connected = if let Some(redirect_addr) = self.upstream_redirect {
+            self.direct_connects.fetch_add(1, Ordering::SeqCst);
+            tokio::time::timeout(
+                Duration::from_secs(UPSTREAM_CONNECT_TIMEOUT_SECS),
+                TcpStream::connect(redirect_addr),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream redirect connect timeout")
+            })
+            .and_then(|r| r)
+            .map(UpstreamStream::Plain)
+        } else {
+            self.connect_transit(host, port).await
+        };
+        let mut target = match connected {
+            Ok(s) => s,
+            Err(e) => {
+                let err_msg = format!("Failed to connect to target {host}:{port}: {e}");
+                send_bad_gateway(client, &err_msg).await?;
+                return Err(e);
             }
         };
-
-        if addrs.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "No valid upstream addresses resolved.",
-            ));
+        if self.guard.is_manual_killswitch() {
+            return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
         }
-
-        let host_is_raw_ip = host.parse::<IpAddr>().is_ok();
-        for addr in &addrs {
-            if is_forbidden_ip(&addr.ip()) {
-                if !host_is_raw_ip && is_tun_fake_ip(&addr.ip()) {
-                    // Allowed: DNS resolved to a TUN FakeIP pool (198.18.0.0/15) used by sing-box/Throne/Nekoray/Hiddify
-                    continue;
-                }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "SSRF Protection: resolved IP belongs to a restricted local or private network.",
-                ));
-            }
-        }
-
-        match tokio::time::timeout(
-            Duration::from_secs(UPSTREAM_CONNECT_TIMEOUT_SECS),
-            TcpStream::connect(addrs.as_slice()),
-        )
-        .await
-        {
-            Ok(res) => res,
-            Err(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "upstream connect timeout",
-            )),
+        client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await?;
+        client.flush().await?;
+        let res = tokio::select! {
+            res = tokio::io::copy_bidirectional(client, &mut target) => res.map(|_| ()),
+            _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+        };
+        match res {
+            Err(e) if is_peer_gone(&e) => Ok(()),
+            other => other,
         }
     }
 
@@ -710,6 +962,9 @@ impl ProxyServer {
         provider: Option<ProviderId>,
         selection: &RouteSelection,
     ) -> Result<(), std::io::Error> {
+        if provider.is_none() && !matches!(selection, RouteSelection::Route(_)) {
+            return self.transit_tunnel(client, host, port).await;
+        }
         let route: Option<&Route> = match selection {
             RouteSelection::Route(r) => Some(r),
             _ => None,
@@ -806,6 +1061,58 @@ impl ProxyServer {
         let mut target = UpstreamStream::Plain(target_stream);
         pump(client, &mut target, &self.guard, TunnelPolicy::FollowGate, watch).await
     }
+}
+
+const KILLSWITCH_MESSAGE: &str = "Сеть остановлена вручную";
+
+/// Completes when the manual kill-switch is (or becomes) engaged. Lowering the flag later does
+/// not matter: the caller has already dropped its connection.
+async fn killswitch_engaged(rx: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+fn killswitch_stopped() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::ConnectionAborted,
+        "connection stopped by the manual kill-switch",
+    )
+}
+
+fn is_absolute_http_target(target: &str) -> bool {
+    target.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+}
+
+/// A peer that went away mid-transfer is the normal end of a transit connection, not an error.
+fn is_peer_gone(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+async fn send_gateway_info(client: &mut TcpStream) -> Result<(), std::io::Error> {
+    let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 23\r\nConnection: close\r\n\r\nZastava Gateway Active\n";
+    client.write_all(resp.as_bytes()).await?;
+    client.flush().await
+}
+
+async fn send_status(client: &mut TcpStream, status: &str, reason: &str) -> Result<(), std::io::Error> {
+    let resp = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
+        reason.len(),
+    );
+    client.write_all(resp.as_bytes()).await?;
+    client.flush().await
 }
 
 async fn send_bad_gateway(client: &mut TcpStream, reason: &str) -> Result<(), std::io::Error> {
@@ -1188,6 +1495,9 @@ async fn send_forbidden(client: &mut TcpStream, reason: &str) -> Result<(), std:
     client.flush().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod transit_tests;
 
 #[cfg(test)]
 mod coverage_count_tests {
