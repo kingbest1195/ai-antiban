@@ -17,7 +17,7 @@ import {
   Switch,
 } from "../../ui";
 import type { IconName, MenuEntry } from "../../ui";
-import { overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
+import { checks as checksCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import { formatNumber } from "../../shared/lib/format";
 import { useOverviewModel } from "./useOverviewModel";
@@ -34,6 +34,8 @@ export interface OverviewScreenProps {
   gatewayStats: GatewayStatsSnapshot | null;
   updateInfo: UpdateCheckResult | null;
   coverageSnapshot?: CoverageSnapshot | null;
+  /** Возраст данных в минутах, если отчёт устарел или аудит упал; иначе null. */
+  dataAgeMinutes?: number | null;
 
   sysproxyActive: boolean;
   cliProtected: boolean;
@@ -300,6 +302,20 @@ function ProblemBanner({ kind, ...props }: { kind: ReturnType<typeof useOverview
           {copy.banner.review.text}
         </Banner>
       );
+    case "incomplete":
+      return (
+        <Banner
+          tone="neutral"
+          title={copy.banner.incomplete.title}
+          action={
+            <Button size="sm" onClick={props.onRetry}>
+              {copy.banner.incomplete.action}
+            </Button>
+          }
+        >
+          {copy.banner.incomplete.text}
+        </Banner>
+      );
     case "update":
       return (
         <Banner
@@ -364,6 +380,7 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
       <Badge tone={allPassed ? "ok" : "warn"} icon={allPassed ? "check" : "alert"}>
         {model.checksLabel}
       </Badge>
+      {props.dataAgeMinutes != null && <Badge>{checksCopy.dataAge(props.dataAgeMinutes)}</Badge>}
       {model.providerName && <Badge>{model.providerName}</Badge>}
       {extra}
       <Menu items={menu} label={copy.ipMenu.label} align="end" className="-my-1" />

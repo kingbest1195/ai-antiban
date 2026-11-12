@@ -22,6 +22,8 @@ export interface ChecksScreenProps {
   onRecheck?: () => void;
   /** Идёт повторный аудит. */
   rechecking?: boolean;
+  /** Возраст данных в минутах, если отчёт устарел или последний аудит упал; иначе null. */
+  dataAgeMinutes?: number | null;
 }
 
 /** Значок строки: только украшение, статус говорит бейдж. */
@@ -40,7 +42,10 @@ const ICONS: Record<CheckId, IconName> = {
   locale_hygiene: "term",
 };
 
-const LEAK_CHECKS: CheckId[] = ["ipv6", "dns", "dns_country", "wifi_geo"];
+/** Значок «не удалось проверить». */
+const UNKNOWN_ICON: IconName = "help";
+
+const LEAK_CHECKS: string[] = ["ipv6", "dns", "dns_country", "wifi_geo"];
 
 interface StatusView {
   tone: Tone | "neutral";
@@ -51,6 +56,9 @@ interface StatusView {
 /** Единый словарь: Чисто / Нужна проверка / Утечка / Выключено. */
 function statusOf(item: CheckItem, state: AppStateData | null): StatusView {
   if (item.ok) return { tone: "ok", word: words.clean, icon: "check" };
+  if (item.missing) return { tone: "neutral", word: words.noData, icon: UNKNOWN_ICON };
+  if (item.cls === "unknown") return { tone: "neutral", word: words.unknown, icon: UNKNOWN_ICON };
+  if (item.cls === "na") return { tone: "neutral", word: words.notApplicable };
   if (isCriticalStatus(item.result)) {
     return { tone: "danger", word: LEAK_CHECKS.includes(item.id) ? words.leak : words.review, icon: "alert" };
   }
@@ -58,7 +66,10 @@ function statusOf(item: CheckItem, state: AppStateData | null): StatusView {
   return { tone: "warn", word: words.review, icon: "alert" };
 }
 
-/** Экран «Проверки»: вердикт, 12 проверок по смыслу, тесты защиты. */
+/** Строку раскрываем сразу, если по ней есть что делать. */
+const needsLook = (item: CheckItem) => item.cls !== "ok" && item.cls !== "na";
+
+/** Экран «Проверки»: вердикт, проверки по смыслу, тесты защиты. */
 export function ChecksScreen({
   report,
   state,
@@ -70,9 +81,10 @@ export function ChecksScreen({
   onOpenCrashTest,
   onRecheck,
   rechecking,
+  dataAgeMinutes,
 }: ChecksScreenProps) {
   // Явный выбор пользователя; без него раскрыты только непройденные проверки.
-  const [expanded, setExpanded] = useState<Partial<Record<CheckId, boolean>>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   if (!report) {
     return (
@@ -88,11 +100,12 @@ export function ChecksScreen({
     );
   }
 
-  const { groups, items } = buildChecks(report, state);
-  const passed = items.filter((i) => i.ok).length;
-  const failed = items.length - passed;
-  const worst: Tone = items.some((i) => !i.ok && isCriticalStatus(i.result)) ? "danger" : failed > 0 ? "warn" : "ok";
-  const leak = items.some((i) => !i.ok && LEAK_CHECKS.includes(i.id) && isCriticalStatus(i.result));
+  const { groups, items, counts, total } = buildChecks(report, state);
+  const passed = counts.ok;
+  const failed = counts.warn + counts.crit;
+  const unknown = counts.unknown;
+  const worst: Tone | "neutral" = counts.crit > 0 ? "danger" : failed > 0 ? "warn" : unknown > 0 ? "neutral" : "ok";
+  const leak = items.some((i) => LEAK_CHECKS.includes(i.id) && i.cls === "crit");
 
   const runAction = (item: CheckItem) => {
     if (item.action === "pin") onPinCurrentIp(report.telemetry.ip);
@@ -109,13 +122,23 @@ export function ChecksScreen({
               <Badge tone="ok" icon="check">
                 {words.clean}
               </Badge>
+            ) : worst === "neutral" ? (
+              <Badge icon={UNKNOWN_ICON}>{words.partial}</Badge>
             ) : (
               <Badge tone={worst} icon="alert">
                 {leak ? words.leak : words.review}
               </Badge>
             )}
-            <h2 className="zs-verdict__title">{copy.verdict(passed, items.length)}</h2>
-            <p className="zs-verdict__text">{failed === 0 ? copy.verdictOk : copy.verdictIssues(failed)}</p>
+            <h2 className="zs-verdict__title">{copy.verdict(passed, total)}</h2>
+            <p className="zs-verdict__text">{copy.summary(passed, total, unknown, failed)}</p>
+            {failed > 0 && <p className="zs-verdict__text">{copy.verdictIssues(failed)}</p>}
+            {unknown > 0 && <p className="zs-verdict__text">{copy.verdictUnknown(unknown)}</p>}
+            {failed === 0 && unknown === 0 && (
+              <p className="zs-verdict__text">
+                {copy.verdictOk} {copy.verdictDisclaimer}
+              </p>
+            )}
+            {dataAgeMinutes != null && <p className="zs-verdict__text">{copy.dataAge(dataAgeMinutes)}</p>}
           </div>
           {onRecheck && (
             <div className="zs-verdict__action">
@@ -136,9 +159,11 @@ export function ChecksScreen({
                   key={item.id}
                   item={item}
                   view={statusOf(item, state)}
-                  open={expanded[item.id] ?? !item.ok}
-                  onToggle={() => setExpanded((prev) => ({ ...prev, [item.id]: !(prev[item.id] ?? !item.ok) }))}
+                  open={expanded[item.id] ?? needsLook(item)}
+                  onToggle={() => setExpanded((prev) => ({ ...prev, [item.id]: !(prev[item.id] ?? needsLook(item)) }))}
                   onAction={() => runAction(item)}
+                  onRetry={onRecheck}
+                  retrying={rechecking}
                   onGuide={() => onNavigateToGuide(item.result.guide_ref || undefined)}
                 />
               ))}
@@ -216,9 +241,12 @@ interface CheckRowProps {
   onToggle: () => void;
   onAction: () => void;
   onGuide: () => void;
+  /** Повторный прогон через общий аудит; без обработчика кнопка не показывается. */
+  onRetry?: () => void;
+  retrying?: boolean;
 }
 
-function CheckRow({ item, view, open, onToggle, onAction, onGuide }: CheckRowProps) {
+function CheckRow({ item, view, open, onToggle, onAction, onGuide, onRetry, retrying }: CheckRowProps) {
   const actionLabel =
     item.action === "pin" ? copy.actions.pin : item.action === "sync-timezone" ? copy.actions.syncTimezone : copy.actions.openGuide;
   // Инструкция отдельной ссылкой — только если главное действие другое.
@@ -226,7 +254,7 @@ function CheckRow({ item, view, open, onToggle, onAction, onGuide }: CheckRowPro
 
   return (
     <ExpandRow
-      icon={ICONS[item.id]}
+      icon={ICONS[item.id as CheckId] ?? "pulse"}
       tone={view.tone === "ok" || view.tone === "warn" || view.tone === "danger" ? view.tone : "neutral"}
       title={item.title}
       sub={item.what}
@@ -241,6 +269,9 @@ function CheckRow({ item, view, open, onToggle, onAction, onGuide }: CheckRowPro
     >
       <div>
         <p className="zs-check__label">{copy.detail.result}</p>
+        {item.cls === "unknown" && (
+          <p className="zs-check__message">{copy.reasons[item.missing ? "no_data" : (item.result.reason ?? "unknown")]}</p>
+        )}
         <p className="zs-check__message">{item.result.message}</p>
       </div>
       {item.data.length > 0 && (
@@ -253,8 +284,13 @@ function CheckRow({ item, view, open, onToggle, onAction, onGuide }: CheckRowPro
           ))}
         </dl>
       )}
-      {(item.action || showGuideLink) && (
+      {(item.action || showGuideLink || (item.cls === "unknown" && onRetry)) && (
         <div className="zs-check__actions">
+          {item.cls === "unknown" && onRetry && (
+            <Button size="sm" icon="refresh" onClick={onRetry} disabled={retrying}>
+              {copy.retry}
+            </Button>
+          )}
           {item.action && (
             <Button size="sm" icon={item.action === "guide" ? undefined : item.action === "pin" ? "lock" : "refresh"} onClick={onAction}>
               {actionLabel}

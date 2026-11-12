@@ -13,12 +13,16 @@ export interface CheckDatum {
 }
 
 export interface CheckItem {
-  id: CheckId;
+  /** Известный id или `extra_<позиция>` для проверки сверх известных. */
+  id: string;
   group: CheckGroupId;
   title: string;
   what: string;
   result: CheckResult;
+  cls: CheckClass;
   ok: boolean;
+  /** Проверки нет в отчёте: строка показывает «Нет данных». */
+  missing: boolean;
   data: CheckDatum[];
   /** Главное действие непройденной проверки. */
   action: CheckAction | null;
@@ -30,10 +34,54 @@ export interface CheckGroup {
   items: CheckItem[];
 }
 
-export const isOkStatus = (c: CheckResult) => c.status === "ok" || c.status === "green";
-export const isCriticalStatus = (c: CheckResult) => c.status === "critical" || c.status === "red";
+/** ok — пройдена; warn/crit — замечание; unknown — не удалось проверить; na — не применима (вне счёта). */
+export type CheckClass = "ok" | "warn" | "crit" | "unknown" | "na";
 
-/** Порядок задан шлюзом: report.checks всегда содержит 12 проверок в этом порядке. */
+/** Единственное место, где статус превращается в класс. Всё незнакомое — unknown, никогда не ok. */
+export function classify(c: CheckResult): CheckClass {
+  switch (c.status) {
+    case "ok":
+    case "green":
+      return "ok";
+    case "warning":
+    case "yellow":
+      return "warn";
+    case "critical":
+    case "red":
+      return "crit";
+    default:
+      return c.reason === "not_applicable" ? "na" : "unknown";
+  }
+}
+
+export const isOkStatus = (c: CheckResult) => classify(c) === "ok";
+export const isCriticalStatus = (c: CheckResult) => classify(c) === "crit";
+
+/** Отчёт «жёлтый» только из-за непроверенного: замечаний (warn/crit) в нём нет. */
+export function isYellowOnlyUnknown(report: RiskReport | null | undefined, results: CheckResult[]): boolean {
+  if (!report || report.overall_status !== "yellow") return false;
+  const c = countChecks(results);
+  return c.unknown > 0 && c.warn === 0 && c.crit === 0;
+}
+
+export interface CheckCounts {
+  ok: number;
+  warn: number;
+  crit: number;
+  unknown: number;
+  na: number;
+  /** M в «N из M»: все проверки, кроме «не применимо». */
+  applicable: number;
+}
+
+export function countChecks(results: CheckResult[]): CheckCounts {
+  const n: CheckCounts = { ok: 0, warn: 0, crit: 0, unknown: 0, na: 0, applicable: 0 };
+  for (const r of results) n[classify(r)] += 1;
+  n.applicable = n.ok + n.warn + n.crit + n.unknown;
+  return n;
+}
+
+/** Порядок задан шлюзом: report.checks содержит эти проверки на этих местах; всё, что дальше, показываем обобщённой строкой. */
 const ORDER: { id: CheckId; group: CheckGroupId; index: number }[] = [
   { id: "geo_matrix", group: "address", index: 0 },
   { id: "asn", group: "address", index: 4 },
@@ -65,6 +113,12 @@ function resultAt(report: RiskReport, id: CheckId, index: number): CheckResult |
   return named[id] ?? report.checks?.[index] ?? null;
 }
 
+/** «ответили N из M» из текста проверки: число зон берём из данных, а не из константы. */
+function answeredZones(report: RiskReport): string | null {
+  const m = /ответили\s+(\d+)\s+из\s+(\d+)/i.exec(report.dnsbl_result?.message ?? "");
+  return m ? `${m[1]} из ${m[2]}` : null;
+}
+
 function dataFor(id: CheckId, report: RiskReport, state: AppStateData | null): CheckDatum[] {
   const t = report.telemetry;
   const d = copy.data;
@@ -83,7 +137,7 @@ function dataFor(id: CheckId, report: RiskReport, state: AppStateData | null): C
       break;
     case "dnsbl":
       add(d.result, report.dnsbl_clean_count, false);
-      add(d.bases, "Spamhaus, SORBS, Barracuda, DroneBL", true);
+      add(d.answeredZones, answeredZones(report), false);
       break;
     case "reverse_dns":
       add(d.ip, t.ip, true);
@@ -109,35 +163,59 @@ function dataFor(id: CheckId, report: RiskReport, state: AppStateData | null): C
   return out;
 }
 
-function actionFor(id: CheckId, result: CheckResult, ok: boolean): CheckAction | null {
-  if (ok) return null;
+function actionFor(id: string, result: CheckResult, cls: CheckClass): CheckAction | null {
+  if (cls === "ok" || cls === "unknown" || cls === "na") return null;
   if (id === "pinning") return "pin";
   if (id === "timezone" || id === "locale_hygiene") return "sync-timezone";
   return result.guide_ref ? "guide" : null;
 }
 
-/** Двенадцать проверок, сгруппированные по смыслу. Без побочных эффектов. */
-export function buildChecks(report: RiskReport, state: AppStateData | null): { groups: CheckGroup[]; items: CheckItem[] } {
+/** Заглушка для проверки, которой нет в отчёте: не пропадает из счёта, а считается «не удалось проверить». */
+function missingResult(): CheckResult {
+  return { status: "unknown", code: "CHECK_MISSING", message: copy.missingMessage, reason: "no_data" };
+}
+
+export interface BuiltChecks {
+  groups: CheckGroup[];
+  items: CheckItem[];
+  counts: CheckCounts;
+  /** M в «N из M»: из отчёта (applicable_count) или из числа проверок; берётся большее. */
+  total: number;
+}
+
+/** Проверки отчёта, сгруппированные по смыслу. Без побочных эффектов. */
+export function buildChecks(report: RiskReport, state: AppStateData | null): BuiltChecks {
   const items: CheckItem[] = [];
-  for (const spec of ORDER) {
-    const result = resultAt(report, spec.id, spec.index);
-    if (!result) continue;
-    const ok = isOkStatus(result);
+  const push = (id: string, group: CheckGroupId, result: CheckResult, missing: boolean) => {
+    const known = id in copy.items;
+    const cls = classify(result);
     items.push({
-      id: spec.id,
-      group: spec.group,
-      title: copy.items[spec.id].title,
-      what: copy.items[spec.id].what,
+      id,
+      group,
+      title: known ? copy.items[id as CheckId].title : copy.extra.title,
+      what: known ? copy.items[id as CheckId].what : copy.extra.what,
       result,
-      ok,
-      data: dataFor(spec.id, report, state),
-      action: actionFor(spec.id, result, ok),
+      cls,
+      ok: cls === "ok",
+      missing,
+      data: known ? dataFor(id as CheckId, report, state) : [],
+      action: actionFor(id, result, cls),
     });
+  };
+  for (const spec of ORDER) {
+    const found = resultAt(report, spec.id, spec.index);
+    push(spec.id, spec.group, found ?? missingResult(), !found);
   }
+  // Проверки сверх известных мест не теряем.
+  const known = Math.max(...ORDER.map((o) => o.index)) + 1;
+  (report.checks ?? []).slice(known).forEach((result, i) => push(`extra_${known + i}`, "leaks", result, false));
+
   const groups = GROUP_ORDER.map((id) => ({
     id,
     title: copy.groups[id],
     items: items.filter((i) => i.group === id),
   })).filter((g) => g.items.length > 0);
-  return { groups, items };
+  const counts = countChecks(items.map((i) => i.result));
+  const total = Math.max(counts.applicable, report.applicable_count ?? 0);
+  return { groups, items, counts, total };
 }

@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Check,
   ChevronRight,
+  CircleHelp,
   Copy,
   Ellipsis,
   Folder,
@@ -21,7 +22,7 @@ import {
 } from "lucide-react";
 import { cx } from "./cx";
 
-/** 18 иконок ДС (design/zastava-ds/icons) → имена lucide-react. */
+/** 19 иконок ДС (design/zastava-ds/icons) → имена lucide-react. */
 export const ICONS = {
   alert: TriangleAlert,
   arrow: ArrowRight,
@@ -30,6 +31,7 @@ export const ICONS = {
   copy: Copy,
   folder: Folder,
   globe: Globe,
+  help: CircleHelp,
   info: Info,
   key: Key,
   lock: Lock,

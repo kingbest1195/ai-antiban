@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppStateData, CoverageSnapshot, ProviderId, RiskReport, RoutesSnapshot } from "../../types";
 import { auditConnection, fetchAppState, getCoverageSnapshot, getRoutesSnapshot, getSysproxyStatus } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
+
+/** Возраст отчёта в минутах для подписи или null, если данные свежие. Вынесено для тестов. */
+export function dataAge(ageMs: number, auditFailed: boolean): number | null {
+  const minutes = Math.max(1, Math.floor(ageMs / 60000));
+  return ageMs > 2 * 60000 || auditFailed ? minutes : null;
+}
 
 interface Options {
   showToast: ShowToast;
@@ -24,6 +30,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   const [auditError, setAuditError] = useState<string | null>(null);
   const [routesSnapshot, setRoutesSnapshot] = useState<RoutesSnapshot | null>(null);
   const [coverageSnapshot, setCoverageSnapshot] = useState<CoverageSnapshot | null>(null);
+  /** Когда пришёл последний успешный отчёт (мс) и «сейчас» для пересчёта возраста. */
+  const [reportAt, setReportAt] = useState<number | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
 
   /** Получить актуальный снимок покрытия приложений и цепочки PAC. */
   const refreshCoverage = useCallback(async () => {
@@ -105,6 +114,7 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
           anthropic: claudeReport,
         }));
         setAuditError(null);
+        setReportAt(Date.now());
 
         const [gptSettled, geminiSettled] = await Promise.allSettled([
           auditConnection("openai", false),
@@ -186,6 +196,18 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     return () => clearInterval(timer);
   }, [refreshCoverage]);
 
+  // Раз в 30 секунд пересчитываем возраст отчёта.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  /** «Данные N мин назад»: показываем, если отчёту больше двух минут или последний аудит упал. */
+  const dataAgeMinutes = useMemo<number | null>(() => {
+    if (!activeReport || reportAt == null) return null;
+    return dataAge(now - reportAt, auditError != null);
+  }, [activeReport, reportAt, now, auditError]);
+
   const currentIp = activeReport?.telemetry.ip || "--";
   const currentCountry = activeReport?.telemetry.country_code || "--";
   const trustScore = activeReport?.trust_score ?? 100;
@@ -201,6 +223,7 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     autoUpdateEnabled,
     setAutoUpdateEnabled,
     auditError,
+    dataAgeMinutes,
     activeReport,
     currentIp,
     currentCountry,

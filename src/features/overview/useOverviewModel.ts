@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import type { AppStateData, CheckResult, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
 import { checksWord } from "../../shared/lib/format";
+import { classify, countChecks, isYellowOnlyUnknown } from "../checks/checksModel";
 import { overview as copy } from "../../shared/copy/ru";
 import type { HeroTone } from "../../ui";
 
@@ -11,7 +12,7 @@ export interface ServiceModel {
   status: ServiceStatus;
 }
 
-export type BannerKind = "stopped" | "frozen" | "leak" | "timezone" | "review" | "update";
+export type BannerKind = "stopped" | "frozen" | "leak" | "timezone" | "review" | "incomplete" | "update";
 export type PinState = "pinned" | "changed" | "none";
 
 export interface OverviewModel {
@@ -19,6 +20,8 @@ export interface OverviewModel {
   tone: HeroTone;
   checksPassed: number;
   checksTotal: number;
+  /** Сколько проверок не удалось выполнить (не «применимо» и не «пройдено»). */
+  checksUnknown: number;
   checksLabel: string;
   /** Имя провайдера для бейджа (isp или org); без жаргона вроде ASN. */
   providerName: string | null;
@@ -28,8 +31,6 @@ export interface OverviewModel {
 }
 
 const PROVIDER_IDS: ProviderId[] = ["anthropic", "openai", "gemini"];
-
-const isOk = (c: CheckResult) => c.status === "ok" || c.status === "green";
 
 function checksOf(report: RiskReport | null): CheckResult[] {
   if (!report) return [];
@@ -70,19 +71,22 @@ export function useOverviewModel({
 }: Input): OverviewModel {
   return useMemo(() => {
     const anyRed = PROVIDER_IDS.some((id) => reports[id]?.overall_status === "red");
-    const anyYellow = PROVIDER_IDS.some((id) => reports[id]?.overall_status === "yellow");
+    const anyYellow = PROVIDER_IDS.some(
+      (id) => reports[id]?.overall_status === "yellow" && !isYellowOnlyUnknown(reports[id], checksOf(reports[id] ?? null)),
+    );
 
-    const ipv6Leak =
-      activeReport?.ipv6_result?.status === "critical" ||
-      activeReport?.ipv6_result?.status === "red" ||
-      activeReport?.ipv6_result?.status === "warning";
-    const tzMismatch =
-      activeReport?.timezone_result?.status === "warning" ||
-      activeReport?.timezone_result?.status === "critical" ||
-      activeReport?.timezone_result?.status === "yellow" ||
-      activeReport?.timezone_result?.status === "red";
-    const dnsblBad =
-      activeReport?.dnsbl_result?.status === "critical" || activeReport?.dnsbl_result?.status === "warning";
+    const bad = (c?: CheckResult) => {
+      if (!c) return false;
+      const k = classify(c);
+      return k === "warn" || k === "crit";
+    };
+    const ipv6Leak = bad(activeReport?.ipv6_result);
+    const tzMismatch = bad(activeReport?.timezone_result);
+    const dnsblBad = bad(activeReport?.dnsbl_result);
+
+    const checks = checksOf(activeReport);
+    const counts = countChecks(checks);
+    const incomplete = Boolean(activeReport?.incomplete) || counts.unknown > 0;
 
     let verdict: string = copy.verdict.ok;
     let tone: HeroTone = "ok";
@@ -98,6 +102,9 @@ export function useOverviewModel({
     } else if (anyYellow || ipv6Leak || tzMismatch) {
       verdict = copy.verdict.attention;
       tone = "warn";
+    } else if (incomplete) {
+      verdict = copy.verdict.partial;
+      tone = "warn";
     }
 
     let banner: BannerKind | null = null;
@@ -106,11 +113,11 @@ export function useOverviewModel({
     else if (ipv6Leak) banner = "leak";
     else if (tzMismatch) banner = "timezone";
     else if (anyYellow || dnsblBad) banner = "review";
+    else if (incomplete) banner = "incomplete";
     else if (updateInfo?.update_available) banner = "update";
 
-    const checks = checksOf(activeReport);
-    const checksPassed = checks.filter(isOk).length;
-    const checksTotal = checks.length;
+    const checksPassed = counts.ok;
+    const checksTotal = Math.max(counts.applicable, activeReport?.applicable_count ?? 0);
 
     const pinned = state?.pinned_ip ?? null;
     const pinState: PinState = pinned ? (pinned === currentIp ? "pinned" : "changed") : "none";
@@ -122,15 +129,16 @@ export function useOverviewModel({
       const isBlocked = state?.blocked_providers?.includes(id);
       const isAllowed = state?.session_allowed_providers?.includes(id);
       const list = checksOf(report ?? null);
-      const hasCritical = list.some((c) => c.status === "critical");
-      const hasWarning = list.some((c) => c.status === "warning");
+      const hasCritical = list.some((c) => classify(c) === "crit");
+      // Непроверенное не считаем чистым: сервис получает статус «Нужна проверка».
+      const hasWarning = list.some((c) => classify(c) === "warn" || classify(c) === "unknown") || Boolean(report?.incomplete);
 
       let status: ServiceStatus = "ok";
       if (isBlocked) status = "critical";
       else if (isAllowed) status = "allowed";
       else if (!report) status = refreshing ? "checking" : "missing";
       else if (report.overall_status === "red" || hasCritical) status = "critical";
-      else if (report.overall_status === "yellow" || hasWarning) status = "warn";
+      else if ((report.overall_status === "yellow" && !isYellowOnlyUnknown(report, list)) || hasWarning) status = "warn";
       return { id, status };
     });
 
@@ -139,7 +147,11 @@ export function useOverviewModel({
       tone,
       checksPassed,
       checksTotal,
-      checksLabel: copy.facts.checks(checksPassed, checksTotal, checksWord(checksTotal)),
+      checksUnknown: counts.unknown,
+      checksLabel:
+        counts.unknown > 0
+          ? copy.facts.checksPartial(checksPassed, checksTotal, counts.unknown)
+          : copy.facts.checks(checksPassed, checksTotal, checksWord(checksTotal)),
       providerName,
       pinState,
       banner,

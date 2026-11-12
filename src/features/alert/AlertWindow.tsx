@@ -205,10 +205,9 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
         ? copy.textRegion
         : copy.textRisk;
 
-  const text: ReactNode =
-    demoFeedback ??
-    allowError ??
-    (failed ? copy.failedText : detecting ? `${reason} ${copy.detectingHint}` : reason);
+  const incomplete = !detecting && !failed && Boolean(report?.incomplete);
+  const base = failed ? copy.failedText : detecting ? `${reason} ${copy.detectingHint}` : reason;
+  const text: ReactNode = demoFeedback ?? allowError ?? (incomplete ? `${base} ${copy.textIncomplete}` : base);
 
   const locked = resolving || Boolean(demoFeedback);
 

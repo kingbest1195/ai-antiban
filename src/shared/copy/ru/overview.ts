@@ -14,9 +14,13 @@ export const overview = {
     stopped: "Доступ к ИИ остановлен",
     frozen: "Сеть ИИ остановлена",
     off: "Защита выключена",
+    partial: "Проверено частично",
   },
   facts: {
     checks: (passed: number, total: number, word: string) => `${passed} из ${total} ${word}`,
+    /** Часть проверок не выполнена: «9 из 13 · 3 не удалось проверить». */
+    checksPartial: (passed: number, total: number, unknown: number) =>
+      `${passed} из ${total} · ${unknown} не удалось проверить`,
     pinned: "IP закреплён",
     pinChanged: "IP сменился",
     key: "Ключ Заставы",
@@ -87,6 +91,11 @@ export const overview = {
     review: {
       title: "У адреса есть замечания",
       text: "ИИ-сервис может запросить дополнительную проверку. Подробности — во вкладке «Проверки».",
+    },
+    incomplete: {
+      title: "Проверено частично",
+      text: "Часть проверок не удалось выполнить. Это не значит, что всё хорошо: повторите проверку.",
+      action: "Повторить проверку",
     },
     update: {
       title: (version: string) => `Доступно обновление v${version}`,
