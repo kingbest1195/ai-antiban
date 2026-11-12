@@ -440,7 +440,9 @@ export type ManualStepKey =
   | "set_env_proxy"
   | "restart_app"
   | "reopen_terminal"
-  | "jetbrains_proxy_settings";
+  | "jetbrains_proxy_settings"
+  | "launch_with_env"
+  | "enable_system_proxy";
 
 export interface AppCoverageItem {
   id: string;
@@ -457,6 +459,8 @@ export interface AppCoverageItem {
   manual_steps: ManualStepKey[];
   /** Короткий текст от шлюза по-русски. */
   detail: string;
+  /** Приложение запущено, но через шлюз от него ничего нет: запросы, похоже, идут мимо Заставы (Antigravity 2.x). */
+  bypass_suspected?: boolean;
 }
 
 export interface CliSettings {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   checkCliProtectionStatus,
   disableCliProtection,
@@ -7,12 +7,28 @@ import {
   toggleNetworkKillswitch,
   toggleSysproxy,
 } from "../../utils/api";
+import type { CliProtectionReport } from "../../types";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
 export interface CliToggleOptions {
   /** Без копирования shell-команды в буфер и без уведомления об успехе (онбординг). Ошибки показываются всегда. */
   quiet?: boolean;
+}
+
+/**
+ * Явные «включить» и «выключить» защиты для кнопок в «Покрытии»: в отличие от переключателя повторный вызов
+ * «включить» ничего не выключает. Ошибку показывают сами (тостом), успех описывает вызывающий по ответу команды.
+ */
+export interface ProtectionActions {
+  /** Возвращает, включён ли системный прокси после команды. */
+  enableSysproxy: () => Promise<boolean>;
+  /** Возвращает true, если выключен. */
+  disableSysproxy: () => Promise<boolean>;
+  /** Ответ команды (что записано, заметки, ошибка) или null, если команда не выполнилась. */
+  enableCli: () => Promise<CliProtectionReport | null>;
+  /** Возвращает true, если выключена. */
+  disableCli: () => Promise<boolean>;
 }
 
 interface Options {
@@ -83,6 +99,52 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
     }
   }, [cliProtected, showToast]);
 
+  const protection = useMemo<ProtectionActions>(
+    () => ({
+      enableSysproxy: async () => {
+        try {
+          const res = await toggleSysproxy(true);
+          setSysproxyActive(res);
+          return res;
+        } catch (err: any) {
+          showToast(t.guard.error, err?.message || String(err), "error");
+          return false;
+        }
+      },
+      disableSysproxy: async () => {
+        try {
+          const res = await toggleSysproxy(false);
+          setSysproxyActive(res);
+          return !res;
+        } catch (err: any) {
+          showToast(t.guard.error, err?.message || String(err), "error");
+          return false;
+        }
+      },
+      enableCli: async () => {
+        try {
+          const report = await enableCliProtection();
+          setCliProtected(true);
+          return report;
+        } catch (err: any) {
+          showToast(t.cli.error, err?.message || String(err), "error");
+          return null;
+        }
+      },
+      disableCli: async () => {
+        try {
+          await disableCliProtection();
+          setCliProtected(false);
+          return true;
+        } catch (err: any) {
+          showToast(t.cli.error, err?.message || String(err), "error");
+          return false;
+        }
+      },
+    }),
+    [setSysproxyActive, showToast],
+  );
+
   const handleToggleKillswitch = useCallback(async () => {
     try {
       const next = !killswitchFrozen;
@@ -104,6 +166,7 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
     setKillswitchFrozen,
     handleToggleSysproxy,
     handleToggleCliProtection,
+    protection,
     handleToggleKillswitch,
   };
 }

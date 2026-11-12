@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { AppCoverageItem, AppCoverageStatus } from "../../types";
-import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, isListed, pollInterval, resolveWaiting, sinceLastSeen, startWaiting, viewOf, vpnNotice } from "./coverageModel";
+import type { AppCoverageItem, AppCoverageStatus, CliProtectionReport } from "../../types";
+import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, enableResult, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, resolveWaiting, sinceLastSeen, startWaiting, viewOf, vpnNotice } from "./coverageModel";
+import { disableCliProtection, enableCliProtection, checkCliProtectionStatus } from "../../utils/api";
 import { coverage as copy } from "../../shared/copy/ru";
 
 const app = (id: string, status: AppCoverageStatus, over: Partial<AppCoverageItem> = {}): AppCoverageItem => ({
@@ -129,5 +130,89 @@ describe("vpnNotice: подключённый VPN и системный прок
     expect(copy.vpn.overridden.title("V2 Pro")).toBe("Системный прокси не действует поверх VPN «V2 Pro»: ИИ-трафик может идти мимо Заставы");
     expect(copy.vpn.overridden.text).toContain("системный прокси");
     expect(copy.vpn.overridden.text).toContain("вручную");
+  });
+});
+
+describe("кнопка защиты: подпись и действие зависят от состояния", () => {
+  it("выключено — одна кнопка «Включить», включено — только состояние, кнопки «Включить» нет", () => {
+    expect(protectionControl(false, false)).toEqual({ mode: "enable", busy: false });
+    expect(protectionControl(true, false)).toEqual({ mode: "on", busy: false });
+    expect(protectionControl(false, true).busy).toBe(true);
+  });
+  it("состояние берётся из снимка шлюза, а не из локального флага", () => {
+    const snap = { sysproxy_enabled: true, cli_protection_enabled: false };
+    expect(isProtectionOn("sysproxy", snap)).toBe(true);
+    expect(isProtectionOn("cli", snap)).toBe(false);
+  });
+  it("подписи называют действие и объект и различаются по состоянию", () => {
+    expect(copy.protection.enable.cli).toBe("Включить защиту IDE и терминала");
+    expect(copy.protection.on.cli).toBe("Защита IDE и терминала включена");
+    expect(copy.protection.on.cli).not.toBe(copy.protection.enable.cli);
+    expect(copy.protection.disable).toBe("Выключить");
+  });
+  it("повторное «включить» никогда не выключает: явное действие ничего не знает о выключении", async () => {
+    await enableCliProtection();
+    expect(await checkCliProtectionStatus()).toBe(true);
+    await enableCliProtection();
+    expect(await checkCliProtectionStatus()).toBe(true);
+    await disableCliProtection();
+    expect(await checkCliProtectionStatus()).toBe(false);
+    await enableCliProtection();
+    expect(await checkCliProtectionStatus()).toBe(true);
+  });
+  it("подтверждение выключения перечисляет то, что останется без защиты", () => {
+    const apps = [
+      app("vscode", "configured", { name: "VS Code" }),
+      app("claude-code", "confirmed", { name: "Claude Code", category: "cli" }),
+      app("cursor", "off", { name: "Cursor" }),
+      app("browsers", "confirmed", { name: "Браузеры", category: "browser" }),
+    ];
+    expect(protectedAppNames("cli", apps)).toEqual(["VS Code", "Claude Code"]);
+    expect(protectedAppNames("sysproxy", apps)).toEqual(["Браузеры"]);
+    const text = copy.protection.confirm.text(["VS Code", "Claude Code"], "cli");
+    expect(text).toContain("Останутся без защиты: VS Code, Claude Code");
+    expect(copy.protection.confirm.text([], "cli")).toContain("Останутся без защиты:");
+  });
+});
+
+describe("enableResult: итог берётся из ответа команды", () => {
+  const report = (over: Partial<CliProtectionReport> = {}): CliProtectionReport => ({
+    enabled: true,
+    proxy_url: "http://127.0.0.1:40111",
+    configured_targets: ["Cursor", "VS Code", "Claude Code", "Gemini CLI"],
+    shell_command: "",
+    ...over,
+  });
+  const antigravity = app("antigravity", "off", { name: "Antigravity", manual_steps: ["enable_system_proxy", "launch_with_env"] });
+
+  it("перечисляет записанное и называет приложения с ручными шагами", () => {
+    const r = enableResult("cli", report(), [antigravity]);
+    expect(r.title).toBe("Защита IDE и терминала включена");
+    expect(r.text).toBe("Записано в: Cursor, VS Code, Claude Code, Gemini CLI. Antigravity: нужны ручные шаги (см. ниже).");
+    expect(r.tone).toBe("warn");
+  });
+  it("без ручных приложений итог зелёный и ничего лишнего не выдумывает", () => {
+    const r = enableResult("cli", report({ configured_targets: ["Cursor"] }), []);
+    expect(r).toEqual({ tone: "ok", title: "Защита IDE и терминала включена", text: "Записано в: Cursor." });
+  });
+  it("ничего не записано — так и сказано, тон предупреждения", () => {
+    const r = enableResult("cli", report({ configured_targets: [] }), []);
+    expect(r.text).toContain("Ничего не записано");
+    expect(r.tone).toBe("warn");
+  });
+  it("заметки и ошибка команды попадают в текст", () => {
+    const withNote = enableResult("cli", report({ notes: ["Старый блок в ~/.zshrc не удалён."] }), []);
+    expect(withNote.text).toContain("Старый блок в ~/.zshrc не удалён.");
+    const failed = enableResult("cli", report({ error: "Журнал недоступен", configured_targets: [] }), []);
+    expect(failed.tone).toBe("danger");
+    expect(failed.text).toContain("Журнал недоступен");
+  });
+  it("команда не выполнилась — ошибка", () => {
+    expect(enableResult("cli", null, []).tone).toBe("danger");
+  });
+  it("системный прокси: короткое подтверждение без списка IDE", () => {
+    const r = enableResult("sysproxy", null, []);
+    expect(r.tone).toBe("ok");
+    expect(r.title).toBe("Защита браузеров и приложений включена");
   });
 });

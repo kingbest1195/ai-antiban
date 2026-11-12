@@ -5,7 +5,7 @@ import type { IconName, Tone } from "../../ui";
 import { providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckId } from "../../shared/copy/ru";
-import type { ShowToast } from "../../shared/hooks";
+import type { ProtectionActions, ShowToast } from "../../shared/hooks";
 import { CoverageSection } from "../coverage/CoverageSection";
 import { openOsNetworkSettings } from "../../utils/api";
 import { buildChecks, buildPendingChecks, isCriticalStatus, progressOf } from "./checksModel";
@@ -24,9 +24,8 @@ export interface ChecksScreenProps {
   provider?: ProviderId;
   state: AppStateData | null;
   coverageSnapshot?: CoverageSnapshot | null;
-  /** Переключатели защиты для кнопки «Включить защиту» в инструкциях; без них кнопка скрыта. */
-  onToggleSysproxy?: () => void | Promise<void>;
-  onToggleCli?: () => void | Promise<void>;
+  /** Явные «включить» и «выключить» защиты для карточек «Покрытия»; без них кнопка скрыта. */
+  protection?: ProtectionActions;
   /** Тосты секции покрытия (например, ошибка копирования адреса). */
   onToast?: ShowToast;
   onNavigateToGuide: (guideId?: string) => void;
@@ -102,8 +101,7 @@ export function ChecksScreen({
   provider,
   state,
   coverageSnapshot,
-  onToggleSysproxy,
-  onToggleCli,
+  protection,
   onToast,
   onNavigateToGuide,
   onSimulate,
@@ -233,8 +231,7 @@ export function ChecksScreen({
         variant="checks"
         initialSnapshot={coverageSnapshot}
         pending={startupPending}
-        onToggleSysproxy={onToggleSysproxy}
-        onToggleCli={onToggleCli}
+        protection={protection}
         onToast={onToast}
       />
 

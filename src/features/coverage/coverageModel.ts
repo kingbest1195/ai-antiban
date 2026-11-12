@@ -1,4 +1,5 @@
-import type { AppCoverageItem, AppCoverageStatus, CliMode, CoverageSnapshot } from "../../types";
+import type { AppCoverageItem, AppCoverageStatus, CliMode, CliProtectionReport, CoverageSnapshot } from "../../types";
+import { coverage as copy } from "../../shared/copy/ru";
 
 /** Опрос при наличии неподтверждённых приложений и без них. */
 export const POLL_FAST_MS = 5_000;
@@ -81,4 +82,59 @@ export function vpnNotice(snapshot: Pick<CoverageSnapshot, "sysproxy_enabled" | 
   const names = (snapshot.vpn_connected ?? []).filter((n) => n.trim() !== "");
   if (names.length === 0) return null;
   return { names: names.join(", "), overridden: snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false };
+}
+
+// ---- Кнопка защиты в карточке приложения ----
+
+export type ProtectionKind = "sysproxy" | "cli";
+
+export const isProtectionOn = (kind: ProtectionKind, snapshot: Pick<CoverageSnapshot, "sysproxy_enabled" | "cli_protection_enabled">): boolean =>
+  kind === "sysproxy" ? snapshot.sysproxy_enabled : snapshot.cli_protection_enabled;
+
+/**
+ * Вид управления защитой в карточке. Включено — кнопки «Включить» нет совсем (повторный клик не может выключить),
+ * остаётся состояние и отдельное тихое «Выключить». Выполняется команда — кнопки заблокированы.
+ */
+export type ProtectionControl = { mode: "enable"; busy: boolean } | { mode: "on"; busy: boolean };
+
+export function protectionControl(on: boolean, busy: boolean): ProtectionControl {
+  return { mode: on ? "on" : "enable", busy };
+}
+
+/** Приложения, которые идут через Заставу благодаря этой защите: для текста подтверждения выключения. */
+export function protectedAppNames(kind: ProtectionKind, apps: AppCoverageItem[]): string[] {
+  const categories: AppCoverageItem["category"][] = kind === "sysproxy" ? ["browser", "desktop"] : ["ide", "cli"];
+  return apps
+    .filter((a) => a.installed && categories.includes(a.category) && (a.status === "confirmed" || a.status === "configured"))
+    .map((a) => a.name);
+}
+
+/** Приложения, которым эта кнопка не помогает и нужны ручные шаги (у них свой способ запуска). */
+export function manualOnlyNames(apps: AppCoverageItem[]): string[] {
+  return apps.filter((a) => a.installed && a.status !== "confirmed" && a.manual_steps.includes("launch_with_env")).map((a) => a.name);
+}
+
+export interface ProtectionResult {
+  tone: "ok" | "warn" | "danger";
+  title: string;
+  text: string;
+}
+
+/**
+ * Итог нажатия «Включить» из ответа команды: список берётся из `configured_targets`, `notes` и `error`, а не придумывается.
+ * `report == null` — команда не выполнилась (ошибку уже показал вызывающий).
+ */
+export function enableResult(kind: ProtectionKind, report: CliProtectionReport | null, apps: AppCoverageItem[]): ProtectionResult {
+  const r = copy.protection.result;
+  if (kind === "sysproxy") return { tone: "ok", title: r.enabledTitle.sysproxy, text: r.sysproxyText };
+  if (!report) return { tone: "danger", title: r.failedTitle, text: "" };
+  const parts: string[] = [];
+  const targets = report.configured_targets.filter((t) => t.trim() !== "");
+  parts.push(targets.length > 0 ? r.written(targets.join(", ")) : r.nothingWritten);
+  const manual = manualOnlyNames(apps);
+  if (manual.length > 0) parts.push(r.manual(manual.join(", ")));
+  for (const n of report.notes ?? []) if (n.trim() !== "") parts.push(n.trim());
+  if (report.error) return { tone: "danger", title: r.failedTitle, text: [report.error, ...parts].join(" ") };
+  const needsSteps = targets.length === 0 || manual.length > 0;
+  return { tone: needsSteps ? "warn" : "ok", title: r.enabledTitle.cli, text: parts.join(" ") };
 }

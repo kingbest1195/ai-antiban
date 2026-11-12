@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppCoverageItem, CoverageSnapshot } from "../../types";
-import { Badge, Banner, Button, Card, CopyBlock, ExpandRow, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
+import { Badge, Banner, Button, Card, ConfirmModal, CopyBlock, ExpandRow, Progress, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
 import type { BadgeTone, IconName, RowTone } from "../../ui";
-import { common, coverage as copy } from "../../shared/copy/ru";
-import type { ShowToast } from "../../shared/hooks";
+import { coverage as copy } from "../../shared/copy/ru";
+import type { ProtectionActions, ShowToast } from "../../shared/hooks";
 import { useCopy } from "../guides/useCopy";
 import { buildManualSetup } from "./manualSetup";
-import { isListed, sinceLastSeen, viewOf, vpnNotice } from "./coverageModel";
-import type { CoverageView, WaitingMap } from "./coverageModel";
+import { enableResult, isListed, isProtectionOn, protectedAppNames, protectionControl, sinceLastSeen, viewOf, vpnNotice } from "./coverageModel";
+import type { CoverageView, ProtectionKind, ProtectionResult, WaitingMap } from "./coverageModel";
 import { useCoverage } from "./useCoverage";
 import "./coverage.css";
 
@@ -18,9 +18,8 @@ export interface CoverageSectionProps {
   initialSnapshot?: CoverageSnapshot | null;
   /** Застава ещё запускается в фоне: статусы приложений пока не определены, вместо них «Проверяем…». */
   pending?: boolean;
-  /** Переключатели защиты со вкладки «Обзор»; без них кнопка «Включить защиту» не показывается. */
-  onToggleSysproxy?: () => void | Promise<void>;
-  onToggleCli?: () => void | Promise<void>;
+  /** Явные «включить» и «выключить» защиты; без них кнопка защиты в карточке не показывается. */
+  protection?: ProtectionActions;
   onToast?: ShowToast;
 }
 
@@ -45,11 +44,14 @@ const ICONS: Record<AppCoverageItem["category"], IconName> = { browser: "globe",
 const rowTone = (view: CoverageView): RowTone => (view === "confirmed" ? "ok" : view === "off" ? "warn" : "neutral");
 
 /** Секция «Покрытие приложений»: одна реализация для «Обзора» и «Проверок». */
-export function CoverageSection({ variant, initialSnapshot, pending, onToggleSysproxy, onToggleCli, onToast }: CoverageSectionProps) {
+export function CoverageSection({ variant, initialSnapshot, pending, protection, onToast }: CoverageSectionProps) {
   const { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup } = useCoverage(initialSnapshot);
   const { copiedId, copy: copyText } = useCopy(onToast);
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const [enabling, setEnabling] = useState<string | null>(null);
+  /** Какая защита сейчас применяется: кнопки этой группы заблокированы, показан индикатор. */
+  const [busy, setBusy] = useState<{ kind: ProtectionKind; action: "enable" | "disable" } | null>(null);
+  const [confirmOff, setConfirmOff] = useState<ProtectionKind | null>(null);
+  const [result, setResult] = useState<ProtectionResult | null>(null);
 
   // Как только запуск закончился, читаем состояние заново: снимок до этого описывал выключенную защиту.
   useEffect(() => {
@@ -61,14 +63,45 @@ export function CoverageSection({ variant, initialSnapshot, pending, onToggleSys
   const apps = useMemo(() => (snapshot?.apps ?? []).filter((a) => isListed(a, variant)), [snapshot, variant]);
   const vpn = useMemo(() => (snapshot ? vpnNotice(snapshot) : null), [snapshot]);
 
-  const enable = async (app: AppCoverageItem, kind: "sysproxy" | "cli") => {
-    const toggle = kind === "sysproxy" ? onToggleSysproxy : onToggleCli;
-    if (!toggle) return;
-    setEnabling(app.id);
+  /** «Включить»: только включает; итог берётся из ответа команды и показывается строкой и тостом. */
+  const enable = async (kind: ProtectionKind) => {
+    if (!protection || busy) return;
+    setBusy({ kind, action: "enable" });
+    setResult(null);
     try {
-      await toggle();
+      let outcome: ProtectionResult;
+      if (kind === "sysproxy") {
+        const on = await protection.enableSysproxy();
+        outcome = on ? enableResult(kind, null, snapshot?.apps ?? []) : { tone: "danger", title: copy.protection.result.failedTitle, text: "" };
+      } else {
+        outcome = enableResult(kind, await protection.enableCli(), snapshot?.apps ?? []);
+      }
+      setResult(outcome);
+      // Ошибку команды уже показал обработчик защиты; успех и предупреждения объявляем здесь.
+      if (outcome.tone !== "danger" || outcome.text) onToast?.(outcome.title, outcome.text || undefined, outcome.tone === "ok" ? "success" : outcome.tone === "warn" ? "warning" : "error");
     } finally {
-      setEnabling(null);
+      setBusy(null);
+      void refresh();
+    }
+  };
+
+  /** «Выключить»: только после подтверждения. */
+  const disable = async (kind: ProtectionKind) => {
+    if (!protection || busy) return;
+    setBusy({ kind, action: "disable" });
+    setResult(null);
+    try {
+      const off = kind === "sysproxy" ? await protection.disableSysproxy() : await protection.disableCli();
+      if (off) {
+        const out: ProtectionResult = { tone: "ok", title: copy.protection.result.disabledTitle[kind], text: copy.protection.result.disabledText };
+        setResult(out);
+        onToast?.(out.title, out.text, "info");
+      } else {
+        setResult({ tone: "danger", title: copy.protection.result.failedTitleOff, text: "" });
+      }
+    } finally {
+      setBusy(null);
+      setConfirmOff(null);
       void refresh();
     }
   };
@@ -101,6 +134,12 @@ export function CoverageSection({ variant, initialSnapshot, pending, onToggleSys
             </Banner>
           )}
           {vpn && <p className="zs-cov__hint zs-cov__vpn-line">{copy.vpn.untouched(vpn.names)}</p>}
+          {result && (
+            <Banner tone={result.tone} title={result.title} className="zs-cov__vpn" action={<Button size="sm" variant="quiet" onClick={() => setResult(null)}>{copy.protection.dismiss}</Button>}>
+              {result.text}
+            </Banner>
+          )}
+          {busy && <Progress label={busy.action === "enable" ? copy.protection.inProgress : copy.protection.inProgressOff} className="zs-cov__vpn" />}
           <Rows>
             {snapshot.chained_proxy && (
               <Row
@@ -125,12 +164,24 @@ export function CoverageSection({ variant, initialSnapshot, pending, onToggleSys
                 copiedId={copiedId}
                 onCopy={copyText}
                 onConfirm={() => void confirmSetup(app.id)}
-                enabling={enabling === app.id}
-                onEnable={(kind) => void enable(app, kind)}
-                canEnable={{ sysproxy: Boolean(onToggleSysproxy), cli: Boolean(onToggleCli) }}
+                busy={busy}
+                onEnable={(kind) => void enable(kind)}
+                onAskDisable={(kind) => setConfirmOff(kind)}
+                canControl={Boolean(protection)}
               />
             ))}
           </Rows>
+          <ConfirmModal
+            open={confirmOff !== null}
+            title={confirmOff ? copy.protection.confirm.title[confirmOff] : ""}
+            confirmLabel={copy.protection.confirm.confirm}
+            busy={busy?.action === "disable"}
+            busyLabel={copy.protection.disableBusy}
+            onConfirm={() => confirmOff && void disable(confirmOff)}
+            onCancel={() => setConfirmOff(null)}
+          >
+            {confirmOff ? copy.protection.confirm.text(protectedAppNames(confirmOff, snapshot.apps), confirmOff) : ""}
+          </ConfirmModal>
           </>
         )}
       </Card>
@@ -148,12 +199,14 @@ interface AppRowProps {
   copiedId: string | null;
   onCopy: (id: string, value: string) => void;
   onConfirm: () => void;
-  enabling: boolean;
-  onEnable: (kind: "sysproxy" | "cli") => void;
-  canEnable: { sysproxy: boolean; cli: boolean };
+  busy: { kind: ProtectionKind; action: "enable" | "disable" } | null;
+  onEnable: (kind: ProtectionKind) => void;
+  onAskDisable: (kind: ProtectionKind) => void;
+  /** Есть ли у экрана команды включения и выключения защиты. */
+  canControl: boolean;
 }
 
-function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy, onConfirm, enabling, onEnable, canEnable }: AppRowProps) {
+function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy, onConfirm, busy, onEnable, onAskDisable, canControl }: AppRowProps) {
   const setup = useMemo(() => buildManualSetup(app, snapshot), [app, snapshot]);
   const view = viewOf(app, waiting, now, snapshot.cli_mode);
   if (view === "not_installed") return null;
@@ -171,7 +224,8 @@ function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy,
     return <Row icon={ICONS[app.category]} tone={rowTone(view)} title={app.name} sub={sub} trail={trail} />;
   }
 
-  const canToggleProtection = setup.protection ? canEnable[setup.protection] : false;
+  const kind = setup.protection;
+  const control = kind ? protectionControl(isProtectionOn(kind, snapshot), busy?.kind === kind) : null;
 
   return (
     <ExpandRow
@@ -191,13 +245,26 @@ function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy,
             {setup.warning.text}
           </Banner>
         )}
-        {setup.protection && !canToggleProtection && <p className="zs-cov__hint">{copy.hints.protectionOnOverview}</p>}
-        {setup.protection && canToggleProtection && (
+        {kind && !canControl && <p className="zs-cov__hint">{copy.hints.protectionOnOverview}</p>}
+        {kind && control && canControl && control.mode === "enable" && (
           <div className="zs-cov__actions">
-            <Button size="sm" variant="primary" icon="power" disabled={enabling} onClick={() => onEnable(setup.protection!)}>
-              {enabling ? copy.enableProtectionBusy : copy.enableProtection}
+            <Button size="sm" variant="primary" icon="power" disabled={control.busy || busy !== null} aria-busy={control.busy} onClick={() => onEnable(kind)}>
+              {control.busy ? copy.protection.busy[kind] : copy.protection.enable[kind]}
             </Button>
           </div>
+        )}
+        {kind && control && canControl && control.mode === "on" && (
+          <>
+            <div className="zs-cov__actions">
+              <Badge tone="ok" icon="check">
+                {copy.protection.on[kind]}
+              </Badge>
+              <Button size="sm" variant="quiet" disabled={busy !== null} aria-label={copy.protection.disableAria(copy.protection.on[kind])} onClick={() => onAskDisable(kind)}>
+                {control.busy && busy?.action === "disable" ? copy.protection.disableBusy : copy.protection.disable}
+              </Button>
+            </div>
+            <p className="zs-cov__hint">{copy.protection.onButNotHere}</p>
+          </>
         )}
         <Steps items={setup.steps.map((s) => ({ title: s.title, text: s.text }))} />
         {setup.addressPending ? (
@@ -215,9 +282,9 @@ function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy,
                   lines={b.lines}
                   label={b.label}
                   copied={copiedId === id}
-                  copyLabel={b.kind === "address" ? copy.copyAddress : common.copy}
+                  copyLabel={b.kind === "address" ? copy.copyAddress : copy.copyCommand}
                   copiedLabel={copy.copied}
-                  copyAriaLabel={b.kind === "address" ? copy.copyAddressAria(b.label) : undefined}
+                  copyAriaLabel={b.kind === "address" ? copy.copyAddressAria(b.label) : copy.copyCommandAria(b.label)}
                   onCopy={(text) => onCopy(id, text)}
                   />
                 </div>
