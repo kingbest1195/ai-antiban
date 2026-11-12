@@ -99,10 +99,47 @@ pub fn parse_semver(ver: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-/// Returns `true` if `latest` is strictly newer than `current`.
+/// The pre-release tail of a version (`"2.1.0-rc.1"` -> `Some("rc.1")`), if any.
+fn pre_release(ver: &str) -> Option<&str> {
+    let clean = ver.trim().trim_start_matches(['v', 'V']);
+    clean.split_once('-').map(|(_, pre)| pre).filter(|p| !p.is_empty())
+}
+
+/// Orders two pre-release tails the way semver does: dot-separated identifiers, numbers compare
+/// numerically and sort before words, a shorter tail sorts before a longer one it prefixes.
+fn compare_pre_release(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut a, mut b) = (a.split('.'), b.split('.'));
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => Ordering::Less,
+                    (Err(_), Ok(_)) => Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
+/// Returns `true` if `latest` is strictly newer than `current`. A release is newer than its own
+/// pre-release (`2.1.0` > `2.1.0-1`), so a trial build can update to the final release.
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
     match (parse_semver(current), parse_semver(latest)) {
-        (Some(cur), Some(lat)) => lat > cur,
+        (Some(cur), Some(lat)) if cur != lat => lat > cur,
+        (Some(_), Some(_)) => match (pre_release(current), pre_release(latest)) {
+            (Some(_), None) => true,
+            (Some(c), Some(l)) => compare_pre_release(c, l) == std::cmp::Ordering::Less,
+            (None, _) => false,
+        },
         _ => false,
     }
 }
@@ -422,6 +459,26 @@ mod tests {
         assert!(!is_newer_version("1.0.4", "1.0.4"));
         assert!(!is_newer_version("1.0.4", "1.0.3"));
         assert!(is_newer_version("1.0.3", "1.0.10"));
+    }
+
+    #[test]
+    fn a_trial_build_updates_to_its_final_release_and_never_the_other_way() {
+        // The rc is built from the numeric pre-release 2.1.0-1 (MSI needs a number).
+        assert!(is_newer_version("2.1.0-1", "2.1.0"));
+        assert!(is_newer_version("v2.1.0-1", "v2.1.0"));
+        assert!(is_newer_version("2.1.0-rc.1", "2.1.0"));
+        assert!(!is_newer_version("2.1.0", "2.1.0-1"));
+        assert!(!is_newer_version("2.1.0-1", "2.1.0-1"));
+        // Between pre-releases the identifiers decide, numbers numerically.
+        assert!(is_newer_version("2.1.0-1", "2.1.0-2"));
+        assert!(is_newer_version("2.1.0-2", "2.1.0-10"));
+        assert!(!is_newer_version("2.1.0-10", "2.1.0-2"));
+        assert!(is_newer_version("2.1.0-rc.1", "2.1.0-rc.2"));
+        assert!(is_newer_version("2.1.0-1", "2.1.0-rc.1"), "a number sorts before a word");
+        // A different numeric core always wins.
+        assert!(is_newer_version("2.0.0", "2.1.0-1"));
+        assert!(!is_newer_version("2.1.0-1", "2.0.9"));
+        assert!(is_newer_version("2.1.0-5", "2.1.1"));
     }
 
     #[test]
