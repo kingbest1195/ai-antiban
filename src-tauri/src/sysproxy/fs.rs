@@ -2,7 +2,8 @@
 //!
 //! `Fs` is a small trait so that every durable-write / lock / permission decision can be tested
 //! against the in-memory `FakeFs` without touching the disk. `RealFs` is the std implementation.
-//! No `unsafe` here: the inter-process lock is `std::fs::File::try_lock` (stable since Rust 1.89).
+//! The inter-process lock is `std::fs::File::try_lock` (stable since Rust 1.89); the only `unsafe`
+//! is the Windows write-through rename.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,53 @@ pub trait Fs: Send + Sync {
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     /// Non-blocking exclusive inter-process lock on `path` (created if missing).
     fn try_lock(&self, path: &Path) -> Result<FsLock, LockError>;
+    /// Removes the temp files of [`Fs::write_atomic`] that a killed process left in `dir`
+    /// (`.<name>.zastava-tmp.<pid>.<n>`). Best effort; returns how many were removed. Call it
+    /// only while holding the lock of the files in `dir`, so no writer of ours is mid-write.
+    fn sweep_stale_tmp(&self, _dir: &Path) -> usize {
+        0
+    }
+}
+
+/// Marker in the name of a temp file of `write_atomic`.
+const TMP_MARKER: &str = ".zastava-tmp.";
+
+/// Whether `name` is a temp file of `write_atomic` (`.<name>.zastava-tmp.<pid>.<n>`).
+fn is_stale_tmp_name(name: &str) -> bool {
+    name.starts_with('.') && name.contains(TMP_MARKER)
+}
+
+/// `rename` that is durable on Windows: `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` returns
+/// only after the move is on disk (`std::fs::rename` does not ask for write-through).
+#[cfg(windows)]
+fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(Some(0)).collect() };
+    let (a, b) = (wide(from), wide(to));
+    // SAFETY: both buffers are NUL-terminated UTF-16 and live until the call returns.
+    let ok = unsafe {
+        MoveFileExW(
+            a.as_ptr(),
+            b.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(windows))]
+fn rename_durable(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -141,7 +189,7 @@ impl Fs for RealFs {
             f.write_all(data)?;
             f.sync_all()?;
             drop(f);
-            std::fs::rename(&tmp, &target)
+            rename_durable(&tmp, &target)
         })();
         if let Err(e) = result {
             let _ = std::fs::remove_file(&tmp);
@@ -204,6 +252,19 @@ impl Fs for RealFs {
             Err(std::fs::TryLockError::WouldBlock) => Err(LockError::Held),
             Err(std::fs::TryLockError::Error(e)) => Err(LockError::Io(e.kind())),
         }
+    }
+
+    fn sweep_stale_tmp(&self, dir: &Path) -> usize {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        rd.flatten()
+            .filter(|e| {
+                e.file_type().is_ok_and(|t| t.is_file())
+                    && e.file_name().to_str().is_some_and(is_stale_tmp_name)
+            })
+            .filter(|e| std::fs::remove_file(e.path()).is_ok())
+            .count()
     }
 }
 
@@ -487,6 +548,26 @@ mod fake {
                 path: path.to_path_buf(),
             })))
         }
+
+        fn sweep_stale_tmp(&self, dir: &Path) -> usize {
+            let mut s = self.st.lock().unwrap();
+            let stale: Vec<PathBuf> = s
+                .files
+                .keys()
+                .filter(|p| {
+                    p.parent() == Some(dir)
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(is_stale_tmp_name)
+                })
+                .cloned()
+                .collect();
+            let removed = stale.len() + std::mem::take(&mut s.leftover_tmp);
+            for p in stale {
+                s.files.remove(&p);
+            }
+            removed
+        }
     }
 }
 
@@ -607,5 +688,36 @@ mod tests {
         ));
         drop(g);
         assert!(other.try_lock(Path::new("/l")).is_ok());
+    }
+
+    #[test]
+    fn real_fs_sweeps_only_stale_temp_files_of_write_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp1 = dir.path().join(".journal.json.zastava-tmp.4242.0");
+        let tmp2 = dir.path().join(".other.zastava-tmp.1.9");
+        let keep = dir.path().join("journal.json");
+        let hidden = dir.path().join(".hidden");
+        for f in [&tmp1, &tmp2, &keep, &hidden] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        assert_eq!(RealFs.sweep_stale_tmp(dir.path()), 2);
+        assert!(!tmp1.exists() && !tmp2.exists());
+        assert!(keep.exists() && hidden.exists());
+        assert_eq!(RealFs.sweep_stale_tmp(dir.path()), 0);
+        assert_eq!(RealFs.sweep_stale_tmp(&dir.path().join("missing")), 0);
+    }
+
+    #[test]
+    fn a_write_replaces_the_target_without_leaving_a_temp_file() {
+        // `rename_durable` is a plain rename off Windows and MoveFileExW(WRITE_THROUGH) on it.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("j.json");
+        for n in 0..3 {
+            RealFs
+                .write_atomic(&p, format!("v{n}").as_bytes(), WriteMode::Private)
+                .unwrap();
+        }
+        assert_eq!(RealFs.read(&p).unwrap().unwrap(), b"v2");
+        assert_eq!(RealFs.sweep_stale_tmp(dir.path()), 0);
     }
 }

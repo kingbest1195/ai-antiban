@@ -18,10 +18,14 @@ pub fn handle_menu_event(
     match id {
         "quit" => {
             // What cannot be put back now stays in the ownership journal and is finished at the
-            // next start (or after the VPN lets go of its temporary DNS).
+            // next start (or after the VPN lets go of its temporary DNS). Quit does not wait for a
+            // VPN with temporary DNS settings; the user is told, the behaviour itself is unchanged.
             let report = sysproxy::cleanup_all_persistent_settings();
             if report.has_failures() {
                 eprintln!("Застава: часть настроек будет восстановлена при следующем запуске");
+            }
+            if report.restore_deferred_by_vpn_dns() {
+                sysproxy::notify_restore_deferred();
             }
             app.exit(0);
         }

@@ -105,7 +105,7 @@ pub(super) fn is_zastava_proxy_json(raw: &str, gateway_port: Option<u16>) -> boo
 /// Whether `url` is a PAC address of Zastava's own gateway: exactly
 /// `http://127.0.0.1|localhost:<our port>/proxy.pac` (8899, 8900 or the current gateway port).
 /// Nothing else (another path, `https`, a query, another host or port) counts as ours.
-fn is_zastava_pac_signature(url: &str, gateway_port: Option<u16>) -> bool {
+pub(super) fn is_zastava_pac_signature(url: &str, gateway_port: Option<u16>) -> bool {
     let Some(rest) = url.trim().strip_prefix("http://") else {
         return false;
     };
@@ -496,7 +496,10 @@ pub(super) fn cleanup_cli_files() -> RecoveryReport {
 /// files. Anything that cannot be restored right now (temporary VPN DNS, busy journal) stays
 /// recorded and is finished at the next start; the report says what was not done.
 pub fn cleanup_all_persistent_settings() -> RecoveryReport {
-    let mut report = match with_journal("ownership_cleanup", restore_and_migrate) {
+    let mut report = match with_journal("ownership_cleanup", |j, p| {
+        // The PAC flag goes down before the restore, under the same lock (see `restore_pass`).
+        super::restore_pass(state(), j, p, restore_and_migrate)
+    }) {
         Run::Done(r) => r,
         Run::Blocked => RecoveryReport {
             skipped_dry_run: true,
