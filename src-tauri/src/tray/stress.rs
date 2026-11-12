@@ -30,6 +30,9 @@ fn fake_report(status: auditor::OverallStatus) -> auditor::RiskReport {
         ipv6_result: c(),
         timezone_result: c(),
         checks: vec![],
+        unknown_count: 0,
+        applicable_count: 12,
+        incomplete: false,
     }
 }
 

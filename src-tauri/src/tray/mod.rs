@@ -78,8 +78,26 @@ impl TrayColor {
 }
 
 const STOP_TITLE: &str = " СТОП СЕТИ";
+/// Menu bar title prefix when the audit finished, but some checks could not be performed.
+const INCOMPLETE_TITLE: &str = " Проверено частично";
+const INCOMPLETE_HEADER: &str = "Проверено частично";
+/// Menu bar title prefix when no audit result is available at all.
+const NO_DATA_TITLE: &str = " Нет данных";
+const NO_DATA_HEADER: &str = "Нет данных";
+const NO_DATA_TOOLTIP: &str = "не удалось выполнить проверку сети";
 const KS_UNFREEZE_TEXT: &str = "Снять СТОП СЕТИ — Возобновить работу ИИ";
 const KS_FREEZE_TEXT: &str = "СТОП СЕТИ — Заморозить трафик ИИ";
+
+/// "1 проверку не удалось выполнить" / "3 проверки ..." / "5 проверок ...".
+pub(crate) fn unfinished_checks_text(n: u8) -> String {
+    let word = match (n % 100, n % 10) {
+        (11..=14, _) => "проверок",
+        (_, 1) => "проверку",
+        (_, 2..=4) => "проверки",
+        _ => "проверок",
+    };
+    format!("{n} {word} не удалось выполнить")
+}
 
 /// Owned, pure description of what the tray should look like. Every field is optional so
 /// partial updates (status only, tooltip only, killswitch only) can be merged/coalesced.
@@ -94,6 +112,7 @@ pub(crate) struct TrayView {
 }
 
 impl TrayView {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_report(
         status: auditor::OverallStatus,
         country: &str,
@@ -102,11 +121,19 @@ impl TrayView {
         has_blocked: bool,
         protected: u64,
         leaks: u64,
+        unknown_count: u8,
     ) -> Self {
+        let incomplete = unknown_count > 0;
         let (color, title, header_suffix) = if has_blocked {
             (TrayColor::Red, STOP_TITLE.to_string(), "СТОП СЕТИ")
         } else {
             match status {
+                // Green with unfinished checks is not "protected": yellow, never a green icon.
+                auditor::OverallStatus::Green if incomplete => (
+                    TrayColor::Yellow,
+                    format!("{INCOMPLETE_TITLE} · {country}"),
+                    INCOMPLETE_HEADER,
+                ),
                 auditor::OverallStatus::Green => {
                     let pin_mark = if is_pinned {
                         " · Закреплён"
@@ -134,11 +161,16 @@ impl TrayView {
         } else {
             (KS_FREEZE_TEXT, TrayColor::Red)
         };
+        let unfinished = if incomplete {
+            format!(" · {}", unfinished_checks_text(unknown_count))
+        } else {
+            String::new()
+        };
         TrayView {
             icon: Some(color),
             title: Some(title),
             tooltip: Some(format!(
-                "Застава · IP: {ip} ({country}) · Защищено запросов: {protected} · Отражено сбоев: {leaks}"
+                "Застава · IP: {ip} ({country}){unfinished} · Защищено запросов: {protected} · Отражено сбоев: {leaks}"
             )),
             stats_text: Some(format!(
                 "Защищено запросов: {protected} · Отражено сбоев: {leaks}"
@@ -148,6 +180,25 @@ impl TrayView {
                 color,
             )),
             killswitch: Some(killswitch),
+        }
+    }
+
+    /// The audit failed: never keep showing the previous (possibly green) state.
+    /// `last_checked` = local time of the last successful audit, if there was one.
+    pub(crate) fn from_audit_error(last_checked: Option<&str>) -> Self {
+        let title = match last_checked {
+            Some(t) => format!("{NO_DATA_TITLE}, проверено {t}"),
+            None => NO_DATA_TITLE.to_string(),
+        };
+        TrayView {
+            icon: Some(TrayColor::Yellow),
+            tooltip: Some(format!("Застава ·{title} · {NO_DATA_TOOLTIP}")),
+            title: Some(title),
+            header: Some((
+                format!("Застава v{} — {NO_DATA_HEADER}", env!("CARGO_PKG_VERSION")),
+                TrayColor::Yellow,
+            )),
+            ..Default::default()
         }
     }
 
@@ -286,8 +337,15 @@ pub fn update_tray_from_report(
             has_blocked,
             stats.protected_ai_requests,
             stats.intercepted_leaks,
+            report.unknown_count,
         ),
     );
+}
+
+/// The audit could not be completed: yellow icon and "Нет данных, проверено <время>".
+/// `last_checked` = local time of the last successful audit. Safe to call from any thread.
+pub fn update_tray_no_data(app: &tauri::AppHandle, last_checked: Option<&str>) {
+    submit(app, TrayView::from_audit_error(last_checked));
 }
 
 /// Updates the system tray icon, menu bar title (macOS), and tooltip with a simple color and status title.
@@ -312,7 +370,11 @@ mod tests {
     use auditor::OverallStatus as S;
 
     fn report_view(s: S, pinned: bool, blocked: bool) -> TrayView {
-        TrayView::from_report(s, "NL", "1.2.3.4", pinned, blocked, 5, 2)
+        TrayView::from_report(s, "NL", "1.2.3.4", pinned, blocked, 5, 2, 0)
+    }
+
+    fn incomplete_view(s: S, blocked: bool, unknown: u8) -> TrayView {
+        TrayView::from_report(s, "NL", "1.2.3.4", false, blocked, 5, 2, unknown)
     }
 
     #[test]
@@ -394,5 +456,72 @@ mod tests {
         let m = m.merged_with(TrayView::from_killswitch(true));
         assert_eq!(m.killswitch, Some((KS_UNFREEZE_TEXT, TrayColor::Green)));
         assert_eq!(m.icon, Some(TrayColor::Red));
+    }
+
+    #[test]
+    fn incomplete_green_report_is_yellow_and_partial() {
+        let v = incomplete_view(S::Green, false, 3);
+        assert_eq!(v.icon, Some(TrayColor::Yellow));
+        assert_eq!(v.title.as_deref(), Some(" Проверено частично · NL"));
+        assert!(
+            v.tooltip
+                .as_deref()
+                .unwrap()
+                .contains("3 проверки не удалось выполнить")
+        );
+        assert!(v.header.unwrap().0.ends_with("Проверено частично"));
+        // The complete report keeps its green state.
+        assert_eq!(
+            report_view(S::Green, false, false).icon,
+            Some(TrayColor::Green)
+        );
+    }
+
+    #[test]
+    fn incomplete_never_hides_red_or_a_block() {
+        let r = incomplete_view(S::Red, false, 2);
+        assert_eq!(r.icon, Some(TrayColor::Red));
+        assert_eq!(r.title.as_deref(), Some(STOP_TITLE));
+        let b = incomplete_view(S::Green, true, 2);
+        assert_eq!(b.icon, Some(TrayColor::Red));
+        // Warnings keep their own wording, the count is still in the tooltip.
+        let y = incomplete_view(S::Yellow, false, 1);
+        assert_eq!(y.title.as_deref(), Some(" Внимание · NL"));
+        assert!(
+            y.tooltip
+                .unwrap()
+                .contains("1 проверку не удалось выполнить")
+        );
+    }
+
+    #[test]
+    fn unfinished_checks_plural_forms() {
+        assert_eq!(unfinished_checks_text(1), "1 проверку не удалось выполнить");
+        assert_eq!(unfinished_checks_text(2), "2 проверки не удалось выполнить");
+        assert_eq!(unfinished_checks_text(5), "5 проверок не удалось выполнить");
+        assert_eq!(
+            unfinished_checks_text(11),
+            "11 проверок не удалось выполнить"
+        );
+        assert_eq!(
+            unfinished_checks_text(21),
+            "21 проверку не удалось выполнить"
+        );
+    }
+
+    #[test]
+    fn audit_error_is_yellow_with_time_of_last_check() {
+        let v = TrayView::from_audit_error(Some("14:32"));
+        assert_eq!(v.icon, Some(TrayColor::Yellow));
+        assert_eq!(v.title.as_deref(), Some(" Нет данных, проверено 14:32"));
+        assert!(v.tooltip.as_deref().unwrap().contains("проверено 14:32"));
+        assert!(v.stats_text.is_none() && v.killswitch.is_none());
+        let never = TrayView::from_audit_error(None);
+        assert_eq!(never.title.as_deref(), Some(" Нет данных"));
+        assert_eq!(never.icon, Some(TrayColor::Yellow));
+        // It replaces a previous green state when merged.
+        let m = report_view(S::Green, false, false).merged_with(v);
+        assert_eq!(m.icon, Some(TrayColor::Yellow));
+        assert_eq!(m.killswitch, Some((KS_FREEZE_TEXT, TrayColor::Red)));
     }
 }

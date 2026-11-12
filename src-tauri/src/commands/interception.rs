@@ -5,6 +5,9 @@ use crate::popup::show_and_position_alert_popup;
 use crate::{auditor, proxy, state};
 use tauri::{Emitter, Manager};
 
+/// `measured_via` of the canned results in the demo simulation.
+const SIMULATED_VIA: &str = "simulation";
+
 #[tauri::command]
 pub async fn resolve_interception(
     id: String,
@@ -160,8 +163,16 @@ pub async fn simulate_interception(
         &dangerous_asns,
         false,
     );
-    let ipv6_result = auditor::CheckResult::ok("IPV6_SAFE", "Утечек по протоколу IPv6 не обнаружено.");
-    let dns_result = auditor::CheckResult::ok("DNS_CLEAN", "Утечек через локальные DNS-резолверы РФ не обнаружено.");
+    // SIMULATION ONLY: these two verdicts are canned demo values, not the outcome of a probe.
+    // They are marked (`measured_via = "simulation"`) so that they never pass for a real check.
+    let ipv6_result =
+        auditor::CheckResult::ok("IPV6_SAFE", "Утечек по протоколу IPv6 не обнаружено.")
+            .with_measured_via(SIMULATED_VIA);
+    let dns_result = auditor::CheckResult::ok(
+        "DNS_CLEAN",
+        "Утечек через локальные DNS-резолверы РФ не обнаружено.",
+    )
+    .with_measured_via(SIMULATED_VIA);
     let timezone_result = auditor::evaluate_system_timezone(telemetry.timezone.as_deref(), None);
     let location_result = auditor::check_os_location_services();
     let reverse_dns_result = auditor::evaluate_reverse_dns_ptr(&telemetry);
@@ -183,6 +194,7 @@ pub async fn simulate_interception(
         locale_result,
     ];
 
+    let (unknown_count, applicable_count) = auditor::count_checks(&checks);
     let report = auditor::RiskReport {
         provider: provider_id,
         overall_status: auditor::OverallStatus::Red,
@@ -197,6 +209,9 @@ pub async fn simulate_interception(
         ipv6_result,
         timezone_result,
         checks,
+        unknown_count,
+        applicable_count,
+        incomplete: unknown_count > 0,
     };
 
     let hold_id = format!("sim-{}", uuid::Uuid::new_v4());

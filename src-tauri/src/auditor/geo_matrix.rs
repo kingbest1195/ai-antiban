@@ -202,6 +202,10 @@ pub enum CheckStatus {
     Ok,
     Warning,
     Critical,
+    /// The check could not be performed ("не удалось проверить"): never counted as clean.
+    /// Any unrecognised status string also reads as `Unknown` (never as `Ok`).
+    #[serde(other)]
+    Unknown,
 }
 
 impl CheckStatus {
@@ -216,6 +220,25 @@ impl CheckStatus {
     pub fn is_ok(&self) -> bool {
         matches!(self, CheckStatus::Ok)
     }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, CheckStatus::Unknown)
+    }
+}
+
+/// Why a check ended up `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnknownReason {
+    Timeout,
+    NetworkError,
+    EmptyResponse,
+    NoData,
+    UnsupportedOs,
+    InternalError,
+    /// The check makes no sense in the current setup: shown neutrally, never penalised.
+    NotApplicable,
+    SourceRefused,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -224,16 +247,37 @@ pub struct CheckResult {
     pub code: String,
     pub message: String,
     pub guide_ref: Option<String>,
+    /// Set only together with `CheckStatus::Unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UnknownReason>,
+    /// Unix seconds at which the check finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_at: Option<u64>,
+    /// Source the value was measured through (reference only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_via: Option<String>,
 }
 
 impl CheckResult {
-    pub fn ok(code: impl Into<String>, message: impl Into<String>) -> Self {
+    fn with_status(
+        status: CheckStatus,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        guide_ref: Option<String>,
+    ) -> Self {
         Self {
-            status: CheckStatus::Ok,
+            status,
             code: code.into(),
             message: message.into(),
-            guide_ref: None,
+            guide_ref,
+            reason: None,
+            checked_at: None,
+            measured_via: None,
         }
+    }
+
+    pub fn ok(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::with_status(CheckStatus::Ok, code, message, None)
     }
 
     pub fn warning(
@@ -241,12 +285,7 @@ impl CheckResult {
         message: impl Into<String>,
         guide_ref: Option<String>,
     ) -> Self {
-        Self {
-            status: CheckStatus::Warning,
-            code: code.into(),
-            message: message.into(),
-            guide_ref,
-        }
+        Self::with_status(CheckStatus::Warning, code, message, guide_ref)
     }
 
     pub fn critical(
@@ -254,12 +293,32 @@ impl CheckResult {
         message: impl Into<String>,
         guide_ref: Option<String>,
     ) -> Self {
-        Self {
-            status: CheckStatus::Critical,
-            code: code.into(),
-            message: message.into(),
-            guide_ref,
-        }
+        Self::with_status(CheckStatus::Critical, code, message, guide_ref)
+    }
+
+    /// A check that could not be carried out; `message` states what exactly was not verified.
+    pub fn unknown(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        reason: UnknownReason,
+    ) -> Self {
+        let mut r = Self::with_status(CheckStatus::Unknown, code, message, None);
+        r.reason = Some(reason);
+        r
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.status.is_unknown()
+    }
+
+    /// `Unknown` because the check does not apply (not penalised, not counted as applicable).
+    pub fn is_not_applicable(&self) -> bool {
+        self.is_unknown() && self.reason == Some(UnknownReason::NotApplicable)
+    }
+
+    pub fn with_measured_via(mut self, via: impl Into<String>) -> Self {
+        self.measured_via = Some(via.into());
+        self
     }
 }
 
@@ -477,5 +536,49 @@ mod tests {
             ProviderId::from_host_with_custom("unknown-service.com", &custom),
             None
         );
+    }
+
+    #[test]
+    fn test_check_result_json_without_new_fields_reads() {
+        let r: CheckResult =
+            serde_json::from_str(r#"{"status":"ok","code":"X","message":"m","guide_ref":null}"#)
+                .unwrap();
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.reason.is_none() && r.checked_at.is_none() && r.measured_via.is_none());
+        // Without optional guide_ref at all, too.
+        let r: CheckResult =
+            serde_json::from_str(r#"{"status":"warning","code":"X","message":"m"}"#).unwrap();
+        assert_eq!(r.status, CheckStatus::Warning);
+    }
+
+    #[test]
+    fn test_status_unknown_and_random_string_read_as_unknown() {
+        let r: CheckResult = serde_json::from_str(
+            r#"{"status":"unknown","code":"X","message":"m","guide_ref":null,"reason":"timeout"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.status, CheckStatus::Unknown);
+        assert_eq!(r.reason, Some(UnknownReason::Timeout));
+
+        let r: CheckResult = serde_json::from_str(
+            r#"{"status":"definitely-not-a-status","code":"X","message":"m","guide_ref":null}"#,
+        )
+        .unwrap();
+        assert_eq!(r.status, CheckStatus::Unknown);
+        assert!(!r.status.is_ok());
+    }
+
+    #[test]
+    fn test_unknown_constructor_and_serialization() {
+        let r = CheckResult::unknown("C", "m", UnknownReason::NotApplicable);
+        assert!(r.is_unknown() && r.is_not_applicable());
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["status"], "unknown");
+        assert_eq!(v["reason"], "not_applicable");
+        // Optional fields that are not set are omitted for ordinary results.
+        let ok = serde_json::to_value(CheckResult::ok("C", "m")).unwrap();
+        assert!(ok.get("reason").is_none() && ok.get("measured_via").is_none());
+        let t = CheckResult::unknown("C", "m", UnknownReason::Timeout);
+        assert!(t.is_unknown() && !t.is_not_applicable());
     }
 }

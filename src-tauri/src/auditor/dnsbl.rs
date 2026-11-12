@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::time::Duration;
-use crate::auditor::geo_matrix::{CheckResult, GUIDE_PERSONAL_VPN};
+use crate::auditor::geo_matrix::{CheckResult, UnknownReason, GUIDE_PERSONAL_VPN};
 use crate::auditor::rules::{DangerousAsns, DnsblZoneConfig};
 
 pub const DNSBL_TIMEOUT_MS: u64 = 600;
@@ -19,6 +19,50 @@ pub struct DnsblReport {
     pub total_checked: usize,
     pub hits: Vec<DnsblZoneHit>,
     pub summary_label: String, // e.g. "0/4 Clean" or "1/4 Listed"
+    /// One entry per zone that gave no usable answer (timeout, refusal by the resolver, task failure).
+    pub failures: Vec<UnknownReason>,
+}
+
+/// Fewer answering zones than this cannot vouch for "not listed".
+pub const MIN_ANSWERING_ZONES: usize = 2;
+
+impl DnsblReport {
+    pub fn answered(&self) -> usize {
+        self.total_checked.saturating_sub(self.failures.len())
+    }
+
+    /// Why the report cannot vouch for "clean", if it cannot. A listing is always conclusive.
+    pub fn unknown_reason(&self) -> Option<UnknownReason> {
+        if !self.hits.is_empty() {
+            return None;
+        }
+        if self.total_checked > 0 && self.answered() >= MIN_ANSWERING_ZONES.min(self.total_checked) {
+            return None;
+        }
+        let count = |r: UnknownReason| self.failures.iter().filter(|f| **f == r).count();
+        Some(if self.failures.is_empty() {
+            UnknownReason::NoData
+        } else if count(UnknownReason::SourceRefused) == self.failures.len() {
+            UnknownReason::SourceRefused
+        } else if count(UnknownReason::Timeout) > 0 {
+            UnknownReason::Timeout
+        } else if count(UnknownReason::NoData) == self.failures.len() {
+            UnknownReason::NoData
+        } else {
+            UnknownReason::NetworkError
+        })
+    }
+}
+
+/// Outcome of one zone lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZoneOutcome {
+    Listed(DnsblZoneHit),
+    /// An answer without a listing (NXDOMAIN or a non-listing address).
+    NotListed,
+    /// The resolver answered with an error marker (`127.255.255.x`): the zone refuses this resolver.
+    Refused,
+    TimedOut,
 }
 
 /// Reverses IPv4 octets: "185.220.101.5" -> "5.101.220.185".
@@ -49,6 +93,17 @@ pub async fn query_dnsbl_zone(
     reversed_ip: &str,
     zone_cfg: &DnsblZoneConfig,
 ) -> Option<DnsblZoneHit> {
+    match query_dnsbl_zone_outcome(reversed_ip, zone_cfg).await {
+        ZoneOutcome::Listed(hit) => Some(hit),
+        _ => None,
+    }
+}
+
+/// Like [`query_dnsbl_zone`], but a timeout or a refusal is told apart from "not listed".
+pub async fn query_dnsbl_zone_outcome(
+    reversed_ip: &str,
+    zone_cfg: &DnsblZoneConfig,
+) -> ZoneOutcome {
     let query_host = format!("{}.{}:80", reversed_ip, zone_cfg.zone.trim_matches('.'));
 
     let lookup_future = tokio::net::lookup_host(&query_host);
@@ -56,13 +111,14 @@ pub async fn query_dnsbl_zone(
 
     match result {
         Ok(Ok(addrs)) => {
+            let mut refused = false;
             for addr in addrs {
                 if let SocketAddr::V4(v4) = addr {
                     let octets = v4.ip().octets();
                     // 127.0.0.x indicates listing in DNSBL
                     // (127.255.255.x indicates query error / refusal by public resolver)
                     if octets[0] == 127 && octets[1] == 0 && octets[2] == 0 {
-                        return Some(DnsblZoneHit {
+                        return ZoneOutcome::Listed(DnsblZoneHit {
                             zone: zone_cfg.zone.clone(),
                             name: zone_cfg.name.clone(),
                             return_ip: v4.ip().to_string(),
@@ -70,24 +126,34 @@ pub async fn query_dnsbl_zone(
                             reason: zone_cfg.reason.clone(),
                         });
                     }
+                    if octets[0] == 127 && octets[1] == 255 && octets[2] == 255 {
+                        refused = true;
+                    }
                 }
             }
-            None
+            if refused {
+                ZoneOutcome::Refused
+            } else {
+                ZoneOutcome::NotListed
+            }
         }
-        // NXDOMAIN or socket error or timeout -> treat as clean
-        _ => None,
+        // The system resolver reports NXDOMAIN and other failures alike: not listed.
+        Ok(Err(_)) => ZoneOutcome::NotListed,
+        Err(_) => ZoneOutcome::TimedOut,
     }
 }
 
 /// Queries all configured DNSBL zones in parallel.
 pub async fn check_all_dnsbl(ip: &str, dangerous_asns: &DangerousAsns) -> DnsblReport {
+    let total = dangerous_asns.dnsbl_zones.len();
     let reversed = match reverse_ipv4(ip) {
         Ok(rev) => rev,
         Err(_) => {
             return DnsblReport {
-                total_checked: dangerous_asns.dnsbl_zones.len(),
+                total_checked: total,
                 hits: Vec::new(),
-                summary_label: format!("0/{} Clean (Invalid IP)", dangerous_asns.dnsbl_zones.len()),
+                summary_label: format!("Не проверено: IP {ip} не IPv4"),
+                failures: vec![UnknownReason::NoData; total],
             };
         }
     };
@@ -97,34 +163,57 @@ pub async fn check_all_dnsbl(ip: &str, dangerous_asns: &DangerousAsns) -> DnsblR
         let rev_clone = reversed.clone();
         let zone_clone = zone.clone();
         tasks.push(tokio::spawn(async move {
-            query_dnsbl_zone(&rev_clone, &zone_clone).await
+            query_dnsbl_zone_outcome(&rev_clone, &zone_clone).await
         }));
     }
 
     let mut hits = Vec::new();
+    let mut failures = Vec::new();
     for task in tasks {
-        if let Ok(Some(hit)) = task.await {
-            hits.push(hit);
+        match task.await {
+            Ok(ZoneOutcome::Listed(hit)) => hits.push(hit),
+            Ok(ZoneOutcome::NotListed) => {}
+            Ok(ZoneOutcome::Refused) => failures.push(UnknownReason::SourceRefused),
+            Ok(ZoneOutcome::TimedOut) => failures.push(UnknownReason::Timeout),
+            Err(_) => failures.push(UnknownReason::InternalError),
         }
     }
 
-    let total = dangerous_asns.dnsbl_zones.len();
     let hit_count = hits.len();
-    let summary_label = if hit_count == 0 {
+    let answered = total.saturating_sub(failures.len());
+    let summary_label = if hit_count > 0 {
+        format!("{hit_count}/{total} Listed")
+    } else if failures.is_empty() {
         format!("0/{total} Clean")
     } else {
-        format!("{hit_count}/{total} Listed")
+        format!("Ответили {answered} из {total} баз")
     };
 
     DnsblReport {
         total_checked: total,
         hits,
         summary_label,
+        failures,
     }
 }
 
 /// Converts DNSBL Report to standard CheckResult.
 pub fn evaluate_dnsbl_report(report: &DnsblReport) -> CheckResult {
+    if let Some(reason) = report.unknown_reason() {
+        return CheckResult::unknown(
+            match reason {
+                UnknownReason::SourceRefused => "DNSBL_RESOLVER_REFUSED",
+                UnknownReason::Timeout => "DNSBL_TIMEOUT",
+                _ => "DNSBL_NO_ANSWER",
+            },
+            format!(
+                "Проверка DNSBL не выполнена: ответили {} из {} спам-баз, отсутствие листинга не подтверждено.",
+                report.answered(),
+                report.total_checked,
+            ),
+            reason,
+        );
+    }
     if report.hits.is_empty() {
         return CheckResult::ok(
             "DNSBL_CLEAN",
@@ -191,6 +280,15 @@ pub fn evaluate_asn_reputation(
         }
     }
 
+    // Nothing to judge: the geolocation source gave neither ASN nor ISP/org.
+    if asn.is_none() && isp_str.trim().is_empty() && org_str.trim().is_empty() {
+        return CheckResult::unknown(
+            "ASN_NO_DATA",
+            "Репутация ASN не проверена: источник геолокации не передал ASN, провайдера и организацию.",
+            UnknownReason::NoData,
+        );
+    }
+
     CheckResult::ok("ASN_CLEAN", "Репутация автономной системы (ASN) и провайдера чистая.")
 }
 
@@ -226,6 +324,7 @@ mod tests {
             total_checked: 4,
             hits: vec![critical_hit],
             summary_label: "1/4 Listed".to_string(),
+            failures: Vec::new(),
         };
         let listed_res = evaluate_dnsbl_report(&listed_report);
         assert_eq!(listed_res.status, CheckStatus::Critical);
@@ -244,6 +343,7 @@ mod tests {
             total_checked: 4,
             hits: vec![warning_hit],
             summary_label: "1/4 Listed".to_string(),
+            failures: Vec::new(),
         };
         let warning_res = evaluate_dnsbl_report(&warning_report);
         assert_eq!(warning_res.status, CheckStatus::Warning);
@@ -254,6 +354,7 @@ mod tests {
             total_checked: 4,
             hits: Vec::new(),
             summary_label: "0/4 Clean".to_string(),
+            failures: Vec::new(),
         };
         let clean_res = evaluate_dnsbl_report(&clean_report);
         assert_eq!(clean_res.status, CheckStatus::Ok);
@@ -278,5 +379,70 @@ mod tests {
         let res_ru = evaluate_asn_reputation(Some(12389), Some("PJSC Rostelecom"), None, &asns, false);
         assert_eq!(res_ru.status, CheckStatus::Critical);
         assert_eq!(res_ru.code, "RUSSIAN_ISP_DETECTED");
+    }
+
+    fn report(total: usize, failures: Vec<UnknownReason>) -> DnsblReport {
+        DnsblReport {
+            total_checked: total,
+            hits: Vec::new(),
+            summary_label: String::new(),
+            failures,
+        }
+    }
+
+    #[test]
+    fn test_dnsbl_without_enough_answers_is_unknown() {
+        use UnknownReason::*;
+        // All four zones timed out.
+        let r = evaluate_dnsbl_report(&report(4, vec![Timeout; 4]));
+        assert_eq!(r.status, CheckStatus::Unknown);
+        assert_eq!(r.reason, Some(Timeout));
+        // All refused by the resolver.
+        let r = evaluate_dnsbl_report(&report(4, vec![SourceRefused; 4]));
+        assert_eq!(r.reason, Some(SourceRefused));
+        // 2 answered + 2 timed out: enough to call it clean.
+        let r = evaluate_dnsbl_report(&report(4, vec![Timeout; 2]));
+        assert_eq!(r.status, CheckStatus::Ok);
+        // 1 answered + 3 timed out: not enough.
+        let r = evaluate_dnsbl_report(&report(4, vec![Timeout; 3]));
+        assert_eq!(r.status, CheckStatus::Unknown);
+        // A task failure is an error, never "clean".
+        let r = evaluate_dnsbl_report(&report(4, vec![InternalError; 4]));
+        assert_eq!(r.status, CheckStatus::Unknown);
+        // No zones configured at all.
+        assert_eq!(evaluate_dnsbl_report(&report(0, vec![])).status, CheckStatus::Unknown);
+    }
+
+    #[test]
+    fn test_dnsbl_listing_wins_over_failures() {
+        let mut rep = report(4, vec![UnknownReason::Timeout; 3]);
+        rep.hits.push(DnsblZoneHit {
+            zone: "z".into(),
+            name: "Z".into(),
+            return_ip: "127.0.0.2".into(),
+            severity: "warning".into(),
+            reason: "r".into(),
+        });
+        assert_eq!(evaluate_dnsbl_report(&rep).status, CheckStatus::Warning);
+    }
+
+    #[tokio::test]
+    async fn test_dnsbl_non_ipv4_is_unknown_without_network() {
+        let asns = DangerousAsns::load_bundled().unwrap();
+        let rep = check_all_dnsbl("2606:4700::1111", &asns).await;
+        let res = evaluate_dnsbl_report(&rep);
+        assert_eq!(res.status, CheckStatus::Unknown);
+        assert_eq!(res.reason, Some(UnknownReason::NoData));
+    }
+
+    #[test]
+    fn test_asn_without_any_data_is_unknown() {
+        let asns = DangerousAsns::load_bundled().unwrap();
+        let res = evaluate_asn_reputation(None, None, None, &asns, false);
+        assert_eq!(res.status, CheckStatus::Unknown);
+        assert_eq!(res.reason, Some(UnknownReason::NoData));
+        // A known (clean) ASN is still a verdict.
+        let res = evaluate_asn_reputation(Some(64500), Some("Example Net"), None, &asns, false);
+        assert_eq!(res.status, CheckStatus::Ok);
     }
 }
