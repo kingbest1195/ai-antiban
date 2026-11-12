@@ -94,7 +94,8 @@ pub async fn run_vpn_crash_test_step(
                 current_ip,
                 current_country,
                 leaked_packets: 0,
-                status_text: "Таймаут сокета · Трафик удержан Kill-Switch (0 пакетов)".to_string(),
+                // Not a count of anything: the test only sees that the gateway gave no answer in time.
+                status_text: "Таймаут сокета · Запрос не прошёл через шлюз".to_string(),
             })
         }
     }

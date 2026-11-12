@@ -148,7 +148,7 @@ export function CrashTestModal({ open, onClose, onToast }: CrashTestModalProps) 
         <Stats>
           <Stat value={copy.metrics.sentValue(sentCount)} label={copy.metrics.sent} />
           <Stat value={copy.metrics.latencyValue(lastLatency)} label={copy.metrics.latency} />
-          <Stat value={copy.metrics.leakedValue} label={copy.metrics.leaked} />
+          <Stat value={copy.metrics.stoppedValue(intercepted)} label={copy.metrics.stopped} />
         </Stats>
 
         {intercepted && (

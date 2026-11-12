@@ -84,6 +84,10 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           body="$(sed "s/\${VERSION}/${VERSION}/g" .github/release-notes.md)"
+          # A tag with a suffix (rc) is a prerelease: say so at the top of the notes.
+          case "$VERSION" in
+            *-*) body="$(printf '> **Пробная сборка (prerelease).** Для проверки перед релизом, не для массового обновления: автообновление её не предлагает.\n\n%s' "$body")" ;;
+          esac
           {
             echo 'body<<RELEASE_NOTES_EOF'
             echo "$body"
