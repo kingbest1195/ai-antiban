@@ -30,6 +30,23 @@ describe("pollInterval", () => {
   });
 });
 
+describe("режим «Только ИИ-клиенты и IDE»", () => {
+  const node = app("node", "off", { category: "cli" });
+  it("обычная терминальная программа идёт напрямую намеренно, а не «не настроено»", () => {
+    expect(viewOf(node, {}, 0, "ai_only")).toBe("direct");
+    expect(viewOf(node, {}, 0, "global_terminal")).toBe("off");
+    expect(viewOf(node, {}, 0, undefined)).toBe("off");
+  });
+  it("ИИ-клиенты терминала и приложения не из терминала этого статуса не получают", () => {
+    expect(viewOf(app("claude-code", "off", { category: "cli" }), {}, 0, "ai_only")).toBe("off");
+    expect(viewOf(app("vscode", "off", { category: "ide" }), {}, 0, "ai_only")).toBe("off");
+  });
+  it("«напрямую» не заставляет опрашивать каждые 5 секунд", () => {
+    expect(pollInterval(true, [app("a", "confirmed"), node], "ai_only")).toBe(POLL_SLOW_MS);
+    expect(pollInterval(true, [app("a", "confirmed"), node], "global_terminal")).toBe(POLL_FAST_MS);
+  });
+});
+
 describe("isListed", () => {
   it("«Не установлено» скрыто везде; в «Обзоре» только установленные или с трафиком", () => {
     const missing = app("x", "not_installed");

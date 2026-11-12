@@ -1,4 +1,4 @@
-import type { AppCoverageItem, AppCoverageStatus } from "../../types";
+import type { AppCoverageItem, AppCoverageStatus, CliMode } from "../../types";
 
 /** Опрос при наличии неподтверждённых приложений и без них. */
 export const POLL_FAST_MS = 5_000;
@@ -7,15 +7,23 @@ export const POLL_SLOW_MS = 30_000;
 export const WAIT_TIMEOUT_MS = 60_000;
 
 /** Что показываем в бейдже: статус шлюза плюс клиентские waiting/waiting_timeout. */
-export type CoverageView = AppCoverageStatus | "waiting" | "waiting_timeout";
+export type CoverageView = AppCoverageStatus | "waiting" | "waiting_timeout" | "direct";
+
+/** ИИ-клиенты терминала: их режим «Только ИИ-клиенты и IDE» настраивает. */
+const AI_CLI_IDS = new Set(["claude-code", "gemini-cli"]);
+
+/** Обычные терминальные программы (node, python, curl…) в режиме «Только ИИ-клиенты и IDE» идут напрямую намеренно: это не «не настроено». */
+export function isDirectByMode(app: AppCoverageItem, cliMode: CliMode | undefined): boolean {
+  return cliMode === "ai_only" && app.category === "cli" && app.status === "off" && !AI_CLI_IDS.has(app.id);
+}
 
 /** Приложение id → момент (мс), когда пользователь начал ждать подтверждения. */
 export type WaitingMap = Record<string, number>;
 
 /** Интервал опроса в мс: 0 при скрытом окне, 5 с пока есть неподтверждённые установленные приложения, иначе 30 с. */
-export function pollInterval(visible: boolean, apps: AppCoverageItem[] | undefined): number {
+export function pollInterval(visible: boolean, apps: AppCoverageItem[] | undefined, cliMode?: CliMode): number {
   if (!visible) return 0;
-  const pending = (apps ?? []).some((a) => a.status !== "confirmed" && a.status !== "not_installed");
+  const pending = (apps ?? []).some((a) => a.status !== "confirmed" && a.status !== "not_installed" && !isDirectByMode(a, cliMode));
   return pending ? POLL_FAST_MS : POLL_SLOW_MS;
 }
 
@@ -48,7 +56,8 @@ export function resolveWaiting(waiting: WaitingMap, apps: AppCoverageItem[]): Wa
 }
 
 /** Итоговый вид статуса: клиентское ожидание поверх статуса шлюза; через 60 с — «не подтверждено». */
-export function viewOf(app: AppCoverageItem, waiting: WaitingMap, now: number): CoverageView {
+export function viewOf(app: AppCoverageItem, waiting: WaitingMap, now: number, cliMode?: CliMode): CoverageView {
+  if (isDirectByMode(app, cliMode)) return "direct";
   const since = waiting[app.id];
   if (since != null && (app.status === "configured" || app.status === "unknown")) {
     return now - since >= WAIT_TIMEOUT_MS ? "waiting_timeout" : "waiting";

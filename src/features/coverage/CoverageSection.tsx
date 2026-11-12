@@ -35,6 +35,7 @@ const BADGES: Record<Exclude<CoverageView, "not_installed">, BadgeView> = {
   waiting_timeout: { tone: "neutral", icon: "help", label: copy.status.waitingTimeout },
   unknown: { tone: "neutral", icon: "help", label: copy.status.unknown },
   off: { tone: "warn", icon: "alert", label: copy.status.off },
+  direct: { tone: "neutral", label: copy.status.direct },
 };
 
 const ICONS: Record<AppCoverageItem["category"], IconName> = { browser: "globe", desktop: "shield", ide: "term", cli: "term" };
@@ -133,7 +134,7 @@ interface AppRowProps {
 
 function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy, onConfirm, enabling, onEnable, canEnable }: AppRowProps) {
   const setup = useMemo(() => buildManualSetup(app, snapshot), [app, snapshot]);
-  const view = viewOf(app, waiting, now);
+  const view = viewOf(app, waiting, now, snapshot.cli_mode);
   if (view === "not_installed") return null;
   const badge = BADGES[view];
   const since = sinceLastSeen(app, now);

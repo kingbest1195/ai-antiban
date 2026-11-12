@@ -45,7 +45,8 @@ let mockState: AppStateData = {
   interception_behavior: "ask_popup",
   popup_position: "top_right",
   custom_ai_domains: [],
-  sync_ai_tz_enabled: false,
+  // Как в шлюзе: подмена включена по умолчанию, применяется только при известной зоне.
+  sync_ai_tz_enabled: true,
   cli_mode: "ai_only",
 };
 
@@ -53,7 +54,7 @@ let mockKillswitchStatus = false;
 /** Мок настроек CLI и подмены часового пояса: независимые флаги, как у шлюза. */
 let mockCliProtection = true;
 let mockCliMode: CliMode = "ai_only";
-let mockSyncAiTz = false;
+let mockSyncAiTz = true;
 /** Сколько раз нажали «Проверить снова»: мок продвигает статусы по шагам. */
 let mockCoverageStage = 0;
 

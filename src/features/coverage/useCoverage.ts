@@ -110,7 +110,8 @@ export function useCoverage(initial?: CoverageSnapshot | null) {
   }, [refresh]);
 
   const apps = snapshot?.apps;
-  const interval = useMemo(() => pollInterval(visible, apps), [visible, apps]);
+  const cliMode = snapshot?.cli_mode;
+  const interval = useMemo(() => pollInterval(visible, apps, cliMode), [visible, apps, cliMode]);
 
   // Таймер: 5 с / 30 с, при скрытом окне не тикает.
   useEffect(() => {
