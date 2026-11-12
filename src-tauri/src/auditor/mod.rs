@@ -330,7 +330,9 @@ impl Auditor {
             Some(pinned) => pinned.trim() == telemetry.ip.trim(),
             None => false,
         };
-        let synced_tz = state_data.synced_ai_timezone.clone();
+        // The effective zone (None while the switch is off): flipping the switch changes the cache
+        // keys below, so the checks never show a stale verdict until the TTL runs out.
+        let synced_tz = state_data.effective_sync_tz();
         let synced_key = synced_tz.clone().unwrap_or_default();
         let country = telemetry.country_code.clone();
         let dnsbl_label = Arc::new(Mutex::new("Не проверено".to_string()));
