@@ -8,6 +8,7 @@ pub mod deeplink;
 pub mod domains;
 pub mod interception;
 pub mod payment;
+pub mod restart_app;
 pub mod routes;
 pub mod sysproxy;
 pub mod updates;

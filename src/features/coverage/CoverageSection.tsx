@@ -1,15 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppCoverageItem, CoverageSnapshot } from "../../types";
+import { restartAppWithGateway } from "../../utils/api";
 import { Badge, Banner, Button, Card, ConfirmModal, CopyBlock, ExpandRow, Progress, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
 import type { BadgeTone, IconName, RowTone } from "../../ui";
 import { coverage as copy } from "../../shared/copy/ru";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
 import { useCopy } from "../guides/useCopy";
 import { buildManualSetup } from "./manualSetup";
-import { enableResult, isListed, isProtectionOn, protectedAppNames, protectionControl, sinceLastSeen, viewOf, vpnNotice } from "./coverageModel";
+import { canRestartAntigravity, enableResult, isListed, isProtectionOn, protectedAppNames, protectionControl, restartResult, sinceLastSeen, viewOf, vpnNotice } from "./coverageModel";
 import type { CoverageView, ProtectionKind, ProtectionResult, WaitingMap } from "./coverageModel";
 import { useCoverage } from "./useCoverage";
 import "./coverage.css";
+
+/** Перезапуск через шлюз есть только на macOS; на Windows и Linux остаётся ручная команда. */
+const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform || navigator.userAgent || "");
 
 export interface CoverageSectionProps {
   /** overview — только установленные или с трафиком; checks — все приложения шлюза. */
@@ -52,6 +56,9 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
   const [busy, setBusy] = useState<{ kind: ProtectionKind; action: "enable" | "disable" } | null>(null);
   const [confirmOff, setConfirmOff] = useState<ProtectionKind | null>(null);
   const [result, setResult] = useState<ProtectionResult | null>(null);
+  /** Подтверждение перезапуска Antigravity открыто / перезапуск идёт (до 15 секунд ожидания закрытия). */
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const [restarting, setRestarting] = useState(false);
 
   // Как только запуск закончился, читаем состояние заново: снимок до этого описывал выключенную защиту.
   useEffect(() => {
@@ -106,6 +113,23 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
     }
   };
 
+  /** «Перезапустить»: после подтверждения; итог — строкой и тостом, статус перечитывается. */
+  const restart = async () => {
+    if (restarting) return;
+    setConfirmRestart(false);
+    setRestarting(true);
+    setResult(null);
+    try {
+      const outcome = await restartAppWithGateway("antigravity");
+      const out = restartResult(outcome);
+      setResult(out);
+      onToast?.(out.title, out.text, out.tone === "ok" ? "success" : out.tone === "warn" ? "warning" : "error");
+    } finally {
+      setRestarting(false);
+      void refresh();
+    }
+  };
+
   return (
     <Section title={copy.section}>
       <Card>
@@ -139,6 +163,7 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
               {result.text}
             </Banner>
           )}
+          {restarting && <Progress label={copy.restart.progress} className="zs-cov__vpn" />}
           {busy && <Progress label={busy.action === "enable" ? copy.protection.inProgress : copy.protection.inProgressOff} className="zs-cov__vpn" />}
           <Rows>
             {snapshot.chained_proxy && (
@@ -168,6 +193,9 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
                 onEnable={(kind) => void enable(kind)}
                 onAskDisable={(kind) => setConfirmOff(kind)}
                 canControl={Boolean(protection)}
+                canRestart={canRestartAntigravity(app, viewOf(app, waiting, now, snapshot.cli_mode), snapshot, IS_MAC)}
+                restarting={restarting}
+                onAskRestart={() => setConfirmRestart(true)}
               />
             ))}
           </Rows>
@@ -181,6 +209,15 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
             onCancel={() => setConfirmOff(null)}
           >
             {confirmOff ? copy.protection.confirm.text(protectedAppNames(confirmOff, snapshot.apps), confirmOff) : ""}
+          </ConfirmModal>
+          <ConfirmModal
+            open={confirmRestart}
+            title={copy.restart.confirm.title}
+            confirmLabel={copy.restart.confirm.confirm}
+            onConfirm={() => void restart()}
+            onCancel={() => setConfirmRestart(false)}
+          >
+            {copy.restart.confirm.text}
           </ConfirmModal>
           </>
         )}
@@ -204,9 +241,13 @@ interface AppRowProps {
   onAskDisable: (kind: ProtectionKind) => void;
   /** Есть ли у экрана команды включения и выключения защиты. */
   canControl: boolean;
+  /** Показать «Перезапустить Antigravity с защитой» (macOS, не подтверждено трафиком). */
+  canRestart: boolean;
+  restarting: boolean;
+  onAskRestart: () => void;
 }
 
-function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy, onConfirm, busy, onEnable, onAskDisable, canControl }: AppRowProps) {
+function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy, onConfirm, busy, onEnable, onAskDisable, canControl, canRestart, restarting, onAskRestart }: AppRowProps) {
   const setup = useMemo(() => buildManualSetup(app, snapshot), [app, snapshot]);
   const view = viewOf(app, waiting, now, snapshot.cli_mode);
   if (view === "not_installed") return null;
@@ -245,6 +286,20 @@ function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy,
             {setup.warning.text}
           </Banner>
         )}
+        {canRestart && (
+          <div className="zs-cov__actions">
+            <Button size="sm" variant="primary" icon="refresh" disabled={restarting || busy !== null} aria-busy={restarting} onClick={onAskRestart}>
+              {restarting ? (
+                <>
+                  <Spinner /> {copy.restart.busy}
+                </>
+              ) : (
+                copy.restart.button
+              )}
+            </Button>
+          </div>
+        )}
+        {canRestart && <p className="zs-cov__hint">{copy.restart.manualFallback}</p>}
         {kind && !canControl && <p className="zs-cov__hint">{copy.hints.protectionOnOverview}</p>}
         {kind && control && canControl && control.mode === "enable" && (
           <div className="zs-cov__actions">

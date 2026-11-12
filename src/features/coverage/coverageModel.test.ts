@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
-import type { AppCoverageItem, AppCoverageStatus, CliProtectionReport } from "../../types";
-import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, enableResult, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, resolveWaiting, sinceLastSeen, startWaiting, viewOf, vpnNotice } from "./coverageModel";
-import { disableCliProtection, enableCliProtection, checkCliProtectionStatus } from "../../utils/api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AppCoverageItem, AppCoverageStatus, CliProtectionReport, RestartOutcome } from "../../types";
+import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, canRestartAntigravity, enableResult, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, resolveWaiting, restartResult, sinceLastSeen, startWaiting, viewOf, vpnNotice } from "./coverageModel";
+import { restartAppWithGateway, disableCliProtection, enableCliProtection, checkCliProtectionStatus } from "../../utils/api";
 import { coverage as copy } from "../../shared/copy/ru";
 
 const app = (id: string, status: AppCoverageStatus, over: Partial<AppCoverageItem> = {}): AppCoverageItem => ({
@@ -214,5 +214,69 @@ describe("enableResult: итог берётся из ответа команды
     const r = enableResult("sysproxy", null, []);
     expect(r.tone).toBe("ok");
     expect(r.title).toBe("Защита браузеров и приложений включена");
+  });
+});
+
+describe("кнопка «Перезапустить Antigravity с защитой»", () => {
+  const agy = (over: Partial<AppCoverageItem> = {}) => app("antigravity", "off", { manual_steps: ["launch_with_env"], ...over });
+  const snap = { gateway_addr: "127.0.0.1:40111" as string | null };
+
+  it("показывается для Antigravity 2.x на macOS, пока трафик не подтверждён", () => {
+    expect(canRestartAntigravity(agy(), "off", snap, true)).toBe(true);
+    expect(canRestartAntigravity(agy({ status: "configured" }), "configured", snap, true)).toBe(true);
+    expect(canRestartAntigravity(agy({ bypass_suspected: true }), "off", snap, true)).toBe(true);
+    expect(canRestartAntigravity(agy(), "waiting", snap, true)).toBe(true);
+  });
+  it("не показывается при «Подтверждено трафиком»", () => {
+    expect(canRestartAntigravity(agy({ status: "confirmed" }), "confirmed", snap, true)).toBe(false);
+  });
+  it("не показывается на Windows и Linux: остаётся ручная команда", () => {
+    expect(canRestartAntigravity(agy(), "off", snap, false)).toBe(false);
+  });
+  it("не показывается, если приложение не установлено, нет шага запуска или адрес шлюза не известен", () => {
+    expect(canRestartAntigravity(agy({ installed: false, status: "not_installed" }), "not_installed", snap, true)).toBe(false);
+    expect(canRestartAntigravity(agy({ manual_steps: [] }), "off", snap, true)).toBe(false);
+    expect(canRestartAntigravity(agy(), "off", { gateway_addr: null }, true)).toBe(false);
+  });
+  it("не показывается для других приложений", () => {
+    expect(canRestartAntigravity(app("cursor", "off", { manual_steps: ["launch_with_env"] }), "off", snap, true)).toBe(false);
+  });
+
+  it("каждый исход даёт свой заголовок, тон и понятное «что делать»", () => {
+    const outcomes: RestartOutcome[] = ["restarted", "not_closed", "needs_automation_permission", "launch_failed", "not_installed", "unsupported"];
+    const views = outcomes.map((o) => restartResult(o));
+    expect(new Set(views.map((v) => v.title)).size).toBe(outcomes.length);
+    expect(restartResult("restarted")).toMatchObject({ tone: "ok", text: "Сделайте запрос: статус обновится сам." });
+    expect(restartResult("not_closed").tone).toBe("warn");
+    expect(restartResult("not_closed").text).toContain("закройте его сами");
+    expect(restartResult("needs_automation_permission").text).toContain("Системные настройки → Конфиденциальность и безопасность → Автоматизация");
+    expect(restartResult("launch_failed").tone).toBe("danger");
+    for (const v of views) expect(v.text).not.toBe("");
+  });
+  it("подтверждение предупреждает про сохранение и лимит в 15 секунд", () => {
+    expect(copy.restart.confirm.text).toContain("несохранённые изменения");
+    expect(copy.restart.confirm.text).toContain("15 секунд");
+    expect(copy.restart.confirm.confirm).toBe("Перезапустить");
+  });
+});
+
+describe("мок restartAppWithGateway: ?mockRestart", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+  const outcomeFor = async (query: string): Promise<RestartOutcome> => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", { location: { search: query } });
+    const p = restartAppWithGateway("antigravity");
+    await vi.runAllTimersAsync();
+    return p;
+  };
+  it("переключает все исходы", async () => {
+    expect(await outcomeFor("")).toBe("restarted");
+    expect(await outcomeFor("?mockRestart=ok")).toBe("restarted");
+    expect(await outcomeFor("?mockRestart=not_closed")).toBe("not_closed");
+    expect(await outcomeFor("?mockRestart=permission")).toBe("needs_automation_permission");
+    expect(await outcomeFor("?mockRestart=failed")).toBe("launch_failed");
   });
 });

@@ -8,7 +8,7 @@ use crate::sysproxy::FileCtx;
 use crate::sysproxy::platform::RealPlatform;
 
 /// Reads the facts (OS, files) on the blocking pool and builds the snapshot.
-async fn build_snapshot(
+pub(super) async fn build_snapshot(
     proxy_manager: &ProxyManager,
     cli_mode: CliMode,
     force: bool,

@@ -1,4 +1,4 @@
-import type { AppCoverageItem, AppCoverageStatus, CliMode, CliProtectionReport, CoverageSnapshot } from "../../types";
+import type { AppCoverageItem, AppCoverageStatus, CliMode, CliProtectionReport, CoverageSnapshot, RestartOutcome } from "../../types";
 import { coverage as copy } from "../../shared/copy/ru";
 
 /** Опрос при наличии неподтверждённых приложений и без них. */
@@ -137,4 +137,27 @@ export function enableResult(kind: ProtectionKind, report: CliProtectionReport |
   if (report.error) return { tone: "danger", title: r.failedTitle, text: [report.error, ...parts].join(" ") };
   const needsSteps = targets.length === 0 || manual.length > 0;
   return { tone: needsSteps ? "warn" : "ok", title: r.enabledTitle.cli, text: parts.join(" ") };
+}
+
+// ---- Кнопка «Перезапустить Antigravity с защитой» ----
+
+/**
+ * Показывать ли кнопку перезапуска: только macOS, Antigravity 2.x (шаг «запуск с переменными»), приложение установлено,
+ * адрес шлюза известен, а трафик через Заставу ещё не подтверждён (иначе перезапускать незачем).
+ */
+export function canRestartAntigravity(app: AppCoverageItem, view: CoverageView, snapshot: Pick<CoverageSnapshot, "gateway_addr">, isMac: boolean): boolean {
+  return (
+    isMac &&
+    app.id === "antigravity" &&
+    app.installed &&
+    app.manual_steps.includes("launch_with_env") &&
+    Boolean(snapshot.gateway_addr) &&
+    view !== "confirmed"
+  );
+}
+
+/** Итог перезапуска для строки и тоста: текст и «что делать» из словаря. */
+export function restartResult(outcome: RestartOutcome): ProtectionResult {
+  const t = copy.restart.result[outcome];
+  return { tone: outcome === "restarted" ? "ok" : outcome === "launch_failed" ? "danger" : "warn", title: t.title, text: t.text };
 }
