@@ -302,7 +302,7 @@ export function AppShell() {
                 title={copy.intercept.title(payload.provider.toUpperCase())}
                 action={
                   <>
-                    <Button size="sm" onClick={intercept.handleAllowInterception}>
+                    <Button size="sm" disabled={payload.phase !== "ready"} onClick={intercept.handleAllowInterception}>
                       {copy.intercept.allow}
                     </Button>{" "}
                     <Button size="sm" variant="quiet" onClick={() => intercept.setInterceptPayload(null)}>
@@ -311,12 +311,13 @@ export function AppShell() {
                   </>
                 }
               >
-                {payload.network_change?.new_country === "RU"
-                  ? copy.intercept.ruText
-                  : copy.intercept.ipText(
-                      payload.report?.telemetry?.ip || "--",
-                      payload.report?.telemetry?.country_code || "--",
-                    )}
+                {intercept.allowError ??
+                  (payload.network_change?.new_country === "RU"
+                    ? copy.intercept.ruText
+                    : copy.intercept.ipText(
+                        payload.report?.telemetry?.ip || "--",
+                        payload.report?.telemetry?.country_code || "--",
+                      ))}
               </Banner>
             )}
 

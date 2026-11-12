@@ -24,7 +24,8 @@ export interface DialogProps {
   /** Маршрут: сервис → IP → страна. */
   service: string;
   ip: string;
-  country: string;
+  /** Строка или заглушка (Skeleton), пока страна определяется. */
+  country: ReactNode;
   /** Тон бейджа страны; по умолчанию danger (небезопасный адрес). */
   countryTone?: BadgeTone;
   /** Бейдж «Демо» в маршруте. */

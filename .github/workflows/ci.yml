@@ -37,9 +37,12 @@ jobs:
       - name: Typecheck & build
         run: pnpm build
 
-      # lint:hex is added in a separate change; skipped until the script exists.
+      # Guards against hard-coded hex colors outside the design tokens.
       - name: Lint hex colors
-        run: pnpm run --if-present lint:hex
+        run: pnpm lint:hex
+
+      - name: Unit tests
+        run: pnpm test
 
   rust:
     strategy:
