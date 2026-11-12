@@ -28,9 +28,30 @@ pub enum LookupOutcome {
     Failed,
 }
 
+/// Raw outcome of one TXT lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxtOutcome {
+    /// The name has these TXT records (one string per record, character-strings joined).
+    Records(Vec<String>),
+    /// The resolver answered "no such name / no TXT record".
+    NotFound,
+    /// No answer within the time limit.
+    Timeout,
+    /// Any other failure (no resolver configured, SERVFAIL, socket error...).
+    Failed,
+    /// This source cannot do TXT lookups on this system.
+    Unsupported,
+}
+
 /// Resolves a host name to addresses.
 pub trait DnsLookup: Send + Sync {
     fn lookup<'a>(&'a self, host: &'a str, limit: Duration) -> BoxFuture<'a, LookupOutcome>;
+
+    /// TXT records of `host` (asked from the resolver configured in the OS).
+    fn lookup_txt<'a>(&'a self, host: &'a str, limit: Duration) -> BoxFuture<'a, TxtOutcome> {
+        let _ = (host, limit);
+        Box::pin(async { TxtOutcome::Unsupported })
+    }
 }
 
 /// The operating system resolver (`getaddrinfo`).
@@ -53,6 +74,65 @@ impl DnsLookup for SystemDns {
                 Ok(Err(_)) => LookupOutcome::Failed,
             }
         })
+    }
+
+    fn lookup_txt<'a>(&'a self, host: &'a str, limit: Duration) -> BoxFuture<'a, TxtOutcome> {
+        Box::pin(async move {
+            tokio::time::timeout(limit, system_txt_lookup(host, limit))
+                .await
+                .unwrap_or(TxtOutcome::Timeout)
+        })
+    }
+}
+
+/// One TXT query through the resolvers of the OS configuration (scutil / registry / resolv.conf),
+/// without cache and without search domains: a fresh answer of the very resolver in use.
+async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
+    use hickory_resolver::TokioResolver;
+    use hickory_resolver::config::ResolveHosts;
+    use hickory_resolver::net::{DnsError, NetError};
+    use hickory_resolver::proto::rr::{RData, RecordType};
+
+    let Ok(mut builder) = TokioResolver::builder_tokio() else {
+        // The OS gave no resolver list (offline, empty configuration).
+        return TxtOutcome::Failed;
+    };
+    {
+        let opts = builder.options_mut();
+        opts.cache_size = 0;
+        opts.attempts = 1;
+        opts.timeout = limit;
+        opts.use_hosts_file = ResolveHosts::Never;
+    }
+    let Ok(resolver) = builder.build() else {
+        return TxtOutcome::Failed;
+    };
+    // The trailing dot makes the name absolute (no search-domain suffixes are tried).
+    let name = format!("{}.", host.trim_end_matches('.'));
+    match resolver.lookup(name, RecordType::TXT).await {
+        Ok(lookup) => {
+            let records: Vec<String> = lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::TXT(txt) => Some(
+                        txt.txt_data
+                            .iter()
+                            .map(|part| String::from_utf8_lossy(part).into_owned())
+                            .collect::<String>(),
+                    ),
+                    _ => None,
+                })
+                .collect();
+            if records.is_empty() {
+                TxtOutcome::NotFound
+            } else {
+                TxtOutcome::Records(records)
+            }
+        }
+        Err(NetError::Timeout) => TxtOutcome::Timeout,
+        Err(NetError::Dns(DnsError::NoRecordsFound(_))) => TxtOutcome::NotFound,
+        Err(_) => TxtOutcome::Failed,
     }
 }
 
@@ -122,6 +202,82 @@ impl IpProbe for ReqwestProbe {
                 Err(e) if e.is_timeout() => HttpProbeOutcome::Timeout,
                 Err(_) => HttpProbeOutcome::ReadFailed,
             }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// UDP exchange
+// ---------------------------------------------------------------------------------------------
+
+/// Raw outcome of one UDP request/response exchange.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UdpOutcome {
+    /// The first datagram of the server that the `accept` filter let through.
+    Reply(Vec<u8>),
+    /// Nothing acceptable arrived within the time limit.
+    Timeout,
+    /// The server name did not resolve or the socket failed (no route, send error...).
+    Failed,
+}
+
+/// One datagram out, one acceptable datagram back (used for the STUN binding request).
+pub trait UdpProbe: Send + Sync {
+    /// Sends `request` to `server` (`host:port`) from the host's own network stack and waits up to
+    /// `limit` for a datagram of that server for which `accept` is true; any other datagram
+    /// (garbage, a stray or forged answer) is skipped.
+    fn exchange<'a>(
+        &'a self,
+        server: &'a str,
+        request: &'a [u8],
+        accept: &'a (dyn Fn(&[u8]) -> bool + Send + Sync),
+        limit: Duration,
+    ) -> BoxFuture<'a, UdpOutcome>;
+}
+
+/// A real `tokio` UDP socket bound to `0.0.0.0:0` (IPv4).
+pub struct TokioUdp;
+
+impl UdpProbe for TokioUdp {
+    fn exchange<'a>(
+        &'a self,
+        server: &'a str,
+        request: &'a [u8],
+        accept: &'a (dyn Fn(&[u8]) -> bool + Send + Sync),
+        limit: Duration,
+    ) -> BoxFuture<'a, UdpOutcome> {
+        Box::pin(async move {
+            let work = async {
+                let Ok(mut addrs) = tokio::net::lookup_host(server).await else {
+                    return UdpOutcome::Failed;
+                };
+                let Some(target) = addrs.find(|a| a.is_ipv4()) else {
+                    return UdpOutcome::Failed;
+                };
+                let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
+                    return UdpOutcome::Failed;
+                };
+                if sock.send_to(request, target).await.is_err() {
+                    return UdpOutcome::Failed;
+                }
+                let mut buf = [0u8; 1500];
+                loop {
+                    match sock.recv_from(&mut buf).await {
+                        // Only the queried server counts: a datagram from anywhere else is noise.
+                        Ok((n, from)) if from == target && accept(&buf[..n]) => {
+                            return UdpOutcome::Reply(buf[..n].to_vec());
+                        }
+                        Ok(_) => {}
+                        // Windows reports an ICMP "port unreachable" of an earlier datagram as a
+                        // reset on the next read: not an answer, keep waiting for the limit.
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+                        Err(_) => return UdpOutcome::Failed,
+                    }
+                }
+            };
+            tokio::time::timeout(limit, work)
+                .await
+                .unwrap_or(UdpOutcome::Timeout)
         })
     }
 }
@@ -427,6 +583,7 @@ pub fn parse_reg_string_values(text: &str) -> Vec<String> {
 pub struct AuditEnv {
     pub dns: Arc<dyn DnsLookup>,
     pub probe: Arc<dyn IpProbe>,
+    pub udp: Arc<dyn UdpProbe>,
     pub system: Arc<dyn SystemInfo>,
 }
 
@@ -436,6 +593,7 @@ impl AuditEnv {
         Self {
             dns: Arc::new(SystemDns),
             probe: Arc::new(ReqwestProbe),
+            udp: Arc::new(TokioUdp),
             system: Arc::new(RealSystem),
         }
     }
@@ -455,6 +613,8 @@ pub mod fakes {
     /// Answers by host name; an unlisted host gets `default`. `panic_on` makes a lookup panic.
     pub struct FakeDns {
         pub answers: Mutex<HashMap<String, LookupOutcome>>,
+        /// TXT answers by host name; an unlisted host gets `TxtOutcome::Timeout`.
+        pub txt_answers: Mutex<HashMap<String, TxtOutcome>>,
         pub default: LookupOutcome,
         pub panic_on: Option<String>,
         pub calls: AtomicUsize,
@@ -464,6 +624,7 @@ pub mod fakes {
         pub fn new(default: LookupOutcome) -> Self {
             Self {
                 answers: Mutex::default(),
+                txt_answers: Mutex::default(),
                 default,
                 panic_on: None,
                 calls: AtomicUsize::new(0),
@@ -471,6 +632,13 @@ pub mod fakes {
         }
         pub fn with(self, host: &str, outcome: LookupOutcome) -> Self {
             self.answers
+                .lock()
+                .unwrap()
+                .insert(host.to_string(), outcome);
+            self
+        }
+        pub fn with_txt(self, host: &str, outcome: TxtOutcome) -> Self {
+            self.txt_answers
                 .lock()
                 .unwrap()
                 .insert(host.to_string(), outcome);
@@ -503,11 +671,25 @@ pub mod fakes {
                 .unwrap_or_else(|| self.default.clone());
             Box::pin(async move { out })
         }
+
+        fn lookup_txt<'a>(&'a self, host: &'a str, _limit: Duration) -> BoxFuture<'a, TxtOutcome> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let out = self
+                .txt_answers
+                .lock()
+                .unwrap()
+                .get(host)
+                .cloned()
+                .unwrap_or(TxtOutcome::Timeout);
+            Box::pin(async move { out })
+        }
     }
 
-    /// Always the same outcome; counts the calls.
+    /// The same outcome for every URL, except the ones with a registered part of the URL; counts
+    /// the calls.
     pub struct FakeProbe {
         pub outcome: HttpProbeOutcome,
+        pub routes: Vec<(String, HttpProbeOutcome)>,
         pub calls: AtomicUsize,
     }
 
@@ -515,8 +697,14 @@ pub mod fakes {
         pub fn new(outcome: HttpProbeOutcome) -> Self {
             Self {
                 outcome,
+                routes: Vec::new(),
                 calls: AtomicUsize::new(0),
             }
+        }
+        /// URLs that contain `url_part` get `outcome` instead of the default one.
+        pub fn with_route(mut self, url_part: &str, outcome: HttpProbeOutcome) -> Self {
+            self.routes.push((url_part.to_string(), outcome));
+            self
         }
         pub fn body(status: u16, body: &str) -> Self {
             Self::new(HttpProbeOutcome::Response {
@@ -530,9 +718,80 @@ pub mod fakes {
     }
 
     impl IpProbe for FakeProbe {
-        fn get<'a>(&'a self, _url: &'a str, _limit: Duration) -> BoxFuture<'a, HttpProbeOutcome> {
+        fn get<'a>(&'a self, url: &'a str, _limit: Duration) -> BoxFuture<'a, HttpProbeOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let out = self.outcome.clone();
+            let out = self
+                .routes
+                .iter()
+                .find(|(part, _)| url.contains(part.as_str()))
+                .map(|(_, o)| o.clone())
+                .unwrap_or_else(|| self.outcome.clone());
+            Box::pin(async move { out })
+        }
+    }
+
+    /// Builds the datagrams a fake server sends back for a request.
+    pub type UdpResponder = Box<dyn Fn(&[u8]) -> Vec<Vec<u8>> + Send + Sync>;
+
+    /// A UDP "network": per server a responder that gets the request and returns the datagrams
+    /// that arrive (in order). A server without a responder stays silent (`Timeout`); the `accept`
+    /// filter is applied exactly as the real socket does.
+    #[derive(Default)]
+    pub struct FakeUdp {
+        pub servers: Mutex<HashMap<String, UdpResponder>>,
+        pub failing: Mutex<Vec<String>>,
+        pub calls: AtomicUsize,
+    }
+
+    impl FakeUdp {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        pub fn with_server(
+            self,
+            server: &str,
+            responder: impl Fn(&[u8]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+        ) -> Self {
+            self.servers
+                .lock()
+                .unwrap()
+                .insert(server.to_string(), Box::new(responder));
+            self
+        }
+        /// The server name does not resolve / the socket fails.
+        pub fn failing_server(self, server: &str) -> Self {
+            self.failing.lock().unwrap().push(server.to_string());
+            self
+        }
+        pub fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl UdpProbe for FakeUdp {
+        fn exchange<'a>(
+            &'a self,
+            server: &'a str,
+            request: &'a [u8],
+            accept: &'a (dyn Fn(&[u8]) -> bool + Send + Sync),
+            _limit: Duration,
+        ) -> BoxFuture<'a, UdpOutcome> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let out = if self.failing.lock().unwrap().iter().any(|s| s == server) {
+                UdpOutcome::Failed
+            } else {
+                let datagrams = self
+                    .servers
+                    .lock()
+                    .unwrap()
+                    .get(server)
+                    .map(|f| f(request))
+                    .unwrap_or_default();
+                datagrams
+                    .into_iter()
+                    .find(|d| accept(d))
+                    .map_or(UdpOutcome::Timeout, UdpOutcome::Reply)
+            };
             Box::pin(async move { out })
         }
     }

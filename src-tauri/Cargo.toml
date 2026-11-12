@@ -33,6 +33,7 @@ ring = "0.17"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
 
 [features]
 # Debug-only tray stress test (ZASTAVA_TRAY_STRESS=1). Never enabled in release builds.

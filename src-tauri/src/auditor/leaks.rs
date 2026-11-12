@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_PRIVACY, UnknownReason};
+use crate::auditor::geo_matrix::{CheckResult, CheckStatus, GUIDE_OS_PRIVACY, UnknownReason};
+use crate::auditor::probes::whoami::{MEASURED_VIA, ResolverView, normalized_country};
 use crate::auditor::seams::{
     HttpProbeOutcome, IpProbe, RealSystem, ReqwestProbe, SystemInfo, SystemReadError,
 };
@@ -176,6 +177,113 @@ pub fn check_dns_leak_with(
             UnknownReason::InternalError,
         ),
     }
+}
+
+/// Verdict of the DNS-resolver check: by the resolver that really sees the requests (`view`, from
+/// the whoami sources); the OS DNS configuration (`config`, [`check_dns_leak_with`]) is reference.
+///
+/// * a resolver in Russia (unless the exit is Russian) or in another country than the exit is a
+///   `Warning`;
+/// * a finding of the configuration check (a domestic provider, Yandex DNS) stays a `Warning`
+///   whatever the real resolver is: measuring never loosens an existing finding;
+/// * without a measured resolver nothing is verified: `Unknown`, except for such a finding.
+pub fn evaluate_dns_resolver(
+    config: CheckResult,
+    view: &ResolverView,
+    exit_country: &str,
+) -> CheckResult {
+    let config_note = match config.status {
+        CheckStatus::Ok => "в списке DNS ОС нет резолверов провайдеров РФ и Яндекс.DNS",
+        CheckStatus::Unknown => "список DNS ОС прочитать не удалось",
+        _ => "в списке DNS ОС есть замечание",
+    };
+    let config_finding = matches!(config.status, CheckStatus::Warning | CheckStatus::Critical);
+    let caveat = "Страна определена по адресу резолвера; ECS и DNS-over-HTTPS в браузере или приложении могут менять картину.";
+
+    let (ip, country, public_service) = match view {
+        ResolverView::Located {
+            ip,
+            country,
+            public_service,
+        } => (ip, country, public_service),
+        ResolverView::Unmeasured(u) => {
+            if config_finding {
+                let mut kept = config;
+                kept.message = format!("{} Реальный резолвер определить не удалось: {}.", kept.message, u.detail);
+                return kept;
+            }
+            return CheckResult::unknown(
+                u.code,
+                format!(
+                    "Проверка DNS-резолвера не выполнена: {}. Справочно, настройки ОС: {config_note}.",
+                    u.detail
+                ),
+                u.reason,
+            );
+        }
+    };
+
+    let exit = normalized_country(exit_country);
+    if country == "RU" && exit.as_deref() != Some("RU") {
+        return CheckResult::warning(
+            "DNS_DOMESTIC_WARNING",
+            format!(
+                "Ваши DNS-запросы видит резолвер {ip}, расположенный в РФ, при выходе через {}. Пропишите публичный DNS (1.1.1.1 / 8.8.8.8) и убедитесь, что DNS идёт через туннель. {caveat}",
+                exit.as_deref().unwrap_or("страну, которая не определена"),
+            ),
+            Some(GUIDE_OS_PRIVACY.to_string()),
+        )
+        .with_measured_via(MEASURED_VIA);
+    }
+    if let Some(service) = public_service {
+        // An anycast service is placed in the country of its nearest point of presence: the
+        // country is not compared. A finding of the OS list still stands.
+        if config_finding {
+            let mut kept = config;
+            kept.message = format!(
+                "{} Реальный резолвер — публичный {service} ({ip}); замечание касается настроек ОС.",
+                kept.message
+            );
+            return kept.with_measured_via(MEASURED_VIA);
+        }
+        return CheckResult::ok(
+            "DNS_PUBLIC_RESOLVER",
+            format!(
+                "Запросы DNS идут на публичный резолвер {service} ({ip}); страна резолвера не сравнивается: это anycast-сервис. Настройки DNS ОС (справочно): {config_note}. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину."
+            ),
+        )
+        .with_measured_via(MEASURED_VIA);
+    }
+    if let Some(exit) = exit.as_deref().filter(|e| *e != country.as_str()) {
+        return CheckResult::warning(
+            "DNS_RESOLVER_MISMATCH",
+            format!(
+                "Ваши DNS-запросы видит резолвер {ip} в {country}, а выход находится в {exit}: DNS и трафик идут разными путями. У публичных anycast-резолверов (1.1.1.1, 8.8.8.8) страна по адресу бывает неточной. {caveat}"
+            ),
+            Some(GUIDE_OS_PRIVACY.to_string()),
+        )
+        .with_measured_via(MEASURED_VIA);
+    }
+    if config_finding {
+        let mut kept = config;
+        kept.message = format!(
+            "{} Реальный резолвер ({ip}, {country}) вопросов не вызывает; замечание касается настроек ОС.",
+            kept.message
+        );
+        return kept.with_measured_via(MEASURED_VIA);
+    }
+
+    let compared = match &exit {
+        Some(exit) => format!("страна совпадает со страной выхода ({exit})"),
+        None => "страну выхода сравнить не с чем".to_string(),
+    };
+    CheckResult::ok(
+        "DNS_CLEAN",
+        format!(
+            "Ваши DNS-запросы видит резолвер {ip} в {country}: не РФ, {compared}. Настройки DNS ОС (справочно): {config_note}. {caveat}"
+        ),
+    )
+    .with_measured_via(MEASURED_VIA)
 }
 
 /// Decision of the DNS check on the text of the OS resolver configuration.
@@ -401,5 +509,123 @@ mod tests {
         let r = evaluate_dns_listing("resolver #1\n  nameserver[0] : 1.1.1.1\n", "NL", &kws());
         assert_eq!(r.status, CheckStatus::Ok);
         assert!(r.message.contains("список настроенных резолверов"), "{}", r.message);
+    }
+
+    // ---- the resolver that really sees the requests ----
+
+    use crate::auditor::probes::whoami::Unmeasured;
+
+    fn located(ip: &str, cc: &str) -> ResolverView {
+        ResolverView::Located {
+            ip: ip.parse().unwrap(),
+            country: cc.into(),
+            public_service: None,
+        }
+    }
+
+    fn unmeasured(reason: UnknownReason) -> ResolverView {
+        ResolverView::Unmeasured(Unmeasured {
+            code: "DNS_WHOAMI_TIMEOUT",
+            reason,
+            detail: "источники молчат".into(),
+        })
+    }
+
+    fn config_ok() -> CheckResult {
+        evaluate_dns_listing("resolver #1\n  nameserver[0] : 1.1.1.1\n", "NL", &kws())
+    }
+
+    fn config_domestic() -> CheckResult {
+        evaluate_dns_listing("resolver #1\n  search domain[0] : mts.ru\n  nameserver[0] : 192.168.1.1\n", "NL", &kws())
+    }
+
+    #[test]
+    fn resolver_in_the_exit_country_is_ok_with_source_and_caveat() {
+        let r = evaluate_dns_resolver(config_ok(), &located("9.9.9.9", "NL"), "NL");
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "DNS_CLEAN"));
+        assert_eq!(r.measured_via.as_deref(), Some("whoami:akamai+google"));
+        assert!(r.message.contains("9.9.9.9") && r.message.contains("ECS"), "{}", r.message);
+        assert!(r.message.contains("справочно"), "the OS list is reference: {}", r.message);
+    }
+
+    #[test]
+    fn resolver_in_russia_is_a_warning_like_the_other_domestic_findings() {
+        let r = evaluate_dns_resolver(config_ok(), &located("77.88.8.8", "RU"), "NL");
+        // The same severity and code as the configuration finding (never harsher).
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "DNS_DOMESTIC_WARNING"));
+        assert!(r.message.contains("РФ") && r.message.contains("NL"), "{}", r.message);
+        // The real resolver speaks even when the OS list looks clean; an unknown exit does too.
+        assert_eq!(evaluate_dns_resolver(config_ok(), &located("77.88.8.8", "RU"), "").status, CheckStatus::Warning);
+        // A Russian exit with a Russian resolver is consistent.
+        assert_eq!(evaluate_dns_resolver(config_ok(), &located("77.88.8.8", "RU"), "RU").status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn resolver_in_another_country_than_the_exit_is_a_warning() {
+        let r = evaluate_dns_resolver(config_ok(), &located("8.8.8.8", "US"), "NL");
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "DNS_RESOLVER_MISMATCH"));
+        assert!(r.message.contains("US") && r.message.contains("NL"));
+    }
+
+    #[test]
+    fn a_finding_of_the_os_list_is_not_loosened_by_a_good_real_resolver() {
+        let r = evaluate_dns_resolver(config_domestic(), &located("9.9.9.9", "NL"), "NL");
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "DNS_DOMESTIC_WARNING"));
+        assert!(r.message.contains("9.9.9.9"));
+        // ... and stays when the resolver could not be measured at all.
+        let r = evaluate_dns_resolver(config_domestic(), &unmeasured(UnknownReason::Timeout), "NL");
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "DNS_DOMESTIC_WARNING"));
+        assert!(r.message.contains("не удалось"));
+    }
+
+    #[test]
+    fn unmeasured_resolver_is_unknown_not_ok_even_with_a_clean_os_list() {
+        for reason in [UnknownReason::Timeout, UnknownReason::SourceRefused, UnknownReason::NoData] {
+            let r = evaluate_dns_resolver(config_ok(), &unmeasured(reason), "NL");
+            assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(reason)));
+            assert_eq!(r.code, "DNS_WHOAMI_TIMEOUT");
+            assert!(r.message.contains("Справочно") && r.message.contains("нет резолверов провайдеров РФ"));
+        }
+        // An unreadable OS list does not matter when the real resolver is known.
+        let unreadable = check_dns_leak_with(&FakeSystem::offline(), "NL", &kws());
+        assert_eq!(evaluate_dns_resolver(unreadable, &located("9.9.9.9", "NL"), "NL").status, CheckStatus::Ok);
+    }
+
+    fn public(ip: &str, cc: &str, service: &'static str) -> ResolverView {
+        ResolverView::Located {
+            ip: ip.parse().unwrap(),
+            country: cc.into(),
+            public_service: Some(service),
+        }
+    }
+
+    #[test]
+    fn public_resolver_is_ok_without_comparing_its_country() {
+        for (ip, cc, svc) in [("74.125.40.10", "US", "Google Public DNS"), ("162.158.1.1", "AU", "Cloudflare")] {
+            let r = evaluate_dns_resolver(config_ok(), &public(ip, cc, svc), "NL");
+            assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "DNS_PUBLIC_RESOLVER"), "{svc}");
+            assert!(r.message.contains(svc) && r.message.contains("anycast"), "{}", r.message);
+            assert!(r.message.contains("ECS") && r.message.contains("DNS-over-HTTPS"));
+            assert_eq!(r.measured_via.as_deref(), Some("whoami:akamai+google"));
+        }
+        // An ordinary provider resolver in another country still warns, a Russian one too.
+        assert_eq!(
+            evaluate_dns_resolver(config_ok(), &located("203.0.113.53", "DE"), "NL").code,
+            "DNS_RESOLVER_MISMATCH"
+        );
+        assert_eq!(
+            evaluate_dns_resolver(config_ok(), &located("77.88.8.8", "RU"), "NL").code,
+            "DNS_DOMESTIC_WARNING"
+        );
+    }
+
+    #[test]
+    fn findings_stay_with_a_public_resolver() {
+        // A domestic provider in the OS list is still a Warning.
+        let r = evaluate_dns_resolver(config_domestic(), &public("74.125.40.10", "US", "Google Public DNS"), "NL");
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "DNS_DOMESTIC_WARNING"));
+        // A public service seen in Russia is still reported as a resolver in Russia.
+        let r = evaluate_dns_resolver(config_ok(), &public("1.1.1.1", "RU", "Cloudflare"), "NL");
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "DNS_DOMESTIC_WARNING"));
     }
 }

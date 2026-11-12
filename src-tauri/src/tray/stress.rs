@@ -31,7 +31,7 @@ fn fake_report(status: auditor::OverallStatus) -> auditor::RiskReport {
         timezone_result: c(),
         checks: vec![],
         unknown_count: 0,
-        applicable_count: 12,
+        applicable_count: 13,
         incomplete: false,
     }
 }

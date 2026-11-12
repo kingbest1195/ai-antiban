@@ -7,6 +7,7 @@ pub mod history;
 pub mod leaks;
 pub mod network;
 pub mod os_env;
+pub mod probes;
 pub mod profile_switcher;
 pub mod rules;
 pub mod run_check;
@@ -18,14 +19,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cache::{DNSBL_TTL, IPV6_TTL, OS_TTL, cached_check};
+use cache::{CheckCache, DNSBL_TTL, IPV6_TTL, OS_TTL, UDP_TTL, WHOAMI_TTL, cached_check};
+use probes::whoami::{self, ResolverView, evaluate_dns_country};
+use probes::stun;
 use run_check::{blocking_check, run_check};
 
 pub use cache_cleaner::clean_ai_app_cache;
 pub use dnsbl::{check_all_dnsbl, check_all_dnsbl_with, evaluate_asn_reputation, evaluate_dnsbl_report};
 pub use geo_matrix::{CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo};
 pub use history::{evaluate_impossible_travel, evaluate_ip_pinning};
-pub use leaks::{check_dns_leak, check_dns_leak_with, check_ipv6_leak, check_ipv6_leak_with};
+pub use leaks::{
+    check_dns_leak, check_dns_leak_with, check_ipv6_leak, check_ipv6_leak_with, evaluate_dns_resolver,
+};
 pub use network::{
     build_upstream_client, evaluate_dns_country_consistency, evaluate_reverse_dns_ptr,
     NetworkResolver, NetworkTelemetry,
@@ -89,7 +94,21 @@ const CHECK_LIMIT_IO: Duration = Duration::from_secs(4);
 /// An `Unknown` in any other check is shown, but does not change the admit decision.
 const CORE_CHECKS: [usize; 2] = [0, 2];
 
-/// Outcome of scoring the 12 checks.
+/// The DNS resolver that sees the requests of this machine (both whoami sources + its country),
+/// measured once for the DNS-resolver and the DNS-country checks.
+async fn resolver_view(env: &AuditEnv, cache: &CheckCache) -> ResolverView {
+    cache
+        .resolver
+        .get_or_compute(
+            "whoami",
+            WHOAMI_TTL,
+            |v| v.is_located(),
+            whoami::measure_resolver(&*env.dns, &*env.probe, &cache.geo),
+        )
+        .await
+}
+
+/// Outcome of scoring the checks of a report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Verdict {
     pub overall_status: OverallStatus,
@@ -276,7 +295,7 @@ impl Auditor {
         Ok(tel)
     }
 
-    /// Evaluates complete 12-point risk assessment for the target AI provider,
+    /// Evaluates the complete 13-point risk assessment for the target AI provider,
     /// on the egress of that provider's route (or the direct egress).
     pub async fn evaluate_all(
         &self,
@@ -393,13 +412,17 @@ impl Auditor {
             let (cache, asns, country, env) =
                 (cache.clone(), dangerous_asns.clone(), country.clone(), env.clone());
             async move {
-                cached_check(&cache.os, &format!("dns:{country}"), OS_TTL, async {
+                // The OS configuration is reference; the verdict is by the resolver that really
+                // sees the requests.
+                let os_key = format!("dns:{country}");
+                let os_config = cached_check(&cache.os, &os_key, OS_TTL, async {
                     let keywords = asns.russian_isp_keywords.clone();
                     let cc = country.clone();
                     let system = env.system.clone();
                     blocking_check(move || check_dns_leak_with(&*system, &cc, &keywords)).await
-                })
-                .await
+                });
+                let (config, view) = tokio::join!(os_config, resolver_view(&env, &cache));
+                evaluate_dns_resolver(config, &view, &country)
             }
         });
         let timezone = run_check("Timezone", CHECK_LIMIT_IO, {
@@ -439,10 +462,13 @@ impl Auditor {
             let tel = telemetry.clone();
             async move { evaluate_reverse_dns_ptr(&tel) }
         });
-        // No independent source of the DNS country exists yet: honestly `Unknown`, not "consistent".
-        let dns_country = run_check("DNS Country", CHECK_LIMIT_LOCAL, {
-            let tel = telemetry.clone();
-            async move { evaluate_dns_country_consistency(&tel, None) }
+        // Country of the resolver that sees the requests (whoami) against the exit country.
+        let dns_country = run_check("DNS Country", CHECK_LIMIT_IO, {
+            let (cache, country, env) = (cache.clone(), country.clone(), env.clone());
+            async move {
+                let view = resolver_view(&env, &cache).await;
+                evaluate_dns_country(&view, &country)
+            }
         });
         let locale = run_check("Locale", CHECK_LIMIT_IO, {
             let (cache, env) = (cache.clone(), env.clone());
@@ -453,6 +479,18 @@ impl Auditor {
                         evaluate_locale_env_hygiene_with(&*system, synced_tz.as_deref())
                     })
                     .await
+                })
+                .await
+            }
+        });
+
+        // UDP leaves through the same address as HTTP? (STUN, per exit address, rare requests)
+        let udp_stun = run_check("UDP STUN", CHECK_LIMIT_IO, {
+            let (cache, env, ip) = (cache.clone(), env.clone(), telemetry.ip.trim().to_string());
+            async move {
+                cached_check(&cache.udp, &ip, UDP_TTL, async {
+                    let answers = stun::probe_servers(&*env.udp, stun::STUN_TIMEOUT).await;
+                    stun::evaluate_udp_stun(&answers, &ip)
                 })
                 .await
             }
@@ -471,6 +509,7 @@ impl Auditor {
             reverse_dns_result,
             dns_country_result,
             locale_result,
+            udp_stun_result,
         ) = tokio::join!(
             geo,
             pinning,
@@ -483,7 +522,8 @@ impl Auditor {
             location,
             reverse_dns,
             dns_country,
-            locale
+            locale,
+            udp_stun
         );
         let dnsbl_clean_count = dnsbl_label
             .lock()
@@ -503,6 +543,8 @@ impl Auditor {
             reverse_dns_result,
             dns_country_result,
             locale_result,
+            // Index 12: not a core check.
+            udp_stun_result,
         ];
         let verdict = score_checks(&checks, is_pinned);
         self.journal_incomplete(provider, &checks);
@@ -588,18 +630,21 @@ mod tests {
     fn na() -> CheckResult {
         CheckResult::unknown("NA", "na", UnknownReason::NotApplicable)
     }
-    /// 12 results in report order, `ok()` everywhere except the given positions.
-    fn twelve(over: &[(usize, CheckResult)]) -> Vec<CheckResult> {
-        let mut v: Vec<CheckResult> = (0..12).map(|_| ok()).collect();
+    /// The 13 results of a report in order, `ok()` everywhere except the given positions.
+    fn all_checks(over: &[(usize, CheckResult)]) -> Vec<CheckResult> {
+        let mut v: Vec<CheckResult> = (0..CHECK_COUNT).map(|_| ok()).collect();
         for (i, r) in over {
             v[*i] = r.clone();
         }
         v
     }
 
+    /// Number of checks in a report (`udp_stun` is the 13th, index 12).
+    const CHECK_COUNT: usize = 13;
+
     #[test]
-    fn score_eleven_ok_and_one_unknown_is_below_100_and_green() {
-        let v = score_checks(&twelve(&[(3, unk())]), false);
+    fn score_twelve_ok_and_one_unknown_is_below_100_and_green() {
+        let v = score_checks(&all_checks(&[(3, unk())]), false);
         assert_eq!(v.overall_status, OverallStatus::Green);
         assert!(v.trust_score < 100);
         assert_eq!(v.trust_score, 94);
@@ -607,23 +652,23 @@ mod tests {
     }
 
     #[test]
-    fn score_twelve_ok_is_100() {
-        let v = score_checks(&twelve(&[]), false);
+    fn score_thirteen_ok_is_100() {
+        let v = score_checks(&all_checks(&[]), false);
         assert_eq!(
             (v.trust_score, v.overall_status),
             (100, OverallStatus::Green)
         );
-        assert!(!v.incomplete && v.unknown_count == 0 && v.applicable_count == 12);
+        assert!(!v.incomplete && v.unknown_count == 0 && v.applicable_count == 13);
     }
 
     #[test]
     fn score_never_exceeds_94_with_unknown_even_when_pinned() {
         for pinned in [false, true] {
-            let v = score_checks(&twelve(&[(5, unk())]), pinned);
+            let v = score_checks(&all_checks(&[(5, unk())]), pinned);
             assert!(v.trust_score <= 94, "pinned={pinned}");
         }
         // Unknown penalty is capped at -15: many Unknown still leave a Green 86+ (aux checks).
-        let many = twelve(&[
+        let many = all_checks(&[
             (1, unk()),
             (3, unk()),
             (4, unk()),
@@ -639,16 +684,16 @@ mod tests {
 
     #[test]
     fn score_not_applicable_is_not_penalised_nor_counted() {
-        let v = score_checks(&twelve(&[(8, na())]), false);
+        let v = score_checks(&all_checks(&[(8, na())]), false);
         assert_eq!(v.trust_score, 100);
         assert!(!v.incomplete);
-        assert_eq!((v.unknown_count, v.applicable_count), (0, 11));
+        assert_eq!((v.unknown_count, v.applicable_count), (0, 12));
     }
 
     #[test]
     fn score_critical_plus_unknown_is_red_and_at_most_35() {
         let v = score_checks(
-            &twelve(&[(0, CheckResult::critical("C", "c", None)), (3, unk())]),
+            &all_checks(&[(0, CheckResult::critical("C", "c", None)), (3, unk())]),
             false,
         );
         assert_eq!(v.overall_status, OverallStatus::Red);
@@ -659,25 +704,25 @@ mod tests {
     #[test]
     fn score_counters() {
         let v = score_checks(
-            &twelve(&[(1, unk()), (3, unk()), (8, na()), (10, na())]),
+            &all_checks(&[(1, unk()), (3, unk()), (8, na()), (10, na())]),
             false,
         );
         assert_eq!(v.unknown_count, 2);
-        assert_eq!(v.applicable_count, 10);
-        assert_eq!(count_checks(&twelve(&[(2, unk())])), (1, 12));
+        assert_eq!(v.applicable_count, 11);
+        assert_eq!(count_checks(&all_checks(&[(2, unk())])), (1, 13));
     }
 
     #[test]
     fn unknown_core_check_is_never_green() {
         // Geo (0) and Impossible Travel (2) are the core: fail-closed.
         for core in CORE_CHECKS {
-            let v = score_checks(&twelve(&[(core, unk())]), false);
+            let v = score_checks(&all_checks(&[(core, unk())]), false);
             assert_eq!(v.overall_status, OverallStatus::Yellow, "core check {core}");
             assert!(!v.overall_status.is_allowed_by_default());
         }
         // The auxiliary ones keep the automatic admit (fail-open), but are reported.
-        for aux in [1, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
-            let v = score_checks(&twelve(&[(aux, unk())]), false);
+        for aux in [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
+            let v = score_checks(&all_checks(&[(aux, unk())]), false);
             assert_eq!(v.overall_status, OverallStatus::Green, "aux check {aux}");
             assert!(v.incomplete);
         }
@@ -728,59 +773,16 @@ mod tests {
             timezone_result: ok(),
             checks: vec![ok()],
             unknown_count: 0,
-            applicable_count: 12,
+            applicable_count: 13,
             incomplete: false,
         }
     }
 
-    /// Whole audit with DNSBL and IPv6 failing (cache seeded with a timeout): not 100, incomplete.
-    #[tokio::test]
-    async fn evaluate_all_with_failed_probes_is_incomplete() {
-        let auditor = Auditor::new().unwrap();
-        let state = AppState::new_in_memory();
-        let tel = NetworkTelemetry {
-            ip: "9.9.9.9".into(),
-            country_code: "NL".into(),
-            hostname: Some("host.example".into()),
-            asn: Some(64500),
-            org: Some("Example Net".into()),
-            isp: Some("Example Net".into()),
-            timezone: Some("Europe/Amsterdam".into()),
-            resolved_at: network::current_timestamp(),
-        };
-        auditor.resolver.set_cached(tel.clone()).await;
-        let cache = auditor.resolver.check_cache();
-        let timeout = || CheckResult::unknown("T", "t", UnknownReason::Timeout);
-        cache
-            .dnsbl
-            .get_or_compute("9.9.9.9", cache::DNSBL_TTL, |_| false, async {
-                (timeout(), "x".to_string())
-            })
-            .await;
-        cache
-            .ipv6
-            .get_or_compute("NL", cache::IPV6_TTL, |_| false, async { timeout() })
-            .await;
-
-        let report = auditor
-            .evaluate_all(ProviderId::Anthropic, &state, false)
-            .await
-            .unwrap();
-        assert_eq!(report.checks.len(), 12);
-        assert!(report.dnsbl_result.is_unknown() && report.ipv6_result.is_unknown());
-        assert!(
-            report.checks[10].is_unknown(),
-            "dns country has no source yet"
-        );
-        assert!(report.incomplete && report.unknown_count >= 3);
-        assert!(report.trust_score <= 94);
-        assert!(report.checks.iter().all(|c| c.checked_at.is_some()));
-    }
-
     // ---- the whole audit on substituted sources (no network, no processes) ----
 
-    use seams::fakes::{FakeDns, FakeProbe, FakeSystem, addr};
-    use seams::{HttpProbeOutcome, LookupOutcome};
+    use probes::stun::testing::echoing;
+    use seams::fakes::{FakeDns, FakeProbe, FakeSystem, FakeUdp, addr};
+    use seams::{HttpProbeOutcome, LookupOutcome, TxtOutcome};
 
     fn rich_telemetry() -> NetworkTelemetry {
         NetworkTelemetry {
@@ -827,12 +829,58 @@ mod tests {
             .unwrap()
     }
 
+    /// UDP stays silent (every STUN server times out).
     fn env_of(dns: FakeDns, probe: FakeProbe, system: FakeSystem) -> AuditEnv {
+        env_with_udp(dns, probe, system, FakeUdp::new())
+    }
+
+    fn env_with_udp(dns: FakeDns, probe: FakeProbe, system: FakeSystem, udp: FakeUdp) -> AuditEnv {
         AuditEnv {
             dns: Arc::new(dns),
             probe: Arc::new(probe),
+            udp: Arc::new(udp),
             system: Arc::new(system),
         }
+    }
+
+    /// Both whoami sources name `resolver` as the resolver that asks them.
+    fn with_whoami(dns: FakeDns, resolver: &str) -> FakeDns {
+        dns.with(whoami::AKAMAI_HOST, addr(resolver)).with_txt(
+            whoami::GOOGLE_TXT_HOST,
+            TxtOutcome::Records(vec![format!("\"{resolver}\"")]),
+        )
+    }
+
+    /// The geo services place every address in `country`; the IPv6 probe reports NL.
+    fn probe_locating(country: &str) -> FakeProbe {
+        FakeProbe::body(200, "loc=NL\n").with_route(
+            "ipwho.is",
+            HttpProbeOutcome::Response {
+                status: 200,
+                body: format!("{{\"success\":true,\"country_code\":\"{country}\"}}"),
+            },
+        )
+    }
+
+    /// Both STUN servers report `ip` as the public UDP address.
+    fn udp_exiting_as(ip: &str) -> FakeUdp {
+        let ip: std::net::Ipv4Addr = ip.parse().unwrap();
+        FakeUdp::new()
+            .with_server(stun::SERVERS[0].addr, echoing(ip))
+            .with_server(stun::SERVERS[1].addr, echoing(ip))
+    }
+
+    /// Every real source answers and everything is consistent (resolver and UDP exit in NL).
+    fn healthy_env() -> AuditEnv {
+        env_with_udp(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"),
+            probe_locating("NL"),
+            FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            },
+            udp_exiting_as("203.0.113.9"),
+        )
     }
 
     /// DNSBL zones and the IPv6 probe all time out: not Green-100, the report says it is incomplete.
@@ -850,13 +898,19 @@ mod tests {
             rich_telemetry(),
         )
         .await;
-        assert_eq!(report.checks.len(), 12);
+        assert_eq!(report.checks.len(), 13);
         assert!(report.dnsbl_result.is_unknown());
         assert_eq!(report.dnsbl_result.reason, Some(UnknownReason::Timeout));
         assert!(report.ipv6_result.is_unknown());
         assert_eq!(report.ipv6_result.reason, Some(UnknownReason::Timeout));
+        // The real DNS resolver, its country and the UDP probe could not be measured either.
+        for i in [6, 10, 12] {
+            assert!(report.checks[i].is_unknown(), "check {i}: {:?}", report.checks[i]);
+            assert_eq!(report.checks[i].reason, Some(UnknownReason::Timeout), "check {i}");
+        }
+        assert!(report.checks.iter().all(|c| c.checked_at.is_some()));
         assert!(report.incomplete);
-        assert!(report.unknown_count >= 3, "{}", report.unknown_count);
+        assert!(report.unknown_count >= 5, "{}", report.unknown_count);
         assert!(report.trust_score <= 94);
         assert!(!(report.overall_status == OverallStatus::Green && report.trust_score == 100));
     }
@@ -878,6 +932,7 @@ mod tests {
         )
         .await;
         let names = [
+            (12, "udp stun"),
             (3, "dnsbl"),
             (4, "asn"),
             (5, "ipv6"),
@@ -895,8 +950,9 @@ mod tests {
         for i in [1, 2, 8] {
             assert!(report.checks[i].is_not_applicable(), "check {i}: {:?}", report.checks[i]);
         }
-        assert_eq!(report.unknown_count, 8);
-        assert_eq!(report.applicable_count, 9);
+        assert_eq!(report.checks.len(), 13);
+        assert_eq!(report.unknown_count, 9);
+        assert_eq!(report.applicable_count, 10);
         assert!(report.incomplete && report.trust_score <= 94);
     }
 
@@ -929,26 +985,166 @@ mod tests {
     /// With every source answering, the Ok texts claim only what was verified.
     #[tokio::test]
     async fn evaluate_all_healthy_sources_state_verified_facts() {
-        let report = audit(
-            env_of(
-                zones_answering(FakeDns::new(LookupOutcome::Timeout)),
-                FakeProbe::body(200, "loc=NL\n"),
-                FakeSystem {
-                    global_ipv6: Some(true),
-                    ..FakeSystem::healthy()
-                },
-            ),
-            rich_telemetry(),
-        )
-        .await;
+        let report = audit(healthy_env(), rich_telemetry()).await;
+        assert_eq!(report.checks.len(), 13);
         assert!(report.dnsbl_result.status.is_ok());
         assert!(report.dnsbl_result.message.contains("Ответили 5 из 5"), "{}", report.dnsbl_result.message);
         assert_eq!(report.dnsbl_clean_count, "Ответили 5 из 5 баз");
         assert_eq!(report.ipv6_result.code, "IPV6_ENCAPSULATED");
         assert_eq!(report.timezone_result.code, "TIMEZONE_MATCH");
-        // Only the DNS country (no source yet), pinning, first session and location do not apply.
-        assert!(report.checks[10].is_unknown() && !report.checks[10].is_not_applicable());
-        assert_eq!(report.unknown_count, 1);
-        assert!(report.incomplete);
+        // The three checks of the real DNS resolver and of UDP rest on measurements now.
+        let (dns, dns_country, udp) = (&report.checks[6], &report.checks[10], &report.checks[12]);
+        assert_eq!(dns.code, "DNS_CLEAN");
+        assert_eq!(dns_country.code, "DNS_COUNTRY_CONSISTENT");
+        assert_eq!(udp.code, "UDP_STUN_MATCH");
+        assert_eq!(dns.measured_via.as_deref(), Some("whoami:akamai+google"));
+        assert_eq!(dns_country.measured_via.as_deref(), Some("whoami:akamai+google"));
+        assert_eq!(udp.measured_via.as_deref(), Some("stun:cloudflare+google"));
+        // Only pinning, first session and location do not apply: everything else was verified.
+        assert_eq!(report.unknown_count, 0);
+        assert_eq!(report.applicable_count, 10);
+        assert!(!report.incomplete);
+        assert_eq!(
+            (report.trust_score, report.overall_status),
+            (100, OverallStatus::Green)
+        );
+    }
+
+    /// TUN with fake-IP DNS: the whoami names resolve to the local pool, the real resolver is
+    /// invisible, so neither the resolver check nor the country check may be Ok.
+    #[tokio::test]
+    async fn evaluate_all_fake_ip_dns_makes_the_resolver_checks_unknown() {
+        let env = env_with_udp(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "198.18.0.12"),
+            probe_locating("NL"),
+            FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            },
+            udp_exiting_as("203.0.113.9"),
+        );
+        let report = audit(env, rich_telemetry()).await;
+        for i in [6, 10] {
+            let c = &report.checks[i];
+            assert_eq!(
+                (c.status, c.reason),
+                (CheckStatus::Unknown, Some(UnknownReason::SourceRefused)),
+                "check {i}: {c:?}"
+            );
+        }
+        assert_eq!(report.unknown_count, 2);
+        assert!(report.incomplete && report.trust_score <= 94);
+    }
+
+    /// The resolver is in Russia while the exit is in NL: both DNS checks warn.
+    #[tokio::test]
+    async fn evaluate_all_resolver_in_russia_warns_in_both_dns_checks() {
+        let env = env_with_udp(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "77.88.8.8"),
+            probe_locating("RU"),
+            FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            },
+            udp_exiting_as("203.0.113.9"),
+        );
+        let report = audit(env, rich_telemetry()).await;
+        assert_eq!(report.checks[6].status, CheckStatus::Warning);
+        assert_eq!(report.checks[6].code, "DNS_DOMESTIC_WARNING");
+        assert_eq!(report.checks[10].status, CheckStatus::Warning);
+        assert_eq!(report.checks[10].code, "DNS_COUNTRY_SPLIT");
+        assert_eq!(report.overall_status, OverallStatus::Yellow);
+    }
+
+    /// UDP exits through another address than HTTP: a Warning in the 13th check.
+    #[tokio::test]
+    async fn evaluate_all_udp_through_another_address_is_a_warning() {
+        let env = env_with_udp(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"),
+            probe_locating("NL"),
+            FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            },
+            udp_exiting_as("198.51.100.77"),
+        );
+        let report = audit(env, rich_telemetry()).await;
+        let udp = &report.checks[12];
+        assert_eq!((udp.status, udp.code.as_str()), (CheckStatus::Warning, "UDP_STUN_MISMATCH"));
+        assert_eq!(report.overall_status, OverallStatus::Yellow);
+        assert!(report.trust_score <= 85);
+    }
+
+    /// A closed UDP is not a leak and, as an auxiliary check, does not stop the automatic admit.
+    #[tokio::test]
+    async fn evaluate_all_silent_udp_is_unknown_and_keeps_the_admit() {
+        let env = env_with_udp(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"),
+            probe_locating("NL"),
+            FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            },
+            FakeUdp::new(),
+        );
+        let report = audit(env, rich_telemetry()).await;
+        let udp = &report.checks[12];
+        assert_eq!((udp.status, udp.reason), (CheckStatus::Unknown, Some(UnknownReason::Timeout)));
+        assert_eq!((report.unknown_count, report.incomplete), (1, true));
+        assert_eq!(report.overall_status, OverallStatus::Green);
+        assert_eq!(report.trust_score, 94);
+    }
+
+    /// The same exit address is probed over UDP once per minute (and the DNS resolver once per
+    /// audit round): repeated audits do not repeat the network work.
+    #[tokio::test]
+    async fn evaluate_all_repeated_audits_reuse_the_probes() {
+        let udp = Arc::new(udp_exiting_as("203.0.113.9"));
+        let dns = Arc::new(with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"));
+        let env = AuditEnv {
+            dns: dns.clone(),
+            probe: Arc::new(probe_locating("NL")),
+            udp: udp.clone(),
+            system: Arc::new(FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            }),
+        };
+        let auditor = Auditor::with_env(env).unwrap();
+        auditor.resolver.set_cached(rich_telemetry()).await;
+        let state = AppState::new_in_memory();
+        for provider in [ProviderId::Anthropic, ProviderId::Anthropic] {
+            auditor.evaluate_all(provider, &state, false).await.unwrap();
+        }
+        assert_eq!(udp.calls(), 2, "two STUN servers, asked once");
+    }
+
+    /// Google Public DNS: the resolver check is Ok, the country check is not applicable (not
+    /// counted, not penalised), so the report is complete and Green-100.
+    #[tokio::test]
+    async fn evaluate_all_public_resolver_is_ok_and_its_country_not_applicable() {
+        let probe = FakeProbe::body(200, "loc=NL\n").with_route(
+            "ipwho.is",
+            HttpProbeOutcome::Response {
+                status: 200,
+                body: "{\"success\":true,\"country_code\":\"US\",\"connection\":{\"asn\":15169,\"org\":\"Google LLC\"}}".into(),
+            },
+        );
+        let env = env_with_udp(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "74.125.40.10"),
+            probe,
+            FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            },
+            udp_exiting_as("203.0.113.9"),
+        );
+        let report = audit(env, rich_telemetry()).await;
+        assert_eq!(report.checks[6].code, "DNS_PUBLIC_RESOLVER");
+        assert!(report.checks[6].status.is_ok());
+        assert!(report.checks[10].is_not_applicable(), "{:?}", report.checks[10]);
+        assert_eq!((report.unknown_count, report.applicable_count), (0, 9));
+        assert!(!report.incomplete);
+        assert_eq!((report.trust_score, report.overall_status), (100, OverallStatus::Green));
     }
 }
