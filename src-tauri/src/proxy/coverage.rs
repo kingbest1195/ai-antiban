@@ -11,6 +11,7 @@
 //! Everything that touches the OS (`lsof` / `netstat` / `tasklist` / `ss`, `Platform`, files)
 //! goes through a seam, so the tests feed canned output and fakes instead of starting processes.
 
+use crate::state::CliMode;
 use crate::sysproxy::FileCtx;
 use crate::sysproxy::fs::Fs;
 use crate::sysproxy::platform::{Platform, PlatformError};
@@ -95,6 +96,10 @@ pub struct AppCoverageItem {
 pub struct CoverageSnapshot {
     pub sysproxy_enabled: bool,
     pub cli_protection_enabled: bool,
+    /// How command-line tools are covered: `"ai_only"` (only Claude Code, Gemini CLI and the
+    /// editors; `node` / `python` / `curl` are not covered) or `"global_terminal"` (the shell
+    /// profiles carry the proxy too).
+    pub cli_mode: CliMode,
     pub chained_proxy: Option<String>,
     /// Real address of the gateway (`127.0.0.1:<port>`).
     pub gateway_addr: Option<String>,
@@ -198,6 +203,8 @@ pub struct CoverageTracker {
     lookups: Mutex<LookupState>,
     gateway: Mutex<Option<SocketAddr>>,
     facts: Mutex<Option<(u64, ConfigFacts)>>,
+    /// The CLI mode the facts are computed for (see [`CoverageSnapshot::cli_mode`]).
+    cli_mode: Mutex<CliMode>,
     clock: Clock,
     probe: Arc<dyn SystemProbe>,
     os: Os,
@@ -227,6 +234,7 @@ impl CoverageTracker {
             lookups: Mutex::new(LookupState::default()),
             gateway: Mutex::new(None),
             facts: Mutex::new(None),
+            cli_mode: Mutex::new(CliMode::default()),
             clock,
             probe,
             os,
@@ -249,6 +257,26 @@ impl CoverageTracker {
 
     pub fn gateway_addr(&self) -> Option<SocketAddr> {
         self.gateway.lock().ok().and_then(|g| *g)
+    }
+
+    /// Tells the tracker how command-line tools are covered right now; a change drops the cached
+    /// facts so the next snapshot reads them again.
+    pub fn set_cli_mode(&self, mode: CliMode) {
+        let changed = match self.cli_mode.lock() {
+            Ok(mut g) => {
+                let changed = *g != mode;
+                *g = mode;
+                changed
+            }
+            Err(_) => false,
+        };
+        if changed && let Ok(mut f) = self.facts.lock() {
+            *f = None;
+        }
+    }
+
+    pub fn cli_mode(&self) -> CliMode {
+        self.cli_mode.lock().map(|g| *g).unwrap_or_default()
     }
 
     /// Records an incoming connection from `peer_port`. Never blocks the tunnel: the OS lookup
@@ -424,6 +452,7 @@ impl CoverageTracker {
     pub(crate) fn snapshot(&self, env: &CoverageEnv<'_>, force: bool) -> CoverageSnapshot {
         let now = self.now_ms();
         let gateway = self.gateway_addr();
+        let cli_mode = self.cli_mode();
 
         let facts = {
             let mut guard = self.facts.lock().unwrap_or_else(|e| e.into_inner());
@@ -434,7 +463,7 @@ impl CoverageTracker {
                 None => false,
             };
             if !fresh {
-                *guard = Some((now, compute_config_facts(env, gateway)));
+                *guard = Some((now, compute_config_facts(env, gateway, cli_mode)));
             }
             guard.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
         };
@@ -526,6 +555,7 @@ impl CoverageTracker {
         CoverageSnapshot {
             sysproxy_enabled: env.sysproxy_enabled,
             cli_protection_enabled: env.cli_protection_enabled,
+            cli_mode,
             chained_proxy: env.chained_proxy.clone(),
             gateway_addr: facts.gateway.map(|g| g.to_string()),
             pac_url: facts.gateway.map(pac_url_for),
@@ -634,7 +664,11 @@ fn steps_of(keys: &[&str]) -> Vec<String> {
     keys.iter().map(|k| k.to_string()).collect()
 }
 
-fn compute_config_facts(env: &CoverageEnv<'_>, gateway: Option<SocketAddr>) -> ConfigFacts {
+fn compute_config_facts(
+    env: &CoverageEnv<'_>,
+    gateway: Option<SocketAddr>,
+    cli_mode: CliMode,
+) -> ConfigFacts {
     let mut facts = ConfigFacts {
         gateway,
         apps: HashMap::new(),
@@ -711,21 +745,7 @@ fn compute_config_facts(env: &CoverageEnv<'_>, gateway: Option<SocketAddr>) -> C
                     ),
                 }
             }
-            "cli" => {
-                if env.cli_protection_enabled {
-                    (
-                        CoverageStatus::Configured,
-                        steps_of(&[steps::REOPEN_TERMINAL]),
-                        "Защита терминала включена (действует в новых терминалах)".to_string(),
-                    )
-                } else {
-                    (
-                        CoverageStatus::Off,
-                        steps_of(&[steps::ENABLE_PROTECTION, steps::SET_ENV_PROXY]),
-                        "Защита терминала не включена".to_string(),
-                    )
-                }
-            }
+            "cli" => cli_fact(id, env, gateway, cli_mode),
             _ => (
                 CoverageStatus::Unknown,
                 Vec::new(),
@@ -744,6 +764,107 @@ fn compute_config_facts(env: &CoverageEnv<'_>, gateway: Option<SocketAddr>) -> C
         );
     }
     facts
+}
+
+/// Settings file of the AI command-line clients that Zastava configures (`ai_only`).
+fn agent_settings_path(ctx: &FileCtx, id: &str) -> Option<PathBuf> {
+    match id {
+        "claude-code" => Some(ctx.claude_settings()),
+        "gemini-cli" => Some(ctx.gemini_settings()),
+        _ => None,
+    }
+}
+
+/// `env.HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` of a Claude Code / Gemini CLI `settings.json`
+/// against the gateway port. A missing file is `Off`; an unreadable one is `Unknown`.
+fn agent_verdict(ctx: &FileCtx, path: &Path, gateway_port: u16) -> Verdict {
+    let text = match ctx.fs.read(path) {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(None) => return Verdict::Off,
+        Err(_) => return Verdict::Unknown,
+    };
+    let text = text.trim_start_matches('\u{feff}');
+    if text.trim().is_empty() {
+        return Verdict::Off;
+    }
+    let cleaned = crate::sysproxy::sanitize_jsonc(text);
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&cleaned) else {
+        return Verdict::Unknown;
+    };
+    let env = v.get("env");
+    let targets = ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"].iter().any(|k| {
+        env.and_then(|e| e.get(*k))
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| proxy_value_targets_gateway(p, gateway_port))
+    });
+    if targets {
+        Verdict::Configured
+    } else {
+        Verdict::Off
+    }
+}
+
+/// Status of a command-line application (`category == "cli"`) in the given CLI mode.
+///
+/// * `ai_only`: Claude Code and Gemini CLI are `Configured` only when their own `settings.json`
+///   carries the Zastava proxy; the general tools (`node`, `python`, `curl`) are not covered at all
+///   (`Off`, no "enable protection" step: it would not change anything).
+/// * `global_terminal`: the shell profiles carry the proxy, so every CLI follows the protection
+///   flag; a terminal opened before needs reopening.
+fn cli_fact(
+    id: &str,
+    env: &CoverageEnv<'_>,
+    gateway: Option<SocketAddr>,
+    mode: CliMode,
+) -> (CoverageStatus, Vec<String>, String) {
+    if mode == CliMode::GlobalTerminal {
+        return if env.cli_protection_enabled {
+            (
+                CoverageStatus::Configured,
+                steps_of(&[steps::REOPEN_TERMINAL]),
+                "Защита терминала включена (действует в новых терминалах)".to_string(),
+            )
+        } else {
+            (
+                CoverageStatus::Off,
+                steps_of(&[steps::ENABLE_PROTECTION, steps::SET_ENV_PROXY]),
+                "Защита терминала не включена".to_string(),
+            )
+        };
+    }
+    let verdict = match (env.files, gateway) {
+        (Some(ctx), Some(g)) => {
+            agent_settings_path(ctx, id).map(|path| agent_verdict(ctx, &path, g.port()))
+        }
+        _ if agent_settings_path_known(id) => Some(Verdict::Unknown),
+        _ => None,
+    };
+    match verdict {
+        Some(Verdict::Configured) => (
+            CoverageStatus::Configured,
+            Vec::new(),
+            "В settings.json прописан прокси Заставы (действует для новых сессий)".to_string(),
+        ),
+        Some(Verdict::Off) => (
+            CoverageStatus::Off,
+            steps_of(&[steps::ENABLE_PROTECTION, steps::SET_ENV_PROXY]),
+            "В settings.json нет прокси Заставы".to_string(),
+        ),
+        Some(Verdict::Unknown) => (
+            CoverageStatus::Unknown,
+            steps_of(&[steps::SET_ENV_PROXY]),
+            "Не удалось прочитать settings.json".to_string(),
+        ),
+        None => (
+            CoverageStatus::Off,
+            steps_of(&[steps::SET_ENV_PROXY]),
+            "Не покрывается в режиме «Только ИИ-клиенты и IDE»".to_string(),
+        ),
+    }
+}
+
+fn agent_settings_path_known(id: &str) -> bool {
+    matches!(id, "claude-code" | "gemini-cli")
 }
 
 fn same_pac(a: &str, b: &str) -> bool {

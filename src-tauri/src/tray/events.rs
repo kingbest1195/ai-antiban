@@ -17,7 +17,12 @@ pub fn handle_menu_event(
 ) {
     match id {
         "quit" => {
-            sysproxy::disable_all_sysproxy();
+            // What cannot be put back now stays in the ownership journal and is finished at the
+            // next start (or after the VPN lets go of its temporary DNS).
+            let report = sysproxy::cleanup_all_persistent_settings();
+            if report.has_failures() {
+                eprintln!("Застава: часть настроек будет восстановлена при следующем запуске");
+            }
             app.exit(0);
         }
         "show" => {
@@ -73,7 +78,10 @@ pub fn handle_menu_event(
         "toggle_sysproxy_tray" => {
             let active = sysproxy::is_sysproxy_active();
             if active {
-                sysproxy::disable_all_sysproxy();
+                let report = sysproxy::cleanup_all_persistent_settings();
+                if report.has_failures() {
+                    eprintln!("Застава: часть настроек будет восстановлена позже");
+                }
             } else if let Some(proxy_mgr) = app.try_state::<proxy::ProxyManager>() {
                 let pac_url = format!("http://{}/proxy.pac", proxy_mgr.server.bound_addr);
                 let _ = sysproxy::enable_sysproxy(&pac_url);
@@ -82,15 +90,25 @@ pub fn handle_menu_event(
         }
         "toggle_cli_tray" => {
             let active = sysproxy::is_cli_protection_enabled();
+            // Whether the switch really changed: a refused journal leaves everything as it was.
+            let mut now_active = active;
             if active {
-                sysproxy::disable_cli_protection();
+                let report = sysproxy::disable_cli_protection();
+                now_active = report.has_failures();
             } else if let Some(proxy_mgr) = app.try_state::<proxy::ProxyManager>() {
                 let addr = proxy_mgr.server.bound_addr.to_string();
-                let state = app.try_state::<state::AppState>();
-                let tz = state.map(|s| tauri::async_runtime::block_on(s.get_synced_ai_timezone())).flatten();
-                let _ = sysproxy::enable_cli_and_ide_protection_with_tz(&addr, tz.as_deref());
+                let (mode, tz) = match app.try_state::<state::AppState>() {
+                    Some(s) => {
+                        let data = tauri::async_runtime::block_on(s.get_data());
+                        (data.cli_mode, data.effective_sync_tz())
+                    }
+                    None => (state::CliMode::default(), None),
+                };
+                now_active =
+                    sysproxy::enable_cli_and_ide_protection_with(&addr, mode, tz.as_deref())
+                        .enabled;
             }
-            let _ = app.emit("tray://cli-toggled", !active);
+            let _ = app.emit("tray://cli-toggled", now_active);
         }
         "sync_tz_tray" => {
             if let Some(win) = app.get_webview_window("main") {

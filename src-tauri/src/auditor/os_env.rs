@@ -79,8 +79,8 @@ pub fn evaluate_system_timezone(
 /// [`evaluate_system_timezone`] through `system` (injectable for tests).
 ///
 /// The OS zone is compared with the zone of the exit IP by UTC offset (1 h tolerance). If the OS
-/// zone differs, but the zone synced for the AI tools equals the IP zone *and* the CLI/IDE
-/// protection that applies it is active, requests of those tools are covered.
+/// zone differs, but the zone synced for the AI tools equals the IP zone *and* the time zone /
+/// locale switch that applies it is on and applied, requests of those tools are covered.
 pub fn evaluate_system_timezone_with(
     system: &dyn SystemInfo,
     ip_timezone: Option<&str>,
@@ -98,19 +98,19 @@ pub fn evaluate_system_timezone_with(
     };
     let ip_tz = ip_timezone.map(str::trim).filter(|t| !t.is_empty());
 
-    // The synced zone counts only when it is actually applied (the protection is on), not merely
-    // remembered in the settings.
+    // The synced zone counts only when it is actually applied (the switch is on and the variables
+    // are in the AI tools' environment), not merely remembered in the settings.
     if let (Some(target), Some(synced)) = (ip_tz, synced_ai_tz.map(str::trim)) {
         let synced_matches_ip =
             synced.eq_ignore_ascii_case(target) || synced.replace('_', " ") == target.replace('_', " ");
         if synced_matches_ip
             && !zones_match(system, &system_tz, target).0
-            && system.cli_protection_active()
+            && system.sync_ai_tz_active()
         {
             return CheckResult::ok(
                 "TIMEZONE_SYNCED_AI",
                 format!(
-                    "Таймзона для ИИ-агентов (CLI/IDE) = {target}: применена через Заставу (защита терминала и IDE включена). Системный пояс ОС ({system_tz}) не менялся: браузеры и десктопные приложения видят его."
+                    "Таймзона для ИИ-агентов (CLI/IDE) = {target}: применена через Заставу (подмена часового пояса и локали включена). Системный пояс ОС ({system_tz}) не менялся: браузеры и десктопные приложения видят его."
                 ),
             );
         }
@@ -191,10 +191,19 @@ fn is_sanctioned_locale(raw: &str) -> bool {
     matches!(parts.next(), Some("RU" | "BY"))
 }
 
+/// Locale variables of this process that are read to look for a Russian / Belarusian marker
+/// (detection only: Zastava never exports `LC_ALL`, see `sysproxy`).
+const LOCALE_ENV_READ: [&str; 2] = ["LANG", "LC_ALL"];
+
 /// Evaluates Gate 12: Locale & Environment Hygiene.
-/// Looks at `LANG` / `LC_ALL` of this process and at the locale of the OS user settings
-/// (macOS `AppleLocale` / `AppleLanguages`, Windows regional settings): an application started
-/// from the Dock has no `LANG`, so the environment alone says nothing.
+/// Looks at the locale variables of this process (read only: Zastava never exports `LC_ALL`) and at
+/// the locale of the OS user settings (macOS `AppleLocale` / `AppleLanguages`, Windows regional
+/// settings): an application started from the Dock has no `LANG`, so the environment alone says
+/// nothing.
+///
+/// The override Zastava puts into the AI tools' environment (`LANG` and `LC_TIME` =
+/// `en_US.UTF-8`) counts only while the independent time zone / locale switch is on and applied;
+/// with the switch off the host locale decides, as if Zastava did nothing.
 pub fn evaluate_locale_env_hygiene(synced_ai_tz: Option<&str>) -> CheckResult {
     evaluate_locale_env_hygiene_with(&RealSystem, synced_ai_tz)
 }
@@ -204,15 +213,15 @@ pub fn evaluate_locale_env_hygiene_with(
     system: &dyn SystemInfo,
     synced_ai_tz: Option<&str>,
 ) -> CheckResult {
-    // The override of the CLI/IDE environment is real only while the protection is active.
-    if synced_ai_tz.is_some() && system.cli_protection_active() {
+    // The override of the AI tools' environment is real only while the switch is on and applied.
+    if synced_ai_tz.is_some() && system.sync_ai_tz_active() {
         return CheckResult::ok(
             "LOCALE_HYGIENE_CLEAN",
-            "Окружение CLI/IDE: Застава переопределяет локаль на en_US.UTF-8 (защита терминала и IDE включена). Локаль ОС для браузеров и приложений не менялась.",
+            "Окружение ИИ-инструментов (Claude, Gemini, терминал IDE): Застава задаёт LANG и LC_TIME = en_US.UTF-8 (подмена часового пояса и локали включена). Локаль ОС для браузеров и приложений не менялась.",
         );
     }
 
-    let env_values: Vec<(String, String)> = ["LANG", "LC_ALL"]
+    let env_values: Vec<(String, String)> = LOCALE_ENV_READ
         .iter()
         .filter_map(|name| {
             system
@@ -235,12 +244,12 @@ fn evaluate_locale_values(
         let (code, text, reason) = match os_locales {
             Err(SystemReadError::Unsupported) => (
                 "LOCALE_ENV_NOT_SET",
-                "Локаль не проверена: в окружении Заставы не заданы LANG и LC_ALL, а языковые настройки ОС на этой системе не читаются.",
+                "Локаль не проверена: в окружении Заставы не задана локаль (LANG), а языковые настройки ОС на этой системе не читаются.",
                 UnknownReason::NoData,
             ),
             _ => (
                 "LOCALE_NOT_READ",
-                "Локаль не проверена: LANG и LC_ALL не заданы, языковые настройки ОС прочитать не удалось.",
+                "Локаль не проверена: переменная LANG не задана, языковые настройки ОС прочитать не удалось.",
                 UnknownReason::NoData,
             ),
         };
@@ -264,7 +273,7 @@ fn evaluate_locale_values(
 
     let mut read = Vec::new();
     if !env_values.is_empty() {
-        read.push("LANG/LC_ALL процесса".to_string());
+        read.push("локаль процесса (LANG, LC_*)".to_string());
     }
     if !os_list.is_empty() {
         read.push(format!("языковые настройки ОС ({})", os_list.join(", ")));
@@ -438,7 +447,7 @@ mod tests {
         let far = |applied: bool| FakeSystem {
             timezone: Ok("Asia/Tokyo".into()),
             local_offset: Some(9 * 3600),
-            cli_protection: applied,
+            sync_ai_tz: applied,
             ..sys()
         };
         // Applied: Ok, even though the OS zone is far from the IP zone.
@@ -454,7 +463,7 @@ mod tests {
         let ru = |applied: bool| FakeSystem {
             timezone: Ok("Europe/Moscow".into()),
             local_offset: Some(3 * 3600),
-            cli_protection: applied,
+            sync_ai_tz: applied,
             ..sys()
         };
         assert_eq!(
@@ -508,7 +517,11 @@ mod tests {
     fn locale_env_and_os_both_clean_is_ok_and_names_its_sources() {
         let r = evaluate_locale_env_hygiene_with(&sys(), None);
         assert_eq!(r.status, CheckStatus::Ok);
-        assert!(r.message.contains("LANG/LC_ALL") && r.message.contains("en_US"), "{}", r.message);
+        assert!(
+            r.message.contains("локаль процесса") && r.message.contains("en_US"),
+            "{}",
+            r.message
+        );
         // The OS source alone is enough to say something, and the text says only that.
         let s = FakeSystem {
             env: HashMap::new(),
@@ -516,7 +529,7 @@ mod tests {
         };
         let r = evaluate_locale_env_hygiene_with(&s, None);
         assert_eq!(r.status, CheckStatus::Ok);
-        assert!(!r.message.contains("LANG/LC_ALL"), "{}", r.message);
+        assert!(!r.message.contains("локаль процесса"), "{}", r.message);
         // A Russian LANG in the environment is still a warning.
         let ru = evaluate_locale_values(&env(&[("LANG", "ru_RU.UTF-8")]), Ok(vec![]));
         assert_eq!(ru.status, CheckStatus::Warning);
@@ -527,7 +540,7 @@ mod tests {
         let ru_host = |applied: bool| FakeSystem {
             env: HashMap::new(),
             os_locales: Ok(vec!["ru_RU".into()]),
-            cli_protection: applied,
+            sync_ai_tz: applied,
             ..sys()
         };
         let r = evaluate_locale_env_hygiene_with(&ru_host(true), Some("Europe/Amsterdam"));
@@ -585,5 +598,117 @@ mod tests {
             ..sys()
         };
         assert_eq!(check_os_location_services_with(&failed).reason, Some(UnknownReason::InternalError));
+    }
+
+    // ---- time zone / locale switch (independent of the proxy protection) ----
+
+    fn ru_host(sync: bool) -> FakeSystem {
+        FakeSystem {
+            env: HashMap::new(),
+            os_locales: Ok(vec!["ru_RU".into()]),
+            sync_ai_tz: sync,
+            ..sys()
+        }
+    }
+
+    #[test]
+    fn locale_branches_of_the_synced_override() {
+        // On and applied (LANG + LC_TIME): Ok, and the text says what was checked.
+        let r = evaluate_locale_env_hygiene_with(&ru_host(true), Some("Europe/Amsterdam"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "LOCALE_HYGIENE_CLEAN")
+        );
+        assert!(
+            r.message.contains("LANG") && r.message.contains("LC_TIME"),
+            "{}",
+            r.message
+        );
+        // Switch off or not applied (the seam says no): the host locale decides, with no credit.
+        let r = evaluate_locale_env_hygiene_with(&ru_host(false), Some("Europe/Amsterdam"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Warning, "LOCALE_ENV_SANCTIONED_MARKER")
+        );
+        // No zone synced at all: the same.
+        assert_eq!(
+            evaluate_locale_env_hygiene_with(&ru_host(true), None).status,
+            CheckStatus::Warning
+        );
+        // A clean host stays Ok with the switch off, and says what it read.
+        let clean = FakeSystem {
+            sync_ai_tz: false,
+            ..sys()
+        };
+        let r = evaluate_locale_env_hygiene_with(&clean, Some("Europe/Amsterdam"));
+        assert_eq!(r.status, CheckStatus::Ok);
+        // Nothing readable is Unknown, not Ok.
+        let offline = FakeSystem::offline();
+        let r = evaluate_locale_env_hygiene_with(&offline, Some("Europe/Amsterdam"));
+        assert_eq!(r.status, CheckStatus::Unknown);
+    }
+
+    #[test]
+    fn no_text_of_the_locale_or_time_zone_checks_mentions_lc_all_or_the_proxy_protection() {
+        let mut texts = Vec::new();
+        for sync in [true, false] {
+            for host in [
+                ru_host(sync),
+                FakeSystem {
+                    sync_ai_tz: sync,
+                    ..sys()
+                },
+                FakeSystem::offline(),
+            ] {
+                texts.push(
+                    evaluate_locale_env_hygiene_with(&host, Some("Europe/Amsterdam")).message,
+                );
+                texts.push(evaluate_locale_env_hygiene_with(&host, None).message);
+            }
+        }
+        let far = FakeSystem {
+            timezone: Ok("Asia/Tokyo".into()),
+            local_offset: Some(9 * 3600),
+            sync_ai_tz: true,
+            ..sys()
+        };
+        texts.push(
+            evaluate_system_timezone_with(&far, Some("Europe/Amsterdam"), Some("Europe/Amsterdam"))
+                .message,
+        );
+        for t in texts {
+            assert!(!t.contains("LC_ALL"), "{t}");
+            assert!(!t.contains("защита терминала и IDE"), "{t}");
+        }
+    }
+
+    #[test]
+    fn the_synced_zone_credit_follows_the_switch_not_the_proxy_protection() {
+        let far = |sync: bool| FakeSystem {
+            timezone: Ok("Asia/Tokyo".into()),
+            local_offset: Some(9 * 3600),
+            sync_ai_tz: sync,
+            ..sys()
+        };
+        let ok = evaluate_system_timezone_with(
+            &far(true),
+            Some("Europe/Amsterdam"),
+            Some("Europe/Amsterdam"),
+        );
+        assert_eq!(
+            (ok.status, ok.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        );
+        assert!(
+            ok.message.contains("подмена часового пояса и локали"),
+            "{}",
+            ok.message
+        );
+        let off = evaluate_system_timezone_with(
+            &far(false),
+            Some("Europe/Amsterdam"),
+            Some("Europe/Amsterdam"),
+        );
+        assert_eq!(off.status, CheckStatus::Warning);
     }
 }
