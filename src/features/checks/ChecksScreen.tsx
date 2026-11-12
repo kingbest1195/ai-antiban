@@ -1,8 +1,8 @@
 import { useState } from "react";
-import type { AppStateData, CoverageSnapshot, RiskReport } from "../../types";
+import type { AppStateData, CoverageSnapshot, ProviderId, RiskReport } from "../../types";
 import { Badge, Button, Card, ExpandRow, Link, Mono, Row, Rows, Section, Skeleton } from "../../ui";
 import type { IconName, Tone } from "../../ui";
-import { status as words } from "../../shared/copy/ru";
+import { providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckId } from "../../shared/copy/ru";
 import { buildChecks, isCriticalStatus } from "./checksModel";
@@ -11,6 +11,8 @@ import "./checks.css";
 
 export interface ChecksScreenProps {
   report: RiskReport | null;
+  /** Сервис, чей отчёт показан (переход из «Обзора»); без него показывается худший отчёт. */
+  provider?: ProviderId;
   state: AppStateData | null;
   coverageSnapshot?: CoverageSnapshot | null;
   onNavigateToGuide: (guideId?: string) => void;
@@ -72,6 +74,7 @@ const needsLook = (item: CheckItem) => item.cls !== "ok" && item.cls !== "na";
 /** Экран «Проверки»: вердикт, проверки по смыслу, тесты защиты. */
 export function ChecksScreen({
   report,
+  provider,
   state,
   coverageSnapshot,
   onNavigateToGuide,
@@ -115,6 +118,7 @@ export function ChecksScreen({
 
   return (
     <div className="zs-stack">
+      {provider && <p className="zs-t-caption">{copy.forService(providerCopy[provider].name)}</p>}
       <Card>
         <div className="zs-verdict__head">
           <div className="zs-verdict__body">

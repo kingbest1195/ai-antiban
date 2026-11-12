@@ -37,6 +37,11 @@
 .zs-tabs{display:flex;gap:2px;padding:4px;border-radius:var(--radius-md);background:var(--bg-1)}
 .zs-tab{flex:1 1 auto;height:32px;padding:0 10px;border:0;border-radius:var(--radius-sm);background:none;color:var(--ink-2);font:inherit;font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap}
 .zs-tab:hover{color:var(--ink)}
+.zs-tab__badge{display:inline-block;vertical-align:middle;margin-left:var(--space-1);flex:none}
+.zs-tab__badge--danger,.zs-tab__badge--warn{width:8px;height:8px;border-radius:var(--radius-pill)}
+.zs-tab__badge--danger{background:var(--danger)}
+.zs-tab__badge--warn{background:var(--warn)}
+.zs-tab__badge--count{min-width:16px;height:16px;padding:0 var(--space-1);border-radius:var(--radius-pill);background:var(--danger-soft);color:var(--danger-text);font-size:11px;line-height:16px;font-weight:600;text-align:center}
 .zs-tab[aria-selected=true]{background:var(--bg-3);color:var(--ink);font-weight:600}
 
 /* Badge */

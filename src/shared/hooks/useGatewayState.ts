@@ -3,6 +3,7 @@ import type { AppStateData, CoverageSnapshot, ProviderId, RiskReport, RoutesSnap
 import { auditConnection, fetchAppState, getCoverageSnapshot, getRoutesSnapshot, getSysproxyStatus } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
+import { pickWorstReport } from "../../features/checks/checksModel";
 
 /** Возраст отчёта в минутах для подписи или null, если данные свежие. Вынесено для тестов. */
 export function dataAge(ageMs: number, auditFailed: boolean): number | null {
@@ -152,6 +153,8 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   }, []);
 
   const activeReport = reports.anthropic || reports.openai || reports.gemini || null;
+  /** Худший из трёх отчётов: его показывает «Проверки» без выбранного сервиса, по нему считается бейдж вкладки. */
+  const checksReport = useMemo(() => pickWorstReport(reports)?.report ?? null, [reports]);
 
   // Самолечение на старте: если первый аудит упёрся в холодный старт сети/PAC и вернулся без IP или провайдера,
   // перепроверяем сами, до шести раз с шагом 1,5 с.
@@ -225,6 +228,7 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     auditError,
     dataAgeMinutes,
     activeReport,
+    checksReport,
     currentIp,
     currentCountry,
     trustScore,

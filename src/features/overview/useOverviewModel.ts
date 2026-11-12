@@ -1,9 +1,9 @@
 import { useMemo } from "react";
 import type { AppStateData, CheckResult, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
 import { checksWord } from "../../shared/lib/format";
-import { classify, countChecks, isYellowOnlyUnknown } from "../checks/checksModel";
+import { classify, countChecks, failedChecks, isYellowOnlyUnknown, pickWorstReport } from "../checks/checksModel";
 import { overview as copy } from "../../shared/copy/ru";
-import type { HeroTone } from "../../ui";
+import type { HeroTone, TabItem } from "../../ui";
 
 export type ServiceStatus = "ok" | "allowed" | "warn" | "critical" | "missing" | "checking";
 
@@ -158,4 +158,23 @@ export function useOverviewModel({
       services,
     };
   }, [reports, activeReport, state, currentIp, sysproxyActive, killswitchFrozen, updateInfo, refreshing]);
+}
+
+/** Бейджи вкладок: красная точка на «Обзоре» только когда трафик не идёт (stopped, frozen); на «Проверках» число непройденных проверок худшего отчёта, ноль — без бейджа. */
+export function tabBadges(
+  banner: BannerKind | null,
+  reports: Partial<Record<ProviderId, RiskReport>>,
+  state: AppStateData | null,
+): { overview?: TabItem["badge"]; checks?: TabItem["badge"] } {
+  const out: { overview?: TabItem["badge"]; checks?: TabItem["badge"] } = {};
+  if (banner === "stopped" || banner === "frozen") out.overview = "danger";
+  const worst = pickWorstReport(reports);
+  const n = worst ? failedChecks(worst.report, state).length : 0;
+  if (n > 0) out.checks = n;
+  return out;
+}
+
+/** Нужно ли подтверждение перед «Разрешить принудительно»: только для красного сервиса и для адреса из РФ, где запросы пойдут без проверки. */
+export function needsForceConfirm(status: ServiceStatus, report: RiskReport | null | undefined): boolean {
+  return status === "critical" || report?.telemetry?.country_code === "RU";
 }

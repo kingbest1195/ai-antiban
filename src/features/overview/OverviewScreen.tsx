@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
 import type { AppStateData, CoverageSnapshot, GatewayStatsSnapshot, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
 import {
@@ -5,7 +6,9 @@ import {
   Banner,
   Button,
   Card,
+  ConfirmModal,
   EmptyState,
+  ExpandRow,
   Menu,
   Row,
   Rows,
@@ -20,7 +23,8 @@ import type { IconName, MenuEntry } from "../../ui";
 import { checks as checksCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import { formatNumber } from "../../shared/lib/format";
-import { useOverviewModel } from "./useOverviewModel";
+import { failedChecks } from "../checks/checksModel";
+import { needsForceConfirm, useOverviewModel } from "./useOverviewModel";
 import type { ServiceModel } from "./useOverviewModel";
 
 export interface OverviewScreenProps {
@@ -52,6 +56,8 @@ export interface OverviewScreenProps {
   onUnblockProvider: (provider: ProviderId) => void;
 
   onRetry: () => void;
+  /** «Что исправить» у сервиса: открыть «Проверки» с его отчётом. */
+  onFixService: (provider: ProviderId) => void;
   onOpenChecks: () => void;
   onOpenTimezone: () => void;
   onOpenUpdate: () => void;
@@ -86,6 +92,18 @@ export function OverviewScreen(props: OverviewScreenProps) {
     updateInfo,
     refreshing,
   });
+
+  // Подтверждение «Разрешить принудительно»: только для красных сервисов и адреса из РФ.
+  const [pendingAllow, setPendingAllow] = useState<ProviderId | null>(null);
+  const runAllow = (provider: ProviderId, blockedByUser: boolean) => {
+    // Как раньше: снятие блока — сначала unblock (если блок поставлен вручную), затем разрешение на сессию.
+    if (blockedByUser) props.onUnblockProvider(provider);
+    props.onAllowProvider(provider);
+  };
+  const requestAllow = (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => {
+    if (needsForceConfirm(service.status, report)) setPendingAllow(service.id);
+    else runAllow(service.id, blockedByUser);
+  };
 
   const loading = !activeReport && !auditError;
   const failed = !activeReport && Boolean(auditError);
@@ -140,8 +158,10 @@ export function OverviewScreen(props: OverviewScreenProps) {
                   <ServiceRow
                     key={service.id}
                     service={service}
-                    onAllow={props.onAllowProvider}
-                    onUnblock={props.onUnblockProvider}
+                    report={reports[service.id]}
+                    state={state}
+                    onFix={props.onFixService}
+                    onAllow={requestAllow}
                     blockedByUser={Boolean(state?.blocked_providers?.includes(service.id))}
                   />
                 ))}
@@ -150,6 +170,19 @@ export function OverviewScreen(props: OverviewScreenProps) {
           </Card>
         </Section>
       )}
+
+      <ConfirmModal
+        open={pendingAllow !== null}
+        title={pendingAllow ? copy.service.confirm.title(providerCopy[pendingAllow].name) : ""}
+        confirmLabel={copy.service.confirm.action}
+        onCancel={() => setPendingAllow(null)}
+        onConfirm={() => {
+          if (pendingAllow) runAllow(pendingAllow, Boolean(state?.blocked_providers?.includes(pendingAllow)));
+          setPendingAllow(null);
+        }}
+      >
+        {pendingAllow ? copy.service.confirm.text(providerCopy[pendingAllow].name) : ""}
+      </ConfirmModal>
 
       <Section title={copy.sectionProtected}>
         <Card>
@@ -392,21 +425,25 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
 
 function ServiceRow({
   service,
+  report,
+  state,
   blockedByUser,
+  onFix,
   onAllow,
-  onUnblock,
 }: {
   service: ServiceModel;
+  report: RiskReport | undefined;
+  state: AppStateData | null;
   blockedByUser: boolean;
-  onAllow: (provider: ProviderId) => void;
-  onUnblock: (provider: ProviderId) => void;
+  onFix: (provider: ProviderId) => void;
+  onAllow: (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => void;
 }) {
+  const [open, setOpen] = useState(false);
   const meta = providerCopy[service.id];
   const { status } = service;
 
   let badge: ReactNode;
   let note: string | null = null;
-  let actionLabel: string | null = null;
   let tone: "neutral" | "ok" | "warn" | "danger" = "ok";
 
   switch (status) {
@@ -423,8 +460,6 @@ function ServiceRow({
           {words.review}
         </Badge>
       );
-      note = copy.service.review;
-      actionLabel = copy.service.allow;
       tone = "warn";
       break;
     case "critical":
@@ -433,8 +468,6 @@ function ServiceRow({
           {words.blocked}
         </Badge>
       );
-      note = copy.service.blocked;
-      actionLabel = copy.service.unblock;
       tone = "danger";
       break;
     case "checking":
@@ -452,30 +485,53 @@ function ServiceRow({
       break;
   }
 
-  const handleAction = () => {
-    // Как раньше: снятие блока — сначала unblock (если блок поставлен вручную), затем разрешение на сессию.
-    if (blockedByUser) onUnblock(service.id);
-    onAllow(service.id);
-  };
+  const sub = (
+    <>
+      <span className="block">{meta.domains}</span>
+      {note && <span className="block">{note}</span>}
+    </>
+  );
+
+  // Решение по сервису принимается здесь: раскрываем только строки, где есть проблема.
+  if (status !== "warn" && status !== "critical") {
+    return (
+      <Row
+        icon={status === "ok" || status === "allowed" || status === "checking" ? "shield" : "alert"}
+        tone={tone}
+        title={meta.name}
+        sub={sub}
+        trail={badge}
+      />
+    );
+  }
+
+  const first = report ? failedChecks(report, state)[0] : undefined;
+  const reason = first ? `${first.title}. ${first.result.message}` : status === "critical" ? copy.service.blocked : copy.service.noReason;
 
   return (
-    <Row
-      icon={status === "ok" || status === "allowed" || status === "checking" ? "shield" : "alert"}
+    <ExpandRow
+      icon="alert"
       tone={tone}
       title={meta.name}
-      sub={
-        <>
-          <span className="block">{meta.domains}</span>
-          {note && <span className="block">{note}</span>}
-          {actionLabel && (
-            <Button variant="quiet" size="sm" className="-ml-3" onClick={handleAction}>
-              {actionLabel}
-            </Button>
-          )}
-        </>
-      }
+      sub={sub}
       trail={badge}
-    />
+      open={open}
+      onToggle={() => setOpen((v) => !v)}
+      detailLabel={copy.service.detailLabel}
+    >
+      <p className="zs-t-body">{reason}</p>
+      <div className="flex flex-wrap gap-2">
+        {report && (
+          <Button size="sm" onClick={() => onFix(service.id)}>
+            {copy.service.fix}
+          </Button>
+        )}
+        <Button variant="quiet" size="sm" onClick={() => onAllow(service, report, blockedByUser)}>
+          {blockedByUser ? copy.service.unblock : copy.service.forceAllow}
+        </Button>
+      </div>
+      <p className="zs-t-caption">{copy.service.forceHint}</p>
+    </ExpandRow>
   );
 }
 
