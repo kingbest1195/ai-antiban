@@ -4,6 +4,7 @@ export { backup } from "./backup";
 export { checks } from "./checks";
 export type { CheckId, CheckGroupId } from "./checks";
 export { common } from "./common";
+export { coverage } from "./coverage";
 export { connect } from "./connect";
 export { crashTest } from "./crash-test";
 export { guides } from "./guides";

@@ -5,6 +5,8 @@ import type { IconName, Tone } from "../../ui";
 import { providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckId } from "../../shared/copy/ru";
+import type { ShowToast } from "../../shared/hooks";
+import { CoverageSection } from "../coverage/CoverageSection";
 import { buildChecks, isCriticalStatus } from "./checksModel";
 import type { CheckItem } from "./checksModel";
 import "./checks.css";
@@ -15,6 +17,11 @@ export interface ChecksScreenProps {
   provider?: ProviderId;
   state: AppStateData | null;
   coverageSnapshot?: CoverageSnapshot | null;
+  /** Переключатели защиты для кнопки «Включить защиту» в инструкциях; без них кнопка скрыта. */
+  onToggleSysproxy?: () => void | Promise<void>;
+  onToggleCli?: () => void | Promise<void>;
+  /** Тосты секции покрытия (например, ошибка копирования адреса). */
+  onToast?: ShowToast;
   onNavigateToGuide: (guideId?: string) => void;
   onSimulate: () => void;
   onPinCurrentIp: (ip: string) => void;
@@ -42,12 +49,13 @@ const ICONS: Record<CheckId, IconName> = {
   wifi_geo: "shield",
   timezone: "refresh",
   locale_hygiene: "term",
+  udp_stun: "zap",
 };
 
 /** Значок «не удалось проверить». */
 const UNKNOWN_ICON: IconName = "help";
 
-const LEAK_CHECKS: string[] = ["ipv6", "dns", "dns_country", "wifi_geo"];
+const LEAK_CHECKS: string[] = ["ipv6", "dns", "dns_country", "wifi_geo", "udp_stun"];
 
 interface StatusView {
   tone: Tone | "neutral";
@@ -77,6 +85,9 @@ export function ChecksScreen({
   provider,
   state,
   coverageSnapshot,
+  onToggleSysproxy,
+  onToggleCli,
+  onToast,
   onNavigateToGuide,
   onSimulate,
   onPinCurrentIp,
@@ -176,53 +187,13 @@ export function ChecksScreen({
         </Section>
       ))}
 
-      {coverageSnapshot && (
-        <Section title="Покрытие и цепочка PAC">
-          <Card>
-            <Rows>
-              {coverageSnapshot.chained_proxy && (
-                <Row
-                  icon="pulse"
-                  title={`Цепочка PAC: не-ИИ трафик идёт через ${coverageSnapshot.chained_proxy}`}
-                  sub="Маршрутизация обычного веб-трафика через внешний прокси"
-                  trail={<Badge tone="info">Внешний прокси</Badge>}
-                />
-              )}
-              {coverageSnapshot.apps.map((item) => {
-                const icon: IconName =
-                  item.category === "browser"
-                    ? "globe"
-                    : item.category === "desktop"
-                    ? "shield"
-                    : "term";
-
-                let badge = <Badge tone="warn">Не настроено</Badge>;
-                if (!item.installed && item.requests_seen === 0) {
-                  badge = <Badge tone="neutral">Не установлено</Badge>;
-                } else if (item.status === "verified") {
-                  badge = (
-                    <Badge tone="ok" icon="check">
-                      Проверено ({item.requests_seen})
-                    </Badge>
-                  );
-                } else if (item.status === "configured") {
-                  badge = <Badge tone="ok">Настроено</Badge>;
-                }
-
-                return (
-                  <Row
-                    key={item.id}
-                    icon={icon}
-                    title={item.name}
-                    sub={item.detail}
-                    trail={badge}
-                  />
-                );
-              })}
-            </Rows>
-          </Card>
-        </Section>
-      )}
+      <CoverageSection
+        variant="checks"
+        initialSnapshot={coverageSnapshot}
+        onToggleSysproxy={onToggleSysproxy}
+        onToggleCli={onToggleCli}
+        onToast={onToast}
+      />
 
       <Section title={copy.tests.title}>
         <Card>
@@ -277,7 +248,14 @@ function CheckRow({ item, view, open, onToggle, onAction, onGuide, onRetry, retr
           <p className="zs-check__message">{copy.reasons[item.missing ? "no_data" : (item.result.reason ?? "unknown")]}</p>
         )}
         <p className="zs-check__message">{item.result.message}</p>
+        {item.result.measured_via && <p className="zs-check__label">{copy.source(item.result.measured_via)}</p>}
       </div>
+      {item.advice && (
+        <div>
+          <p className="zs-check__label">{copy.detail.todo}</p>
+          <p className="zs-check__message">{item.advice}</p>
+        </div>
+      )}
       {item.data.length > 0 && (
         <dl className="zs-check__data">
           {item.data.map((d) => (

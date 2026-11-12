@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Badge, Banner, Button, Card, Segmented } from "../../ui";
 import { guides as copy } from "../../shared/copy/ru";
-import { openOsDatetimeSettings, syncAiAgentsTimezone } from "../../utils/api";
+import { openOsDatetimeSettings, setSyncAiTzEnabled, syncAiAgentsTimezone } from "../../utils/api";
 import { CopyBlock } from "./CopyBlock";
 import { CMD_TZ_MAC, PROXY_EXPORT_LINE } from "./commands";
 import { useGuide } from "./context";
@@ -47,6 +47,8 @@ function TimezoneCard() {
     const tz = currentTimezone || "Europe/London";
     setSyncing(true);
     try {
+      // Явное нажатие кнопки: сначала включаем подмену, иначе зона только сохранится.
+      await setSyncAiTzEnabled(true);
       const res = await syncAiAgentsTimezone(tz);
       setSynced(true);
       onToast?.(copy.toast.tzDone, res, "success");

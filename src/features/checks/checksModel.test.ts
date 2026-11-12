@@ -28,8 +28,8 @@ function report(checks: CheckResult[], over: Partial<RiskReport> = {}): RiskRepo
   };
 }
 
-const twelve = (over: Record<number, CheckResult> = {}) =>
-  Array.from({ length: 12 }, (_, i) => over[i] ?? ok(`C${i}`));
+const thirteen = (over: Record<number, CheckResult> = {}) =>
+  Array.from({ length: 13 }, (_, i) => over[i] ?? ok(`C${i}`));
 
 describe("classify", () => {
   it("unknown никогда не ok", () => {
@@ -49,45 +49,70 @@ describe("classify", () => {
 
 describe("buildChecks", () => {
   it("счётчики ok/unknown/na/warn/crit; na вне M", () => {
-    const r = report(twelve({ 3: warn(), 5: crit(), 6: unknown(), 8: unknown("not_applicable") }));
+    const r = report(thirteen({ 3: warn(), 5: crit(), 6: unknown(), 8: unknown("not_applicable") }));
     const { counts, total } = buildChecks(r, null);
-    expect(counts).toMatchObject({ ok: 8, warn: 1, crit: 1, unknown: 1, na: 1, applicable: 11 });
-    expect(total).toBe(11);
+    expect(counts).toMatchObject({ ok: 9, warn: 1, crit: 1, unknown: 1, na: 1, applicable: 12 });
+    expect(total).toBe(12);
   });
 
   it("«M из M» невозможно при unknown > 0", () => {
-    const { counts, total } = buildChecks(report(twelve({ 6: unknown() })), null);
+    const { counts, total } = buildChecks(report(thirteen({ 6: unknown() })), null);
     expect(counts.unknown).toBe(1);
     expect(counts.ok).toBeLessThan(total);
   });
 
   it("потеря проверки не уменьшает M: показывается «Нет данных»", () => {
-    const checks = twelve();
-    checks.length = 10; // нет dns_country и locale_hygiene
+    const checks = thirteen();
+    checks.length = 10; // нет dns_country, locale_hygiene и udp_stun
     const { items, counts, total } = buildChecks(report(checks), null);
     const missing = items.filter((i) => i.missing);
-    expect(missing.map((i) => i.id).sort()).toEqual(["dns_country", "locale_hygiene"]);
-    expect(counts.unknown).toBe(2);
-    expect(total).toBe(12);
+    expect(missing.map((i) => i.id).sort()).toEqual(["dns_country", "locale_hygiene", "udp_stun"]);
+    expect(counts.unknown).toBe(3);
+    expect(total).toBe(13);
   });
 
   it("проверка сверх известных id не пропадает и входит в M", () => {
-    const { items, total, groups } = buildChecks(report([...twelve(), unknown()]), null);
+    const { items, total, groups } = buildChecks(report([...thirteen(), unknown()]), null);
     const extra = items.find((i) => i.id.startsWith("extra_"));
     expect(extra).toBeDefined();
     expect(extra?.group).toBe("leaks");
     expect(groups.find((g) => g.id === "leaks")?.items).toContain(extra);
-    expect(total).toBe(13);
+    expect(total).toBe(14);
   });
 
   it("M берётся из отчёта, не из константы", () => {
-    const { total } = buildChecks(report(twelve(), { applicable_count: 14 }), null);
+    const { total } = buildChecks(report(thirteen(), { applicable_count: 14 }), null);
     expect(total).toBe(14);
+  });
+
+  it("13 id попадают ровно в одну группу, M берётся из отчёта, а не из константы", () => {
+    const { groups, items, total } = buildChecks(report(thirteen()), null);
+    const ids = items.map((i) => i.id);
+    expect(ids).toHaveLength(13);
+    expect(new Set(ids).size).toBe(13);
+    expect(ids).toContain("udp_stun");
+    // Каждый id встречается в группах ровно один раз.
+    const grouped = groups.flatMap((g) => g.items.map((i) => i.id));
+    expect(grouped.sort()).toEqual([...ids].sort());
+    expect(groups.find((g) => g.items.some((i) => i.id === "udp_stun"))?.id).toBe("leaks");
+    expect(total).toBe(13);
+    expect(buildChecks(report(thirteen(), { applicable_count: 15 }), null).total).toBe(15);
+  });
+
+  it("udp_stun: «что делать» только при замечании или «не удалось проверить»; источник доступен для показа", () => {
+    const via: CheckResult = { status: "warning", code: "UDP_STUN_MISMATCH", message: "m", measured_via: "stun:cloudflare+google" };
+    const warned = buildChecks(report(thirteen({ 12: via })), null).items.find((i) => i.id === "udp_stun");
+    expect(warned?.advice).toBeTruthy();
+    expect(warned?.result.measured_via).toBe("stun:cloudflare+google");
+    const unk = buildChecks(report(thirteen({ 12: unknown() })), null).items.find((i) => i.id === "udp_stun");
+    expect(unk?.advice).toBeTruthy();
+    const fine = buildChecks(report(thirteen()), null).items.find((i) => i.id === "udp_stun");
+    expect(fine?.advice).toBeNull();
   });
 
   it("число ответивших DNSBL-зон берётся из текста проверки", () => {
     const dnsbl: CheckResult = { status: "ok", code: "DNSBL_CLEAN", message: "Ответили 3 из 5 спам-баз." };
-    const { items } = buildChecks(report(twelve({ 3: dnsbl })), null);
+    const { items } = buildChecks(report(thirteen({ 3: dnsbl })), null);
     expect(items.find((i) => i.id === "dnsbl")?.data.some((d) => d.value === "3 из 5")).toBe(true);
   });
 });
@@ -99,27 +124,27 @@ describe("countChecks / isYellowOnlyUnknown", () => {
     });
   });
   it("жёлтый только из-за unknown", () => {
-    const r = report(twelve({ 6: unknown() }), { overall_status: "yellow" });
+    const r = report(thirteen({ 6: unknown() }), { overall_status: "yellow" });
     expect(isYellowOnlyUnknown(r, r.checks)).toBe(true);
-    const r2 = report(twelve({ 6: unknown(), 3: warn() }), { overall_status: "yellow" });
+    const r2 = report(thirteen({ 6: unknown(), 3: warn() }), { overall_status: "yellow" });
     expect(isYellowOnlyUnknown(r2, r2.checks)).toBe(false);
   });
 });
 
 describe("evaluateNetwork", () => {
   it("всё зелёное — «ok»", () => {
-    const r = report(twelve());
-    expect(evaluateNetwork({ anthropic: r }, r)).toMatchObject({ verdict: "ok", passed: 12, total: 12, unknown: 0 });
+    const r = report(thirteen());
+    expect(evaluateNetwork({ anthropic: r }, r)).toMatchObject({ verdict: "ok", passed: 13, total: 13, unknown: 0 });
   });
   it("unknown без замечаний — «Проверено частично», не «ok»", () => {
-    const r = report(twelve({ 6: unknown() }), { overall_status: "yellow" });
+    const r = report(thirteen({ 6: unknown() }), { overall_status: "yellow" });
     const v = evaluateNetwork({ anthropic: r }, r);
     expect(v.verdict).toBe("partial");
     expect(v.unknown).toBe(1);
     expect(v.passed).toBeLessThan(v.total);
   });
   it("реальное замечание остаётся замечанием", () => {
-    const r = report(twelve({ 6: unknown(), 5: crit() }), { overall_status: "red" });
+    const r = report(thirteen({ 6: unknown(), 5: crit() }), { overall_status: "red" });
     expect(evaluateNetwork({ anthropic: r }, r).verdict).toBe("bad");
   });
 });

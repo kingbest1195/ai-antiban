@@ -190,15 +190,6 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     activeReport?.telemetry?.org,
   ]);
 
-  // Регулярный опрос покрытия приложений и PAC
-  useEffect(() => {
-    refreshCoverage();
-    const timer = setInterval(() => {
-      refreshCoverage();
-    }, 4000);
-    return () => clearInterval(timer);
-  }, [refreshCoverage]);
-
   // Раз в 30 секунд пересчитываем возраст отчёта.
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 30000);

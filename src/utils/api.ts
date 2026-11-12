@@ -8,8 +8,12 @@ import {
   ClaudeLocalDataSummary,
   ClaudeProfile,
   ClaudeProfileListResponse,
+  AppCoverageItem,
+  CliMode,
   CliProtectionReport,
+  CliSettings,
   CoverageSnapshot,
+  ManualStepKey,
   CrashTestStepResult,
   GatewayStatsSnapshot,
   InstallUpdateResult,
@@ -41,9 +45,17 @@ let mockState: AppStateData = {
   interception_behavior: "ask_popup",
   popup_position: "top_right",
   custom_ai_domains: [],
+  sync_ai_tz_enabled: false,
+  cli_mode: "ai_only",
 };
 
 let mockKillswitchStatus = false;
+/** Мок настроек CLI и подмены часового пояса: независимые флаги, как у шлюза. */
+let mockCliProtection = true;
+let mockCliMode: CliMode = "ai_only";
+let mockSyncAiTz = false;
+/** Сколько раз нажали «Проверить снова»: мок продвигает статусы по шагам. */
+let mockCoverageStage = 0;
 
 let mockRoutesSnapshot: RoutesSnapshot = {
   routes: [],
@@ -245,6 +257,7 @@ export async function auditConnection(
         status: "ok",
         code: "DNS_CLEAN",
         message: "Утечек через локальные DNS-резолверы РФ не обнаружено (Cloudflare 1.1.1.1).",
+        measured_via: "whoami:akamai+google",
       };
 
   const tzResult = {
@@ -305,12 +318,20 @@ export async function auditConnection(
         code: "DNS_COUNTRY_CONSISTENT",
         message: "DNS-резолверы находятся в той же юрисдикции, что и выходной IP.",
         guide_ref: null,
+        measured_via: "whoami:akamai+google",
       },
       {
         status: "ok",
         code: "LOCALE_HYGIENE_CLEAN",
         message: "Локаль среды и системные переменные безопасны.",
         guide_ref: null,
+      },
+      {
+        status: "ok",
+        code: "UDP_STUN_MATCH",
+        message: "UDP-запросы выходят с тем же адресом, что и обычный трафик: утечки мимо туннеля нет.",
+        guide_ref: null,
+        measured_via: "stun:cloudflare+google",
       },
     ],
   };
@@ -402,7 +423,7 @@ function mockAlertReport(): RiskReport {
     overall_status: "red",
     trust_score: 28,
     unknown_count: 1,
-    applicable_count: 12,
+    applicable_count: 13,
     incomplete: true,
     telemetry: {
       ip: "185.220.101.5",
@@ -504,9 +525,10 @@ export async function enableCliProtection(): Promise<CliProtectionReport> {
   if (isTauri()) {
     return await invoke<CliProtectionReport>("enable_cli_protection");
   }
+  mockCliProtection = true;
   return {
     enabled: true,
-    proxy_url: "http://127.0.0.1:8899",
+    proxy_url: "http://127.0.0.1:40111",
     configured_targets: [
       "~/.zshrc",
       "~/.bashrc",
@@ -514,7 +536,7 @@ export async function enableCliProtection(): Promise<CliProtectionReport> {
       "Cursor Settings",
     ],
     shell_command:
-      'export HTTP_PROXY="http://127.0.0.1:8899" HTTPS_PROXY="http://127.0.0.1:8899" ALL_PROXY="http://127.0.0.1:8899"',
+      'export HTTP_PROXY="http://127.0.0.1:40111" HTTPS_PROXY="http://127.0.0.1:40111" ALL_PROXY="http://127.0.0.1:40111"',
   };
 }
 
@@ -522,6 +544,7 @@ export async function disableCliProtection(): Promise<boolean> {
   if (isTauri()) {
     return await invoke<boolean>("disable_cli_protection");
   }
+  mockCliProtection = false;
   return false;
 }
 
@@ -529,7 +552,7 @@ export async function checkCliProtectionStatus(): Promise<boolean> {
   if (isTauri()) {
     return await invoke<boolean>("check_cli_protection_status");
   }
-  return true;
+  return mockCliProtection;
 }
 
 export async function syncAiAgentsTimezone(timezone: string): Promise<string> {
@@ -537,7 +560,46 @@ export async function syncAiAgentsTimezone(timezone: string): Promise<string> {
     return await invoke<string>("sync_ai_agents_timezone", { timezone });
   }
   mockState.synced_ai_timezone = timezone;
+  if (!mockSyncAiTz) {
+    return `Зона ${timezone} сохранена, но подмена часового пояса и локали выключена.`;
+  }
   return `Таймзона ${timezone} и en_US.UTF-8 синхронизированы в браузере и окружении.`;
+}
+
+const mockCliSettings = (): CliSettings => ({
+  cli_mode: mockCliMode,
+  sync_ai_tz_enabled: mockSyncAiTz,
+  cli_protection_enabled: mockCliProtection,
+  synced_ai_timezone: mockState.synced_ai_timezone ?? null,
+});
+
+/** Режим покрытия CLI и тумблер подмены часового пояса/локали (независимые). */
+export async function getCliSettings(): Promise<CliSettings> {
+  if (isTauri()) {
+    return await invoke<CliSettings>("get_cli_settings");
+  }
+  return mockCliSettings();
+}
+
+/** Применяется сразу; при отказе шлюза бросает ошибку с русским текстом, режим не меняется. */
+export async function setCliMode(mode: CliMode): Promise<CliSettings> {
+  if (isTauri()) {
+    return await invoke<CliSettings>("set_cli_mode", { mode });
+  }
+  mockCliMode = mode;
+  mockState.cli_mode = mode;
+  return mockCliSettings();
+}
+
+/** Включает или откатывает TZ/LANG/LC_TIME сразу; защиту CLI не трогает. */
+export async function setSyncAiTzEnabled(enabled: boolean): Promise<CliSettings> {
+  if (isTauri()) {
+    return await invoke<CliSettings>("set_sync_ai_tz_enabled", { enabled });
+  }
+  mockSyncAiTz = enabled;
+  mockState.sync_ai_tz_enabled = enabled;
+  if (enabled && !mockState.synced_ai_timezone) mockState.synced_ai_timezone = "Europe/Amsterdam";
+  return mockCliSettings();
 }
 
 export async function openOsDatetimeSettings(): Promise<void> {
@@ -1251,72 +1313,101 @@ export function setMockPendingDeepLink(link: string | null): void {
   mockPendingDeepLink = link;
 }
 
+/** Мок снимка покрытия: порт шлюза не 8899, статусы и шаги по правилам шлюза; «Проверить снова» продвигает их. */
+function mockCoverageSnapshot(): CoverageSnapshot {
+  const now = Date.now();
+  const stage = mockCoverageStage;
+  const sys = mockSysproxyActive;
+  const cli = mockCliProtection;
+  const globalMode = mockCliMode === "global_terminal";
+  type Spec = Pick<AppCoverageItem, "id" | "name" | "category" | "status" | "detail"> & {
+    ai?: number;
+    ago?: number;
+    steps?: ManualStepKey[];
+  };
+  const app = (s: Spec): AppCoverageItem => ({
+    id: s.id,
+    name: s.name,
+    category: s.category,
+    installed: s.status !== "not_installed",
+    status: s.status,
+    requests_seen: s.ai ?? 0,
+    ai_requests: s.ai ?? 0,
+    pac_fetches: s.status === "confirmed" || s.status === "configured" ? 3 : 0,
+    last_seen_ms: s.ai ? now - (s.ago ?? 120_000) : null,
+    manual_steps: s.steps ?? [],
+    detail: s.detail,
+  });
+  const apps: AppCoverageItem[] = [
+    sys
+      ? app({ id: "browsers", name: "Браузеры", category: "browser", status: "confirmed", ai: 42, ago: 45_000, detail: "Был ИИ-запрос через шлюз" })
+      : app({ id: "browsers", name: "Браузеры", category: "browser", status: "off", detail: "Системный PAC выключен", steps: ["enable_protection"] }),
+    app({ id: "claude-desktop", name: "Claude Desktop", category: "desktop", status: "confirmed", ai: 18, ago: 240_000, detail: "Был ИИ-запрос через шлюз" }),
+    sys
+      ? app({ id: "chatgpt-desktop", name: "ChatGPT Desktop", category: "desktop", status: "configured", detail: "Системный PAC включён, ждём первый запрос" })
+      : app({ id: "chatgpt-desktop", name: "ChatGPT Desktop", category: "desktop", status: "off", detail: "Системный PAC выключен", steps: ["enable_protection"] }),
+    app({ id: "cursor", name: "Cursor", category: "ide", status: "confirmed", ai: 27, ago: 60_000, detail: "Был ИИ-запрос через шлюз" }),
+    cli
+      ? app({ id: "vscode", name: "VS Code", category: "ide", status: "configured", detail: "http.proxy в settings.json указывает на шлюз" })
+      : app({ id: "vscode", name: "VS Code", category: "ide", status: "off", detail: "Защита редакторов выключена", steps: ["enable_protection", "set_http_proxy"] }),
+    stage >= 1
+      ? app({ id: "jetbrains", name: "JetBrains IDE", category: "ide", status: "configured", detail: "Настройки прокси найдены, ждём первый запрос", steps: [] })
+      : app({ id: "jetbrains", name: "JetBrains IDE", category: "ide", status: "unknown", detail: "Не удалось проверить настройки прокси", steps: ["jetbrains_proxy_settings", "set_pac_url", "set_http_proxy"] }),
+    cli
+      ? app({ id: "claude-code", name: "Claude Code", category: "cli", status: stage >= 2 ? "confirmed" : "configured", ai: stage >= 2 ? 1 : 0, ago: 5_000, detail: "Прокси записан в settings.json", steps: stage >= 2 ? [] : ["reopen_terminal"] })
+      : app({ id: "claude-code", name: "Claude Code", category: "cli", status: "off", detail: "Защита CLI выключена", steps: ["enable_protection", "set_env_proxy"] }),
+    cli
+      ? app({ id: "gemini-cli", name: "Gemini CLI", category: "cli", status: "configured", detail: "Прокси записан в настройки", steps: ["reopen_terminal"] })
+      : app({ id: "gemini-cli", name: "Gemini CLI", category: "cli", status: "off", detail: "Защита CLI выключена", steps: ["enable_protection", "set_env_proxy"] }),
+    cli && globalMode
+      ? app({ id: "node-cli", name: "Node.js", category: "cli", status: "configured", detail: "Переменные прокси в профиле терминала", steps: ["reopen_terminal"] })
+      : app({
+          id: "node-cli",
+          name: "Node.js",
+          category: "cli",
+          status: "off",
+          detail: globalMode ? "Защита CLI выключена" : "Не покрывается в режиме «Только ИИ-клиенты и IDE»",
+          steps: globalMode ? ["enable_protection", "set_env_proxy"] : ["set_env_proxy"],
+        }),
+    app({ id: "windsurf", name: "Windsurf", category: "ide", status: "not_installed", detail: "Не установлено" }),
+  ];
+  return {
+    sysproxy_enabled: sys,
+    cli_protection_enabled: cli,
+    chained_proxy: null,
+    gateway_addr: "127.0.0.1:40111",
+    pac_url: "http://127.0.0.1:40111/proxy.pac",
+    generated_at_ms: now,
+    cli_mode: mockCliMode,
+    apps,
+  };
+}
+
 export async function getCoverageSnapshot(): Promise<CoverageSnapshot> {
   if (isTauri()) {
     return await invoke<CoverageSnapshot>("get_coverage_snapshot");
   }
+  return mockCoverageSnapshot();
+}
 
-  return {
-    sysproxy_enabled: mockSysproxyActive,
-    cli_protection_enabled: true,
-    chained_proxy: null,
-    apps: [
-      {
-        id: "chrome_arc",
-        name: "Chrome / Arc",
-        category: "browser",
-        installed: true,
-        status: "verified",
-        requests_seen: 42,
-        detail: "PAC-скрипт активен, трафик защищён",
-      },
-      {
-        id: "claude_desktop",
-        name: "Claude Desktop",
-        category: "desktop",
-        installed: true,
-        status: "verified",
-        requests_seen: 18,
-        detail: "Прямой шлюз 127.0.0.1:40111, сессия изолирована",
-      },
-      {
-        id: "chatgpt_desktop",
-        name: "ChatGPT Desktop",
-        category: "desktop",
-        installed: true,
-        status: "configured",
-        requests_seen: 0,
-        detail: "Шлюз настроен через системный PAC",
-      },
-      {
-        id: "antigravity",
-        name: "Antigravity",
-        category: "ide",
-        installed: true,
-        status: "verified",
-        requests_seen: 9,
-        detail: "Интеграция с локальным шлюзом активна",
-      },
-      {
-        id: "cursor",
-        name: "Cursor",
-        category: "ide",
-        installed: true,
-        status: "verified",
-        requests_seen: 27,
-        detail: "HTTP_PROXY настроен в среде редактора",
-      },
-      {
-        id: "claude_code",
-        name: "Claude Code",
-        category: "cli",
-        installed: true,
-        status: "configured",
-        requests_seen: 5,
-        detail: "Переменные окружения экспортированы в shell",
-      },
-    ],
-  };
+/** Принудительная перепроверка: шлюз заново читает ОС и файлы и отдаёт свежий снимок. */
+export async function recheckCoverage(): Promise<CoverageSnapshot> {
+  if (isTauri()) {
+    return await invoke<CoverageSnapshot>("recheck_coverage");
+  }
+  mockCoverageStage = Math.min(mockCoverageStage + 1, 2);
+  return mockCoverageSnapshot();
+}
+
+/** Фокус окна приложения: в Tauri через событие окна, в браузере — без подписки. Возвращает отписку. */
+export async function onWindowFocusChanged(handler: (focused: boolean) => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    return await getCurrentWindow().onFocusChanged(({ payload }) => handler(payload));
+  } catch {
+    return () => {};
+  }
 }
 
 export async function takePendingDeepLink(): Promise<string | null> {
