@@ -1,4 +1,9 @@
-use crate::auditor::geo_matrix::{CheckResult, UnknownReason, GUIDE_OS_PRIVACY};
+use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_PRIVACY, UnknownReason};
+use crate::auditor::seams::{RealSystem, SystemInfo, SystemReadError};
+
+/// Two zones whose current UTC offsets differ by no more than this are the same "time" for the
+/// purpose of the check (the same offset under different IANA names, a neighbouring zone).
+pub const TZ_OFFSET_TOLERANCE_SECS: i32 = 3600;
 
 pub const RUSSIAN_TIMEZONES: &[&str] = &[
     "Europe/Moscow",
@@ -34,16 +39,56 @@ pub fn is_russian_or_belarusian_timezone(tz: &str) -> bool {
     RUSSIAN_TIMEZONES.iter().any(|&item| item.eq_ignore_ascii_case(tz))
 }
 
+/// `"+01:00"` style label of an offset.
+fn format_offset(secs: i32) -> String {
+    let sign = if secs < 0 { '-' } else { '+' };
+    let abs = secs.abs();
+    format!("UTC{sign}{:02}:{:02}", abs / 3600, (abs % 3600) / 60)
+}
+
+/// Whether the system zone and the zone of the exit IP are close enough: the same name, or
+/// current UTC offsets within [`TZ_OFFSET_TOLERANCE_SECS`]. `None`: the offsets are not known and
+/// the names differ, so nothing can be claimed.
+fn zones_match(
+    system: &dyn SystemInfo,
+    system_tz: &str,
+    ip_tz: &str,
+) -> (bool, Option<(i32, i32)>) {
+    if system_tz.eq_ignore_ascii_case(ip_tz) || system_tz.replace('_', " ") == ip_tz.replace('_', " ")
+    {
+        return (true, None);
+    }
+    let local = system
+        .local_utc_offset_secs()
+        .or_else(|| system.zone_utc_offset_secs(system_tz));
+    match (local, system.zone_utc_offset_secs(ip_tz)) {
+        (Some(a), Some(b)) => ((a - b).abs() <= TZ_OFFSET_TOLERANCE_SECS, Some((a, b))),
+        // Offsets unknown (no time zone database on this OS): different names count as different.
+        _ => (false, None),
+    }
+}
+
 /// Evaluates whether system timezone exposes user's actual location.
-/// Gate 8: If the OS system timezone mismatches the IP country, but `synced_ai_tz` matches
-/// the exit IP's timezone, CLI and IDE requests are fully protected.
 pub fn evaluate_system_timezone(
     ip_timezone: Option<&str>,
     synced_ai_tz: Option<&str>,
 ) -> CheckResult {
-    let system_tz = match iana_time_zone::get_timezone() {
-        Ok(tz) => tz,
-        Err(_) => {
+    evaluate_system_timezone_with(&RealSystem, ip_timezone, synced_ai_tz)
+}
+
+/// [`evaluate_system_timezone`] through `system` (injectable for tests).
+///
+/// The OS zone is compared with the zone of the exit IP by UTC offset (1 h tolerance). If the OS
+/// zone differs, but the zone synced for the AI tools equals the IP zone *and* the CLI/IDE
+/// protection that applies it is active, requests of those tools are covered.
+pub fn evaluate_system_timezone_with(
+    system: &dyn SystemInfo,
+    ip_timezone: Option<&str>,
+    synced_ai_tz: Option<&str>,
+) -> CheckResult {
+    let system_tz = match system.system_timezone() {
+        Ok(tz) if !tz.trim().is_empty() => tz,
+        _ => {
             return CheckResult::unknown(
                 "TIMEZONE_UNKNOWN",
                 "Часовой пояс не проверен: системный часовой пояс ОС не определен.",
@@ -51,20 +96,23 @@ pub fn evaluate_system_timezone(
             );
         }
     };
+    let ip_tz = ip_timezone.map(str::trim).filter(|t| !t.is_empty());
 
-    // If synced_ai_tz matches ip_timezone, AI agents in CLI/IDE have TZ and LANG overridden
-    if let (Some(target_tz), Some(synced)) = (ip_timezone, synced_ai_tz) {
-        let t_clean = target_tz.trim();
-        let s_clean = synced.trim();
-        if !t_clean.is_empty() && (s_clean.eq_ignore_ascii_case(t_clean) || s_clean.replace('_', " ") == t_clean.replace('_', " ")) {
-            if system_tz != t_clean {
-                return CheckResult::ok(
-                    "TIMEZONE_SYNCED_AI",
-                    format!(
-                        "Таймзона для ИИ-агентов (CLI/IDE) синхронизирована через Заставу ({t_clean}). Для браузеров рекомендуем также переключить системные часы ОС."
-                    ),
-                );
-            }
+    // The synced zone counts only when it is actually applied (the protection is on), not merely
+    // remembered in the settings.
+    if let (Some(target), Some(synced)) = (ip_tz, synced_ai_tz.map(str::trim)) {
+        let synced_matches_ip =
+            synced.eq_ignore_ascii_case(target) || synced.replace('_', " ") == target.replace('_', " ");
+        if synced_matches_ip
+            && !zones_match(system, &system_tz, target).0
+            && system.cli_protection_active()
+        {
+            return CheckResult::ok(
+                "TIMEZONE_SYNCED_AI",
+                format!(
+                    "Таймзона для ИИ-агентов (CLI/IDE) = {target}: применена через Заставу (защита терминала и IDE включена). Системный пояс ОС ({system_tz}) не менялся: браузеры и десктопные приложения видят его."
+                ),
+            );
         }
     }
 
@@ -79,22 +127,8 @@ pub fn evaluate_system_timezone(
         );
     }
 
-    // 2. Compare against IP timezone if available
-    if let Some(target_tz) = ip_timezone {
-        let t_clean = target_tz.trim();
-        if !t_clean.is_empty() && system_tz != t_clean {
-            return CheckResult::warning(
-                "TIMEZONE_MISMATCH",
-                format!(
-                    "Часовой пояс ОС ({system_tz}) отличается от таймзоны IP ({t_clean}). Для максимального траста рекомендуется синхронизировать пояс с локацией сервера.",
-                ),
-                Some(GUIDE_OS_PRIVACY.to_string()),
-            );
-        }
-    }
-
-    // Nothing to compare with: the geolocation source gave no time zone for the exit IP.
-    if ip_timezone.is_none_or(|t| t.trim().is_empty()) {
+    // 2. Nothing to compare with: the geolocation source gave no time zone for the exit IP.
+    let Some(target) = ip_tz else {
         return CheckResult::unknown(
             "TZ_NO_IP_DATA",
             format!(
@@ -102,137 +136,218 @@ pub fn evaluate_system_timezone(
             ),
             UnknownReason::NoData,
         );
-    }
-
-    CheckResult::ok(
-        "TIMEZONE_MATCH",
-        format!("Системный часовой пояс ({system_tz}) совпадает с локацией IP."),
-    )
-}
-
-/// Evaluates Gate 12: Locale & Environment Hygiene (`LANG` and `LC_ALL`).
-/// Checks if host/process environment contains Russian/Belarusian locale indicators
-/// without Zastava's clean `en_US.UTF-8` override.
-pub fn evaluate_locale_env_hygiene(synced_ai_tz: Option<&str>) -> CheckResult {
-    if synced_ai_tz.is_some() {
-        return CheckResult::ok(
-            "LOCALE_HYGIENE_CLEAN",
-            "Окружение CLI/IDE защищено: локаль синхронизирована (en_US.UTF-8) через Заставу.",
-        );
-    }
-
-    let lang = std::env::var("LANG").unwrap_or_default();
-    let lc_all = std::env::var("LC_ALL").unwrap_or_default();
-    evaluate_locale_values(lang, lc_all)
-}
-
-/// The decision of [`evaluate_locale_env_hygiene`] for already read `LANG` / `LC_ALL` values.
-fn evaluate_locale_values(lang: String, lc_all: String) -> CheckResult {
-    if lang.trim().is_empty() && lc_all.trim().is_empty() {
-        return CheckResult::unknown(
-            "LOCALE_ENV_NOT_SET",
-            "Локаль не проверена: в окружении Заставы не заданы LANG и LC_ALL, системная локаль не читалась.",
-            UnknownReason::NoData,
-        );
-    }
-
-    let is_sanctioned = |val: &str| {
-        let v = val.to_ascii_uppercase();
-        v.contains("RU_RU") || v.contains("BE_BY") || v.starts_with("RU-") || v.starts_with("BE-")
     };
 
-    if is_sanctioned(&lang) || is_sanctioned(&lc_all) {
-        let bad_val = if is_sanctioned(&lang) { lang } else { lc_all };
+    // 3. Compare against the IP time zone.
+    match zones_match(system, &system_tz, target) {
+        (true, offsets) => {
+            let detail = match offsets {
+                Some((a, b)) => format!(
+                    "{system_tz} ({}) и пояс IP {target} ({}) различаются не более чем на 1 ч",
+                    format_offset(a),
+                    format_offset(b)
+                ),
+                None => format!("{system_tz} совпадает с поясом IP ({target})"),
+            };
+            CheckResult::ok(
+                "TIMEZONE_MATCH",
+                format!("Системный часовой пояс: {detail}."),
+            )
+        }
+        (false, offsets) => {
+            let detail = match offsets {
+                Some((a, b)) => format!(" ({} против {})", format_offset(a), format_offset(b)),
+                None => String::new(),
+            };
+            CheckResult::warning(
+                "TIMEZONE_MISMATCH",
+                format!(
+                    "Часовой пояс ОС ({system_tz}) отличается от таймзоны IP ({target}){detail}. Для максимального траста рекомендуется синхронизировать пояс с локацией сервера.",
+                ),
+                Some(GUIDE_OS_PRIVACY.to_string()),
+            )
+        }
+    }
+}
+
+/// Whether a locale tag (`ru_RU.UTF-8`, `ru-RU`, `en_RU`, `en_US@rg=ruzzzz`) points at Russia or
+/// Belarus.
+fn is_sanctioned_locale(raw: &str) -> bool {
+    let v = raw.trim().to_ascii_uppercase();
+    if v.is_empty() {
+        return false;
+    }
+    if v.contains("RU_RU") || v.contains("BE_BY") || v.starts_with("RU-") || v.starts_with("BE-") {
+        return true;
+    }
+    // macOS region override: "en_US@rg=ruzzzz".
+    if v.contains("@RG=RU") || v.contains("@RG=BY") {
+        return true;
+    }
+    // Language with a Russian or Belarusian region: "en_RU", "en-RU", "de-BY.UTF-8".
+    let base = v.split(['.', '@']).next().unwrap_or_default();
+    let mut parts = base.split(['_', '-']);
+    let _language = parts.next();
+    matches!(parts.next(), Some("RU" | "BY"))
+}
+
+/// Evaluates Gate 12: Locale & Environment Hygiene.
+/// Looks at `LANG` / `LC_ALL` of this process and at the locale of the OS user settings
+/// (macOS `AppleLocale` / `AppleLanguages`, Windows regional settings): an application started
+/// from the Dock has no `LANG`, so the environment alone says nothing.
+pub fn evaluate_locale_env_hygiene(synced_ai_tz: Option<&str>) -> CheckResult {
+    evaluate_locale_env_hygiene_with(&RealSystem, synced_ai_tz)
+}
+
+/// [`evaluate_locale_env_hygiene`] through `system` (injectable for tests).
+pub fn evaluate_locale_env_hygiene_with(
+    system: &dyn SystemInfo,
+    synced_ai_tz: Option<&str>,
+) -> CheckResult {
+    // The override of the CLI/IDE environment is real only while the protection is active.
+    if synced_ai_tz.is_some() && system.cli_protection_active() {
+        return CheckResult::ok(
+            "LOCALE_HYGIENE_CLEAN",
+            "Окружение CLI/IDE: Застава переопределяет локаль на en_US.UTF-8 (защита терминала и IDE включена). Локаль ОС для браузеров и приложений не менялась.",
+        );
+    }
+
+    let env_values: Vec<(String, String)> = ["LANG", "LC_ALL"]
+        .iter()
+        .filter_map(|name| {
+            system
+                .env_var(name)
+                .map(|v| (name.to_string(), v))
+                .filter(|(_, v)| !v.trim().is_empty())
+        })
+        .collect();
+    let os_locales = system.os_locales();
+    evaluate_locale_values(&env_values, os_locales)
+}
+
+/// The decision of [`evaluate_locale_env_hygiene`] for already read values.
+fn evaluate_locale_values(
+    env_values: &[(String, String)],
+    os_locales: Result<Vec<String>, SystemReadError>,
+) -> CheckResult {
+    let os_list: &[String] = os_locales.as_deref().unwrap_or(&[]);
+    if env_values.is_empty() && os_list.is_empty() {
+        let (code, text, reason) = match os_locales {
+            Err(SystemReadError::Unsupported) => (
+                "LOCALE_ENV_NOT_SET",
+                "Локаль не проверена: в окружении Заставы не заданы LANG и LC_ALL, а языковые настройки ОС на этой системе не читаются.",
+                UnknownReason::NoData,
+            ),
+            _ => (
+                "LOCALE_NOT_READ",
+                "Локаль не проверена: LANG и LC_ALL не заданы, языковые настройки ОС прочитать не удалось.",
+                UnknownReason::NoData,
+            ),
+        };
+        return CheckResult::unknown(code, text, reason);
+    }
+
+    let bad = env_values
+        .iter()
+        .map(|(name, v)| (format!("{name}={v}"), v.as_str()))
+        .chain(os_list.iter().map(|v| (format!("язык ОС {v}"), v.as_str())))
+        .find(|(_, v)| is_sanctioned_locale(v));
+    if let Some((label, _)) = bad {
         return CheckResult::warning(
             "LOCALE_ENV_SANCTIONED_MARKER",
             format!(
-                "В окружении обнаружена локаль «{bad_val}». ИИ-агенты в терминале могут передавать этот заголовок. Нажмите «Авто-настройка TZ/локали» для безопасной синхронизации (en_US.UTF-8)."
+                "Обнаружена локаль РФ/РБ ({label}). ИИ-агенты в терминале могут передавать этот заголовок. Нажмите «Авто-настройка TZ/локали» для безопасной синхронизации (en_US.UTF-8)."
             ),
             Some(GUIDE_OS_PRIVACY.to_string()),
         );
     }
 
+    let mut read = Vec::new();
+    if !env_values.is_empty() {
+        read.push("LANG/LC_ALL процесса".to_string());
+    }
+    if !os_list.is_empty() {
+        read.push(format!("языковые настройки ОС ({})", os_list.join(", ")));
+    }
     CheckResult::ok(
         "LOCALE_HYGIENE_CLEAN",
-        "Переменные окружения LANG/LC_ALL не содержат маркеров риска.",
+        format!("Маркеров РФ/РБ нет в проверенных источниках: {}.", read.join("; ")),
     )
 }
 
 /// Checks OS Location Services status (BSSID Wi-Fi triangulation).
 /// Only Windows exposes a setting that can be read; elsewhere the check does not apply.
-#[cfg(not(target_os = "windows"))]
 pub fn check_os_location_services() -> CheckResult {
-    CheckResult::unknown(
-        "OS_LOCATION_NOT_APPLICABLE",
-        "Геолокация ОС по Wi-Fi (BSSID) на этой системе не проверяется: состояние службы геолокации не читается.",
-        UnknownReason::NotApplicable,
-    )
+    check_os_location_services_with(&RealSystem)
 }
 
-/// Checks OS Location Services status (BSSID Wi-Fi triangulation).
-#[cfg(target_os = "windows")]
-pub fn check_os_location_services() -> CheckResult {
-    {
-        // 1. Check machine-wide policy first in HKLM.
-        // If Deny, location services are globally disabled for the entire machine.
-        let mut registry_read = false;
-        if let Ok(hklm_output) = crate::sysproxy::silent_command("reg")
-            .args([
-                "query",
-                r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
-                "/v",
-                "Value",
-            ])
-            .output()
-        {
-            registry_read = true;
-            let hklm_text = String::from_utf8_lossy(&hklm_output.stdout);
-            if hklm_text.contains("Deny") {
-                return CheckResult::ok(
-                    "OS_LOCATION_SAFE",
-                    "Геолокация Windows отключена. Утечек по Wi-Fi (BSSID) нет.",
-                );
-            }
-            if hklm_text.contains("Allow") {
-                // 2. Only if HKLM is Allow AND HKCU is Allow, return the warning
-                if let Ok(hkcu_output) = crate::sysproxy::silent_command("reg")
-                    .args([
-                        "query",
-                        r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
-                        "/v",
-                        "Value",
-                    ])
-                    .output()
-                {
-                    let hkcu_text = String::from_utf8_lossy(&hkcu_output.stdout);
-                    if hkcu_text.contains("Allow") {
-                        return CheckResult::warning(
-                            "OS_LOCATION_ENABLED",
-                            "Службы геолокации Windows активны. Отключите их в настройках конфиденциальности ОС.",
-                            Some(GUIDE_OS_PRIVACY.to_string()),
-                        );
-                    }
-                }
-            }
-        }
-        if !registry_read {
+/// [`check_os_location_services`] through `system` (injectable for tests).
+pub fn check_os_location_services_with(system: &dyn SystemInfo) -> CheckResult {
+    let machine = match system.location_consent(true) {
+        Ok(text) => text,
+        Err(SystemReadError::Unsupported) => {
             return CheckResult::unknown(
-                "OS_LOCATION_UNREADABLE",
-                "Геолокация Windows не проверена: не удалось прочитать настройку службы геолокации.",
-                UnknownReason::InternalError,
+                "OS_LOCATION_NOT_APPLICABLE",
+                "Геолокация ОС по Wi-Fi (BSSID) на этой системе не проверяется: состояние службы геолокации не читается.",
+                UnknownReason::NotApplicable,
             );
         }
+        Err(SystemReadError::Failed) => return location_unreadable(),
+    };
+
+    // Machine-wide policy first: Deny turns the location services off for everybody.
+    if machine.contains("Deny") {
+        return CheckResult::ok(
+            "OS_LOCATION_SAFE",
+            "Геолокация Windows запрещена на уровне компьютера (ConsentStore HKLM = Deny).",
+        );
+    }
+    if !machine.contains("Allow") {
+        return CheckResult::unknown(
+            "OS_LOCATION_NO_DATA",
+            "Геолокация Windows не проверена: настройка компьютера не содержит значения Allow или Deny.",
+            UnknownReason::NoData,
+        );
     }
 
-    CheckResult::ok(
-        "OS_LOCATION_SAFE",
-        "Геолокация по Wi-Fi безопасна: MAC-адреса роутеров (BSSID) не передаются.",
+    // The computer allows it: the user's own switch decides.
+    match system.location_consent(false) {
+        Ok(user) if user.contains("Allow") => CheckResult::warning(
+            "OS_LOCATION_ENABLED",
+            "Службы геолокации Windows активны. Отключите их в настройках конфиденциальности ОС.",
+            Some(GUIDE_OS_PRIVACY.to_string()),
+        ),
+        Ok(user) if user.contains("Deny") => CheckResult::ok(
+            "OS_LOCATION_SAFE",
+            "Геолокация Windows запрещена в настройках пользователя (ConsentStore HKCU = Deny).",
+        ),
+        Ok(_) => CheckResult::unknown(
+            "OS_LOCATION_NO_DATA",
+            "Геолокация Windows не проверена: настройка пользователя не содержит значения Allow или Deny.",
+            UnknownReason::NoData,
+        ),
+        Err(_) => location_unreadable(),
+    }
+}
+
+fn location_unreadable() -> CheckResult {
+    CheckResult::unknown(
+        "OS_LOCATION_UNREADABLE",
+        "Геолокация Windows не проверена: не удалось прочитать настройку службы геолокации.",
+        UnknownReason::InternalError,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auditor::geo_matrix::CheckStatus;
+    use crate::auditor::seams::fakes::FakeSystem;
+    use std::collections::HashMap;
+
+    fn sys() -> FakeSystem {
+        FakeSystem::healthy()
+    }
 
     #[test]
     fn test_russian_timezone_detection() {
@@ -244,62 +359,231 @@ mod tests {
         assert!(!is_russian_or_belarusian_timezone("America/New_York"));
     }
 
+    // ---- time zone ----
+
     #[test]
-    fn test_timezone_evaluation_synced_ai_bypass() {
-        // If synced_ai_tz matches IP timezone, it returns OK even if OS timezone is different
-        let res = evaluate_system_timezone(Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
-        assert_eq!(res.status, crate::auditor::geo_matrix::CheckStatus::Ok);
-        assert!(res.code == "TIMEZONE_SYNCED_AI" || res.code == "TIMEZONE_MATCH");
+    fn tz_err_from_the_os_is_unknown() {
+        let s = FakeSystem {
+            timezone: Err("boom".into()),
+            ..sys()
+        };
+        let r = evaluate_system_timezone_with(&s, Some("Europe/Amsterdam"), None);
+        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NoData)));
+        assert_eq!(r.code, "TIMEZONE_UNKNOWN");
     }
 
     #[test]
-    fn test_locale_hygiene_evaluation() {
-        // When synced_ai_tz is active, locale hygiene is always OK
-        let res_synced = evaluate_locale_env_hygiene(Some("Europe/London"));
-        assert_eq!(res_synced.status, crate::auditor::geo_matrix::CheckStatus::Ok);
-        assert_eq!(res_synced.code, "LOCALE_HYGIENE_CLEAN");
-    }
-
-    #[test]
-    fn test_os_location_services_check() {
-        let res = check_os_location_services();
-        assert!(res.message.contains("Wi-Fi"));
-        #[cfg(not(target_os = "windows"))]
-        {
-            assert!(res.is_not_applicable());
-            assert_eq!(res.code, "OS_LOCATION_NOT_APPLICABLE");
+    fn tz_without_ip_zone_is_unknown_never_a_match() {
+        for none in [None, Some(""), Some("  ")] {
+            let r = evaluate_system_timezone_with(&sys(), none, None);
+            assert_eq!(r.status, CheckStatus::Unknown, "{none:?}");
+            assert_eq!(r.code, "TZ_NO_IP_DATA");
         }
-        #[cfg(target_os = "windows")]
-        assert!(
-            res.code == "OS_LOCATION_SAFE"
-                || res.code == "OS_LOCATION_ENABLED"
-                || res.code == "OS_LOCATION_UNREADABLE"
-        );
-    }
-
-    #[test]
-    fn test_locale_values() {
-        use crate::auditor::geo_matrix::CheckStatus;
-        let r = evaluate_locale_values(String::new(), "  ".to_string());
-        assert_eq!(r.status, CheckStatus::Unknown);
-        assert_eq!(r.reason, Some(UnknownReason::NoData));
+        // A Russian system zone is still a finding without IP data.
+        let ru = FakeSystem {
+            timezone: Ok("Europe/Moscow".into()),
+            ..sys()
+        };
         assert_eq!(
-            evaluate_locale_values("ru_RU.UTF-8".into(), String::new()).status,
+            evaluate_system_timezone_with(&ru, None, None).status,
             CheckStatus::Warning
         );
+    }
+
+    #[test]
+    fn tz_aliases_with_the_same_offset_are_ok() {
+        // Europe/Amsterdam vs Europe/Berlin: different names, the same offset (regression: false Warning).
+        let r = evaluate_system_timezone_with(&sys(), Some("Europe/Berlin"), None);
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert_eq!(r.code, "TIMEZONE_MATCH");
+        assert!(r.message.contains("UTC+01:00"), "{}", r.message);
+        // The same name needs no offsets at all.
+        let no_offsets = FakeSystem {
+            local_offset: None,
+            zone_offsets: HashMap::new(),
+            ..sys()
+        };
         assert_eq!(
-            evaluate_locale_values("en_US.UTF-8".into(), String::new()).status,
+            evaluate_system_timezone_with(&no_offsets, Some("europe/amsterdam"), None).status,
             CheckStatus::Ok
         );
     }
 
     #[test]
-    fn test_timezone_without_ip_timezone_is_never_a_match() {
-        use crate::auditor::geo_matrix::CheckStatus;
-        let r = evaluate_system_timezone(None, None);
-        // Depends on the host zone: a Russian zone is a legitimate Warning, anything else has
-        // nothing to compare with.
-        assert_ne!(r.status, CheckStatus::Ok);
-        assert!(r.code != "TIMEZONE_MATCH");
+    fn tz_tolerance_is_one_hour() {
+        let mut s = sys();
+        s.zone_offsets.insert("Europe/London".into(), 0); // 1 h away: inside
+        s.zone_offsets.insert("Europe/Helsinki".into(), 7200); // 1 h away: inside
+        s.zone_offsets.insert("Asia/Dubai".into(), 4 * 3600); // 3 h away: outside
+        assert_eq!(evaluate_system_timezone_with(&s, Some("Europe/London"), None).status, CheckStatus::Ok);
+        assert_eq!(evaluate_system_timezone_with(&s, Some("Europe/Helsinki"), None).status, CheckStatus::Ok);
+        let r = evaluate_system_timezone_with(&s, Some("Asia/Dubai"), None);
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "TIMEZONE_MISMATCH"));
+        assert!(r.message.contains("UTC+04:00"), "{}", r.message);
+    }
+
+    #[test]
+    fn tz_unknown_offsets_and_different_names_stay_a_warning() {
+        let s = FakeSystem {
+            local_offset: None,
+            zone_offsets: HashMap::new(),
+            ..sys()
+        };
+        let r = evaluate_system_timezone_with(&s, Some("Europe/Berlin"), None);
+        assert_eq!(r.status, CheckStatus::Warning);
+    }
+
+    #[test]
+    fn tz_synced_zone_counts_only_when_applied() {
+        let far = |applied: bool| FakeSystem {
+            timezone: Ok("Asia/Tokyo".into()),
+            local_offset: Some(9 * 3600),
+            cli_protection: applied,
+            ..sys()
+        };
+        // Applied: Ok, even though the OS zone is far from the IP zone.
+        let r = evaluate_system_timezone_with(&far(true), Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "TIMEZONE_SYNCED_AI"));
+        // Only remembered in the settings, the protection is off: a plain mismatch.
+        let r = evaluate_system_timezone_with(&far(false), Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
+        assert_eq!(r.status, CheckStatus::Warning);
+        // Synced to a zone that is not the IP zone: no cover.
+        let r = evaluate_system_timezone_with(&far(true), Some("Europe/Amsterdam"), Some("America/New_York"));
+        assert_eq!(r.status, CheckStatus::Warning);
+        // A Russian OS zone is covered only by an applied sync too.
+        let ru = |applied: bool| FakeSystem {
+            timezone: Ok("Europe/Moscow".into()),
+            local_offset: Some(3 * 3600),
+            cli_protection: applied,
+            ..sys()
+        };
+        assert_eq!(
+            evaluate_system_timezone_with(&ru(true), Some("Europe/Amsterdam"), Some("Europe/Amsterdam")).status,
+            CheckStatus::Ok
+        );
+        assert_eq!(
+            evaluate_system_timezone_with(&ru(false), Some("Europe/Amsterdam"), Some("Europe/Amsterdam")).code,
+            "TIMEZONE_LEAK_RU"
+        );
+    }
+
+    // ---- locale ----
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn locale_nothing_readable_is_unknown() {
+        let r = evaluate_locale_values(&[], Err(SystemReadError::Failed));
+        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NoData)));
+        assert_eq!(r.code, "LOCALE_NOT_READ");
+        let r = evaluate_locale_values(&[], Err(SystemReadError::Unsupported));
+        assert_eq!(r.code, "LOCALE_ENV_NOT_SET");
+        assert_eq!(r.status, CheckStatus::Unknown);
+    }
+
+    #[test]
+    fn locale_empty_env_with_apple_locale_ru_is_a_warning() {
+        // The Dock-launched app has no LANG, but the macOS user locale is Russian.
+        let s = FakeSystem {
+            env: HashMap::new(),
+            os_locales: Ok(vec!["ru_RU".into(), "ru-RU".into(), "en-RU".into()]),
+            ..sys()
+        };
+        let r = evaluate_locale_env_hygiene_with(&s, None);
+        assert_eq!(r.status, CheckStatus::Warning);
+        assert_eq!(r.code, "LOCALE_ENV_SANCTIONED_MARKER");
+        assert!(r.message.contains("язык ОС"), "{}", r.message);
+        // Only the region says Russia.
+        let en_ru = FakeSystem {
+            env: HashMap::new(),
+            os_locales: Ok(vec!["en_RU".into()]),
+            ..sys()
+        };
+        assert_eq!(evaluate_locale_env_hygiene_with(&en_ru, None).status, CheckStatus::Warning);
+    }
+
+    #[test]
+    fn locale_env_and_os_both_clean_is_ok_and_names_its_sources() {
+        let r = evaluate_locale_env_hygiene_with(&sys(), None);
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.message.contains("LANG/LC_ALL") && r.message.contains("en_US"), "{}", r.message);
+        // The OS source alone is enough to say something, and the text says only that.
+        let s = FakeSystem {
+            env: HashMap::new(),
+            ..sys()
+        };
+        let r = evaluate_locale_env_hygiene_with(&s, None);
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(!r.message.contains("LANG/LC_ALL"), "{}", r.message);
+        // A Russian LANG in the environment is still a warning.
+        let ru = evaluate_locale_values(&env(&[("LANG", "ru_RU.UTF-8")]), Ok(vec![]));
+        assert_eq!(ru.status, CheckStatus::Warning);
+    }
+
+    #[test]
+    fn locale_synced_override_is_ok_only_when_applied() {
+        let ru_host = |applied: bool| FakeSystem {
+            env: HashMap::new(),
+            os_locales: Ok(vec!["ru_RU".into()]),
+            cli_protection: applied,
+            ..sys()
+        };
+        let r = evaluate_locale_env_hygiene_with(&ru_host(true), Some("Europe/Amsterdam"));
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "LOCALE_HYGIENE_CLEAN"));
+        // Remembered, but not applied: the system locale decides.
+        let r = evaluate_locale_env_hygiene_with(&ru_host(false), Some("Europe/Amsterdam"));
+        assert_eq!(r.status, CheckStatus::Warning);
+        // Nothing synced: the system locale decides.
+        assert_eq!(evaluate_locale_env_hygiene_with(&ru_host(true), None).status, CheckStatus::Warning);
+    }
+
+    #[test]
+    fn locale_tag_recognition() {
+        for yes in ["ru_RU.UTF-8", "RU-ru", "be_BY", "be-BY", "en_RU", "en-RU", "en_US@rg=ruzzzz", "de_BY.UTF-8"] {
+            assert!(is_sanctioned_locale(yes), "{yes}");
+        }
+        for no in ["en_US.UTF-8", "en-US", "C", "POSIX", "", "  ", "de_DE", "pt_BR", "ru_UA"] {
+            assert!(!is_sanctioned_locale(no), "{no}");
+        }
+    }
+
+    // ---- OS location ----
+
+    #[test]
+    fn location_is_not_applicable_where_nothing_can_be_read() {
+        let r = check_os_location_services_with(&sys());
+        assert!(r.is_not_applicable());
+        assert_eq!(r.code, "OS_LOCATION_NOT_APPLICABLE");
+        assert!(r.message.contains("Wi-Fi"));
+    }
+
+    #[test]
+    fn location_windows_branches() {
+        let win = |m: &str, u: Result<&str, SystemReadError>| FakeSystem {
+            consent_machine: Ok(m.to_string()),
+            consent_user: u.map(str::to_string),
+            ..sys()
+        };
+        let allow = "    Value    REG_SZ    Allow";
+        let deny = "    Value    REG_SZ    Deny";
+        let r = check_os_location_services_with(&win(deny, Ok(allow)));
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "OS_LOCATION_SAFE"));
+        let r = check_os_location_services_with(&win(allow, Ok(allow)));
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "OS_LOCATION_ENABLED"));
+        let r = check_os_location_services_with(&win(allow, Ok(deny)));
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.message.contains("HKCU"));
+        // Unreadable pieces are never "safe".
+        let r = check_os_location_services_with(&win(allow, Err(SystemReadError::Failed)));
+        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::InternalError)));
+        let r = check_os_location_services_with(&win("garbage", Ok(allow)));
+        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NoData)));
+        let failed = FakeSystem {
+            consent_machine: Err(SystemReadError::Failed),
+            ..sys()
+        };
+        assert_eq!(check_os_location_services_with(&failed).reason, Some(UnknownReason::InternalError));
     }
 }

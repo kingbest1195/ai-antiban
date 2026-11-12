@@ -15,16 +15,22 @@
       "reason": "IP замечен в базе абузных прокси и взломанных узлов DroneBL."
     },
     {
-      "zone": "dnsbl.sorbs.net",
-      "name": "SORBS Open Proxy & Spam",
-      "severity": "warning",
-      "reason": "IP находится в черном списке открытых прокси и спам-активности SORBS."
-    },
-    {
       "zone": "b.barracudacentral.org",
       "name": "Barracuda Reputation Block List",
       "severity": "warning",
       "reason": "Низкая репутация IP по базе Barracuda Central."
+    },
+    {
+      "zone": "bl.spamcop.net",
+      "name": "SpamCop Blocking List",
+      "severity": "warning",
+      "reason": "IP замечен в рассылке спама по данным SpamCop."
+    },
+    {
+      "zone": "dnsbl-1.uceprotect.net",
+      "name": "UCEPROTECT Level 1",
+      "severity": "warning",
+      "reason": "IP числится в списке UCEPROTECT уровня 1 (отдельные адреса со спам-активностью)."
     }
   ],
   "high_risk_asns": [

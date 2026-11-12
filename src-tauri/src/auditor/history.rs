@@ -1,4 +1,4 @@
-use crate::auditor::geo_matrix::{CheckResult, ProviderId, GUIDE_PERSONAL_VPN};
+use crate::auditor::geo_matrix::{CheckResult, GUIDE_PERSONAL_VPN, ProviderId, UnknownReason};
 use crate::state::IpHistoryEntry;
 
 pub const IMPOSSIBLE_TRAVEL_WINDOW_SECS: u64 = 4 * 3600; // 4 hours
@@ -36,9 +36,11 @@ pub fn evaluate_ip_pinning(
                 "PINNED_IP_MATCH",
                 format!("Подключено через закрепленный личный VPS ({current_ip})."),
             ),
-            _ => CheckResult::ok(
+            // Nothing is enforced and nothing was compared: not a "pass", the check just does not apply.
+            _ => CheckResult::unknown(
                 "STRICT_PINNING_DISABLED",
-                "Строгая привязка IP отключена (консультативный режим).",
+                "Строгая привязка IP отключена: IP не сверялся с закрепленным (консультативный режим).",
+                UnknownReason::NotApplicable,
             ),
         }
     }
@@ -57,9 +59,10 @@ pub fn evaluate_impossible_travel(
     let prev = match history.last() {
         Some(entry) => entry,
         None => {
-            return CheckResult::ok(
-                "HISTORY_CLEAN",
-                "Первая сессия для этого провайдера. Аномалий перемещения нет.",
+            return CheckResult::unknown(
+                "HISTORY_FIRST_SESSION",
+                "Первая сессия для этого провайдера: истории стран для сравнения еще нет.",
+                UnknownReason::NotApplicable,
             );
         }
     };
@@ -99,10 +102,14 @@ pub fn evaluate_impossible_travel(
         }
     }
 
-    CheckResult::ok(
-        "TRAVEL_NORMAL",
-        "География сессий стабильна (без резких смен страны за 4ч).",
-    )
+    let text = if prev_country == current_country {
+        format!("Страна выхода ({current_country}) совпадает со страной последней записи истории.")
+    } else {
+        format!(
+            "Страна сменилась ({prev_country} -> {current_country}), но с последней записи истории прошло больше 4 ч."
+        )
+    };
+    CheckResult::ok("TRAVEL_NORMAL", text)
 }
 
 #[cfg(test)]
@@ -122,9 +129,40 @@ mod tests {
         assert_eq!(res.status, CheckStatus::Critical);
         assert_eq!(res.code, "PINNED_IP_MISMATCH");
 
-        // Strict disabled -> Ok
-        let res = evaluate_ip_pinning(Some("185.10.10.10"), false, "185.20.20.20");
-        assert_eq!(res.status, CheckStatus::Ok);
+        // Strict disabled and the IP does not match / is not pinned: nothing was checked.
+        for pinned in [Some("185.10.10.10"), None] {
+            let res = evaluate_ip_pinning(pinned, false, "185.20.20.20");
+            assert_eq!(res.status, CheckStatus::Unknown);
+            assert!(res.is_not_applicable());
+            assert_eq!(res.code, "STRICT_PINNING_DISABLED");
+        }
+
+        // Strict disabled, but the IP is the pinned one: a real match.
+        let res = evaluate_ip_pinning(Some("185.10.10.10"), false, "185.10.10.10");
+        assert_eq!((res.status, res.code.as_str()), (CheckStatus::Ok, "PINNED_IP_MATCH"));
+
+        // Strict enabled without a pinned IP is a warning, not "not applicable".
+        let res = evaluate_ip_pinning(None, true, "185.10.10.10");
+        assert_eq!(res.status, CheckStatus::Warning);
+    }
+
+    #[test]
+    fn first_session_is_not_applicable_and_not_a_pass() {
+        let res = evaluate_impossible_travel(&[], "NL", 100_000, ProviderId::Anthropic);
+        assert_eq!(res.status, CheckStatus::Unknown);
+        assert!(res.is_not_applicable());
+        assert_eq!(res.code, "HISTORY_FIRST_SESSION");
+    }
+
+    #[test]
+    fn travel_ok_text_states_the_compared_fact() {
+        let now = 100_000;
+        let same = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1), now - 600)];
+        let r = evaluate_impossible_travel(&same, "DE", now, ProviderId::Openai);
+        assert!(r.message.contains("совпадает"), "{}", r.message);
+        let old = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1), now - 5 * 3600)];
+        let r = evaluate_impossible_travel(&old, "US", now, ProviderId::Openai);
+        assert!(r.message.contains("DE -> US") && r.message.contains("4 ч"), "{}", r.message);
     }
 
     #[test]

@@ -330,6 +330,30 @@ pub fn evaluate_provider_geo(
 ) -> CheckResult {
     let country_code = country_code_raw.trim().to_uppercase();
 
+    // 0. Codes that are not a country: Cloudflare marks Tor exits as "T1", an unknown location is
+    // "XX" (or empty). The first is a finding, the others mean nothing was verified.
+    if country_code == "T1" {
+        return CheckResult::critical(
+            "TOR_EXIT_NODE",
+            "Выходной узел определен как сеть Tor (код страны T1). Антифрод ИИ-сервисов блокирует Tor-адреса.",
+            Some(GUIDE_PERSONAL_VPN.to_string()),
+        );
+    }
+    let is_country_code = country_code.len() == 2
+        && country_code.bytes().all(|b| b.is_ascii_uppercase())
+        && !matches!(country_code.as_str(), "XX" | "ZZ");
+    if !is_country_code {
+        return CheckResult::unknown(
+            "GEO_NO_COUNTRY",
+            format!(
+                "Страна выхода не определена (источник геолокации вернул «{}»): совместимость с {} не проверена.",
+                country_code_raw.trim(),
+                provider.display_name()
+            ),
+            UnknownReason::NoData,
+        );
+    }
+
     // 1. Check Global Sanctioned List (RU, BY, CN, HK, MO, IR, KP, SY, CU)
     if matrix.global_blocked_countries.contains(&country_code) {
         let msg = if country_code == "HK" {
@@ -415,7 +439,7 @@ pub fn evaluate_provider_geo(
     CheckResult::ok(
         "GEO_ALLOWED",
         format!(
-            "Локация {} полностью совместима и безопасна для {}.",
+            "Страна выхода {} не входит в списки ограничений для {} (по данным геолокации выходного IP).",
             country_code,
             provider.display_name()
         ),
@@ -434,6 +458,34 @@ mod tests {
             assert_eq!(res.status, CheckStatus::Critical);
             assert_eq!(res.code, "GLOBAL_SANCTIONED_COUNTRY");
         }
+    }
+
+    #[test]
+    fn test_provider_geo_non_country_codes_are_never_allowed() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+            for raw in ["", "  ", "XX", "xx", "ZZ", "N", "NLD", "1A"] {
+                let res = evaluate_provider_geo(&matrix, provider, raw);
+                assert_eq!(res.status, CheckStatus::Unknown, "{raw:?}");
+                assert_eq!(res.reason, Some(UnknownReason::NoData), "{raw:?}");
+                assert_ne!(res.code, "GEO_ALLOWED");
+            }
+            // Cloudflare's marker of a Tor exit.
+            for raw in ["T1", "t1"] {
+                let res = evaluate_provider_geo(&matrix, provider, raw);
+                assert_eq!(res.status, CheckStatus::Critical);
+                assert_eq!(res.code, "TOR_EXIT_NODE");
+            }
+        }
+    }
+
+    #[test]
+    fn test_provider_geo_ok_text_states_the_verified_fact() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let res = evaluate_provider_geo(&matrix, ProviderId::Anthropic, "NL");
+        assert_eq!(res.code, "GEO_ALLOWED");
+        assert!(res.message.contains("не входит в списки ограничений"));
+        assert!(!res.message.contains("полностью") && !res.message.contains("безопасна"));
     }
 
     #[test]
