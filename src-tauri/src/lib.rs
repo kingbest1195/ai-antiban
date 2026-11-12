@@ -6,6 +6,7 @@ pub mod popup;
 pub mod proxy;
 pub mod routing;
 pub mod sanctions;
+pub mod startup;
 pub mod state;
 pub mod sysproxy;
 pub mod tray;

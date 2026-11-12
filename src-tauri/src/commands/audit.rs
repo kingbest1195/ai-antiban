@@ -2,11 +2,33 @@
 
 use crate::tray::update_tray_from_report;
 use crate::{auditor, proxy, state};
+use std::sync::Arc;
+use tauri::Emitter;
+
+/// Event with the pieces of a running audit (see `audit_connection`, argument `run_id`).
+pub const AUDIT_PROGRESS_EVENT: &str = "audit://progress";
+
+/// Payload of [`AUDIT_PROGRESS_EVENT`]: `run_id` tells the interface which call it belongs to.
+#[derive(serde::Serialize, Clone)]
+struct AuditProgressEvent<'a> {
+    run_id: &'a str,
+    provider: &'a str,
+    #[serde(flatten)]
+    progress: auditor::AuditProgress,
+}
 
 #[tauri::command]
 pub async fn get_state(state: tauri::State<'_, state::AppState>) -> Result<state::AppStateData, String> {
     // Route secrets are blanked; `upstream_proxy` keeps its v1.3.x shape (legacy/default route).
     Ok(state.get_data().await.redacted_for_ui())
+}
+
+/// Where the background start is: the interface shows "checking" while it is `starting`.
+#[tauri::command]
+pub fn get_startup_state(
+    startup: tauri::State<'_, Arc<crate::startup::StartupState>>,
+) -> crate::startup::StartupSnapshot {
+    startup.snapshot()
 }
 
 #[tauri::command]
@@ -17,11 +39,28 @@ pub async fn audit_connection(
     guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
     app: tauri::AppHandle,
     force_refresh: Option<bool>,
+    run_id: Option<String>,
 ) -> Result<auditor::RiskReport, String> {
     let provider_id = auditor::ProviderId::from_id(&provider)
         .ok_or_else(|| format!("Неизвестный провайдер: {provider}"))?;
+    // With a `run_id` every check is sent to the interface as soon as it is done, so the rows
+    // fill in one by one instead of staying empty until the slowest check ends.
+    let sink: Option<auditor::ProgressSink> = run_id.map(|run_id| {
+        let app = app.clone();
+        let provider = provider.clone();
+        Arc::new(move |progress: auditor::AuditProgress| {
+            let _ = app.emit(
+                AUDIT_PROGRESS_EVENT,
+                AuditProgressEvent {
+                    run_id: &run_id,
+                    provider: &provider,
+                    progress,
+                },
+            );
+        }) as auditor::ProgressSink
+    });
     let report = match auditor
-        .evaluate_all(provider_id, &state, force_refresh.unwrap_or(false))
+        .evaluate_all_progress(provider_id, &state, force_refresh.unwrap_or(false), sink)
         .await
     {
         Ok(report) => report,
@@ -151,4 +190,27 @@ pub async fn get_gateway_stats(
     state: tauri::State<'_, state::AppState>,
 ) -> Result<state::GatewayStatsSnapshot, String> {
     Ok(state.get_gateway_stats().await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_event_is_one_flat_object_the_interface_reads() {
+        let event = AuditProgressEvent {
+            run_id: "r1",
+            provider: "anthropic",
+            progress: auditor::AuditProgress::Check {
+                index: 6,
+                result: auditor::CheckResult::ok("DNS_PUBLIC_RESOLVER", "ok"),
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["run_id"], "r1");
+        assert_eq!(json["provider"], "anthropic");
+        assert_eq!(json["kind"], "check");
+        assert_eq!(json["index"], 6);
+        assert_eq!(json["result"]["code"], "DNS_PUBLIC_RESOLVER");
+    }
 }

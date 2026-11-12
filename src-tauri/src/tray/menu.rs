@@ -1,6 +1,6 @@
 //! Builds the tray menu (status header, kill-switch, submenus) and the tray icon itself.
 
-use super::{events, TrayKillswitchMenuItem, TrayStatsMenuItem, TrayStatusMenuItem, MAIN_TRAY_ID, TRAY_ICON_GREEN, TRAY_ICON_RED};
+use super::{events, TrayKillswitchMenuItem, TrayStatsMenuItem, TrayStatusMenuItem, MAIN_TRAY_ID, TRAY_ICON_RED, TRAY_ICON_YELLOW};
 use crate::auditor;
 use tauri::{
     image::Image,
@@ -14,9 +14,9 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let status_i = IconMenuItem::with_id(
         app,
         "status_header",
-        concat!("Застава v", env!("CARGO_PKG_VERSION"), " — Шлюз активен"),
+        concat!("Застава v", env!("CARGO_PKG_VERSION"), " — Проверяем…"),
         false,
-        Image::from_bytes(TRAY_ICON_GREEN).ok(),
+        Image::from_bytes(TRAY_ICON_YELLOW).ok(),
         None::<&str>,
     )?;
     app.manage(TrayStatusMenuItem(status_i.clone()));
@@ -259,15 +259,16 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let killswitch_i_for_event = killswitch_i.clone();
     let mut tray_builder = TrayIconBuilder::with_id(MAIN_TRAY_ID)
         .menu(&menu)
-        .title(" ···")
-        .tooltip("Застава — Сетевой шлюз для работы с ИИ")
+        .title(super::CHECKING_TITLE)
+        .tooltip("Застава — проверяем сеть и защиту")
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| {
             events::handle_menu_event(app, event.id.as_ref(), &killswitch_i_for_event)
         })
         .on_tray_icon_event(events::handle_tray_icon_event);
 
-    if let Ok(initial_icon) = Image::from_bytes(TRAY_ICON_GREEN) {
+    // Yellow until the first audit says otherwise: green would claim a verdict nobody made yet.
+    if let Ok(initial_icon) = Image::from_bytes(TRAY_ICON_YELLOW) {
         tray_builder = tray_builder.icon(initial_icon);
     }
 

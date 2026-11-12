@@ -256,6 +256,44 @@ pub struct CheckResult {
     /// Source the value was measured through (reference only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_via: Option<String>,
+    /// What each independent source showed (only the DNS checks fill it): the interface lists it
+    /// so that a disagreement is not a dead end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<CheckDetail>,
+}
+
+/// How one source of a multi-source check answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceState {
+    Answered,
+    /// A service address (private, fake-IP...): the local DNS stub answered, not a resolver.
+    Special,
+    Empty,
+    Timeout,
+    Failed,
+    Unsupported,
+}
+
+/// One source of a check: what it showed (address, its operator and country when known).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceView {
+    /// "Akamai", "Google".
+    pub source: String,
+    pub state: SourceState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
+    /// Public DNS service the address belongs to ("Cloudflare"), if it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
+/// Structured facts behind a result (the text lives in `message`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CheckDetail {
+    pub sources: Vec<SourceView>,
 }
 
 impl CheckResult {
@@ -273,6 +311,7 @@ impl CheckResult {
             reason: None,
             checked_at: None,
             measured_via: None,
+            detail: None,
         }
     }
 
@@ -318,6 +357,16 @@ impl CheckResult {
 
     pub fn with_measured_via(mut self, via: impl Into<String>) -> Self {
         self.measured_via = Some(via.into());
+        self
+    }
+
+    /// Attaches what each source showed; an empty list attaches nothing.
+    pub fn with_sources(mut self, sources: &[SourceView]) -> Self {
+        if !sources.is_empty() {
+            self.detail = Some(CheckDetail {
+                sources: sources.to_vec(),
+            });
+        }
         self
     }
 }

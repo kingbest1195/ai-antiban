@@ -15,6 +15,16 @@ export const overview = {
     frozen: "Сеть ИИ остановлена",
     off: "Защита выключена",
     partial: "Проверено частично",
+    /** Шлюз запускается в фоне: защита ещё не включена, вывода нет. */
+    starting: "Запускаем защиту…",
+  },
+  /** Пока данных нет: не «Опасно» и не «Защищены», а ожидание. */
+  checking: {
+    title: "Проверяем сеть и защиту…",
+    startingTitle: "Запускаем защиту…",
+    text: "Это займёт несколько секунд. Пока проверка не закончилась, вывода нет.",
+    startingText: "Включаем защиту и проверяем сеть. Это займёт несколько секунд.",
+    progress: (done: number, total: number) => `Проверено ${done} из ${total}`,
   },
   facts: {
     checks: (passed: number, total: number, word: string) => `${passed} из ${total} ${word}`,
@@ -27,6 +37,8 @@ export const overview = {
   },
   guard: {
     title: "Защита",
+    /** Тумблер недоступен, пока защита запускается. */
+    startingText: "Включаем защиту…",
     onText: "Запросы к ИИ идут только через чистый IP",
     offText: "Запросы к ИИ идут напрямую, без защиты",
     label: "Защита",
@@ -57,7 +69,7 @@ export const overview = {
       action: "Разрешить без проверки",
     },
     missing: "Данных пока нет",
-    checking: "Проверяем",
+    checking: "Проверяем…",
   },
   browsers: { title: "Браузеры", sub: "Chrome, Safari, Arc, Edge, Яндекс" },
   desktopApps: { title: "Десктопные приложения", sub: "Claude Desktop, ChatGPT Desktop" },

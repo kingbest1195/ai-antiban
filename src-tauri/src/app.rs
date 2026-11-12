@@ -1,6 +1,7 @@
 //! Application bootstrap: Tauri builder, setup sequence and background tasks.
 
 use crate::tray::update_tray_from_report;
+use crate::startup::{self, StartupSink, StartupSnapshot, StartupState, StartupSteps};
 use crate::{auditor, bin_checker, commands, proxy, state, sysproxy, tray, updater};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,19 +32,16 @@ pub fn run() {
             // Register panic guard and OS termination signal watcher for systemic proxy clean-up
             sysproxy::register_clean_exit_guard();
             sysproxy::spawn_signal_cleanup_watcher();
-            // Ownership recovery pass BEFORE protection is enabled: restores only what the journal
-            // says Zastava changed in a previous run, then the one-time 1.3.x signature cleanup.
-            // Fail closed (logged, nothing is guessed).
-            match app.path().app_data_dir() {
+            // Only the directory is pinned here (cheap). The ownership recovery pass, the
+            // protection and the guard run in the background sequence below: the window and the
+            // tray must answer at once, not after a dozen `networksetup` calls.
+            let data_dir = match app.path().app_data_dir() {
                 Ok(dir) => {
                     sysproxy::set_data_dir(dir.clone());
-                    match sysproxy::recover_ownership_on_start(&dir) {
-                        Ok(report) => eprintln!("Застава: {}", report.summary()),
-                        Err(e) => eprintln!("Застава: восстановление отложено, {e}"),
-                    }
+                    Some(dir)
                 }
-                Err(_) => eprintln!("Застава: каталог данных недоступен, восстановление отложено"),
-            }
+                Err(_) => None,
+            };
 
             init_alert_popup(app);
 
@@ -52,20 +50,29 @@ pub fn run() {
             let (guard_for_watcher, pac_url) = start_proxy(app, &risk_auditor, &app_state);
             app.manage(guard_for_watcher.clone());
 
-            enable_default_protection(&app_state, &pac_url);
-
-            // Network guard: detects sudden IP changes and freezes AI traffic until confirmed
-            guard_for_watcher.start(proxy::GuardCtx {
-                auditor: risk_auditor.clone(),
-                state: app_state.clone(),
-                hold_queue: app.state::<proxy::ProxyManager>().hold_queue.clone(),
-                app: app.handle().clone(),
-            });
+            let startup_state = Arc::new(StartupState::new());
+            app.manage(startup_state.clone());
 
             tray::build_tray(app)?;
 
-            spawn_tray_status_watcher(app, &risk_auditor, &app_state, guard_for_watcher);
+            spawn_tray_status_watcher(app, &risk_auditor, &app_state, guard_for_watcher.clone());
             spawn_update_checker(app, &app_state);
+
+            // The gateway listens (`pac_url` exists only after the bind), so the sequence may
+            // switch protection on: recovery -> protection -> guard, off the setup path.
+            let steps = Arc::new(RealSteps {
+                app: app.handle().clone(),
+                data_dir,
+                app_state: app_state.clone(),
+                auditor: risk_auditor.clone(),
+                guard: guard_for_watcher,
+                pac_url,
+            });
+            let sink = Arc::new(TauriStartupSink(app.handle().clone()));
+            if let Err(e) = startup::spawn(steps, startup_state.clone(), sink) {
+                // Without the thread nothing would ever enable the protection or the guard.
+                eprintln!("Застава: не удалось запустить фоновый старт: {e}");
+            }
 
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
@@ -101,6 +108,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::audit::get_state,
+            commands::audit::get_startup_state,
             commands::audit::audit_connection,
             commands::claude::clean_app_cache,
             commands::claude::scan_claude_data_cmd,
@@ -122,6 +130,7 @@ pub fn run() {
             commands::sysproxy::set_cli_mode,
             commands::sysproxy::set_sync_ai_tz_enabled,
             commands::sysproxy::open_os_datetime_settings_cmd,
+            commands::sysproxy::open_os_network_settings_cmd,
             commands::sysproxy::get_sysproxy_status,
             commands::payment::check_payment_bin,
             commands::updates::check_for_updates,
@@ -172,6 +181,7 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                startup::note_shutdown(app_handle);
                 // Cmd+Q / closing the last window: the same notice as a quit from the tray.
                 if sysproxy::cleanup_all_persistent_settings().restore_deferred_by_vpn_dns() {
                     sysproxy::notify_restore_deferred();
@@ -263,6 +273,60 @@ fn enable_default_protection(app_state: &state::AppState, pac_url: &str) {
     }
 }
 
+/// The real steps of the background start (see [`startup`]).
+struct RealSteps {
+    app: tauri::AppHandle,
+    data_dir: Option<std::path::PathBuf>,
+    app_state: state::AppState,
+    auditor: auditor::Auditor,
+    guard: Arc<proxy::NetworkGuard>,
+    pac_url: String,
+}
+
+impl StartupSteps for RealSteps {
+    /// Restores only what the journal says Zastava changed in a previous run, then the one-time
+    /// 1.3.x signature cleanup. Fail closed (logged, nothing is guessed).
+    fn recover(&self) {
+        match &self.data_dir {
+            Some(dir) => match sysproxy::recover_ownership_on_start(dir) {
+                Ok(report) => eprintln!("Застава: {}", report.summary()),
+                Err(e) => eprintln!("Застава: восстановление отложено, {e}"),
+            },
+            None => eprintln!("Застава: каталог данных недоступен, восстановление отложено"),
+        }
+    }
+
+    fn enable_protection(&self) {
+        enable_default_protection(&self.app_state, &self.pac_url);
+    }
+
+    /// Network guard: detects sudden IP changes and freezes AI traffic until confirmed.
+    fn start_guard(&self) {
+        self.guard.start(proxy::GuardCtx {
+            auditor: self.auditor.clone(),
+            state: self.app_state.clone(),
+            hold_queue: self.app.state::<proxy::ProxyManager>().hold_queue.clone(),
+            app: self.app.clone(),
+        });
+    }
+
+    fn undo_protection(&self) {
+        let _ = sysproxy::cleanup_all_persistent_settings();
+    }
+}
+
+/// Publishes the start phase to the interface.
+struct TauriStartupSink(tauri::AppHandle);
+
+impl StartupSink for TauriStartupSink {
+    fn publish(&self, snapshot: &StartupSnapshot) {
+        let _ = self.0.emit(startup::STARTUP_EVENT, snapshot);
+    }
+}
+
+/// Failed audits in a row at start before the tray says "Нет данных" (about 3.6 s plus the audit time).
+const STARTUP_FAILURES_BEFORE_NO_DATA: u32 = 3;
+
 /// Background tray status updater (network changes are handled by the NetworkGuard).
 fn spawn_tray_status_watcher(
     app: &tauri::App,
@@ -276,6 +340,7 @@ fn spawn_tray_status_watcher(
     let watcher_guard = guard;
     tauri::async_runtime::spawn(async move {
         let mut initial_synced = false;
+        let mut failures: u32 = 0;
         // Local time (HH:MM) of the last audit that produced a report.
         let mut last_checked: Option<String> = None;
         loop {
@@ -284,6 +349,7 @@ fn spawn_tray_status_watcher(
                 .await
             {
                 Ok(report) => {
+                    failures = 0;
                     last_checked = Some(chrono::Local::now().format("%H:%M").to_string());
                     let st = watcher_state.get_data().await;
                     let is_pinned = st
@@ -308,8 +374,14 @@ fn spawn_tray_status_watcher(
                     let st = watcher_state.get_data().await;
                     let has_blocked = !st.blocked_providers.is_empty()
                         || watcher_guard.gate() != proxy::Gate::Open;
+                    failures += 1;
                     if !has_blocked {
-                        crate::tray::update_tray_no_data(&watcher_handle, last_checked.as_deref());
+                        if !initial_synced && failures < STARTUP_FAILURES_BEFORE_NO_DATA {
+                            // Cold start (network or PAC not up yet): still "checking", not an error.
+                            crate::tray::update_tray_checking(&watcher_handle);
+                        } else {
+                            crate::tray::update_tray_no_data(&watcher_handle, last_checked.as_deref());
+                        }
                     }
                     if !initial_synced {
                         tokio::time::sleep(Duration::from_millis(1200)).await;

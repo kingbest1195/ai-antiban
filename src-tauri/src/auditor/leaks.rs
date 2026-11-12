@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use crate::auditor::geo_matrix::{CheckResult, CheckStatus, GUIDE_OS_PRIVACY, UnknownReason};
-use crate::auditor::probes::whoami::{MEASURED_VIA, ResolverView, normalized_country};
+use crate::auditor::probes::whoami::{
+    MEASURED_VIA, ResolverView, normalized_country, same_operator_note,
+};
 use crate::auditor::seams::{
     HttpProbeOutcome, IpProbe, RealSystem, ReqwestProbe, SystemInfo, SystemReadError,
 };
@@ -192,6 +194,18 @@ pub fn evaluate_dns_resolver(
     view: &ResolverView,
     exit_country: &str,
 ) -> CheckResult {
+    let sources = match view {
+        ResolverView::Located { sources, .. } => sources,
+        ResolverView::Unmeasured(u) => &u.sources,
+    };
+    resolve_dns_verdict(config, view, exit_country).with_sources(sources)
+}
+
+fn resolve_dns_verdict(
+    config: CheckResult,
+    view: &ResolverView,
+    exit_country: &str,
+) -> CheckResult {
     let config_note = match config.status {
         CheckStatus::Ok => "в списке DNS ОС нет резолверов провайдеров РФ и Яндекс.DNS",
         CheckStatus::Unknown => "список DNS ОС прочитать не удалось",
@@ -205,6 +219,7 @@ pub fn evaluate_dns_resolver(
             ip,
             country,
             public_service,
+            ..
         } => (ip, country, public_service),
         ResolverView::Unmeasured(u) => {
             if config_finding {
@@ -246,10 +261,14 @@ pub fn evaluate_dns_resolver(
             );
             return kept.with_measured_via(MEASURED_VIA);
         }
+        let same_operator = match view {
+            ResolverView::Located { sources, .. } => same_operator_note(sources, service),
+            ResolverView::Unmeasured(_) => String::new(),
+        };
         return CheckResult::ok(
             "DNS_PUBLIC_RESOLVER",
             format!(
-                "Запросы DNS идут на публичный резолвер {service} ({ip}); страна резолвера не сравнивается: это anycast-сервис. Настройки DNS ОС (справочно): {config_note}. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину."
+                "Резолвер: {service} (публичный DNS). Запросы DNS идут на {ip}; страна резолвера не сравнивается: это anycast-сервис.{same_operator} Настройки DNS ОС (справочно): {config_note}. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину."
             ),
         )
         .with_measured_via(MEASURED_VIA);
@@ -520,6 +539,7 @@ mod tests {
             ip: ip.parse().unwrap(),
             country: cc.into(),
             public_service: None,
+            sources: vec![],
         }
     }
 
@@ -528,6 +548,7 @@ mod tests {
             code: "DNS_WHOAMI_TIMEOUT",
             reason,
             detail: "источники молчат".into(),
+            sources: vec![],
         })
     }
 
@@ -596,6 +617,7 @@ mod tests {
             ip: ip.parse().unwrap(),
             country: cc.into(),
             public_service: Some(service),
+            sources: vec![],
         }
     }
 

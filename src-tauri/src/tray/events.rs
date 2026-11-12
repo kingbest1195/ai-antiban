@@ -20,6 +20,7 @@ pub fn handle_menu_event(
             // What cannot be put back now stays in the ownership journal and is finished at the
             // next start (or after the VPN lets go of its temporary DNS). Quit does not wait for a
             // VPN with temporary DNS settings; the user is told, the behaviour itself is unchanged.
+            crate::startup::note_shutdown(app);
             let report = sysproxy::cleanup_all_persistent_settings();
             if report.has_failures() {
                 eprintln!("Застава: часть настроек будет восстановлена при следующем запуске");
@@ -82,6 +83,7 @@ pub fn handle_menu_event(
         "toggle_sysproxy_tray" => {
             let active = sysproxy::is_sysproxy_active();
             if active {
+                crate::startup::note_user_off(app);
                 let report = sysproxy::cleanup_all_persistent_settings();
                 if report.has_failures() {
                     eprintln!("Застава: часть настроек будет восстановлена позже");

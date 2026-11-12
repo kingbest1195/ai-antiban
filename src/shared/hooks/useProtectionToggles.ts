@@ -19,24 +19,29 @@ interface Options {
   sysproxyActive: boolean;
   setSysproxyActive: (value: boolean) => void;
   showToast: ShowToast;
+  /** Застава ещё запускается в фоне: защита не включена до конца запуска, статус читать рано. */
+  startupPending?: boolean;
 }
 
 /** Тумблеры защиты: системный прокси (PAC), защита редакторов и CLI, kill-switch «Остановить сеть». */
-export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showToast }: Options) {
+export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showToast, startupPending = false }: Options) {
   const [cliProtected, setCliProtected] = useState<boolean>(false);
   const [killswitchFrozen, setKillswitchFrozen] = useState<boolean>(false);
 
-  // Стартовое чтение: kill-switch и статус защиты CLI.
+  // Стартовое чтение: kill-switch.
   useEffect(() => {
     getNetworkKillswitchStatus()
       .then((frozen) => setKillswitchFrozen(frozen))
       .catch(() => {});
-    checkCliProtectionStatus()
-      .then((active) => {
-        if (active) setCliProtected(true);
-      })
-      .catch(() => {});
   }, []);
+
+  // Статус защиты CLI читаем, когда фоновый запуск закончен: раньше защита ещё не включена, ответ был бы ложным «выключено».
+  useEffect(() => {
+    if (startupPending) return;
+    checkCliProtectionStatus()
+      .then((active) => setCliProtected(active))
+      .catch(() => {});
+  }, [startupPending]);
 
   const handleToggleSysproxy = useCallback(async () => {
     try {

@@ -1,6 +1,10 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   AppStateData,
+  AuditProgress,
+  AuditProgressEvent,
+  StartupSnapshot,
   BinAuditResult,
   CheckResult,
   CleanResult,
@@ -141,17 +145,192 @@ export async function toggleAutoUpdate(enabled: boolean): Promise<void> {
   mockState.auto_update_enabled = enabled;
 }
 
+/* ---------- Моки для браузера: медленный старт и варианты проверки DNS ---------- */
+
+/** Параметры адреса для превью без Tauri: `?startup=slow` и `?dns=cloudflare|disagree|fake|single`. */
+function mockOption(name: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return new URLSearchParams(window.location.search).get(name);
+  } catch {
+    return null;
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export const MOCK_AUDIT_PROGRESS_EVENT = "mock-audit-progress";
+export const MOCK_STARTUP_EVENT = "mock-startup-phase";
+
+/** Через сколько мс после запуска мок-аудита приходит каждая проверка (место в отчёте → задержка). */
+const SLOW_AUDIT_SCHEDULE: Record<number, number> = {
+  0: 3000, 1: 3000, 2: 3000, 4: 3200, 9: 3200, 5: 3800, 3: 4600, 7: 5200, 8: 5200, 11: 5600, 10: 6400, 6: 6400, 12: 8000,
+};
+const SLOW_AUDIT_TELEMETRY_MS = 3000;
+const SLOW_START_MS = 6000;
+
+/** `?slowFactor=5` растягивает моковый запуск в 5 раз: удобно снимать состояния «ожидание» и «готово». */
+const slowFactor = () => Math.max(1, Number(mockOption("slowFactor")) || 1);
+
+let mockStartup: StartupSnapshot | null = null;
+
+function currentMockStartup(): StartupSnapshot {
+  if (!mockStartup) {
+    const slow = mockOption("startup") === "slow";
+    mockStartup = { phase: slow ? "starting" : "ready", step: slow ? "protection" : null };
+    if (slow) {
+      setTimeout(() => {
+        mockStartup = { phase: "ready", step: null };
+        emitMock(MOCK_STARTUP_EVENT, mockStartup);
+      }, SLOW_START_MS * slowFactor());
+    }
+  }
+  return mockStartup;
+}
+
+/** Результаты DNS-проверок мока по сценарию `?dns=`. */
+function mockDnsChecks(): { dns: CheckResult; dnsCountry: CheckResult } | null {
+  const scenario = mockOption("dns");
+  const cloudflareSources = [
+    { source: "Akamai", state: "answered" as const, addr: "172.70.161.26", operator: "Cloudflare" },
+    { source: "Google", state: "answered" as const, addr: "172.71.240.11", operator: "Cloudflare" },
+  ];
+  const unknownCountry = (code: string, message: string, reason: CheckResult["reason"], sources: CheckResult["detail"]): CheckResult => ({
+    status: "unknown",
+    code,
+    message,
+    reason,
+    measured_via: "whoami:akamai+google",
+    detail: sources,
+  });
+  switch (scenario) {
+    case "cloudflare":
+      return {
+        dns: {
+          status: "ok",
+          code: "DNS_PUBLIC_RESOLVER",
+          message:
+            "Резолвер: Cloudflare (публичный DNS). Запросы DNS идут на 172.70.161.26; страна резолвера не сравнивается: это anycast-сервис. Источники показали разные адреса (172.70.161.26 и 172.71.240.11), но оба принадлежат Cloudflare: это один и тот же публичный DNS. Настройки DNS ОС (справочно): в списке DNS ОС нет резолверов провайдеров РФ и Яндекс.DNS. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину.",
+          measured_via: "whoami:akamai+google",
+          detail: { sources: cloudflareSources },
+        },
+        dnsCountry: {
+          status: "unknown",
+          code: "DNS_COUNTRY_PUBLIC_RESOLVER",
+          message:
+            "Запросы DNS идут на публичный резолвер Cloudflare (172.70.161.26); страна резолвера не сравнивается: это anycast-сервис. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину.",
+          reason: "not_applicable",
+          measured_via: "whoami:akamai+google",
+          detail: { sources: cloudflareSources },
+        },
+      };
+    case "disagree": {
+      const sources: CheckResult["detail"] = {
+        sources: [
+          { source: "Akamai", state: "answered", addr: "203.0.113.10" },
+          { source: "Google", state: "answered", addr: "198.51.100.7" },
+        ],
+      };
+      const text =
+        "два независимых источника показали разные резолверы (Akamai: 203.0.113.10, Google: 198.51.100.7) и общего публичного DNS-сервиса у них нет, надёжно определить его нельзя";
+      return {
+        dns: unknownCountry("DNS_WHOAMI_DISAGREE", `Проверка DNS-резолвера не выполнена: ${text}. Справочно, настройки ОС: в списке DNS ОС нет резолверов провайдеров РФ и Яндекс.DNS.`, "no_data", sources),
+        dnsCountry: unknownCountry("DNS_WHOAMI_DISAGREE", `Согласованность страны DNS и выходного узла не проверена: ${text}.`, "no_data", sources),
+      };
+    }
+    case "fake": {
+      const sources: CheckResult["detail"] = {
+        sources: [
+          { source: "Akamai", state: "special", addr: "198.18.0.7" },
+          { source: "Google", state: "answered", addr: "172.71.240.11", operator: "Cloudflare" },
+        ],
+      };
+      const text =
+        "DNS ответил служебным адресом 198.18.0.7 (так выглядит fake-IP режим TUN-клиента или локальный DNS-перехватчик), реальный резолвер не виден";
+      return {
+        dns: unknownCountry("DNS_WHOAMI_FAKE_IP", `Проверка DNS-резолвера не выполнена: ${text}. Справочно, настройки ОС: список DNS ОС прочитать не удалось.`, "source_refused", sources),
+        dnsCountry: unknownCountry("DNS_WHOAMI_FAKE_IP", `Согласованность страны DNS и выходного узла не проверена: ${text}.`, "source_refused", sources),
+      };
+    }
+    case "single": {
+      const sources: CheckResult["detail"] = {
+        sources: [
+          { source: "Akamai", state: "answered", addr: "172.70.161.26", operator: "Cloudflare" },
+          { source: "Google", state: "timeout" },
+        ],
+      };
+      const text = "ответил только один источник (Akamai), Google не ответил вовремя: подтверждения нет";
+      return {
+        dns: unknownCountry("DNS_WHOAMI_SINGLE_SOURCE", `Проверка DNS-резолвера не выполнена: ${text}.`, "no_data", sources),
+        dnsCountry: unknownCountry("DNS_WHOAMI_SINGLE_SOURCE", `Согласованность страны DNS и выходного узла не проверена: ${text}.`, "no_data", sources),
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/** Как доставляются куски аудита: событие Tauri или событие окна в браузере. */
+export async function onAuditProgress(handler: (event: AuditProgressEvent) => void): Promise<() => void> {
+  if (isTauri()) {
+    return await listen<AuditProgressEvent>("audit://progress", (e) => handler(e.payload));
+  }
+  const listener = (e: Event) => handler((e as CustomEvent<AuditProgressEvent>).detail);
+  window.addEventListener(MOCK_AUDIT_PROGRESS_EVENT, listener);
+  return () => window.removeEventListener(MOCK_AUDIT_PROGRESS_EVENT, listener);
+}
+
+/** Где фоновый запуск шлюза (защита, страж): пока `starting`, состояние защиты не известно. */
+export async function getStartupState(): Promise<StartupSnapshot> {
+  if (isTauri()) {
+    return await invoke<StartupSnapshot>("get_startup_state");
+  }
+  return currentMockStartup();
+}
+
+export async function onStartupChanged(handler: (snapshot: StartupSnapshot) => void): Promise<() => void> {
+  if (isTauri()) {
+    return await listen<StartupSnapshot>("startup://phase", (e) => handler(e.payload));
+  }
+  currentMockStartup();
+  const listener = (e: Event) => handler((e as CustomEvent<StartupSnapshot>).detail);
+  window.addEventListener(MOCK_STARTUP_EVENT, listener);
+  return () => window.removeEventListener(MOCK_STARTUP_EVENT, listener);
+}
+
+/**
+ * Аудит. С `runId` шлюз присылает событиями audit://progress адрес выхода и каждую проверку, как только она
+ * готова, а итоговый отчёт возвращает в конце; без `runId` приходит только отчёт.
+ */
 export async function auditConnection(
   provider: ProviderId = "anthropic",
-  forceRefresh: boolean = false
+  forceRefresh: boolean = false,
+  runId?: string,
 ): Promise<RiskReport> {
   if (isTauri()) {
     return await invoke<RiskReport>("audit_connection", {
       provider,
       forceRefresh,
+      runId: runId ?? null,
     });
   }
+  const report = buildMockReport(provider);
+  // Мок «медленный старт»: аудит, начатый в первые секунды жизни страницы, приходит поэтапно за 3–8 секунд
+  // (повторный запуск эффектов в dev-режиме React тоже попадает сюда).
+  if (mockOption("startup") === "slow" && provider === "anthropic" && performance.now() < 2000) {
+    const send = (progress: AuditProgress) => {
+      if (runId) emitMock(MOCK_AUDIT_PROGRESS_EVENT, { ...progress, run_id: runId, provider });
+    };
+    setTimeout(() => send({ kind: "telemetry", telemetry: report.telemetry }), SLOW_AUDIT_TELEMETRY_MS * slowFactor());
+    for (const [index, ms] of Object.entries(SLOW_AUDIT_SCHEDULE)) {
+      setTimeout(() => send({ kind: "check", index: Number(index), result: report.checks[Number(index)] }), ms * slowFactor());
+    }
+    await sleep((Math.max(...Object.values(SLOW_AUDIT_SCHEDULE)) + 200) * slowFactor());
+  }
+  return report;
+}
 
+function buildMockReport(provider: ProviderId): RiskReport {
   const hasUpstream = mockState.upstream_proxy?.enabled;
   const country = hasUpstream ? "NL" : mockCountryOverride || "NL";
   const isTurkey = !hasUpstream && country === "TR";
@@ -247,7 +426,8 @@ export async function auditConnection(
         message: "Утечек по протоколу IPv6 не обнаружено (трафик идет строго через IPv4-туннель).",
       };
 
-  const dnsResult: CheckResult = isTurkey
+  const dnsMock = mockDnsChecks();
+  const dnsResult: CheckResult = dnsMock?.dns ?? (isTurkey
     ? {
         status: "unknown",
         code: "DNS_TIMEOUT",
@@ -259,7 +439,7 @@ export async function auditConnection(
         code: "DNS_CLEAN",
         message: "Утечек через локальные DNS-резолверы РФ не обнаружено (Cloudflare 1.1.1.1).",
         measured_via: "whoami:akamai+google",
-      };
+      });
 
   const tzResult = {
     status: isTurkey ? ("warning" as const) : ("ok" as const),
@@ -314,7 +494,7 @@ export async function auditConnection(
         message: "Reverse DNS: ptr.hostvds.net не содержит стоп-слов коммерческих прокси.",
         guide_ref: null,
       },
-      {
+      dnsMock?.dnsCountry ?? {
         status: "ok",
         code: "DNS_COUNTRY_CONSISTENT",
         message: "DNS-резолверы находятся в той же юрисдикции, что и выходной IP.",
@@ -553,7 +733,7 @@ export async function checkCliProtectionStatus(): Promise<boolean> {
   if (isTauri()) {
     return await invoke<boolean>("check_cli_protection_status");
   }
-  return mockCliProtection;
+  return mockCliProtection && currentMockStartup().phase === "ready";
 }
 
 export async function syncAiAgentsTimezone(timezone: string): Promise<string> {
@@ -603,6 +783,13 @@ export async function setSyncAiTzEnabled(enabled: boolean): Promise<CliSettings>
   return mockCliSettings();
 }
 
+/** Открывает системные настройки сети (где указывают DNS); в браузере ничего не делает. */
+export async function openOsNetworkSettings(): Promise<void> {
+  if (isTauri()) {
+    return await invoke("open_os_network_settings_cmd");
+  }
+}
+
 export async function openOsDatetimeSettings(): Promise<void> {
   if (isTauri()) {
     return await invoke("open_os_datetime_settings_cmd");
@@ -613,7 +800,8 @@ export async function getSysproxyStatus(): Promise<boolean> {
   if (isTauri()) {
     return await invoke<boolean>("get_sysproxy_status");
   }
-  return mockSysproxyActive;
+  // Как шлюз: пока фоновый запуск не закончен, защита ещё не включена.
+  return mockSysproxyActive && currentMockStartup().phase === "ready";
 }
 
 export async function checkPaymentBin(

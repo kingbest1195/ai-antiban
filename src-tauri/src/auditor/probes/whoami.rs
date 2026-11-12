@@ -9,7 +9,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use crate::auditor::cache::{GEO_TTL, TtlCache};
-use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_PRIVACY, UnknownReason};
+use crate::auditor::geo_matrix::{
+    CheckResult, GUIDE_OS_PRIVACY, SourceState, SourceView, UnknownReason,
+};
+use crate::auditor::probes::public_dns::operator_of;
 use crate::auditor::seams::{DnsLookup, HttpProbeOutcome, IpProbe, LookupOutcome, TxtOutcome};
 
 pub const AKAMAI_HOST: &str = "whoami.akamai.net";
@@ -48,6 +51,40 @@ impl SourceReading {
             Self::Unsupported => "не поддерживается на этой системе",
         }
     }
+
+    fn state(&self) -> SourceState {
+        match self {
+            Self::Addr(_) => SourceState::Answered,
+            Self::Special(_) => SourceState::Special,
+            Self::Empty => SourceState::Empty,
+            Self::Timeout => SourceState::Timeout,
+            Self::Failed => SourceState::Failed,
+            Self::Unsupported => SourceState::Unsupported,
+        }
+    }
+
+    /// What this source showed, for the structured detail of a result.
+    fn view(&self, source: &str) -> SourceView {
+        let ip = match self {
+            Self::Addr(ip) | Self::Special(ip) => Some(*ip),
+            _ => None,
+        };
+        SourceView {
+            source: source.to_string(),
+            state: self.state(),
+            addr: ip.map(|ip| ip.to_string()),
+            operator: match self {
+                Self::Addr(ip) => operator_of(*ip).map(str::to_string),
+                _ => None,
+            },
+            country: None,
+        }
+    }
+}
+
+/// What both whoami sources showed (Akamai first).
+pub fn source_views(akamai: &SourceReading, google: &SourceReading) -> Vec<SourceView> {
+    vec![akamai.view("Akamai"), google.view("Google")]
 }
 
 /// Addresses that a real resolver never has on the Internet. Besides private and loopback ranges
@@ -130,6 +167,8 @@ pub struct Unmeasured {
     pub reason: UnknownReason,
     /// Clause that completes "... не выполнена: {detail}".
     pub detail: String,
+    /// What each source showed.
+    pub sources: Vec<SourceView>,
 }
 
 /// The resolver that sees the DNS requests of this machine, located.
@@ -137,10 +176,14 @@ pub struct Unmeasured {
 pub enum ResolverView {
     Located {
         ip: IpAddr,
+        /// Empty when the operator was known by its address range and no geo request was made
+        /// (the country of an anycast service is not compared anyway).
         country: String,
         /// Name of the public DNS service whose egress address this is (see
         /// [`PUBLIC_DNS_SERVICES`]); its country says nothing about where the user is.
         public_service: Option<&'static str>,
+        /// What each source showed.
+        sources: Vec<SourceView>,
     },
     Unmeasured(Unmeasured),
 }
@@ -161,12 +204,23 @@ fn same_resolver_network(a: IpAddr, b: IpAddr) -> bool {
     }
 }
 
-/// The resolver address both sources agree on, or the reason it is not known.
+/// The resolver both sources agree on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agreed {
+    pub ip: IpAddr,
+    /// Set when both addresses belong to the same well-known public DNS service.
+    pub operator: Option<&'static str>,
+}
+
+/// The resolver both sources agree on, or the reason it is not known. Two different addresses
+/// agree when they are one resolver network (same /24 or /48) or belong to one public DNS
+/// operator (anycast egress addresses of a fleet differ between queries).
 pub fn combine_sources(
     akamai: &SourceReading,
     google: &SourceReading,
-) -> Result<IpAddr, Unmeasured> {
+) -> Result<Agreed, Unmeasured> {
     use SourceReading::*;
+    let sources = source_views(akamai, google);
 
     // A service address instead of a resolver address: a local DNS stub answers for the name.
     let special = match (akamai, google) {
@@ -180,20 +234,37 @@ pub fn combine_sources(
             detail: format!(
                 "DNS ответил служебным адресом {ip} (так выглядит fake-IP режим TUN-клиента или локальный DNS-перехватчик), реальный резолвер не виден"
             ),
+            sources,
         });
     }
 
     match (akamai, google) {
-        (Addr(a), Addr(g)) if same_resolver_network(*a, *g) => Ok(*a),
-        (Addr(a), Addr(g)) => Err(Unmeasured {
-            code: "DNS_WHOAMI_DISAGREE",
-            reason: UnknownReason::NoData,
-            detail: format!(
-                "два независимых источника показали разные резолверы (Akamai: {a}, Google: {g}), надёжно определить его нельзя"
-            ),
-        }),
-        (Addr(_), other) => Err(single_source("Akamai", "Google", other)),
-        (other, Addr(_)) => Err(single_source("Google", "Akamai", other)),
+        (Addr(a), Addr(g)) => {
+            let (op_a, op_g) = (operator_of(*a), operator_of(*g));
+            let operator = op_a.filter(|op| Some(*op) == op_g);
+            if operator.is_some() || same_resolver_network(*a, *g) {
+                return Ok(Agreed {
+                    ip: *a,
+                    operator,
+                });
+            }
+            let named = |ip: &IpAddr, op: Option<&str>| match op {
+                Some(op) => format!("{ip}, {op}"),
+                None => ip.to_string(),
+            };
+            Err(Unmeasured {
+                code: "DNS_WHOAMI_DISAGREE",
+                reason: UnknownReason::NoData,
+                detail: format!(
+                    "два независимых источника показали разные резолверы (Akamai: {}, Google: {}) и общего публичного DNS-сервиса у них нет, надёжно определить его нельзя",
+                    named(a, op_a),
+                    named(g, op_g)
+                ),
+                sources,
+            })
+        }
+        (Addr(_), other) => Err(single_source("Akamai", "Google", other, sources)),
+        (other, Addr(_)) => Err(single_source("Google", "Akamai", other, sources)),
         _ => {
             let both = [akamai, google];
             let (code, reason, why) = if both.iter().any(|r| **r == Timeout) {
@@ -225,12 +296,18 @@ pub fn combine_sources(
                 code,
                 reason,
                 detail: format!("{why} (Akamai и Google)"),
+                sources,
             })
         }
     }
 }
 
-fn single_source(answered: &str, silent: &str, other: &SourceReading) -> Unmeasured {
+fn single_source(
+    answered: &str,
+    silent: &str,
+    other: &SourceReading,
+    sources: Vec<SourceView>,
+) -> Unmeasured {
     Unmeasured {
         code: "DNS_WHOAMI_SINGLE_SOURCE",
         reason: UnknownReason::NoData,
@@ -238,6 +315,7 @@ fn single_source(answered: &str, silent: &str, other: &SourceReading) -> Unmeasu
             "ответил только один источник ({answered}), {silent} {}: подтверждения нет",
             other.describe()
         ),
+        sources,
     }
 }
 
@@ -255,7 +333,7 @@ pub struct PublicDns {
 
 /// Public resolvers whose whoami egress address is placed by geo services in the country of the
 /// nearest point of presence: comparing that country with the exit country proves nothing.
-pub const PUBLIC_DNS_SERVICES: [PublicDns; 4] = [
+pub const PUBLIC_DNS_SERVICES: [PublicDns; 5] = [
     PublicDns {
         name: "Google Public DNS",
         asns: &[15169, 36040, 19527, 396982],
@@ -275,6 +353,11 @@ pub const PUBLIC_DNS_SERVICES: [PublicDns; 4] = [
         name: "Cisco OpenDNS",
         asns: &[36692],
         org_keywords: &["opendns"],
+    },
+    PublicDns {
+        name: "AdGuard DNS",
+        asns: &[212772],
+        org_keywords: &["adguard"],
     },
 ];
 
@@ -417,10 +500,22 @@ pub async fn measure_resolver(
         dns.lookup(AKAMAI_HOST, WHOAMI_LIMIT),
         dns.lookup_txt(GOOGLE_TXT_HOST, WHOAMI_LIMIT)
     );
-    let ip = match combine_sources(&akamai_reading(&akamai), &google_reading(&google)) {
-        Ok(ip) => ip,
+    let (akamai, google) = (akamai_reading(&akamai), google_reading(&google));
+    let sources = source_views(&akamai, &google);
+    let agreed = match combine_sources(&akamai, &google) {
+        Ok(agreed) => agreed,
         Err(unmeasured) => return ResolverView::Unmeasured(unmeasured),
     };
+    let ip = agreed.ip;
+    // The operator is known by its address range: no geo request (its country is not compared).
+    if let Some(service) = agreed.operator {
+        return ResolverView::Located {
+            ip,
+            country: String::new(),
+            public_service: Some(service),
+            sources,
+        };
+    }
     let geo = geo_cache
         .get_or_compute(
             &ip.to_string(),
@@ -434,6 +529,7 @@ pub async fn measure_resolver(
             ip,
             public_service: public_dns_service(geo.asn, geo.org.as_deref()),
             country: geo.country,
+            sources,
         },
         Err(reason) => ResolverView::Unmeasured(Unmeasured {
             code: "DNS_RESOLVER_GEO_UNAVAILABLE",
@@ -441,6 +537,7 @@ pub async fn measure_resolver(
             detail: format!(
                 "резолвер определён ({ip}), но его страну узнать не удалось: сервисы геолокации не дали ответа"
             ),
+            sources,
         }),
     }
 }
@@ -455,14 +552,31 @@ pub fn normalized_country(raw: &str) -> Option<String> {
     (c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase())).then_some(c)
 }
 
+/// " Источники показали разные адреса (A и B), но оба принадлежат {service}..." when the two
+/// sources answered with different addresses of one public DNS service; empty otherwise.
+pub fn same_operator_note(sources: &[SourceView], service: &str) -> String {
+    let addrs: Vec<&str> = sources
+        .iter()
+        .filter(|s| s.state == SourceState::Answered)
+        .filter_map(|s| s.addr.as_deref())
+        .collect();
+    match addrs.as_slice() {
+        [a, b] if a != b => format!(
+            " Источники показали разные адреса ({a} и {b}), но оба принадлежат {service}: это один и тот же публичный DNS."
+        ),
+        _ => String::new(),
+    }
+}
+
 /// "DNS country = exit country" on a measured resolver.
 pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckResult {
-    let (ip, country, public_service) = match view {
+    let (ip, country, public_service, sources) = match view {
         ResolverView::Located {
             ip,
             country,
             public_service,
-        } => (ip, country, public_service),
+            sources,
+        } => (ip, country, public_service, sources),
         ResolverView::Unmeasured(u) => {
             return CheckResult::unknown(
                 u.code,
@@ -471,7 +585,8 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
                     u.detail
                 ),
                 u.reason,
-            );
+            )
+            .with_sources(&u.sources);
         }
     };
     if let Some(service) = public_service {
@@ -479,11 +594,13 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
         return CheckResult::unknown(
             "DNS_COUNTRY_PUBLIC_RESOLVER",
             format!(
-                "Запросы DNS идут на публичный резолвер {service} ({ip}); страна резолвера не сравнивается: это anycast-сервис. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину."
+                "Запросы DNS идут на публичный резолвер {service} ({ip}); страна резолвера не сравнивается: это anycast-сервис. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину.{}",
+                same_operator_note(sources, service)
             ),
             UnknownReason::NotApplicable,
         )
-        .with_measured_via(MEASURED_VIA);
+        .with_measured_via(MEASURED_VIA)
+        .with_sources(sources);
     }
     let Some(exit) = normalized_country(exit_country) else {
         return CheckResult::unknown(
@@ -491,7 +608,8 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
             format!("Согласованность страны DNS и выходного узла не проверена: страна выхода не определена (резолвер {ip} находится в {country})."),
             UnknownReason::NoData,
         )
-        .with_measured_via(MEASURED_VIA);
+        .with_measured_via(MEASURED_VIA)
+        .with_sources(sources);
     };
     if *country != exit {
         return CheckResult::warning(
@@ -501,7 +619,8 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
             ),
             Some(GUIDE_OS_PRIVACY.to_string()),
         )
-        .with_measured_via(MEASURED_VIA);
+        .with_measured_via(MEASURED_VIA)
+        .with_sources(sources);
     }
     CheckResult::ok(
         "DNS_COUNTRY_CONSISTENT",
@@ -510,6 +629,7 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
         ),
     )
     .with_measured_via(MEASURED_VIA)
+    .with_sources(sources)
 }
 
 #[cfg(test)]
@@ -600,33 +720,142 @@ mod tests {
         assert_eq!(google_reading(&TxtOutcome::NotFound), SourceReading::Empty);
     }
 
+    /// `(ip, country, public_service)` of a located resolver.
+    fn parts(view: &ResolverView) -> (IpAddr, &str, Option<&'static str>) {
+        match view {
+            ResolverView::Located {
+                ip,
+                country,
+                public_service,
+                ..
+            } => (*ip, country.as_str(), *public_service),
+            other => panic!("not located: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn agreeing_sources_give_a_located_resolver() {
         let view = measure(agreeing("77.88.8.8"), &geo_probe("RU")).await;
-        assert_eq!(
-            view,
-            ResolverView::Located {
-                ip: ip("77.88.8.8"),
-                country: "RU".into(),
-                public_service: None,
-            }
-        );
+        assert_eq!(parts(&view), (ip("77.88.8.8"), "RU", None));
+        let ResolverView::Located { sources, .. } = &view else {
+            panic!()
+        };
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].source, "Akamai");
+        assert_eq!(sources[1].addr.as_deref(), Some("77.88.8.8"));
     }
 
     #[tokio::test]
     async fn two_addresses_of_one_resolver_pool_still_agree() {
+        // The same /24 outside of any public DNS range: the geo answer places it.
         let dns = FakeDns::new(LookupOutcome::Failed)
-            .with(AKAMAI_HOST, addr("74.125.40.10"))
-            .with_txt(GOOGLE_TXT_HOST, txt("74.125.40.77"));
+            .with(AKAMAI_HOST, addr("203.0.113.10"))
+            .with_txt(GOOGLE_TXT_HOST, txt("203.0.113.77"));
         let view = measure(dns, &geo_probe("US")).await;
-        assert_eq!(
-            view,
-            ResolverView::Located {
-                ip: ip("74.125.40.10"),
-                country: "US".into(),
-                public_service: None,
-            }
-        );
+        assert_eq!(parts(&view), (ip("203.0.113.10"), "US", None));
+    }
+
+    fn two(akamai: &str, google: &str) -> FakeDns {
+        FakeDns::new(LookupOutcome::Failed)
+            .with(AKAMAI_HOST, addr(akamai))
+            .with_txt(GOOGLE_TXT_HOST, txt(&format!("\"{google}\"")))
+    }
+
+    #[tokio::test]
+    async fn owner_case_two_cloudflare_addresses_agree_without_a_geo_request() {
+        // Akamai and Google reached the same resolver from different addresses of its fleet.
+        let probe = geo_probe("US");
+        let view = measure(two("172.70.161.26", "172.71.240.11"), &probe).await;
+        assert_eq!(parts(&view), (ip("172.70.161.26"), "", Some("Cloudflare")));
+        assert_eq!(probe.calls(), 0);
+        let ResolverView::Located { sources, .. } = &view else {
+            panic!()
+        };
+        assert_eq!(sources[0].operator.as_deref(), Some("Cloudflare"));
+        assert_eq!(sources[1].addr.as_deref(), Some("172.71.240.11"));
+        assert!(same_operator_note(sources, "Cloudflare").contains("172.71.240.11"));
+    }
+
+    #[tokio::test]
+    async fn owner_case_ends_as_ok_public_dns_with_both_sources_in_the_detail() {
+        let view = measure(two("172.70.161.26", "172.71.240.11"), &geo_probe("US")).await;
+        let config = CheckResult::ok("DNS_CONFIG_OK", "в настройках ОС всё чисто");
+        let r = crate::auditor::leaks::evaluate_dns_resolver(config, &view, "NL");
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "DNS_PUBLIC_RESOLVER"));
+        assert!(r.message.starts_with("Резолвер: Cloudflare (публичный DNS)"), "{}", r.message);
+        assert!(r.message.contains("172.70.161.26") && r.message.contains("172.71.240.11"));
+        let sources = r.detail.expect("detail").sources;
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().all(|s| s.operator.as_deref() == Some("Cloudflare")));
+        // The country check does not penalise it: not applicable.
+        let c = evaluate_dns_country(&view, "NL");
+        assert!(c.is_not_applicable());
+        // The detail survives the JSON the interface reads.
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["detail"]["sources"][0]["source"], "Akamai");
+        assert_eq!(json["detail"]["sources"][0]["state"], "answered");
+    }
+
+    #[tokio::test]
+    async fn one_operator_in_one_range_of_google_or_in_ipv6_agrees() {
+        let probe = geo_probe("US");
+        let google = measure(two("74.125.40.10", "74.125.99.1"), &probe).await;
+        assert_eq!(parts(&google).2, Some("Google Public DNS"));
+        let v6 = measure(two("2606:4700:4700::1111", "2606:4700:4700::1001"), &probe).await;
+        assert_eq!(parts(&v6).2, Some("Cloudflare"));
+        let mixed_family = measure(two("1.1.1.1", "2606:4700:4700::1111"), &probe).await;
+        assert_eq!(parts(&mixed_family).2, Some("Cloudflare"));
+        assert_eq!(probe.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn different_operators_stay_unknown_and_explain_both_sources() {
+        let probe = geo_probe("US");
+        let view = measure(two("172.70.161.26", "8.8.8.8"), &probe).await;
+        let ResolverView::Unmeasured(u) = view else {
+            panic!("{view:?}")
+        };
+        assert_eq!(u.code, "DNS_WHOAMI_DISAGREE");
+        assert!(u.detail.contains("Cloudflare") && u.detail.contains("Google Public DNS"));
+        assert_eq!(u.sources.len(), 2);
+        assert_eq!(u.sources[0].operator.as_deref(), Some("Cloudflare"));
+        assert_eq!(u.sources[1].operator.as_deref(), Some("Google Public DNS"));
+        assert_eq!(probe.calls(), 0);
+        // An unknown operator on one side is not an agreement either.
+        let view = measure(two("172.70.161.26", "203.0.113.5"), &probe).await;
+        assert!(matches!(view, ResolverView::Unmeasured(ref u) if u.code == "DNS_WHOAMI_DISAGREE"));
+    }
+
+    #[tokio::test]
+    async fn fake_ip_or_one_silent_source_is_still_unknown_with_detail() {
+        let probe = geo_probe("US");
+        let fake = measure(two("198.18.0.7", "172.71.240.11"), &probe).await;
+        let ResolverView::Unmeasured(u) = fake else {
+            panic!()
+        };
+        assert_eq!(u.code, "DNS_WHOAMI_FAKE_IP");
+        assert_eq!(u.sources[0].state, SourceState::Special);
+        let dns = FakeDns::new(LookupOutcome::Failed)
+            .with(AKAMAI_HOST, addr("172.70.161.26"))
+            .with_txt(GOOGLE_TXT_HOST, TxtOutcome::Timeout);
+        let ResolverView::Unmeasured(u) = measure(dns, &probe).await else {
+            panic!()
+        };
+        assert_eq!(u.code, "DNS_WHOAMI_SINGLE_SOURCE");
+        assert_eq!(u.sources[1].state, SourceState::Timeout);
+        assert_eq!(u.sources[0].addr.as_deref(), Some("172.70.161.26"));
+    }
+
+    #[test]
+    fn dns_country_of_an_unmeasured_resolver_carries_the_sources() {
+        let u = combine_sources(
+            &SourceReading::Addr(ip("172.70.161.26")),
+            &SourceReading::Addr(ip("8.8.8.8")),
+        )
+        .unwrap_err();
+        let r = evaluate_dns_country(&ResolverView::Unmeasured(u), "NL");
+        assert_eq!(r.status, CheckStatus::Unknown);
+        assert_eq!(r.detail.as_ref().map(|d| d.sources.len()), Some(2));
     }
 
     #[tokio::test]
@@ -748,12 +977,8 @@ mod tests {
             },
         );
         assert_eq!(
-            measure(dns(), &probe).await,
-            ResolverView::Located {
-                ip: ip("77.88.8.8"),
-                country: "RU".into(),
-                public_service: None,
-            }
+            parts(&measure(dns(), &probe).await),
+            (ip("77.88.8.8"), "RU", None)
         );
         // No service answers in time.
         let ResolverView::Unmeasured(u) =
@@ -790,7 +1015,7 @@ mod tests {
     async fn geo_of_one_resolver_is_asked_once() {
         let cache = TtlCache::default();
         let probe = geo_probe("NL");
-        let dns = agreeing("9.9.9.9");
+        let dns = agreeing("203.0.113.9");
         measure_resolver(&dns, &probe, &cache).await;
         measure_resolver(&dns, &probe, &cache).await;
         assert_eq!(probe.calls(), 1);
@@ -803,6 +1028,7 @@ mod tests {
             ip: ip(ip_s),
             country: cc.into(),
             public_service: None,
+            sources: vec![],
         }
     }
 
@@ -838,6 +1064,7 @@ mod tests {
             code: "DNS_WHOAMI_TIMEOUT",
             reason: UnknownReason::Timeout,
             detail: "x".into(),
+            sources: vec![],
         });
         let r = evaluate_dns_country(&u, "NL");
         assert_eq!(
@@ -915,15 +1142,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_resolver_is_marked_as_a_public_service_from_the_same_geo_answer() {
+        // An address outside of the built-in ranges: only the geo answer tells the operator.
         let probe = probe_with_org("US", 15169, "Google LLC");
-        let view = measure(agreeing("74.125.40.10"), &probe).await;
+        let view = measure(agreeing("35.199.1.1"), &probe).await;
         assert_eq!(
-            view,
-            ResolverView::Located {
-                ip: ip("74.125.40.10"),
-                country: "US".into(),
-                public_service: Some("Google Public DNS"),
-            }
+            parts(&view),
+            (ip("35.199.1.1"), "US", Some("Google Public DNS"))
         );
         assert_eq!(probe.calls(), 1, "no extra request for the ASN");
         let plain = measure(
@@ -943,6 +1167,7 @@ mod tests {
             ip: ip("1.1.1.1"),
             country: "AU".into(),
             public_service: Some("Cloudflare"),
+            sources: vec![],
         };
         let r = evaluate_dns_country(&view, "NL");
         assert_eq!(

@@ -1,4 +1,4 @@
-import type { AppStateData, CheckResult, ProviderId, RiskReport } from "../../types";
+import type { AppStateData, CheckResult, NetworkTelemetry, PartialAudit, ProviderId, RiskReport } from "../../types";
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckGroupId, CheckId } from "../../shared/copy/ru";
 
@@ -28,6 +28,18 @@ export interface CheckItem {
   action: CheckAction | null;
   /** «Что делать» при замечании или «не удалось проверить»; у проверок без такого текста null. */
   advice: string | null;
+  /** Результата ещё нет: проверка идёт. Это не «не удалось проверить» и не «нет данных». */
+  pending: boolean;
+  /** Пояснение и шаги, когда проверку нельзя довести до вывода (расхождение источников DNS и т. п.). */
+  help: CheckHelp | null;
+}
+
+/** Почему так бывает и что сделать (тексты — в copy/ru/checks.ts). */
+export interface CheckHelp {
+  why: string;
+  steps: string[];
+  /** Есть надёжная ссылка на настройки сети ОС: можно показать «Открыть настройки DNS». */
+  canOpenNetworkSettings: boolean;
 }
 
 export interface CheckGroup {
@@ -36,8 +48,11 @@ export interface CheckGroup {
   items: CheckItem[];
 }
 
-/** ok — пройдена; warn/crit — замечание; unknown — не удалось проверить; na — не применима (вне счёта). */
-export type CheckClass = "ok" | "warn" | "crit" | "unknown" | "na";
+/**
+ * ok — пройдена; warn/crit — замечание; unknown — не удалось проверить; na — не применима (вне счёта);
+ * pending — проверка ещё идёт (результата нет; в счёт «хорошо» и «плохо» не входит).
+ */
+export type CheckClass = "ok" | "warn" | "crit" | "unknown" | "na" | "pending";
 
 /** Единственное место, где статус превращается в класс. Всё незнакомое — unknown, никогда не ok. */
 export function classify(c: CheckResult): CheckClass {
@@ -72,14 +87,24 @@ export interface CheckCounts {
   crit: number;
   unknown: number;
   na: number;
+  /** Проверки без результата: не хорошие и не плохие. */
+  pending: number;
   /** M в «N из M»: все проверки, кроме «не применимо». */
   applicable: number;
 }
 
 export function countChecks(results: CheckResult[]): CheckCounts {
-  const n: CheckCounts = { ok: 0, warn: 0, crit: 0, unknown: 0, na: 0, applicable: 0 };
+  const n: CheckCounts = { ok: 0, warn: 0, crit: 0, unknown: 0, na: 0, pending: 0, applicable: 0 };
   for (const r of results) n[classify(r)] += 1;
   n.applicable = n.ok + n.warn + n.crit + n.unknown;
+  return n;
+}
+
+/** Счётчики по строкам экрана: строка без результата считается ожиданием, а не неизвестным. */
+function countItems(items: CheckItem[]): CheckCounts {
+  const done = items.filter((i) => !i.pending);
+  const n = countChecks(done.map((i) => i.result));
+  n.pending = items.length - done.length;
   return n;
 }
 
@@ -181,6 +206,18 @@ function adviceFor(id: CheckId, cls: CheckClass): string | null {
   return null;
 }
 
+/** Коды проверки DNS, для которых показываем разбор: источники не дали вывода. */
+const DNS_UNRESOLVED = /^DNS_(WHOAMI_|RESOLVER_GEO_)/;
+
+/** Пояснение и шаги для «DNS-серверов», когда резолвер определить не удалось. */
+function helpFor(id: string, result: CheckResult, cls: CheckClass): CheckHelp | null {
+  if (cls !== "unknown" || (id !== "dns" && id !== "dns_country")) return null;
+  if (!DNS_UNRESOLVED.test(result.code)) return null;
+  const by = copy.dnsHelp.byCode as Record<string, { why: string; steps: readonly string[] } | undefined>;
+  const entry = by[result.code] ?? copy.dnsHelp.fallback;
+  return { why: entry.why, steps: [...entry.steps], canOpenNetworkSettings: true };
+}
+
 /** Заглушка для проверки, которой нет в отчёте: не пропадает из счёта, а считается «не удалось проверить». */
 function missingResult(): CheckResult {
   return { status: "unknown", code: "CHECK_MISSING", message: copy.missingMessage, reason: "no_data" };
@@ -212,6 +249,8 @@ export function buildChecks(report: RiskReport, state: AppStateData | null): Bui
       data: known ? dataFor(id as CheckId, report, state) : [],
       action: actionFor(id, result, cls),
       advice: known ? adviceFor(id as CheckId, cls) : null,
+      pending: false,
+      help: known ? helpFor(id, result, cls) : null,
     });
   };
   for (const spec of ORDER) {
@@ -230,6 +269,54 @@ export function buildChecks(report: RiskReport, state: AppStateData | null): Bui
   const counts = countChecks(items.map((i) => i.result));
   const total = Math.max(counts.applicable, report.applicable_count ?? 0);
   return { groups, items, counts, total };
+}
+
+/** Заглушка, пока результата нет: в счёт не попадает (см. `pending`). */
+const PENDING_RESULT: CheckResult = { status: "unknown", code: "CHECK_PENDING", message: "", reason: "no_data" };
+
+/** Пустая телеметрия: нужна только для разбора, пока адрес выхода ещё не пришёл. */
+const NO_TELEMETRY: NetworkTelemetry = { ip: "", country_code: "", resolved_at: 0 };
+
+/**
+ * Строки экрана, пока отчёта ещё нет: готовые проверки (по событиям аудита) рисуются как обычно,
+ * остальные — «Проверяем…». Всё, чего нет, не считается ни пройденным, ни непройденным.
+ */
+export function buildPendingChecks(partial: PartialAudit | null, state: AppStateData | null): BuiltChecks {
+  const checks = partial?.checks ?? [];
+  // Синтетический отчёт нужен только для общей сборки строк; наружу он не уходит.
+  const stub = (i: number) => checks[i] ?? PENDING_RESULT;
+  const synthetic = {
+    provider: partial?.provider ?? "anthropic",
+    overall_status: "yellow",
+    trust_score: 0,
+    telemetry: partial?.telemetry ?? NO_TELEMETRY,
+    geo_result: stub(0),
+    pinning_result: stub(1),
+    travel_result: stub(2),
+    dnsbl_result: stub(3),
+    dnsbl_clean_count: "",
+    asn_result: stub(4),
+    ipv6_result: stub(5),
+    timezone_result: stub(7),
+    checks: ORDER.reduce<CheckResult[]>((acc, o) => {
+      acc[o.index] = stub(o.index);
+      return acc;
+    }, []),
+  } satisfies RiskReport;
+  const built = buildChecks(synthetic, state);
+  const items = built.items.map((item): CheckItem => {
+    const index = ORDER.find((o) => o.id === item.id)?.index;
+    if (index === undefined || checks[index]) return item;
+    return { ...item, cls: "pending", pending: true, ok: false, missing: false, data: [], action: null, advice: null, help: null };
+  });
+  const groups = built.groups.map((g) => ({ ...g, items: items.filter((i) => i.group === g.id) }));
+  const counts = countItems(items);
+  return { groups, items, counts, total: items.length };
+}
+
+/** Сколько проверок уже дало результат из скольких всего (для «Проверено N из M»). */
+export function progressOf(built: BuiltChecks): { done: number; total: number } {
+  return { done: built.items.length - built.counts.pending, total: built.items.length };
 }
 
 /** Порядок сервисов при равной тяжести отчётов. */

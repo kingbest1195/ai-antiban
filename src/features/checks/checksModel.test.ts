@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { CheckResult, RiskReport } from "../../types";
-import { buildChecks, classify, countChecks, isYellowOnlyUnknown } from "./checksModel";
-import { dataAge } from "../../shared/hooks/useGatewayState";
+import { buildChecks, buildPendingChecks, classify, countChecks, isYellowOnlyUnknown, progressOf } from "./checksModel";
+import { applyProgress, dataAge, emptyPartial } from "../../shared/hooks/useGatewayState";
+import type { AuditProgressEvent, PartialAudit } from "../../types";
 import { evaluateNetwork } from "../onboarding/networkVerdict";
 
 const ok = (code = "OK"): CheckResult => ({ status: "ok", code, message: "ok" });
@@ -120,7 +121,7 @@ describe("buildChecks", () => {
 describe("countChecks / isYellowOnlyUnknown", () => {
   it("считает все классы", () => {
     expect(countChecks([ok(), warn(), crit(), unknown(), unknown("not_applicable")])).toEqual({
-      ok: 1, warn: 1, crit: 1, unknown: 1, na: 1, applicable: 4,
+      ok: 1, warn: 1, crit: 1, unknown: 1, na: 1, pending: 0, applicable: 4,
     });
   });
   it("жёлтый только из-за unknown", () => {
@@ -154,5 +155,132 @@ describe("dataAge", () => {
     expect(dataAge(60_000, false)).toBeNull();
     expect(dataAge(3 * 60_000, false)).toBe(3);
     expect(dataAge(10_000, true)).toBe(1);
+  });
+});
+
+describe("ожидание ≠ неизвестно ≠ ошибка", () => {
+  const partialWith = (done: Record<number, CheckResult>): PartialAudit => {
+    const p = emptyPartial("anthropic", "r1");
+    for (const [i, r] of Object.entries(done)) p.checks[Number(i)] = r;
+    return p;
+  };
+
+  it("без единого результата все 13 строк — ожидание, а не «не удалось проверить»", () => {
+    const built = buildPendingChecks(emptyPartial("anthropic", "r1"), null);
+    expect(built.items).toHaveLength(13);
+    expect(built.items.every((i) => i.pending && i.cls === "pending" && !i.ok && !i.missing)).toBe(true);
+    // Ожидание не считается ни пройденным, ни непройденным, ни неизвестным.
+    expect(built.counts).toMatchObject({ ok: 0, warn: 0, crit: 0, unknown: 0, na: 0, pending: 13, applicable: 0 });
+    expect(progressOf(built)).toEqual({ done: 0, total: 13 });
+  });
+
+  it("готовые строки получают результат, остальные ждут; счёт «N из 13» считает только готовые", () => {
+    const built = buildPendingChecks(partialWith({ 0: ok("G"), 3: warn(), 6: unknown() }), null);
+    expect(progressOf(built)).toEqual({ done: 3, total: 13 });
+    expect(built.counts).toMatchObject({ ok: 1, warn: 1, unknown: 1, pending: 10 });
+    const geo = built.items.find((i) => i.id === "geo_matrix")!;
+    const dnsbl = built.items.find((i) => i.id === "dnsbl")!;
+    const dns = built.items.find((i) => i.id === "dns")!;
+    const asn = built.items.find((i) => i.id === "asn")!;
+    expect([geo.pending, geo.cls]).toEqual([false, "ok"]);
+    expect([dnsbl.pending, dnsbl.cls]).toEqual([false, "warn"]);
+    // «Не удалось проверить» — это результат, а не ожидание.
+    expect([dns.pending, dns.cls]).toEqual([false, "unknown"]);
+    expect([asn.pending, asn.cls]).toEqual([true, "pending"]);
+  });
+
+  it("пока что-то ждёт, строки не тянут за собой действия и советы", () => {
+    const built = buildPendingChecks(partialWith({}), null);
+    expect(built.items.every((i) => i.action === null && i.advice === null && i.help === null && i.data.length === 0)).toBe(true);
+    const groups = built.groups.flatMap((g) => g.items);
+    expect(groups).toHaveLength(13);
+  });
+
+  it("полный отчёт: ожидания нет, счёт прежний", () => {
+    const built = buildChecks(report(thirteen({ 6: unknown() })), null);
+    expect(built.counts.pending).toBe(0);
+    expect(built.items.every((i) => !i.pending)).toBe(true);
+  });
+
+  it("applyProgress складывает куски своего запуска и игнорирует чужие", () => {
+    const prev = emptyPartial("anthropic", "r1");
+    const tel: AuditProgressEvent = {
+      kind: "telemetry",
+      run_id: "r1",
+      provider: "anthropic",
+      telemetry: { ip: "1.1.1.1", country_code: "NL", resolved_at: 1 },
+    };
+    const withTel = applyProgress(prev, tel)!;
+    expect(withTel.telemetry?.ip).toBe("1.1.1.1");
+    const chk: AuditProgressEvent = { kind: "check", run_id: "r1", provider: "anthropic", index: 4, result: ok("A") };
+    const withCheck = applyProgress(withTel, chk)!;
+    expect(withCheck.checks[4]?.code).toBe("A");
+    expect(withCheck.checks[3]).toBeNull();
+    // Событие устаревшего запуска (самолечение, повтор) состояние не меняет.
+    expect(applyProgress(withCheck, { ...chk, run_id: "old", index: 5 })).toBe(withCheck);
+    // Индекс вне отчёта и отсутствие запуска тоже безопасны.
+    expect(applyProgress(withCheck, { ...chk, index: 99 })).toBe(withCheck);
+    expect(applyProgress(undefined, chk)).toBeUndefined();
+  });
+});
+
+describe("DNS: источники и разбор", () => {
+  const dnsUnknown = (code: string, sources: NonNullable<CheckResult["detail"]>["sources"]): CheckResult => ({
+    status: "unknown",
+    code,
+    message: "m",
+    reason: "no_data",
+    detail: { sources },
+  });
+
+  it("расхождение источников даёт пояснение и шаги для строки DNS", () => {
+    const r = report(
+      thirteen({
+        6: dnsUnknown("DNS_WHOAMI_DISAGREE", [
+          { source: "Akamai", state: "answered", addr: "203.0.113.10" },
+          { source: "Google", state: "answered", addr: "198.51.100.7" },
+        ]),
+      }),
+    );
+    const dns = buildChecks(r, null).items.find((i) => i.id === "dns")!;
+    expect(dns.cls).toBe("unknown");
+    expect(dns.help?.steps.length).toBeGreaterThanOrEqual(2);
+    expect(dns.help?.why).toContain("разные");
+    expect(dns.help?.canOpenNetworkSettings).toBe(true);
+    expect(dns.result.detail?.sources).toHaveLength(2);
+  });
+
+  it("fake-IP объяснён как ожидаемое, а не как утечка", () => {
+    const r = report(thirteen({ 6: dnsUnknown("DNS_WHOAMI_FAKE_IP", []) }));
+    const dns = buildChecks(r, null).items.find((i) => i.id === "dns")!;
+    expect(dns.help?.why).toContain("fake-IP");
+    expect(dns.help?.why).toContain("не значит, что есть утечка");
+  });
+
+  it("другие коды DNS получают общий разбор, не-DNS проверки и результаты «Чисто» — ничего", () => {
+    const timeout = buildChecks(report(thirteen({ 6: dnsUnknown("DNS_WHOAMI_TIMEOUT", []) })), null).items.find((i) => i.id === "dns")!;
+    expect(timeout.help?.steps.length).toBeGreaterThanOrEqual(2);
+    const okDns = buildChecks(report(thirteen()), null).items.find((i) => i.id === "dns")!;
+    expect(okDns.help).toBeNull();
+    const other = buildChecks(report(thirteen({ 3: dnsUnknown("DNS_WHOAMI_DISAGREE", []) })), null).items.find((i) => i.id === "dnsbl")!;
+    expect(other.help).toBeNull();
+  });
+
+  it("публичный DNS с двумя адресами одного оператора — «Чисто», источники видны", () => {
+    const publicDns: CheckResult = {
+      status: "ok",
+      code: "DNS_PUBLIC_RESOLVER",
+      message: "Резолвер: Cloudflare (публичный DNS).",
+      detail: {
+        sources: [
+          { source: "Akamai", state: "answered", addr: "172.70.161.26", operator: "Cloudflare" },
+          { source: "Google", state: "answered", addr: "172.71.240.11", operator: "Cloudflare" },
+        ],
+      },
+    };
+    const dns = buildChecks(report(thirteen({ 6: publicDns })), null).items.find((i) => i.id === "dns")!;
+    expect(dns.ok).toBe(true);
+    expect(dns.help).toBeNull();
+    expect(dns.result.detail?.sources.map((s) => s.operator)).toEqual(["Cloudflare", "Cloudflare"]);
   });
 });

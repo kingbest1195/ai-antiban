@@ -1,6 +1,24 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { AppStateData, CoverageSnapshot, ProviderId, RiskReport, RoutesSnapshot } from "../../types";
-import { auditConnection, fetchAppState, getCoverageSnapshot, getRoutesSnapshot, getSysproxyStatus } from "../../utils/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  AppStateData,
+  AuditProgressEvent,
+  CoverageSnapshot,
+  PartialAudit,
+  ProviderId,
+  RiskReport,
+  RoutesSnapshot,
+  StartupSnapshot,
+} from "../../types";
+import {
+  auditConnection,
+  fetchAppState,
+  getCoverageSnapshot,
+  getRoutesSnapshot,
+  getStartupState,
+  getSysproxyStatus,
+  onAuditProgress,
+  onStartupChanged,
+} from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 import { pickWorstReport } from "../../features/checks/checksModel";
@@ -9,6 +27,24 @@ import { pickWorstReport } from "../../features/checks/checksModel";
 export function dataAge(ageMs: number, auditFailed: boolean): number | null {
   const minutes = Math.max(1, Math.floor(ageMs / 60000));
   return ageMs > 2 * 60000 || auditFailed ? minutes : null;
+}
+
+/** Число проверок в отчёте шлюза (места 0..12 в `RiskReport.checks`). */
+export const CHECK_SLOTS = 13;
+
+/** Новый идущий аудит: ничего ещё не готово. */
+export function emptyPartial(provider: ProviderId, runId: string): PartialAudit {
+  return { runId, provider, telemetry: null, checks: Array.from({ length: CHECK_SLOTS }, () => null) };
+}
+
+/** Вносит кусок аудита в накопленное; события чужого запуска (устаревшего) игнорируются. */
+export function applyProgress(prev: PartialAudit | undefined, event: AuditProgressEvent): PartialAudit | undefined {
+  if (!prev || prev.runId !== event.run_id) return prev;
+  if (event.kind === "telemetry") return { ...prev, telemetry: event.telemetry };
+  if (event.index < 0 || event.index >= prev.checks.length) return prev;
+  const checks = prev.checks.slice();
+  checks[event.index] = event.result;
+  return { ...prev, checks };
 }
 
 interface Options {
@@ -34,6 +70,16 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   /** Когда пришёл последний успешный отчёт (мс) и «сейчас» для пересчёта возраста. */
   const [reportAt, setReportAt] = useState<number | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
+  /** Фоновый запуск шлюза: пока `starting`, защита ещё не включена и её состояние не известно. */
+  const [startup, setStartup] = useState<StartupSnapshot>({ phase: "starting" });
+  const startupPending = startup.phase === "starting";
+  /** Что уже готово в идущем первом аудите: показываем по мере прихода, не дожидаясь отчёта. */
+  const [partials, setPartials] = useState<Partial<Record<ProviderId, PartialAudit>>>({});
+  const runSeq = useRef(0);
+  /** Текущий запуск по сервису: события других запусков (самолечение, повтор) игнорируются. */
+  const activeRuns = useRef<Partial<Record<ProviderId, string>>>({});
+  /** Сколько аудитов идёт прямо сейчас: самолечение не плодит параллельные запуски. */
+  const inFlight = useRef(0);
 
   /** Получить актуальный снимок покрытия приложений и цепочки PAC. */
   const refreshCoverage = useCallback(async () => {
@@ -66,47 +112,38 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     return st;
   }, [refreshRoutes, refreshCoverage]);
 
+  /** Начинает запуск аудита сервиса и отдаёт его id для событий прогресса. */
+  const beginRun = useCallback((provider: ProviderId) => {
+    const runId = `${Date.now().toString(36)}-${++runSeq.current}`;
+    activeRuns.current[provider] = runId;
+    setPartials((prev) => ({ ...prev, [provider]: emptyPartial(provider, runId) }));
+    return runId;
+  }, []);
+
   const runFullAudit = useCallback(
     async (force: boolean = false, silentError: boolean = false) => {
       const startTime = performance.now();
       setRefreshing(true);
+      inFlight.current += 1;
 
       try {
-        try {
-          const st = await fetchAppState();
-          setState(st);
-          if (st.auto_update_enabled !== undefined) {
-            setAutoUpdateEnabled(st.auto_update_enabled);
-          }
-        } catch (stateErr) {
-          console.warn("Could not fetch app state:", stateErr);
-        }
-
-        try {
-          const proxyActive = await getSysproxyStatus();
-          setSysproxyActive(proxyActive);
-        } catch (proxyErr) {
-          console.warn("Could not fetch sysproxy status:", proxyErr);
-        }
-
-        try {
-          await refreshRoutes();
-        } catch (routesErr) {
-          console.warn("Could not fetch routes snapshot:", routesErr);
-        }
-
-        try {
-          await refreshCoverage();
-        } catch (covErr) {
-          console.warn("Could not fetch coverage snapshot:", covErr);
-        }
+        // Сопутствующие чтения идут рядом с аудитом, а не перед ним: ни одно из них не задерживает проверки.
+        const sideReads = Promise.allSettled([
+          fetchAppState().then((st) => {
+            setState(st);
+            if (st.auto_update_enabled !== undefined) setAutoUpdateEnabled(st.auto_update_enabled);
+          }),
+          getSysproxyStatus().then(setSysproxyActive),
+          refreshRoutes(),
+          refreshCoverage(),
+        ]);
 
         let claudeReport: RiskReport;
         try {
-          claudeReport = await auditConnection("anthropic", force);
+          claudeReport = await auditConnection("anthropic", force, beginRun("anthropic"));
         } catch {
           await new Promise((r) => setTimeout(r, 600));
-          claudeReport = await auditConnection("anthropic", true);
+          claudeReport = await auditConnection("anthropic", true, beginRun("anthropic"));
         }
 
         // Основной отчёт сразу: IP, провайдер и проверки рисуются, не дожидаясь остальных сервисов.
@@ -114,6 +151,7 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
           ...prev,
           anthropic: claudeReport,
         }));
+        setPartials((prev) => ({ ...prev, anthropic: undefined }));
         setAuditError(null);
         setReportAt(Date.now());
 
@@ -131,20 +169,69 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
 
         const elapsed = Math.round(performance.now() - startTime);
         setScanLatencyMs(Math.max(18, elapsed));
+        await sideReads;
         await refreshGatewayStats();
       } catch (err: any) {
         console.error("Failed to run audit:", err);
+        setPartials((prev) => ({ ...prev, anthropic: undefined }));
         setAuditError(err?.message || String(err));
         if (!silentError) {
           showToast(t.auditError, err?.message || String(err), "error");
         }
       } finally {
-        setRefreshing(false);
+        inFlight.current -= 1;
+        // Пока идёт другой запуск, «обновление» не снимаем: экран не должен мигать готовым состоянием.
+        if (inFlight.current <= 0) setRefreshing(false);
         refreshGatewayStats();
       }
     },
-    [showToast, refreshGatewayStats],
+    [showToast, refreshGatewayStats, beginRun, refreshRoutes, refreshCoverage],
   );
+
+  // Куски идущего аудита: адрес выхода и каждая проверка приходят, как только готовы.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    onAuditProgress((event) => {
+      if (activeRuns.current[event.provider] !== event.run_id) return;
+      setPartials((prev) => {
+        const next = applyProgress(prev[event.provider], event);
+        return next === prev[event.provider] ? prev : { ...prev, [event.provider]: next };
+      });
+    })
+      .then((un) => (cancelled ? un() : (off = un)))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
+  // Фоновый запуск шлюза: узнаём стартовое состояние и ловим его окончание.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    onStartupChanged((snapshot) => setStartup(snapshot))
+      .then((un) => (cancelled ? un() : (off = un)))
+      .catch(() => {});
+    getStartupState()
+      .then((snapshot) => setStartup((prev) => (prev.phase === "ready" ? prev : snapshot)))
+      // Не смогли спросить: считаем, что запуск закончен, а не держим «Проверяем…» вечно.
+      .catch(() => setStartup({ phase: "ready" }));
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
+  // Запуск закончился: защита уже включена (или нет), перечитываем то, что до этого описывало «ещё не включено».
+  useEffect(() => {
+    if (startupPending) return;
+    getSysproxyStatus()
+      .then(setSysproxyActive)
+      .catch(() => {});
+    refreshCoverage();
+  }, [startupPending, refreshCoverage]);
 
   // Стартовый аудит.
   useEffect(() => {
@@ -173,6 +260,8 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     let attempts = 0;
     const maxAttempts = 6;
     const timer = setInterval(() => {
+      // Пока идёт аудит, новый не запускаем: параллельные принудительные запуски только замедляют старт.
+      if (inFlight.current > 0) return;
       attempts += 1;
       if (attempts > maxAttempts) {
         clearInterval(timer);
@@ -202,6 +291,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     return dataAge(now - reportAt, auditError != null);
   }, [activeReport, reportAt, now, auditError]);
 
+  /** Что уже известно о первом аудите, пока отчёта нет (для экранов «Обзор» и «Проверки»). */
+  const partialAudit = !activeReport ? (partials.anthropic ?? null) : null;
+
   const currentIp = activeReport?.telemetry.ip || "--";
   const currentCountry = activeReport?.telemetry.country_code || "--";
   const trustScore = activeReport?.trust_score ?? 100;
@@ -217,6 +309,8 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     autoUpdateEnabled,
     setAutoUpdateEnabled,
     auditError,
+    startupPending,
+    partialAudit,
     dataAgeMinutes,
     activeReport,
     checksReport,

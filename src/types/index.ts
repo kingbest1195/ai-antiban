@@ -30,6 +30,50 @@ export interface CheckResult {
   checked_at?: number | null;
   /** Через какой источник измерено (справочно). */
   measured_via?: string | null;
+  /** Что показал каждый независимый источник (пока только у проверок DNS). */
+  detail?: CheckDetail | null;
+}
+
+/** Как ответил один источник проверки. */
+export type SourceState = "answered" | "special" | "empty" | "timeout" | "failed" | "unsupported";
+
+export interface SourceView {
+  /** «Akamai», «Google». */
+  source: string;
+  state: SourceState;
+  addr?: string | null;
+  /** Публичный DNS-сервис, которому принадлежит адрес («Cloudflare»). */
+  operator?: string | null;
+  country?: string | null;
+}
+
+export interface CheckDetail {
+  sources: SourceView[];
+}
+
+/** Этап запуска шлюза в фоне: пока `starting`, состояние защиты ещё не известно. */
+export type StartupPhase = "starting" | "ready";
+
+export interface StartupSnapshot {
+  phase: StartupPhase;
+  /** recovery | protection | guard, пока идёт запуск. */
+  step?: string | null;
+}
+
+/** Кусок аудита, пришедший до его конца (событие audit://progress). */
+export type AuditProgress =
+  | { kind: "telemetry"; telemetry: NetworkTelemetry }
+  | { kind: "check"; index: number; result: CheckResult };
+
+export type AuditProgressEvent = AuditProgress & { run_id: string; provider: ProviderId };
+
+/** Что уже известно о идущем аудите: адрес выхода и готовые проверки по местам отчёта. */
+export interface PartialAudit {
+  runId: string;
+  provider: ProviderId;
+  telemetry: NetworkTelemetry | null;
+  /** Место в `RiskReport.checks`; null — результата ещё нет. */
+  checks: (CheckResult | null)[];
 }
 
 export interface NetworkTelemetry {
