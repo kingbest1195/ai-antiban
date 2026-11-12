@@ -433,5 +433,9 @@ export interface CoverageSnapshot {
   generated_at_ms: number;
   cli_mode: CliMode;
   apps: AppCoverageItem[];
+  /** Действует ли системный PAC глобально (`scutil --proxy`); null — защита выключена или прочитать не удалось. */
+  system_proxy_effective?: boolean | null;
+  /** Включённые VPN-службы, подключённые сейчас. Застава в них ничего не пишет. */
+  vpn_connected?: string[];
 }
 

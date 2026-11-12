@@ -14,7 +14,7 @@
 use crate::state::CliMode;
 use crate::sysproxy::FileCtx;
 use crate::sysproxy::fs::Fs;
-use crate::sysproxy::platform::{Platform, PlatformError};
+use crate::sysproxy::platform::{Platform, PlatformError, ServiceKind, classify_services};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -107,6 +107,14 @@ pub struct CoverageSnapshot {
     pub pac_url: Option<String>,
     pub generated_at_ms: u64,
     pub apps: Vec<AppCoverageItem>,
+    /// Does the system actually hand our PAC to applications (`scutil --proxy`)? `None` while the
+    /// protection is off, on systems without this check, or when it could not be read. `false`
+    /// with the PAC written on the physical services means something (a VPN) overrides it.
+    #[serde(default)]
+    pub system_proxy_effective: Option<bool>,
+    /// Enabled VPN services that are connected right now. Zastava never writes into them.
+    #[serde(default)]
+    pub vpn_connected: Vec<String>,
 }
 
 /// What kind of connection reached the gateway.
@@ -561,6 +569,12 @@ impl CoverageTracker {
             pac_url: facts.gateway.map(pac_url_for),
             generated_at_ms: now,
             apps,
+            system_proxy_effective: if env.sysproxy_enabled {
+                facts.system_proxy_effective
+            } else {
+                None
+            },
+            vpn_connected: facts.vpn_connected.clone(),
         }
     }
 }
@@ -651,6 +665,8 @@ pub(crate) struct AppFact {
 pub(crate) struct ConfigFacts {
     pub gateway: Option<SocketAddr>,
     pub apps: HashMap<&'static str, AppFact>,
+    pub system_proxy_effective: Option<bool>,
+    pub vpn_connected: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,6 +688,8 @@ fn compute_config_facts(
     let mut facts = ConfigFacts {
         gateway,
         apps: HashMap::new(),
+        system_proxy_effective: None,
+        vpn_connected: Vec::new(),
     };
 
     // One PAC read serves browsers and desktop apps.
@@ -679,6 +697,11 @@ fn compute_config_facts(
         Some(g) => read_os_pac(env.platform, env.pac_source, &pac_url_for(g)),
         None => Verdict::Unknown,
     };
+
+    if env.pac_source == PacSource::Services {
+        facts.vpn_connected = connected_vpn_names(env.platform);
+        facts.system_proxy_effective = gateway.and_then(|g| read_effective_pac(env.platform, g));
+    }
 
     for id in KNOWN_IDS {
         let Some(info) = get_known_app_info(id) else {
@@ -873,6 +896,33 @@ fn same_pac(a: &str, b: &str) -> bool {
         .eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
 }
 
+/// Names of the enabled VPN services that are connected now (macOS). Read-only.
+fn connected_vpn_names(platform: &dyn Platform) -> Vec<String> {
+    let Ok(services) = platform.list_services() else {
+        return Vec::new();
+    };
+    let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
+    classify_services(platform, &enabled)
+        .into_iter()
+        .filter(|(_, k)| *k == ServiceKind::Vpn { connected: true })
+        .map(|(s, _)| s.name)
+        .collect()
+}
+
+/// `scutil --proxy` against our PAC: the proxy the system really applies, which follows the
+/// primary service (so a VPN that took over shows up here although Wi-Fi carries our PAC).
+/// `None` when it cannot be read.
+fn read_effective_pac(platform: &dyn Platform, gateway: SocketAddr) -> Option<bool> {
+    let eff = platform.effective_proxy().ok()?;
+    Some(
+        eff.pac_enabled == Some(true)
+            && eff
+                .pac_url
+                .as_deref()
+                .is_some_and(|u| same_pac(u, &pac_url_for(gateway))),
+    )
+}
+
 /// Reads the PAC the OS hands out and compares it with ours. A failed read is `Unknown`,
 /// never `Configured`.
 fn read_os_pac(platform: &dyn Platform, source: PacSource, ours: &str) -> Verdict {
@@ -889,7 +939,13 @@ fn read_os_pac(platform: &dyn Platform, source: PacSource, ours: &str) -> Verdic
             };
             let mut readable = 0usize;
             let mut failed = 0usize;
-            for svc in services.iter().filter(|s| s.enabled) {
+            let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
+            // A PAC in a VPN service is not Zastava's (it never writes there): not a verdict.
+            for (svc, kind) in classify_services(platform, &enabled) {
+                if !kind.is_physical() {
+                    continue;
+                }
+                let svc = &svc;
                 match platform.get_pac(svc) {
                     Ok(st) => {
                         readable += 1;

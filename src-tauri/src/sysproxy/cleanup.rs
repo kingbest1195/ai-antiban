@@ -3,7 +3,7 @@
 
 use super::journal::{self, Journal, Outcome, RecoveryReport, ReportItem, Resource};
 use super::platform::PacState;
-use super::platform::{Platform, PlatformError, RegKind, RegValue};
+use super::platform::{Platform, PlatformError, RegKind, RegValue, classify_services};
 use super::{FileCtx, Run, is_known_no_proxy_value, state, with_journal};
 use std::collections::BTreeMap;
 use std::sync::Once;
@@ -203,6 +203,11 @@ pub(super) const LEGACY_MIGRATION_MARK: &str = "legacy-1.3-signature-cleanup";
 /// set by an earlier 2.1 build that did not know the 2.1 rules for the GUI session.
 pub(super) const LAUNCHD_MIGRATION_MARK: &str = "legacy-2.0-launchctl-cleanup";
 
+/// Marker of the one-time cleanup of the PAC that 2.0.0 wrote into VPN services. Set only after
+/// every VPN service was examined, which needs it to be disconnected: a connected one is never
+/// touched, not even read, so the pass is repeated at a later start.
+pub(super) const VPN_PAC_MIGRATION_MARK: &str = "legacy-2.0-vpn-services-pac-cleanup";
+
 fn gateway_port_now() -> Option<u16> {
     state().gateway_port()
 }
@@ -210,13 +215,28 @@ fn gateway_port_now() -> Option<u16> {
 /// One-time cleanups of what builds without a journal (1.3.x, 2.0) left behind: the user
 /// environment ([`migrate_launchd_leftovers`]) and PAC / WinINet ([`migrate_legacy_pac`]). Each
 /// has its own marker and runs until it has examined everything once.
+#[cfg(test)]
 pub(super) fn migrate_legacy(
     j: &mut Journal,
     p: &dyn Platform,
     gateway_port: Option<u16>,
 ) -> Vec<ReportItem> {
+    migrate_legacy_with(j, p, gateway_port, false)
+}
+
+/// [`migrate_legacy`]; with `defer_physical_pac` a leftover PAC on a physical service is not
+/// cleared here. That is the start of the app: the protection is enabled right after and writes
+/// the PAC into the same service, so clearing it first would be a pointless "off, then on" pair.
+/// The enable pass adopts the leftover (see `Journal::apply`) with one write or none.
+pub(super) fn migrate_legacy_with(
+    j: &mut Journal,
+    p: &dyn Platform,
+    gateway_port: Option<u16>,
+    defer_physical_pac: bool,
+) -> Vec<ReportItem> {
     let mut items = migrate_launchd_leftovers(j, p, gateway_port);
-    items.extend(migrate_legacy_pac(j, p, gateway_port));
+    items.extend(migrate_legacy_pac(j, p, gateway_port, defer_physical_pac));
+    items.extend(migrate_vpn_pac_leftovers(j, p, gateway_port));
     items
 }
 
@@ -299,6 +319,7 @@ fn migrate_legacy_pac(
     j: &mut Journal,
     p: &dyn Platform,
     gateway_port: Option<u16>,
+    defer_physical_pac: bool,
 ) -> Vec<ReportItem> {
     let mut items = Vec::new();
     if j.has_mark(LEGACY_MIGRATION_MARK) {
@@ -310,7 +331,13 @@ fn migrate_legacy_pac(
     match p.list_services() {
         Ok(services) => {
             let mut candidates = Vec::new();
-            for svc in services.iter().filter(|s| s.enabled) {
+            let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
+            // Only physical services here; VPN services have their own, gentler pass.
+            for (svc, kind) in classify_services(p, &enabled) {
+                if !kind.is_physical() {
+                    continue;
+                }
+                let svc = &svc;
                 if j.entry(&Resource::Pac {
                     service: svc.clone(),
                 })
@@ -325,7 +352,12 @@ fn migrate_legacy_pac(
                             .as_deref()
                             .is_some_and(|u| is_zastava_pac_signature(u, gateway_port));
                         if signed && st.enabled == Some(true) {
-                            candidates.push(svc.clone());
+                            if defer_physical_pac {
+                                // Left for the enable pass; the marker waits until it has run.
+                                complete = false;
+                            } else {
+                                candidates.push(svc.clone());
+                            }
                         }
                     }
                     Err(PlatformError::Unsupported(_)) => {}
@@ -400,6 +432,88 @@ fn migrate_legacy_pac(
     items
 }
 
+/// One-time cleanup of the PAC that 2.0.0 left in VPN services (it wrote into every enabled
+/// service). Only a service that is surely Disconnected is examined, and only a PAC that is
+/// switched on and has our loopback address is cleared; a connected (or unknown) VPN is not
+/// touched at all, because a write into its service can drop the tunnel. The leftover there is
+/// harmless: the address does not answer without Zastava, so the system goes direct.
+fn migrate_vpn_pac_leftovers(
+    j: &mut Journal,
+    p: &dyn Platform,
+    gateway_port: Option<u16>,
+) -> Vec<ReportItem> {
+    let mut items = Vec::new();
+    if j.has_mark(VPN_PAC_MIGRATION_MARK) {
+        return items;
+    }
+    let Ok(services) = p.list_services() else {
+        return items; // not macOS, or unreadable: nothing to clear, retried later
+    };
+    let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
+    let mut complete = true;
+    let mut candidates = Vec::new();
+    for (svc, kind) in classify_services(p, &enabled) {
+        if kind.is_physical() {
+            continue;
+        }
+        if j
+            .entry(&Resource::Pac {
+                service: svc.clone(),
+            })
+            .is_some()
+        {
+            continue; // the journal restores it by the general rule
+        }
+        if !kind.is_idle_vpn() {
+            complete = false; // connected or unknown: not touched, not even read
+            continue;
+        }
+        match p.get_pac(&svc) {
+            Ok(st) => {
+                let signed = st
+                    .url
+                    .as_deref()
+                    .is_some_and(|u| is_zastava_pac_signature(u, gateway_port));
+                if signed && st.enabled == Some(true) {
+                    candidates.push(svc);
+                }
+            }
+            Err(PlatformError::Unsupported(_)) => {}
+            Err(_) => complete = false,
+        }
+    }
+    if !candidates.is_empty() {
+        if matches!(p.temp_dns_overrides(), Ok(false)) {
+            for svc in candidates {
+                let ok = p
+                    .set_pac(
+                        &svc,
+                        &PacState {
+                            url: Some(String::new()),
+                            enabled: Some(false),
+                        },
+                    )
+                    .is_ok();
+                complete &= ok;
+                items.push(ReportItem {
+                    resource: format!("legacy:vpn-pac:{}", svc.key()),
+                    outcome: if ok {
+                        Outcome::Restored
+                    } else {
+                        Outcome::Failed("set_pac")
+                    },
+                });
+            }
+        } else {
+            complete = false;
+        }
+    }
+    if complete && j.set_mark(p, VPN_PAC_MIGRATION_MARK).is_err() {
+        // Not durable: the pass simply runs again next time.
+    }
+    items
+}
+
 /// Which journal resources a restore pass covers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Scope {
@@ -425,6 +539,32 @@ fn is_network_setting(r: &Resource) -> bool {
     )
 }
 
+/// The recorded network settings of services that are VPN connections up right now. Writing
+/// into such a service can drop the tunnel, so a restore leaves it alone. A service that is not in
+/// the service list any more is not held (the restore only finds it gone); neither is a service
+/// that could not be classified because the connection list is unreadable.
+fn held_by_connected_vpn(j: &Journal, p: &dyn Platform, scope: Scope) -> Vec<Resource> {
+    let Ok(services) = p.list_services() else {
+        return Vec::new();
+    };
+    let kinds = classify_services(p, &services);
+    j.entries()
+        .iter()
+        .filter(|e| scope.covers(&e.resource) && is_network_setting(&e.resource))
+        .filter_map(|e| {
+            let svc = match &e.resource {
+                Resource::Pac { service }
+                | Resource::Chain { service }
+                | Resource::Bypass { service } => service,
+                _ => return None,
+            };
+            let kind = kinds.iter().find(|(s, _)| s.key() == svc.key())?.1;
+            matches!(kind, super::platform::ServiceKind::Vpn { connected: true })
+                .then(|| e.resource.clone())
+        })
+        .collect()
+}
+
 /// Restores the journal resources in `scope`. PAC and chain are written through `networksetup`;
 /// while an active VPN keeps temporary DNS settings (or that cannot be checked) they are NOT
 /// written: their records stay and the pass reports a failure, so a later pass finishes the job.
@@ -436,9 +576,21 @@ pub(super) fn restore_with(j: &mut Journal, p: &dyn Platform, scope: Scope) -> R
         .map(|e| e.resource.id())
         .collect();
     let dns_blocked = !net_ids.is_empty() && !matches!(p.temp_dns_overrides(), Ok(false));
+    let vpn_held = if net_ids.is_empty() {
+        Vec::new()
+    } else {
+        held_by_connected_vpn(j, p, scope)
+    };
     let mut report = j.restore_where(p, |r| {
-        scope.covers(r) && !(dns_blocked && is_network_setting(r))
+        scope.covers(r) && !(dns_blocked && is_network_setting(r)) && !vpn_held.contains(r)
     });
+    for r in &vpn_held {
+        // Not an error: the record stays and is put back once the VPN is disconnected.
+        report.items.push(ReportItem {
+            resource: r.id(),
+            outcome: Outcome::Skipped("vpn"),
+        });
+    }
     if dns_blocked {
         for id in net_ids {
             report.items.push(ReportItem {
@@ -454,10 +606,23 @@ pub(super) fn restore_with(j: &mut Journal, p: &dyn Platform, scope: Scope) -> R
 /// Zastava block out of `~/.zshenv` by its exact markers (a half marker or an edited block is
 /// left as it is and named in the log).
 pub(super) fn restore_and_migrate(j: &mut Journal, p: &dyn Platform) -> RecoveryReport {
+    restore_and_migrate_with(j, p, false)
+}
+
+/// [`restore_and_migrate`] for the start of the app (`at_app_start`): the protection is enabled
+/// right after, so a leftover PAC on a physical service is left for that pass.
+pub(super) fn restore_and_migrate_with(
+    j: &mut Journal,
+    p: &dyn Platform,
+    at_app_start: bool,
+) -> RecoveryReport {
     let mut report = restore_with(j, p, Scope::All);
-    report
-        .items
-        .extend(migrate_legacy(j, p, gateway_port_now()));
+    report.items.extend(migrate_legacy_with(
+        j,
+        p,
+        gateway_port_now(),
+        at_app_start,
+    ));
     if let Some(ctx) = FileCtx::real_with_fs(j.fs()) {
         let (strip, items) = super::cli_protection::clean_zshenv(j, p, &ctx);
         report.items.extend(items);
@@ -1221,5 +1386,149 @@ mod tests {
         assert!(!report.has_failures());
         assert!(report.external() >= 1, "{}", report.summary());
         assert_eq!(fs.get(&zshenv).unwrap(), broken.as_bytes());
+    }
+
+    // --- WP-28: VPN services ------------------------------------------------------------------
+
+    fn ours() -> PacState {
+        PacState {
+            url: Some("http://127.0.0.1:8899/proxy.pac".into()),
+            enabled: Some(true),
+        }
+    }
+    fn calls_on(p: &FakePlatform, svc: &ServiceId) -> bool {
+        let key = svc.key();
+        p.calls().iter().any(|c| c.contains(&key))
+    }
+
+    #[test]
+    fn the_vpn_leftover_cleanup_clears_only_a_disconnected_service_and_marks_once() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let vpn = p.add_vpn_service("Alpha VPN", false);
+        p.seed_pac(&vpn, ours());
+        let mut j = open(&fs);
+        let items = migrate_legacy(&mut j, &p, None);
+        assert_eq!(p.pac_of(&vpn), PacState { url: None, enabled: Some(false) });
+        assert!(items.iter().any(|i| i.resource.starts_with("legacy:vpn-pac:")));
+        assert!(j.has_mark(VPN_PAC_MIGRATION_MARK));
+        assert_eq!(VPN_PAC_MIGRATION_MARK, "legacy-2.0-vpn-services-pac-cleanup");
+        // Done once: a second run neither reads nor writes.
+        p.seed_pac(&vpn, ours());
+        p.clear_calls();
+        assert!(migrate_legacy(&mut j, &p, None).is_empty());
+        assert_eq!(p.pac_of(&vpn), ours());
+        assert!(!calls_on(&p, &vpn));
+    }
+
+    #[test]
+    fn a_connected_vpn_is_not_even_read_and_the_cleanup_waits_for_it_to_disconnect() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        p.seed_pac(&vpn, ours());
+        let mut j = open(&fs);
+        migrate_legacy(&mut j, &p, None);
+        assert!(!calls_on(&p, &vpn), "calls: {:?}", p.calls());
+        assert_eq!(p.os_writes(), 0);
+        assert_eq!(p.pac_of(&vpn), ours());
+        assert!(!j.has_mark(VPN_PAC_MIGRATION_MARK));
+        // Later it is disconnected: now the leftover goes, once.
+        p.set_vpn_connection("Alpha VPN", false);
+        migrate_legacy(&mut j, &p, None);
+        assert_eq!(p.pac_of(&vpn).enabled, Some(false));
+        assert!(j.has_mark(VPN_PAC_MIGRATION_MARK));
+    }
+
+    #[test]
+    fn a_foreign_pac_on_a_disconnected_vpn_is_never_cleared() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let vpn = p.add_vpn_service("Alpha VPN", false);
+        let theirs = PacState {
+            url: Some("http://corp.example/p.pac".into()),
+            enabled: Some(true),
+        };
+        p.seed_pac(&vpn, theirs.clone());
+        let mut j = open(&fs);
+        migrate_legacy(&mut j, &p, None);
+        assert_eq!(p.pac_of(&vpn), theirs);
+        assert_eq!(p.os_writes(), 0);
+        assert!(j.has_mark(VPN_PAC_MIGRATION_MARK));
+    }
+
+    #[test]
+    fn a_vpn_leftover_waits_for_temporary_dns_like_every_other_write() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let vpn = p.add_vpn_service("Alpha VPN", false);
+        p.seed_pac(&vpn, ours());
+        p.set_temp_dns(true);
+        let mut j = open(&fs);
+        migrate_legacy(&mut j, &p, None);
+        assert_eq!(p.pac_of(&vpn), ours());
+        assert!(!j.has_mark(VPN_PAC_MIGRATION_MARK));
+    }
+
+    #[test]
+    fn the_physical_pass_does_not_touch_a_vpn_service() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.add_service(wifi());
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        p.seed_pac(&wifi(), ours());
+        p.seed_pac(&vpn, ours());
+        let mut j = open(&fs);
+        migrate_legacy_pac(&mut j, &p, None, false);
+        assert_eq!(p.pac_of(&wifi()).enabled, Some(false));
+        assert!(!calls_on(&p, &vpn));
+    }
+
+    fn own_pac_on(j: &mut Journal, p: &FakePlatform, svc: &ServiceId) {
+        j.apply(
+            p,
+            &Resource::Pac {
+                service: svc.clone(),
+            },
+            Value::Pac(ours()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_restore_leaves_a_record_on_a_connected_vpn_and_finishes_it_after_the_disconnect() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.add_service(wifi());
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        // A record from an earlier build that wrote into the VPN service.
+        let mut j = open(&fs);
+        own_pac_on(&mut j, &p, &vpn);
+        own_pac_on(&mut j, &p, &wifi());
+        p.clear_calls();
+        let writes = p.os_writes();
+        let rep = restore_with(&mut j, &p, Scope::All);
+        assert_eq!(p.pac_of(&vpn), ours(), "the connected VPN keeps what it has");
+        assert_eq!(p.pac_of(&wifi()).enabled, Some(false), "Wi-Fi is restored");
+        assert_eq!(p.os_writes(), writes + 1);
+        assert!(rep.items.iter().any(|i| i.outcome == Outcome::Skipped("vpn")));
+        assert!(!rep.has_failures(), "a skipped VPN is not an error");
+        assert!(j.entry(&Resource::Pac { service: vpn.clone() }).is_some());
+        assert!(
+            !p.calls()
+                .iter()
+                .any(|c| c.starts_with("set_") && c.contains(&vpn.key()))
+        );
+        // Disconnected: the record is put back like any other.
+        p.set_vpn_connection("Alpha VPN", false);
+        let rep = restore_with(&mut j, &p, Scope::All);
+        assert_eq!(rep.restored(), 1);
+        assert_eq!(p.pac_of(&vpn).enabled, Some(false));
+        assert!(j.is_empty());
+    }
+
+    #[test]
+    fn a_restore_of_a_physical_service_does_not_depend_on_the_connection_list() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.add_service(wifi());
+        let mut j = open(&fs);
+        own_pac_on(&mut j, &p, &wifi());
+        p.fail_next(PlatOp::VpnList);
+        let rep = restore_with(&mut j, &p, Scope::All);
+        assert_eq!(rep.restored(), 1, "quit must not leave our PAC behind");
     }
 }

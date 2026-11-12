@@ -10,4 +10,6 @@
 .zs-cov__blocks .zs-code{margin:0}
 .zs-cov__label{margin:0;font-size:12px;line-height:16px;color:var(--ink-3)}
 .zs-cov__actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+.zs-cov__vpn{margin-bottom:var(--space-2)}
+.zs-cov__vpn-line{padding-bottom:var(--space-2)}
 @media (max-width:420px){.zs-cov__head{flex-direction:column;align-items:flex-start}}
