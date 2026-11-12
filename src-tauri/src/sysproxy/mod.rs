@@ -1421,7 +1421,10 @@ mod tests {
         let r = refresh_with(&st, &mut j, &p).unwrap();
         assert!(!r.changed && r.configured.is_empty());
         assert_eq!(p.os_writes(), writes, "nothing is written back");
-        assert_eq!(p.pac_of(&wifi()), restored_pac());
+        // The per-service PAC exists only on macOS; Windows keeps it in a WinINet value.
+        if cfg!(target_os = "macos") {
+            assert_eq!(p.pac_of(&wifi()), restored_pac());
+        }
     }
 
     #[test]
