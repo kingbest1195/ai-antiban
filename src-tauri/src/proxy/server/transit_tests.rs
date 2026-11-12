@@ -620,7 +620,8 @@ async fn running_transit_stream_survives_a_gate_freeze_and_new_ones_are_not_held
     let (mut dl, head) = open_tunnel(dl_env.addr(), "ghcr.io:443").await;
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
 
-    let mut got = 0usize;
+    // Body bytes that came with the header are part of the download too (see `open_tunnel`).
+    let mut got = head.find("\r\n\r\n").map_or(0, |i| head.len() - (i + 4));
     let mut buf = vec![0u8; 64 * 1024];
     // First piece arrives before the freeze.
     got += dl.read(&mut buf).await.unwrap();
@@ -801,7 +802,10 @@ async fn pending_gate_keeps_direct_streams_and_new_transit_but_holds_ai_hosts() 
     let (mut dl, head) = open_tunnel(env.addr(), "ghcr.io:443").await;
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     let mut buf = vec![0u8; 64 * 1024];
-    let mut got = dl.read(&mut buf).await.unwrap();
+    // `open_tunnel` reads the answer in small chunks and may already hold the first body bytes
+    // that followed the header; they belong to the download too.
+    let body_in_head = head.find("\r\n\r\n").map_or(0, |i| head.len() - (i + 4));
+    let mut got = body_in_head + dl.read(&mut buf).await.unwrap();
 
     env.server.guard.set_gate_for_test(Gate::Pending);
     env.server.guard.abort_active_tunnels();

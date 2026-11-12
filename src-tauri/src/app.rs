@@ -172,7 +172,10 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-                let _ = sysproxy::cleanup_all_persistent_settings();
+                // Cmd+Q / closing the last window: the same notice as a quit from the tray.
+                if sysproxy::cleanup_all_persistent_settings().restore_deferred_by_vpn_dns() {
+                    sysproxy::notify_restore_deferred();
+                }
             }
             _ => {}
         });

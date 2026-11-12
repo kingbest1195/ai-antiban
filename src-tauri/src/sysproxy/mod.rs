@@ -959,6 +959,11 @@ pub const RESTORE_DEFERRED_TEXT: &str = "Застава закрыта, но а�
 /// a minute, started detached so it outlives the quitting process; other systems have no such
 /// state). Goes through [`silent_command`], so dry-run mode starts nothing.
 pub fn notify_restore_deferred() {
+    // Quit goes through the tray handler and then through the exit events: tell the user once.
+    static TOLD: AtomicBool = AtomicBool::new(false);
+    if TOLD.swap(true, Ordering::SeqCst) {
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         let script = format!(
