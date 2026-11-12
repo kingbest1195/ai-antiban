@@ -17,6 +17,7 @@ import {
   CliProtectionReport,
   CliSettings,
   CoverageSnapshot,
+  RestartOutcome,
   ManualStepKey,
   CrashTestStepResult,
   GatewayStatsSnapshot,
@@ -92,6 +93,12 @@ function currentMockAntigravityScenario(): MockAntigravityScenario {
   if (mockAntigravityScenario !== "none" || typeof window === "undefined") return mockAntigravityScenario;
   const fromUrl = new URLSearchParams(window.location.search).get("mockAntigravity");
   return fromUrl === "uncovered" || fromUrl === "bypass" || fromUrl === "confirmed" ? fromUrl : "none";
+}
+
+/** Исход «Перезапустить Antigravity с защитой» в моке: ?mockRestart=ok|not_closed|permission|failed (по умолчанию ok). */
+function currentMockRestartOutcome(): RestartOutcome {
+  const v = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("mockRestart");
+  return v === "not_closed" ? "not_closed" : v === "permission" ? "needs_automation_permission" : v === "failed" ? "launch_failed" : "restarted";
 }
 
 let mockRoutesSnapshot: RoutesSnapshot = {
@@ -1754,6 +1761,22 @@ export async function recheckCoverage(): Promise<CoverageSnapshot> {
   }
   mockCoverageStage = Math.min(mockCoverageStage + 1, 2);
   return mockCoverageSnapshot();
+}
+
+/**
+ * Закрывает Antigravity и открывает заново с адресом шлюза. Передаётся только id: путь, процесс и адрес определяет шлюз.
+ * Ошибка команды (в том числе отказ из белого списка) — как неудачный запуск.
+ */
+export async function restartAppWithGateway(appId: "antigravity"): Promise<RestartOutcome> {
+  if (isTauri()) {
+    try {
+      return await invoke<RestartOutcome>("restart_app_with_gateway", { appId });
+    } catch {
+      return "launch_failed";
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  return currentMockRestartOutcome();
 }
 
 /** Фокус окна приложения: в Tauri через событие окна, в браузере — без подписки. Возвращает отписку. */

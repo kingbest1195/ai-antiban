@@ -1075,6 +1075,17 @@ pub(crate) enum AntigravityKind {
     CliOnly,
 }
 
+/// The `.app` bundle of Antigravity: the system one first, then the user's own. One place, so the
+/// coverage status and the restart button always mean the same installation.
+pub(crate) fn antigravity_app_path(ctx: &FileCtx) -> Option<PathBuf> {
+    [
+        PathBuf::from("/Applications/Antigravity.app"),
+        ctx.home.join("Applications").join("Antigravity.app"),
+    ]
+    .into_iter()
+    .find(|p| ctx.fs.exists(p))
+}
+
 pub(crate) fn antigravity_kind(ctx: &FileCtx) -> Option<AntigravityKind> {
     let ex = |p: &Path| ctx.fs.exists(p);
     if ctx
@@ -1084,9 +1095,7 @@ pub(crate) fn antigravity_kind(ctx: &FileCtx) -> Option<AntigravityKind> {
     {
         return Some(AntigravityKind::Editor);
     }
-    if ex(Path::new("/Applications/Antigravity.app"))
-        || ex(&ctx.home.join("Applications").join("Antigravity.app"))
-        || ctx.ide_roots.iter().any(|r| ex(&r.join("Antigravity")))
+    if antigravity_app_path(ctx).is_some() || ctx.ide_roots.iter().any(|r| ex(&r.join("Antigravity")))
     {
         return Some(AntigravityKind::Desktop);
     }

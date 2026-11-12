@@ -473,6 +473,9 @@ export interface AppCoverageItem {
   bypass_suspected?: boolean;
 }
 
+/** Итог «Перезапустить Antigravity с защитой»: значения совпадают с `RestartOutcome` шлюза (snake_case). */
+export type RestartOutcome = "restarted" | "not_closed" | "needs_automation_permission" | "launch_failed" | "not_installed" | "unsupported";
+
 export interface CliSettings {
   cli_mode: CliMode;
   sync_ai_tz_enabled: boolean;
