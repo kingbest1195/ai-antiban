@@ -91,6 +91,8 @@ impl ProxyServer {
 
         let bound_addr = listener.local_addr()?;
         auditor.resolver.set_gateway_port(bound_addr.port());
+        let coverage = Arc::new(crate::proxy::CoverageTracker::new());
+        coverage.set_gateway_addr(bound_addr);
 
         Ok(Self {
             bound_addr,
@@ -99,7 +101,7 @@ impl ProxyServer {
             state,
             hold_queue,
             guard: Arc::new(NetworkGuard::new()),
-            coverage: Arc::new(crate::proxy::CoverageTracker::new()),
+            coverage,
             app_handle,
             upstream_redirect: None,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
@@ -118,6 +120,8 @@ impl ProxyServer {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let bound_addr = listener.local_addr()?;
         auditor.resolver.set_gateway_port(bound_addr.port());
+        let coverage = Arc::new(crate::proxy::CoverageTracker::new());
+        coverage.set_gateway_addr(bound_addr);
 
         Ok(Self {
             bound_addr,
@@ -126,7 +130,7 @@ impl ProxyServer {
             state,
             hold_queue,
             guard: Arc::new(NetworkGuard::new()),
-            coverage: Arc::new(crate::proxy::CoverageTracker::new()),
+            coverage,
             app_handle: None,
             upstream_redirect,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
@@ -198,8 +202,6 @@ impl ProxyServer {
             .find(|line| line.to_ascii_lowercase().starts_with("user-agent:"))
             .and_then(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()));
 
-        self.coverage.record_incoming(client_addr.port(), user_agent);
-
         let mut parts = request_line.split_whitespace();
         let method = parts.next().unwrap_or("");
         let target = parts.next().unwrap_or("");
@@ -211,12 +213,20 @@ impl ProxyServer {
                 || target.starts_with("/pac.js")
                 || target.contains("/pac.js"))
         {
+            // A PAC download is counted apart from AI requests.
+            self.coverage.record_incoming(
+                client_addr.port(),
+                user_agent,
+                crate::proxy::coverage::TrafficKind::PacFetch,
+            );
             return self.handle_pac_request(&mut client).await;
         }
 
         // 2. Route CONNECT <host>:<port>
         if method == "CONNECT" {
-            return self.handle_connect_request(&mut client, target).await;
+            return self
+                .handle_connect_request(&mut client, target, client_addr.port(), user_agent)
+                .await;
         }
 
         // Generic HTTP health / info response
@@ -258,6 +268,8 @@ impl ProxyServer {
         &self,
         client: &mut TcpStream,
         raw_target: &str,
+        peer_port: u16,
+        user_agent: Option<String>,
     ) -> Result<(), std::io::Error> {
         let (host, port) = parse_host_port(raw_target);
 
@@ -270,7 +282,18 @@ impl ProxyServer {
         let provider_opt = ProviderId::from_host_with_custom(&host, &custom_domains);
 
         let provider = match provider_opt {
-            Some(p) => p,
+            Some(p) => {
+                // Only a tunnel to an AI host is an AI request (the canary is Zastava's own probe).
+                // Transit non-AI traffic below is never reported to the coverage radar.
+                if !is_canary {
+                    self.coverage.record_incoming(
+                        peer_port,
+                        user_agent,
+                        crate::proxy::coverage::TrafficKind::AiRequest,
+                    );
+                }
+                p
+            }
             None => {
                 // Direct pass-through for safe public non-AI domains: allows terminal users to set
                 // HTTPS_PROXY=http://127.0.0.1:8899 safely without breaking git, npm, brew, etc.
@@ -1164,4 +1187,75 @@ async fn send_forbidden(client: &mut TcpStream, reason: &str) -> Result<(), std:
     client.write_all(resp.as_bytes()).await?;
     client.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod coverage_count_tests {
+    use super::*;
+    use crate::proxy::coverage::{CoverageEnv, PacSource};
+    use crate::proxy::hold_queue::HoldQueue;
+    use crate::state::AppState;
+    use crate::sysproxy::platform::FakePlatform;
+
+    async fn started() -> Arc<ProxyServer> {
+        crate::sysproxy::force_os_dry_run();
+        let auditor = Auditor::new().expect("auditor");
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(
+                auditor,
+                AppState::new_in_memory(),
+                Arc::new(HoldQueue::new()),
+                None,
+            )
+            .await
+            .expect("bind"),
+        );
+        let srv = Arc::clone(&server);
+        tokio::spawn(async move { srv.run().await });
+        server
+    }
+
+    async fn request(addr: SocketAddr, text: &str) -> Option<String> {
+        let mut c = TcpStream::connect(addr).await.ok()?;
+        c.write_all(text.as_bytes()).await.ok()?;
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), c.read_to_end(&mut buf)).await;
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    #[tokio::test]
+    async fn proxy_pac_is_counted_apart_and_gateway_addr_is_the_real_one() {
+        let server = started().await;
+        let addr = server.bound_addr;
+        let req = format!(
+            "GET http://{addr}/proxy.pac HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: curl/8.7.1\r\nConnection: close\r\n\r\n"
+        );
+        let Some(resp) = request(addr, &req).await else {
+            return; // loopback is not available in this sandbox
+        };
+        assert!(resp.contains("HTTP/1.1 200 OK"), "{resp}");
+        // The health page is not an AI request either.
+        let _ = request(addr, "GET / HTTP/1.1\r\nUser-Agent: curl/8.7.1\r\n\r\n").await;
+
+        let platform = FakePlatform::new();
+        let env = CoverageEnv {
+            platform: &platform,
+            files: None,
+            pac_source: PacSource::Services,
+            sysproxy_enabled: false,
+            cli_protection_enabled: false,
+            chained_proxy: None,
+            jetbrains_xml_confirmed: false,
+        };
+        let snap = server.coverage.snapshot(&env, true);
+        let curl = snap.apps.iter().find(|a| a.id == "curl").unwrap();
+        assert_eq!(curl.pac_fetches, 1);
+        assert_eq!(curl.ai_requests, 0);
+        assert_ne!(
+            curl.status,
+            crate::proxy::coverage::CoverageStatus::Confirmed
+        );
+        assert_eq!(snap.gateway_addr, Some(addr.to_string()));
+        assert_eq!(snap.pac_url, Some(format!("http://{addr}/proxy.pac")));
+    }
 }

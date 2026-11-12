@@ -156,6 +156,7 @@ pub fn run() {
             commands::interception::toggle_network_killswitch_cmd,
             commands::interception::get_network_killswitch_status_cmd,
             commands::coverage::get_coverage_snapshot,
+            commands::coverage::recheck_coverage,
             commands::deeplink::take_pending_deep_link
         ])
         .build(tauri::generate_context!())

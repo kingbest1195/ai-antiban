@@ -1,10 +1,73 @@
 //! Application network coverage and incoming socket process auditing.
+//!
+//! A status is never guessed from an in-memory flag:
+//! * `confirmed`  - the app made an AI request through the gateway within [`CONFIRM_TTL_MS`];
+//! * `configured` - a fact read from the system says so (the PAC the OS hands out equals ours,
+//!   `http.proxy` in the editor's `settings.json` points at the gateway port);
+//! * `off`        - the fact was read and it says "not configured";
+//! * `unknown`    - the app is there but there is nothing reliable to read (or reading failed);
+//! * `not_installed`.
+//!
+//! Everything that touches the OS (`lsof` / `netstat` / `tasklist` / `ss`, `Platform`, files)
+//! goes through a seam, so the tests feed canned output and fakes instead of starting processes.
 
+use crate::sysproxy::FileCtx;
+use crate::sysproxy::fs::Fs;
+use crate::sysproxy::platform::{Platform, PlatformError};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+
+/// A confirmation by live traffic is valid for 30 minutes.
+pub const CONFIRM_TTL_MS: u64 = 30 * 60 * 1000;
+/// Configuration facts read from the OS / files are reused for this long (a forced re-check
+/// bypasses it).
+const FACTS_TTL_MS: u64 = 5_000;
+/// `peer_port -> process` answers are reused for this long.
+const LOOKUP_CACHE_TTL_MS: u64 = 15_000;
+/// A failed lookup is remembered for this long (no retry storm for the same port).
+const LOOKUP_NEGATIVE_TTL_MS: u64 = 5_000;
+/// At most [`LOOKUP_RATE_MAX`] process lookups per [`LOOKUP_RATE_WINDOW_MS`]; the rest is
+/// attributed by User-Agent only.
+const LOOKUP_RATE_WINDOW_MS: u64 = 1_000;
+const LOOKUP_RATE_MAX: usize = 8;
+/// Upper bound of remembered ports (cache never grows without limit).
+const LOOKUP_CACHE_MAX: usize = 1024;
+
+/// Whether the format of the JetBrains `options/proxy.settings.xml` has been confirmed on a real
+/// machine. While `false`, JetBrains is always `unknown` with manual steps.
+pub const JETBRAINS_XML_CONFIRMED: bool = false;
+
+/// Keys of manual steps handed to the UI (the texts live on the front end).
+pub mod steps {
+    /// Enable Zastava protection with its own button.
+    pub const ENABLE_PROTECTION: &str = "enable_protection";
+    /// Put `http://<gateway_addr>` into the application's HTTP proxy setting.
+    pub const SET_HTTP_PROXY: &str = "set_http_proxy";
+    /// Put the PAC address (`pac_url`) into the application's / system proxy setting.
+    pub const SET_PAC_URL: &str = "set_pac_url";
+    /// Set `HTTPS_PROXY` / `HTTP_PROXY` environment variables to `http://<gateway_addr>`.
+    pub const SET_ENV_PROXY: &str = "set_env_proxy";
+    /// Restart the application so that it picks the setting up.
+    pub const RESTART_APP: &str = "restart_app";
+    /// Open a new terminal window (already running ones keep their old environment).
+    pub const REOPEN_TERMINAL: &str = "reopen_terminal";
+    /// Open Settings -> HTTP Proxy in a JetBrains IDE.
+    pub const JETBRAINS_PROXY_SETTINGS: &str = "jetbrains_proxy_settings";
+}
+
+/// Protection status of an application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageStatus {
+    Confirmed,
+    Configured,
+    Unknown,
+    Off,
+    NotInstalled,
+}
 
 /// Individual application status within Zastava network protection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,8 +76,17 @@ pub struct AppCoverageItem {
     pub name: String,
     pub category: String, // "browser" | "desktop" | "ide" | "cli"
     pub installed: bool,
-    pub status: String, // "verified" | "configured" | "unconfigured"
+    pub status: CoverageStatus,
+    /// Same as `ai_requests` (kept for the old front end).
     pub requests_seen: u64,
+    /// AI requests through the gateway since Zastava started.
+    pub ai_requests: u64,
+    /// How many times the app fetched `/proxy.pac`.
+    pub pac_fetches: u64,
+    /// Unix time (ms) of the last AI request through the gateway.
+    pub last_seen_ms: Option<u64>,
+    /// Keys of manual steps (see [`steps`]); empty when nothing has to be done.
+    pub manual_steps: Vec<String>,
     pub detail: String,
 }
 
@@ -24,213 +96,389 @@ pub struct CoverageSnapshot {
     pub sysproxy_enabled: bool,
     pub cli_protection_enabled: bool,
     pub chained_proxy: Option<String>,
+    /// Real address of the gateway (`127.0.0.1:<port>`).
+    pub gateway_addr: Option<String>,
+    /// `http://<gateway_addr>/proxy.pac`.
+    pub pac_url: Option<String>,
+    pub generated_at_ms: u64,
     pub apps: Vec<AppCoverageItem>,
+}
+
+/// What kind of connection reached the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrafficKind {
+    /// A tunnel request to an AI host.
+    AiRequest,
+    /// `GET /proxy.pac`.
+    PacFetch,
+    /// Transit traffic to a non-AI host: never inspected, never counted.
+    Direct,
 }
 
 #[derive(Debug, Clone)]
 struct AppTrafficStats {
-    pub requests_seen: u64,
-    pub last_seen_ms: u64,
-    pub detected_name: String,
-    pub category: String,
+    ai_requests: u64,
+    pac_fetches: u64,
+    last_seen_ms: u64,
+    detected_name: String,
+    category: String,
+}
+
+// ---------------------------------------------------------------------------------------------
+// OS seam
+// ---------------------------------------------------------------------------------------------
+
+/// Runs a system program and returns its stdout when it exited successfully.
+pub trait SystemProbe: Send + Sync {
+    fn run(&self, program: &str, args: &[&str]) -> Option<String>;
+}
+
+/// The real thing: starts the program (nothing is started in OS dry-run mode).
+pub struct RealProbe;
+
+impl SystemProbe for RealProbe {
+    fn run(&self, program: &str, args: &[&str]) -> Option<String> {
+        let output = crate::sysproxy::silent_command(program)
+            .args(args)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+/// Which OS tools to ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Macos,
+    Windows,
+    Linux,
+}
+
+impl Os {
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Os::Macos
+        } else if cfg!(target_os = "windows") {
+            Os::Windows
+        } else {
+            Os::Linux
+        }
+    }
+}
+
+type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+fn system_clock() -> Clock {
+    Arc::new(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tracker
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Default)]
+struct LookupState {
+    /// `peer_port -> (process or None for "not found", time of the answer)`.
+    cache: HashMap<u16, (Option<String>, u64)>,
+    inflight: HashSet<u16>,
+    recent: VecDeque<u64>,
 }
 
 /// Live process accounting engine tracking incoming local gateway sockets.
-#[derive(Default)]
 pub struct CoverageTracker {
     stats: Mutex<HashMap<String, AppTrafficStats>>,
-    port_cache: Mutex<HashMap<u16, (String, Instant)>>,
+    lookups: Mutex<LookupState>,
+    gateway: Mutex<Option<SocketAddr>>,
+    facts: Mutex<Option<(u64, ConfigFacts)>>,
+    clock: Clock,
+    probe: Arc<dyn SystemProbe>,
+    os: Os,
+}
+
+impl Default for CoverageTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What must happen after the cheap part of an incoming connection was handled.
+enum Step {
+    Done,
+    Lookup,
 }
 
 impl CoverageTracker {
     pub fn new() -> Self {
+        Self::with_parts(system_clock(), Arc::new(RealProbe), Os::current())
+    }
+
+    /// A tracker with its own clock (Unix ms), OS probe and OS flavour (tests).
+    pub fn with_parts(clock: Clock, probe: Arc<dyn SystemProbe>, os: Os) -> Self {
         Self {
             stats: Mutex::new(HashMap::new()),
-            port_cache: Mutex::new(HashMap::new()),
+            lookups: Mutex::new(LookupState::default()),
+            gateway: Mutex::new(None),
+            facts: Mutex::new(None),
+            clock,
+            probe,
+            os,
         }
     }
 
-    /// Records an incoming connection from `peer_port`.
-    /// Performs non-blocking, cached process resolution without delaying proxy tunneling.
-    pub fn record_incoming(self: &Arc<Self>, peer_port: u16, user_agent: Option<String>) {
-        // 1. Check recent port cache (connections from the same port within 15 seconds)
+    fn now_ms(&self) -> u64 {
+        (self.clock)()
+    }
+
+    /// The address the gateway really listens on.
+    pub fn set_gateway_addr(&self, addr: SocketAddr) {
+        if let Ok(mut g) = self.gateway.lock() {
+            *g = Some(addr);
+        }
+        if let Ok(mut f) = self.facts.lock() {
+            *f = None;
+        }
+    }
+
+    pub fn gateway_addr(&self) -> Option<SocketAddr> {
+        self.gateway.lock().ok().and_then(|g| *g)
+    }
+
+    /// Records an incoming connection from `peer_port`. Never blocks the tunnel: the OS lookup
+    /// (when needed at all) runs on the blocking pool.
+    ///
+    /// [`TrafficKind::Direct`] is ignored: transit traffic to non-AI hosts must not cost a single
+    /// process lookup.
+    pub fn record_incoming(
+        self: &Arc<Self>,
+        peer_port: u16,
+        user_agent: Option<String>,
+        kind: TrafficKind,
+    ) {
+        if let Step::Lookup = self.prepare(peer_port, user_agent.as_deref(), kind) {
+            let tracker = Arc::clone(self);
+            tokio::task::spawn_blocking(move || {
+                tracker.run_lookup(peer_port, user_agent.as_deref(), kind);
+            });
+        }
+    }
+
+    /// Same as [`Self::record_incoming`] but the lookup (if any) runs on the calling thread.
+    pub fn record_incoming_blocking(
+        &self,
+        peer_port: u16,
+        user_agent: Option<&str>,
+        kind: TrafficKind,
+    ) {
+        if let Step::Lookup = self.prepare(peer_port, user_agent, kind) {
+            self.run_lookup(peer_port, user_agent, kind);
+        }
+    }
+
+    /// Cheap part: cache, User-Agent, debounce and rate limit. Decides whether an OS lookup is due.
+    fn prepare(&self, peer_port: u16, user_agent: Option<&str>, kind: TrafficKind) -> Step {
+        if kind == TrafficKind::Direct {
+            return Step::Done;
+        }
+        let now = self.now_ms();
+
+        // 1. Recent answer for this port (found or not found).
+        let cached = self.lookups.lock().ok().and_then(|l| {
+            l.cache.get(&peer_port).and_then(|(name, at)| {
+                let ttl = if name.is_some() {
+                    LOOKUP_CACHE_TTL_MS
+                } else {
+                    LOOKUP_NEGATIVE_TTL_MS
+                };
+                (now.saturating_sub(*at) < ttl).then(|| name.clone())
+            })
+        });
+        if let Some(answer) = cached {
+            match answer {
+                Some(name) => self.record(kind, &name, user_agent),
+                None => self.record_by_user_agent(kind, user_agent),
+            }
+            return Step::Done;
+        }
+
+        // 2. The User-Agent names the client directly.
+        if let Some(ua) = user_agent
+            && let Some(name) = identify_by_user_agent(ua)
         {
-            if let Ok(cache) = self.port_cache.lock() {
-                if let Some((proc_name, instant)) = cache.get(&peer_port) {
-                    if instant.elapsed().as_secs() < 15 {
-                        let name_clone = proc_name.clone();
-                        drop(cache);
-                        self.record_hit(&name_clone, user_agent.as_deref());
-                        return;
-                    }
+            self.cache_answer(peer_port, Some(name.to_string()), now);
+            self.record(kind, name, user_agent);
+            return Step::Done;
+        }
+
+        // 3. Debounce and rate limit: a lookup for this port is already running / too many
+        //    lookups lately -> no new process, attribute by User-Agent only.
+        let Ok(mut l) = self.lookups.lock() else {
+            return Step::Done;
+        };
+        if l.inflight.contains(&peer_port) {
+            return Step::Done;
+        }
+        while let Some(front) = l.recent.front() {
+            if now.saturating_sub(*front) >= LOOKUP_RATE_WINDOW_MS {
+                l.recent.pop_front();
+            } else {
+                break;
+            }
+        }
+        if l.recent.len() >= LOOKUP_RATE_MAX {
+            drop(l);
+            self.record_by_user_agent(kind, user_agent);
+            return Step::Done;
+        }
+        l.recent.push_back(now);
+        l.inflight.insert(peer_port);
+        Step::Lookup
+    }
+
+    fn run_lookup(&self, peer_port: u16, user_agent: Option<&str>, kind: TrafficKind) {
+        let found = lookup_process_with(&*self.probe, self.os, peer_port, std::process::id());
+        let now = self.now_ms();
+        if let Ok(mut l) = self.lookups.lock() {
+            l.inflight.remove(&peer_port);
+        }
+        self.cache_answer(peer_port, found.clone(), now);
+        match found {
+            Some(name) => self.record(kind, &name, user_agent),
+            None => self.record_by_user_agent(kind, user_agent),
+        }
+    }
+
+    fn cache_answer(&self, port: u16, name: Option<String>, now: u64) {
+        if let Ok(mut l) = self.lookups.lock() {
+            if l.cache.len() >= LOOKUP_CACHE_MAX {
+                l.cache
+                    .retain(|_, (_, at)| now.saturating_sub(*at) < LOOKUP_CACHE_TTL_MS);
+                if l.cache.len() >= LOOKUP_CACHE_MAX {
+                    l.cache.clear();
                 }
             }
-        }
-
-        // 2. Fast check: can we identify the client directly from User-Agent?
-        if let Some(ref ua) = user_agent {
-            let ua_lower = ua.to_lowercase();
-            if ua_lower.starts_with("curl/") {
-                self.cache_port(peer_port, "curl".to_string());
-                self.record_hit("curl", Some(ua));
-                return;
-            }
-            if ua_lower.contains("claude-code") || ua_lower.contains("claude_code") {
-                self.cache_port(peer_port, "claude-code".to_string());
-                self.record_hit("claude-code", Some(ua));
-                return;
-            }
-            if ua_lower.contains("python-requests") || ua_lower.contains("aiohttp") {
-                self.cache_port(peer_port, "python".to_string());
-                self.record_hit("python", Some(ua));
-                return;
-            }
-            if ua_lower.contains("node-fetch") || ua_lower.contains("undici") {
-                self.cache_port(peer_port, "node".to_string());
-                self.record_hit("node", Some(ua));
-                return;
-            }
-        }
-
-        // 3. Background asynchronous OS process lookup (never blocks the tunnel)
-        let tracker = Arc::clone(self);
-        tokio::spawn(async move {
-            if let Some(proc_name) = lookup_process_name_by_port(peer_port).await {
-                tracker.cache_port(peer_port, proc_name.clone());
-                tracker.record_hit(&proc_name, user_agent.as_deref());
-            } else if let Some(ua) = user_agent {
-                tracker.record_hit(&ua, None);
-            }
-        });
-    }
-
-    fn cache_port(&self, port: u16, name: String) {
-        if let Ok(mut cache) = self.port_cache.lock() {
-            cache.insert(port, (name, Instant::now()));
+            l.cache.insert(port, (name, now));
         }
     }
 
-    /// Records a verified request from a discovered process name or user-agent.
+    fn record_by_user_agent(&self, kind: TrafficKind, user_agent: Option<&str>) {
+        if let Some(ua) = user_agent {
+            self.record(kind, ua, None);
+        }
+    }
+
+    /// Records one AI request from a discovered process name or user-agent.
     pub fn record_hit(&self, raw_process_name: &str, user_agent: Option<&str>) {
-        let (id, display_name, category) = resolve_app_identity(raw_process_name, user_agent);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        self.record(TrafficKind::AiRequest, raw_process_name, user_agent);
+    }
 
-        if let Ok(mut lock) = self.stats.lock() {
-            let entry = lock.entry(id).or_insert_with(|| AppTrafficStats {
-                requests_seen: 0,
-                last_seen_ms: now_ms,
-                detected_name: display_name,
-                category,
-            });
-            entry.requests_seen = entry.requests_seen.saturating_add(1);
-            entry.last_seen_ms = now_ms;
+    fn record(&self, kind: TrafficKind, raw_process_name: &str, user_agent: Option<&str>) {
+        if kind == TrafficKind::Direct {
+            return;
+        }
+        let (id, display_name, category) = resolve_app_identity(raw_process_name, user_agent);
+        let now_ms = self.now_ms();
+        let Ok(mut lock) = self.stats.lock() else {
+            return;
+        };
+        match kind {
+            TrafficKind::AiRequest => {
+                let entry = lock.entry(id).or_insert_with(|| AppTrafficStats {
+                    ai_requests: 0,
+                    pac_fetches: 0,
+                    last_seen_ms: now_ms,
+                    detected_name: display_name,
+                    category,
+                });
+                entry.ai_requests = entry.ai_requests.saturating_add(1);
+                entry.last_seen_ms = now_ms;
+            }
+            TrafficKind::PacFetch => {
+                // A PAC fetch only counts for apps of the catalog: it must not create an entry
+                // for the system's own PAC helper.
+                if get_known_app_info(&id).is_none() {
+                    return;
+                }
+                let entry = lock.entry(id).or_insert_with(|| AppTrafficStats {
+                    ai_requests: 0,
+                    pac_fetches: 0,
+                    last_seen_ms: 0,
+                    detected_name: display_name,
+                    category,
+                });
+                entry.pac_fetches = entry.pac_fetches.saturating_add(1);
+            }
+            TrafficKind::Direct => {}
         }
     }
 
-    /// Generates a complete coverage snapshot of all known catalog apps and any live detected processes.
-    pub fn get_snapshot(
-        &self,
-        sysproxy_enabled: bool,
-        cli_protection_enabled: bool,
-        chained_proxy: Option<String>,
-    ) -> CoverageSnapshot {
-        let stats_map = self
-            .stats
-            .lock()
-            .map(|l| l.clone())
-            .unwrap_or_default();
+    /// Builds the snapshot. `force` ignores the cache of configuration facts (re-reads the OS
+    /// and the files right now).
+    pub(crate) fn snapshot(&self, env: &CoverageEnv<'_>, force: bool) -> CoverageSnapshot {
+        let now = self.now_ms();
+        let gateway = self.gateway_addr();
 
-        let known_ids = [
-            "browsers",
-            "claude-desktop",
-            "chatgpt-desktop",
-            "antigravity",
-            "cursor",
-            "vscode",
-            "windsurf",
-            "jetbrains",
-            "claude-code",
-            "gemini-cli",
-            "node-cli",
-            "python-cli",
-            "curl",
-        ];
+        let facts = {
+            let mut guard = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = match &*guard {
+                Some((at, f)) => {
+                    !force && now.saturating_sub(*at) < FACTS_TTL_MS && f.gateway == gateway
+                }
+                None => false,
+            };
+            if !fresh {
+                *guard = Some((now, compute_config_facts(env, gateway)));
+            }
+            guard.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
+        };
 
+        let stats_map = self.stats.lock().map(|l| l.clone()).unwrap_or_default();
         let mut apps = Vec::new();
 
-        // 1. Process standard known apps catalog
-        for app_id in known_ids {
+        for app_id in KNOWN_IDS {
             let info = get_known_app_info(app_id).unwrap_or(KnownAppInfo {
                 id: app_id,
                 name: app_id,
                 category: "desktop",
             });
-
             let traffic = stats_map.get(app_id);
-            let requests_seen = traffic.map(|t| t.requests_seen).unwrap_or(0);
-            let installed = check_app_installed(app_id) || requests_seen > 0;
+            let ai_requests = traffic.map(|t| t.ai_requests).unwrap_or(0);
+            let pac_fetches = traffic.map(|t| t.pac_fetches).unwrap_or(0);
+            let last_seen_ms = traffic
+                .filter(|t| t.ai_requests > 0)
+                .map(|t| t.last_seen_ms);
+            let fact = facts.apps.get(app_id);
+            let installed = fact.map(|f| f.installed).unwrap_or(false) || ai_requests > 0;
+            let fresh = last_seen_ms.is_some_and(|t| now.saturating_sub(t) < CONFIRM_TTL_MS);
 
-            let (status, detail) = if requests_seen > 0 {
+            let (status, manual_steps, detail) = if fresh {
                 (
-                    "verified".to_string(),
-                    format!("Проверено трафиком ({} запр.)", requests_seen),
+                    CoverageStatus::Confirmed,
+                    Vec::new(),
+                    format!("Подтверждено трафиком ({} запр.)", ai_requests),
                 )
-            } else if installed {
-                match info.category {
-                    "browser" => {
-                        if sysproxy_enabled {
-                            ("configured".to_string(), "Через системный PAC".to_string())
-                        } else {
-                            ("unconfigured".to_string(), "Включите системный PAC".to_string())
-                        }
-                    }
-                    "desktop" => {
-                        if sysproxy_enabled {
-                            ("configured".to_string(), "Через системный PAC".to_string())
-                        } else {
-                            ("unconfigured".to_string(), "Включите системный PAC".to_string())
-                        }
-                    }
-                    "ide" => {
-                        if app_id == "jetbrains" {
-                            (
-                                "unconfigured".to_string(),
-                                "Требуется ручная настройка (127.0.0.1:8899)".to_string(),
-                            )
-                        } else if is_ide_configured(app_id) || cli_protection_enabled {
-                            ("configured".to_string(), "Настроен settings.json".to_string())
-                        } else if sysproxy_enabled {
-                            ("configured".to_string(), "Через системный PAC".to_string())
-                        } else {
-                            (
-                                "unconfigured".to_string(),
-                                "Включите защиту IDE и CLI".to_string(),
-                            )
-                        }
-                    }
-                    "cli" => {
-                        if cli_protection_enabled {
-                            (
-                                "configured".to_string(),
-                                "Через settings.json / переменные окружения".to_string(),
-                            )
-                        } else {
-                            (
-                                "unconfigured".to_string(),
-                                "Включите защиту IDE и CLI".to_string(),
-                            )
-                        }
-                    }
-                    _ => (
-                        "unconfigured".to_string(),
-                        "Ожидание настройки".to_string(),
-                    ),
-                }
+            } else if !installed {
+                (
+                    CoverageStatus::NotInstalled,
+                    Vec::new(),
+                    "Не установлено".to_string(),
+                )
+            } else if let Some(f) = fact.filter(|f| f.installed) {
+                (f.status, f.manual_steps.clone(), f.detail.clone())
             } else {
-                ("unconfigured".to_string(), "Не установлено".to_string())
+                // Seen on traffic earlier, but nothing to read now.
+                (
+                    CoverageStatus::Unknown,
+                    Vec::new(),
+                    "Подтверждение устарело".to_string(),
+                )
             };
 
             apps.push(AppCoverageItem {
@@ -239,34 +487,479 @@ impl CoverageTracker {
                 category: info.category.to_string(),
                 installed,
                 status,
-                requests_seen,
+                requests_seen: ai_requests,
+                ai_requests,
+                pac_fetches,
+                last_seen_ms,
+                manual_steps,
                 detail,
             });
         }
 
-        // 2. Append dynamically detected processes not present in the static catalog
-        for (id, traffic) in &stats_map {
-            if !known_ids.contains(&id.as_str()) {
-                apps.push(AppCoverageItem {
-                    id: id.clone(),
-                    name: traffic.detected_name.clone(),
-                    category: traffic.category.clone(),
-                    installed: true,
-                    status: "verified".to_string(),
-                    requests_seen: traffic.requests_seen,
-                    detail: format!("Проверено трафиком ({} запр.)", traffic.requests_seen),
-                });
-            }
+        // Processes seen on AI traffic that are not in the catalog.
+        let mut dynamic: Vec<_> = stats_map
+            .iter()
+            .filter(|(id, t)| !KNOWN_IDS.contains(&id.as_str()) && t.ai_requests > 0)
+            .collect();
+        dynamic.sort_by(|a, b| a.0.cmp(b.0));
+        for (id, t) in dynamic {
+            let fresh = now.saturating_sub(t.last_seen_ms) < CONFIRM_TTL_MS;
+            apps.push(AppCoverageItem {
+                id: id.clone(),
+                name: t.detected_name.clone(),
+                category: t.category.clone(),
+                installed: true,
+                status: if fresh {
+                    CoverageStatus::Confirmed
+                } else {
+                    CoverageStatus::Unknown
+                },
+                requests_seen: t.ai_requests,
+                ai_requests: t.ai_requests,
+                pac_fetches: t.pac_fetches,
+                last_seen_ms: Some(t.last_seen_ms),
+                manual_steps: Vec::new(),
+                detail: format!("Подтверждено трафиком ({} запр.)", t.ai_requests),
+            });
         }
 
         CoverageSnapshot {
-            sysproxy_enabled,
-            cli_protection_enabled,
-            chained_proxy,
+            sysproxy_enabled: env.sysproxy_enabled,
+            cli_protection_enabled: env.cli_protection_enabled,
+            chained_proxy: env.chained_proxy.clone(),
+            gateway_addr: facts.gateway.map(|g| g.to_string()),
+            pac_url: facts.gateway.map(pac_url_for),
+            generated_at_ms: now,
             apps,
         }
     }
 }
+
+const KNOWN_IDS: [&str; 13] = [
+    "browsers",
+    "claude-desktop",
+    "chatgpt-desktop",
+    "antigravity",
+    "cursor",
+    "vscode",
+    "windsurf",
+    "jetbrains",
+    "claude-code",
+    "gemini-cli",
+    "node-cli",
+    "python-cli",
+    "curl",
+];
+
+/// The PAC address the gateway serves.
+pub fn pac_url_for(addr: SocketAddr) -> String {
+    format!("http://{addr}/proxy.pac")
+}
+
+fn identify_by_user_agent(ua: &str) -> Option<&'static str> {
+    let ua_lower = ua.to_lowercase();
+    if ua_lower.starts_with("curl/") {
+        return Some("curl");
+    }
+    if ua_lower.contains("claude-code") || ua_lower.contains("claude_code") {
+        return Some("claude-code");
+    }
+    if ua_lower.contains("python-requests") || ua_lower.contains("aiohttp") {
+        return Some("python");
+    }
+    if ua_lower.contains("node-fetch") || ua_lower.contains("undici") {
+        return Some("node");
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------------------------
+// Configuration facts
+// ---------------------------------------------------------------------------------------------
+
+/// How the PAC is read from the OS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacSource {
+    /// Per network service (`networksetup -getautoproxyurl`), macOS.
+    Services,
+    /// WinINet `AutoConfigURL`, Windows.
+    Inet,
+}
+
+impl PacSource {
+    pub fn current() -> Self {
+        if cfg!(target_os = "windows") {
+            PacSource::Inet
+        } else {
+            PacSource::Services
+        }
+    }
+}
+
+/// Everything the status computation reads from outside.
+pub(crate) struct CoverageEnv<'a> {
+    pub platform: &'a dyn Platform,
+    /// `None` when the user's directories cannot be determined: file based facts are `unknown`.
+    pub files: Option<&'a FileCtx>,
+    pub pac_source: PacSource,
+    pub sysproxy_enabled: bool,
+    pub cli_protection_enabled: bool,
+    pub chained_proxy: Option<String>,
+    /// Whether the JetBrains settings format is trusted (see [`JETBRAINS_XML_CONFIRMED`]).
+    pub jetbrains_xml_confirmed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppFact {
+    pub installed: bool,
+    pub status: CoverageStatus,
+    pub manual_steps: Vec<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConfigFacts {
+    pub gateway: Option<SocketAddr>,
+    pub apps: HashMap<&'static str, AppFact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Configured,
+    Off,
+    Unknown,
+}
+
+fn steps_of(keys: &[&str]) -> Vec<String> {
+    keys.iter().map(|k| k.to_string()).collect()
+}
+
+fn compute_config_facts(env: &CoverageEnv<'_>, gateway: Option<SocketAddr>) -> ConfigFacts {
+    let mut facts = ConfigFacts {
+        gateway,
+        apps: HashMap::new(),
+    };
+
+    // One PAC read serves browsers and desktop apps.
+    let pac_verdict = match gateway {
+        Some(g) => read_os_pac(env.platform, env.pac_source, &pac_url_for(g)),
+        None => Verdict::Unknown,
+    };
+
+    for id in KNOWN_IDS {
+        let Some(info) = get_known_app_info(id) else {
+            continue;
+        };
+        let installed = match env.files {
+            Some(ctx) => check_app_installed_in(id, ctx),
+            None => matches!(id, "browsers" | "curl"),
+        };
+        if !installed {
+            facts.apps.insert(
+                id,
+                AppFact {
+                    installed: false,
+                    status: CoverageStatus::NotInstalled,
+                    manual_steps: Vec::new(),
+                    detail: "Не установлено".to_string(),
+                },
+            );
+            continue;
+        }
+
+        let (status, manual_steps, detail) = match info.category {
+            "browser" | "desktop" => match pac_verdict {
+                Verdict::Configured => (
+                    CoverageStatus::Configured,
+                    Vec::new(),
+                    "Системный PAC указывает на Заставу, ждём первый запрос".to_string(),
+                ),
+                Verdict::Off => (
+                    CoverageStatus::Off,
+                    steps_of(&[steps::ENABLE_PROTECTION]),
+                    "Системный PAC не указывает на Заставу".to_string(),
+                ),
+                Verdict::Unknown => (
+                    CoverageStatus::Unknown,
+                    steps_of(&[steps::ENABLE_PROTECTION, steps::SET_PAC_URL]),
+                    "Не удалось прочитать системный PAC".to_string(),
+                ),
+            },
+            "ide" if id == "jetbrains" => {
+                jetbrains_fact(env.files, gateway, env.jetbrains_xml_confirmed)
+            }
+            "ide" => {
+                let verdict = match (env.files, gateway) {
+                    (Some(ctx), Some(g)) => ide_verdict(ctx, ide_folders(id), g.port()),
+                    _ => Verdict::Unknown,
+                };
+                match verdict {
+                    Verdict::Configured => (
+                        CoverageStatus::Configured,
+                        Vec::new(),
+                        "В settings.json http.proxy указывает на Заставу".to_string(),
+                    ),
+                    Verdict::Off => (
+                        CoverageStatus::Off,
+                        steps_of(&[steps::ENABLE_PROTECTION, steps::SET_HTTP_PROXY]),
+                        "В settings.json нет http.proxy с портом Заставы".to_string(),
+                    ),
+                    Verdict::Unknown => (
+                        CoverageStatus::Unknown,
+                        steps_of(&[steps::SET_HTTP_PROXY]),
+                        "Не удалось прочитать settings.json".to_string(),
+                    ),
+                }
+            }
+            "cli" => {
+                if env.cli_protection_enabled {
+                    (
+                        CoverageStatus::Configured,
+                        steps_of(&[steps::REOPEN_TERMINAL]),
+                        "Защита терминала включена (действует в новых терминалах)".to_string(),
+                    )
+                } else {
+                    (
+                        CoverageStatus::Off,
+                        steps_of(&[steps::ENABLE_PROTECTION, steps::SET_ENV_PROXY]),
+                        "Защита терминала не включена".to_string(),
+                    )
+                }
+            }
+            _ => (
+                CoverageStatus::Unknown,
+                Vec::new(),
+                "Не удалось проверить".to_string(),
+            ),
+        };
+
+        facts.apps.insert(
+            id,
+            AppFact {
+                installed: true,
+                status,
+                manual_steps,
+                detail,
+            },
+        );
+    }
+    facts
+}
+
+fn same_pac(a: &str, b: &str) -> bool {
+    a.trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
+}
+
+/// Reads the PAC the OS hands out and compares it with ours. A failed read is `Unknown`,
+/// never `Configured`.
+fn read_os_pac(platform: &dyn Platform, source: PacSource, ours: &str) -> Verdict {
+    match source {
+        PacSource::Inet => match platform.get_inet("AutoConfigURL") {
+            Ok(Some(v)) if same_pac(&v.data, ours) => Verdict::Configured,
+            Ok(_) => Verdict::Off,
+            Err(_) => Verdict::Unknown,
+        },
+        PacSource::Services => {
+            let services = match platform.list_services() {
+                Ok(s) => s,
+                Err(_) => return Verdict::Unknown,
+            };
+            let mut readable = 0usize;
+            let mut failed = 0usize;
+            for svc in services.iter().filter(|s| s.enabled) {
+                match platform.get_pac(svc) {
+                    Ok(st) => {
+                        readable += 1;
+                        if st.enabled == Some(true)
+                            && st.url.as_deref().is_some_and(|u| same_pac(u, ours))
+                        {
+                            return Verdict::Configured;
+                        }
+                    }
+                    Err(PlatformError::NotFound(_)) => {}
+                    Err(_) => failed += 1,
+                }
+            }
+            if failed > 0 || readable == 0 {
+                Verdict::Unknown
+            } else {
+                Verdict::Off
+            }
+        }
+    }
+}
+
+/// Folder names under the editors' per-user data root.
+fn ide_folders(id: &str) -> &'static [&'static str] {
+    match id {
+        "antigravity" => &["Antigravity"],
+        "cursor" => &["Cursor"],
+        "vscode" => &["Code", "VSCodium"],
+        "windsurf" => &["Windsurf"],
+        _ => &[],
+    }
+}
+
+/// Does an `http.proxy` value point at the local gateway on `port`?
+pub fn proxy_value_targets_gateway(raw: &str, port: u16) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    let with_scheme = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let Ok(url) = url::Url::parse(&with_scheme) else {
+        return false;
+    };
+    let host_ok = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
+    host_ok && url.port_or_known_default() == Some(port)
+}
+
+/// `http.proxy` of the editor's `settings.json` against the gateway port.
+fn ide_verdict(ctx: &FileCtx, folders: &[&str], gateway_port: u16) -> Verdict {
+    let mut unreadable = false;
+    for root in &ctx.ide_roots {
+        for folder in folders {
+            let path = root.join(folder).join("User").join("settings.json");
+            match ctx.fs.read(&path) {
+                Ok(Some(bytes)) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    let text = text.trim_start_matches('\u{feff}');
+                    let cleaned = crate::sysproxy::sanitize_jsonc(text);
+                    match serde_json::from_str::<serde_json::Value>(&cleaned) {
+                        Ok(v) => {
+                            if v.get("http.proxy")
+                                .and_then(|p| p.as_str())
+                                .is_some_and(|p| proxy_value_targets_gateway(p, gateway_port))
+                            {
+                                return Verdict::Configured;
+                            }
+                        }
+                        Err(_) => unreadable = true,
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => unreadable = true,
+            }
+        }
+    }
+    if unreadable {
+        Verdict::Unknown
+    } else {
+        Verdict::Off
+    }
+}
+
+// ----- JetBrains -------------------------------------------------------------------------------
+
+/// Value of `<option name="X" value="Y" />` in a JetBrains settings XML (the format is not
+/// confirmed: see [`JETBRAINS_XML_CONFIRMED`]).
+fn xml_option(xml: &str, name: &str) -> Option<String> {
+    let needle = format!("name=\"{name}\"");
+    let at = xml.find(&needle)?;
+    let tag_start = xml[..at].rfind('<')?;
+    let tag_end = at + xml[at..].find('>')?;
+    let tag = &xml[tag_start..=tag_end];
+    let v_at = tag.find("value=\"")? + "value=\"".len();
+    let rest = &tag[v_at..];
+    Some(rest[..rest.find('"')?].to_string())
+}
+
+fn jetbrains_xml_verdict(xml: &str, gateway: SocketAddr) -> Verdict {
+    let flag = |n: &str| xml_option(xml, n).is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    if flag("USE_HTTP_PROXY") {
+        let host_ok = xml_option(xml, "PROXY_HOST")
+            .is_some_and(|h| matches!(h.trim(), "127.0.0.1" | "localhost"));
+        let port_ok = xml_option(xml, "PROXY_PORT")
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .is_some_and(|p| p == gateway.port());
+        return if host_ok && port_ok {
+            Verdict::Configured
+        } else {
+            Verdict::Off
+        };
+    }
+    if flag("USE_PROXY_PAC") {
+        return match xml_option(xml, "PAC_URL") {
+            Some(u) if same_pac(&u, &pac_url_for(gateway)) => Verdict::Configured,
+            Some(_) => Verdict::Off,
+            None => Verdict::Unknown,
+        };
+    }
+    Verdict::Unknown
+}
+
+/// `<root>/JetBrains/<Product>/options/proxy.settings.xml` for every product directory.
+fn jetbrains_xml_candidates(ctx: &FileCtx) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in &ctx.ide_roots {
+        if let Ok(rd) = std::fs::read_dir(root.join("JetBrains")) {
+            for entry in rd.flatten() {
+                out.push(entry.path().join("options").join("proxy.settings.xml"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn jetbrains_fact(
+    files: Option<&FileCtx>,
+    gateway: Option<SocketAddr>,
+    confirmed: bool,
+) -> (CoverageStatus, Vec<String>, String) {
+    let manual = steps_of(&[
+        steps::JETBRAINS_PROXY_SETTINGS,
+        steps::SET_PAC_URL,
+        steps::SET_HTTP_PROXY,
+    ]);
+    let unknown = (
+        CoverageStatus::Unknown,
+        manual.clone(),
+        "Настройки прокси JetBrains проверить нельзя: смотрим по трафику".to_string(),
+    );
+    if !confirmed {
+        return unknown;
+    }
+    let (Some(ctx), Some(g)) = (files, gateway) else {
+        return unknown;
+    };
+    let mut seen_configured = false;
+    let mut seen_off = false;
+    for path in jetbrains_xml_candidates(ctx) {
+        if let Ok(Some(bytes)) = ctx.fs.read(&path) {
+            match jetbrains_xml_verdict(&String::from_utf8_lossy(&bytes), g) {
+                Verdict::Configured => seen_configured = true,
+                Verdict::Off => seen_off = true,
+                Verdict::Unknown => {}
+            }
+        }
+    }
+    if seen_configured {
+        (
+            CoverageStatus::Configured,
+            Vec::new(),
+            "Прокси JetBrains указывает на Заставу, ждём первый запрос".to_string(),
+        )
+    } else if seen_off {
+        (
+            CoverageStatus::Off,
+            manual,
+            "Прокси JetBrains настроен не на Заставу".to_string(),
+        )
+    } else {
+        unknown
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------------------------
 
 pub struct KnownAppInfo {
     pub id: &'static str,
@@ -275,132 +968,98 @@ pub struct KnownAppInfo {
 }
 
 pub fn get_known_app_info(id: &str) -> Option<KnownAppInfo> {
-    match id {
-        "browsers" => Some(KnownAppInfo {
-            id: "browsers",
-            name: "Браузеры (Chrome, Safari, Arc, Edge...)",
-            category: "browser",
-        }),
-        "claude-desktop" => Some(KnownAppInfo {
-            id: "claude-desktop",
-            name: "Claude Desktop",
-            category: "desktop",
-        }),
-        "chatgpt-desktop" => Some(KnownAppInfo {
-            id: "chatgpt-desktop",
-            name: "ChatGPT Desktop",
-            category: "desktop",
-        }),
-        "antigravity" => Some(KnownAppInfo {
-            id: "antigravity",
-            name: "Antigravity",
-            category: "ide",
-        }),
-        "cursor" => Some(KnownAppInfo {
-            id: "cursor",
-            name: "Cursor",
-            category: "ide",
-        }),
-        "vscode" => Some(KnownAppInfo {
-            id: "vscode",
-            name: "VS Code",
-            category: "ide",
-        }),
-        "windsurf" => Some(KnownAppInfo {
-            id: "windsurf",
-            name: "Windsurf",
-            category: "ide",
-        }),
-        "jetbrains" => Some(KnownAppInfo {
-            id: "jetbrains",
-            name: "JetBrains IDE (PyCharm, IntelliJ...)",
-            category: "ide",
-        }),
-        "claude-code" => Some(KnownAppInfo {
-            id: "claude-code",
-            name: "Claude Code",
-            category: "cli",
-        }),
-        "gemini-cli" => Some(KnownAppInfo {
-            id: "gemini-cli",
-            name: "Gemini CLI",
-            category: "cli",
-        }),
-        "node-cli" => Some(KnownAppInfo {
-            id: "node-cli",
-            name: "Node.js / CLI",
-            category: "cli",
-        }),
-        "python-cli" => Some(KnownAppInfo {
-            id: "python-cli",
-            name: "Python / CLI",
-            category: "cli",
-        }),
-        "curl" => Some(KnownAppInfo {
-            id: "curl",
-            name: "curl",
-            category: "cli",
-        }),
-        _ => None,
-    }
+    let (id, name, category) = match id {
+        "browsers" => (
+            "browsers",
+            "Браузеры (Chrome, Safari, Arc, Edge...)",
+            "browser",
+        ),
+        "claude-desktop" => ("claude-desktop", "Claude Desktop", "desktop"),
+        "chatgpt-desktop" => ("chatgpt-desktop", "ChatGPT Desktop", "desktop"),
+        "antigravity" => ("antigravity", "Antigravity", "ide"),
+        "cursor" => ("cursor", "Cursor", "ide"),
+        "vscode" => ("vscode", "VS Code", "ide"),
+        "windsurf" => ("windsurf", "Windsurf", "ide"),
+        "jetbrains" => ("jetbrains", "JetBrains IDE (PyCharm, IntelliJ...)", "ide"),
+        "claude-code" => ("claude-code", "Claude Code", "cli"),
+        "gemini-cli" => ("gemini-cli", "Gemini CLI", "cli"),
+        "node-cli" => ("node-cli", "Node.js / CLI", "cli"),
+        "python-cli" => ("python-cli", "Python / CLI", "cli"),
+        "curl" => ("curl", "curl", "cli"),
+        _ => return None,
+    };
+    Some(KnownAppInfo { id, name, category })
 }
 
-/// Normalizes raw OS process names to canonical Zastava app identifiers.
+/// Splits a process name into lower-case words (non-alphanumeric characters separate words;
+/// trailing digits of a word are dropped: `idea64` -> `idea`).
+fn name_words(lower: &str) -> Vec<String> {
+    lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let t = w.trim_end_matches(|c: char| c.is_ascii_digit());
+            if t.is_empty() { w } else { t }.to_string()
+        })
+        .collect()
+}
+
+/// Normalizes raw OS process names to canonical Zastava app identifiers. Names are compared as
+/// whole words / exact binary names, never as substrings (`provider` is not `rider`,
+/// `knowledge` is not `edge`).
 pub fn classify_process_name(name: &str) -> &'static str {
     let lower_buf = name.to_lowercase();
     let lower = lower_buf.trim().trim_end_matches(".exe");
+    let words = name_words(lower);
+    let has = |w: &str| words.iter().any(|x| x == w);
+    let first = words.first().map(String::as_str).unwrap_or("");
 
     if lower.contains("claude-code") || lower.contains("claude_code") {
         return "claude-code";
     }
-    if lower.starts_with("claude") || lower.contains("claude helper") {
+    if first == "claude" {
         return "claude-desktop";
     }
-    if lower.contains("chatgpt") {
+    if has("chatgpt") {
         return "chatgpt-desktop";
     }
-    if lower.contains("antigravity") {
+    if has("antigravity") {
         return "antigravity";
     }
-    if lower.contains("cursor") {
+    if has("cursor") {
         return "cursor";
     }
-    if lower == "code"
-        || lower.starts_with("code ")
-        || lower.contains("code helper")
-        || lower.contains("vscode")
-        || lower.contains("vscodium")
+    if first == "code"
+        || has("vscode")
+        || has("vscodium")
+        || (has("visual") && has("studio") && has("code"))
     {
         return "vscode";
     }
-    if lower.contains("windsurf") {
+    if has("windsurf") {
         return "windsurf";
     }
-    if lower.contains("chrome")
-        || lower.contains("safari")
-        || lower == "arc"
-        || lower.starts_with("arc ")
-        || lower.contains("arc helper")
-        || lower.contains("edge")
-        || lower.contains("msedge")
-        || lower.contains("yandex")
-        || lower.contains("яндекс")
-        || lower.contains("firefox")
-        || lower.contains("brave")
+    if has("chrome")
+        || has("chromium")
+        || has("safari")
+        || has("firefox")
+        || has("brave")
+        || has("msedge")
+        || has("edge")
+        || first == "arc"
+        || words
+            .iter()
+            .any(|w| w.starts_with("yandex") || w.starts_with("яндекс"))
     {
         return "browsers";
     }
-    if lower.contains("idea")
-        || lower.contains("pycharm")
-        || lower.contains("webstorm")
-        || lower.contains("datagrip")
-        || lower.contains("clion")
-        || lower.contains("rider")
-        || lower.contains("goland")
-        || lower.contains("rubymine")
-        || lower.contains("phpstorm")
-        || lower.contains("fleet")
-        || lower.contains("studio")
+    const JETBRAINS_WORDS: [&str; 11] = [
+        "idea", "pycharm", "webstorm", "datagrip", "clion", "rider", "goland", "rubymine",
+        "phpstorm", "fleet", "appcode",
+    ];
+    if JETBRAINS_WORDS.iter().any(|w| has(w))
+        || (has("android") && has("studio"))
+        || lower == "studio64"
     {
         return "jetbrains";
     }
@@ -410,7 +1069,7 @@ pub fn classify_process_name(name: &str) -> &'static str {
     if lower == "node" || lower.starts_with("node ") {
         return "node-cli";
     }
-    if lower.starts_with("python") {
+    if first == "python" {
         return "python-cli";
     }
     if lower == "curl" {
@@ -440,14 +1099,14 @@ pub fn resolve_app_identity(
     }
 
     let classified = classify_process_name(raw_process_name);
-    if classified != "other" {
-        if let Some(info) = get_known_app_info(classified) {
-            return (
-                info.id.to_string(),
-                info.name.to_string(),
-                info.category.to_string(),
-            );
-        }
+    if classified != "other"
+        && let Some(info) = get_known_app_info(classified)
+    {
+        return (
+            info.id.to_string(),
+            info.name.to_string(),
+            info.category.to_string(),
+        );
     }
 
     let clean_id = raw_process_name
@@ -456,178 +1115,98 @@ pub fn resolve_app_identity(
     (clean_id, raw_process_name.to_string(), "cli".to_string())
 }
 
-/// Checks whether an application is installed or its config/settings directory exists on disk.
+// ---------------------------------------------------------------------------------------------
+// Installed?
+// ---------------------------------------------------------------------------------------------
+
+/// Checks whether an application is installed on this machine (real home).
 pub fn check_app_installed(id: &str) -> bool {
+    FileCtx::real()
+        .map(|ctx| check_app_installed_in(id, &ctx))
+        .unwrap_or(matches!(id, "browsers" | "curl"))
+}
+
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(PathBuf::from)
+}
+
+/// Whether the application is installed or its config / settings directory exists, looking
+/// only through `ctx` (its file system, home and editor roots).
+pub(crate) fn check_app_installed_in(id: &str, ctx: &FileCtx) -> bool {
+    let fs: &dyn Fs = &*ctx.fs;
+    let ex = |p: &Path| fs.exists(p);
+    let in_roots = |folder: &str| ctx.ide_roots.iter().any(|r| ex(&r.join(folder)));
+    let windows_local = |sub: &[&str]| {
+        cfg!(target_os = "windows")
+            && env_dir("LOCALAPPDATA").is_some_and(|l| {
+                let mut p = l;
+                for s in sub {
+                    p = p.join(s);
+                }
+                ex(&p)
+            })
+    };
+    let has_ide_folder = |folder: &str| {
+        ctx.ide_roots
+            .iter()
+            .any(|r| ex(&r.join(folder).join("User")))
+    };
+
     match id {
         "browsers" | "curl" => true,
         "claude-desktop" => {
-            #[cfg(target_os = "macos")]
-            {
-                Path::new("/Applications/Claude.app").exists()
-                    || dirs_home()
-                        .map(|h| {
-                            h.join("Applications/Claude.app").exists()
-                                || h.join("Library/Application Support/Claude").exists()
-                        })
-                        .unwrap_or(false)
-            }
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var_os("APPDATA")
-                    .map(|a| PathBuf::from(a).join("Claude").exists())
-                    .unwrap_or(false)
-                    || std::env::var_os("LOCALAPPDATA")
-                        .map(|l| PathBuf::from(l).join("Programs/Claude").exists())
-                        .unwrap_or(false)
-            }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            {
-                dirs_home()
-                    .map(|h| h.join(".config/Claude").exists())
-                    .unwrap_or(false)
-            }
+            ex(Path::new("/Applications/Claude.app"))
+                || ex(&ctx.home.join("Applications").join("Claude.app"))
+                || in_roots("Claude")
+                || windows_local(&["Programs", "Claude"])
         }
         "chatgpt-desktop" => {
-            #[cfg(target_os = "macos")]
-            {
-                Path::new("/Applications/ChatGPT.app").exists()
-                    || dirs_home()
-                        .map(|h| {
-                            h.join("Applications/ChatGPT.app").exists()
-                                || h.join("Library/Application Support/ChatGPT").exists()
-                        })
-                        .unwrap_or(false)
-            }
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var_os("APPDATA")
-                    .map(|a| PathBuf::from(a).join("ChatGPT").exists())
-                    .unwrap_or(false)
-                    || std::env::var_os("LOCALAPPDATA")
-                        .map(|l| PathBuf::from(l).join("Programs/ChatGPT").exists())
-                        .unwrap_or(false)
-            }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            {
-                dirs_home()
-                    .map(|h| h.join(".config/ChatGPT").exists())
-                    .unwrap_or(false)
-            }
+            ex(Path::new("/Applications/ChatGPT.app"))
+                || ex(&ctx.home.join("Applications").join("ChatGPT.app"))
+                || in_roots("ChatGPT")
+                || windows_local(&["Programs", "ChatGPT"])
         }
         "antigravity" => {
             has_ide_folder("Antigravity")
-                || Path::new("/Applications/Antigravity.app").exists()
-                || dirs_home()
-                    .map(|h| h.join(".gemini/antigravity-cli").exists())
-                    .unwrap_or(false)
+                || ex(Path::new("/Applications/Antigravity.app"))
+                || ex(&ctx.home.join(".gemini").join("antigravity-cli"))
         }
-        "cursor" => {
-            has_ide_folder("Cursor") || Path::new("/Applications/Cursor.app").exists()
-        }
+        "cursor" => has_ide_folder("Cursor") || ex(Path::new("/Applications/Cursor.app")),
         "vscode" => {
             has_ide_folder("Code")
                 || has_ide_folder("VSCodium")
-                || Path::new("/Applications/Visual Studio Code.app").exists()
+                || ex(Path::new("/Applications/Visual Studio Code.app"))
         }
-        "windsurf" => {
-            has_ide_folder("Windsurf") || Path::new("/Applications/Windsurf.app").exists()
-        }
+        "windsurf" => has_ide_folder("Windsurf") || ex(Path::new("/Applications/Windsurf.app")),
         "jetbrains" => {
-            #[cfg(target_os = "macos")]
-            {
-                dirs_home()
-                    .map(|h| h.join("Library/Application Support/JetBrains").exists())
-                    .unwrap_or(false)
-                    || Path::new("/Applications/IntelliJ IDEA.app").exists()
-                    || Path::new("/Applications/PyCharm.app").exists()
-                    || Path::new("/Applications/WebStorm.app").exists()
-            }
-            #[cfg(target_os = "windows")]
-            {
-                std::env::var_os("APPDATA")
-                    .map(|a| PathBuf::from(a).join("JetBrains").exists())
-                    .unwrap_or(false)
-                    || std::env::var_os("LOCALAPPDATA")
-                        .map(|l| PathBuf::from(l).join("JetBrains").exists())
-                        .unwrap_or(false)
-            }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            {
-                dirs_home()
-                    .map(|h| h.join(".config/JetBrains").exists())
-                    .unwrap_or(false)
-            }
+            in_roots("JetBrains")
+                || windows_local(&["JetBrains"])
+                || ex(Path::new("/Applications/IntelliJ IDEA.app"))
+                || ex(Path::new("/Applications/PyCharm.app"))
+                || ex(Path::new("/Applications/WebStorm.app"))
         }
-        "claude-code" => dirs_home()
-            .map(|h| h.join(".claude").exists())
-            .unwrap_or(false),
-        "gemini-cli" => dirs_home()
-            .map(|h| h.join(".gemini").exists())
-            .unwrap_or(false),
+        "claude-code" => ex(&ctx.home.join(".claude")),
+        "gemini-cli" => ex(&ctx.home.join(".gemini")),
         "node-cli" => {
-            dirs_home()
-                .map(|h| h.join(".nvm").exists() || h.join(".fnm").exists())
-                .unwrap_or(false)
-                || Path::new("/usr/local/bin/node").exists()
-                || Path::new("/opt/homebrew/bin/node").exists()
-                || std::env::var_os("ProgramFiles")
-                    .map(|p| PathBuf::from(p).join("nodejs").exists())
-                    .unwrap_or(false)
+            ex(&ctx.home.join(".nvm"))
+                || ex(&ctx.home.join(".fnm"))
+                || ex(Path::new("/usr/local/bin/node"))
+                || ex(Path::new("/opt/homebrew/bin/node"))
+                || env_dir("ProgramFiles").is_some_and(|p| ex(&p.join("nodejs")))
         }
         "python-cli" => {
-            Path::new("/usr/bin/python3").exists()
-                || Path::new("/usr/local/bin/python3").exists()
-                || Path::new("/opt/homebrew/bin/python3").exists()
-                || std::env::var_os("LOCALAPPDATA")
-                    .map(|l| PathBuf::from(l).join("Programs/Python").exists())
-                    .unwrap_or(false)
+            ex(Path::new("/usr/bin/python3"))
+                || ex(Path::new("/usr/local/bin/python3"))
+                || ex(Path::new("/opt/homebrew/bin/python3"))
+                || windows_local(&["Programs", "Python"])
         }
         _ => false,
     }
 }
 
-fn dirs_home() -> Option<PathBuf> {
-    crate::sysproxy::user_home_dir()
-}
-
-fn has_ide_folder(folder_name: &str) -> bool {
-    for (label, path) in crate::sysproxy::candidate_ide_settings_paths() {
-        if label.eq_ignore_ascii_case(folder_name)
-            || path.to_string_lossy().contains(folder_name)
-        {
-            if path.parent().map(|p| p.is_dir()).unwrap_or(false) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn is_ide_configured(id: &str) -> bool {
-    let folder_name = match id {
-        "antigravity" => "Antigravity",
-        "cursor" => "Cursor",
-        "vscode" => "Code",
-        "windsurf" => "Windsurf",
-        _ => return false,
-    };
-    for (label, path) in crate::sysproxy::candidate_ide_settings_paths() {
-        if label.eq_ignore_ascii_case(folder_name)
-            || path.to_string_lossy().contains(folder_name)
-        {
-            if path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if content.contains("http.proxy")
-                        && (content.contains("127.0.0.1") || content.contains("8899"))
-                    {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
+// ---------------------------------------------------------------------------------------------
+// Process owner of a local port
+// ---------------------------------------------------------------------------------------------
 
 /// Asynchronously resolves process name owning `peer_port`.
 pub async fn lookup_process_name_by_port(port: u16) -> Option<String> {
@@ -639,93 +1218,96 @@ pub async fn lookup_process_name_by_port(port: u16) -> Option<String> {
 
 /// Synchronous OS-level process resolution for an established TCP port.
 pub fn lookup_process_name_by_port_sync(port: u16) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        lookup_process_macos(port)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        lookup_process_windows(port)
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        lookup_process_linux(port)
+    lookup_process_with(&RealProbe, Os::current(), port, std::process::id())
+}
+
+/// Resolves the process that owns `port` using `probe` (`lsof` on macOS, `netstat` + `tasklist`
+/// on Windows, `ss` on Linux). `my_pid` (the gateway itself) is never returned.
+pub fn lookup_process_with(
+    probe: &dyn SystemProbe,
+    os: Os,
+    port: u16,
+    my_pid: u32,
+) -> Option<String> {
+    match os {
+        Os::Macos => {
+            let filter = format!("-iTCP:{port}");
+            let text = probe.run("lsof", &["-nP", "+c", "0", "-Fpcn", &filter])?;
+            parse_lsof_owner(&text, my_pid)
+        }
+        Os::Windows => {
+            let text = probe.run("netstat", &["-ano", "-p", "tcp"])?;
+            let pid = parse_netstat_pid(&text, port, my_pid)?;
+            let filter = format!("PID eq {pid}");
+            let tasks = probe.run("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"])?;
+            parse_tasklist_name(&tasks)
+        }
+        Os::Linux => {
+            let text = probe.run("ss", &["-t", "-p", "-H"])?;
+            parse_ss_owner(&text, port, my_pid)
+        }
     }
 }
 
-#[cfg(target_os = "macos")]
-fn lookup_process_macos(port: u16) -> Option<String> {
-    let output = crate::sysproxy::silent_command("lsof")
-        .args(["-nP", "-Fc", "-Fn", &format!("-iTCP:{port}")])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let my_pid = std::process::id();
-    let mut current_pid = None;
-    let mut current_cmd = None;
+fn unescape_lsof(s: &str) -> String {
+    s.replace("\\x20", " ")
+}
 
+/// `lsof -Fpcn` output -> first command that is not the gateway itself.
+pub fn parse_lsof_owner(text: &str, my_pid: u32) -> Option<String> {
+    let mut current_pid: Option<u32> = None;
+    let mut current_cmd: Option<String> = None;
     for line in text.lines() {
-        if line.starts_with('p') {
-            current_pid = line[1..].parse::<u32>().ok();
+        if let Some(rest) = line.strip_prefix('p') {
+            current_pid = rest.trim().parse::<u32>().ok();
             current_cmd = None;
-        } else if line.starts_with('c') {
-            current_cmd = Some(line[1..].trim().to_string());
-        } else if line.starts_with('n') {
-            if let Some(cmd) = &current_cmd {
-                if current_pid != Some(my_pid)
-                    && cmd != "zastava"
-                    && cmd != "zastava_lib"
-                {
-                    return Some(cmd.clone());
-                }
+        } else if let Some(rest) = line.strip_prefix('c') {
+            current_cmd = Some(unescape_lsof(rest.trim()));
+        } else if line.starts_with('n')
+            && let Some(cmd) = &current_cmd
+        {
+            let own =
+                cmd.eq_ignore_ascii_case("zastava") || cmd.eq_ignore_ascii_case("zastava_lib");
+            if current_pid != Some(my_pid) && !own && !cmd.is_empty() {
+                return Some(cmd.clone());
             }
         }
     }
     None
 }
 
-#[cfg(target_os = "windows")]
-fn lookup_process_windows(port: u16) -> Option<String> {
-    let output = crate::sysproxy::silent_command("netstat")
-        .args(["-ano", "-p", "tcp"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let port_str = format!(":{port}");
-    let mut target_pid = None;
-    let my_pid = std::process::id();
+/// Port of `host:port` / `[::1]:port`.
+fn addr_port(addr: &str) -> Option<u16> {
+    addr.rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+}
 
+/// `netstat -ano -p tcp` -> PID of the process on `port`. The port must match exactly
+/// (8899 is not 18899 / 88990); the gateway's own rows and PID 0 are skipped.
+pub fn parse_netstat_pid(text: &str, port: u16, my_pid: u32) -> Option<u32> {
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("TCP") && trimmed.contains(&port_str) {
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if let Some(pid_str) = parts.last() {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    if pid != my_pid && pid != 0 {
-                        target_pid = Some(pid);
-                        break;
-                    }
-                }
-            }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 || !parts[0].eq_ignore_ascii_case("TCP") {
+            continue;
+        }
+        let local = addr_port(parts[1]);
+        let remote = addr_port(parts[2]);
+        if local != Some(port) && remote != Some(port) {
+            continue;
+        }
+        if let Ok(pid) = parts[parts.len() - 1].parse::<u32>()
+            && pid != my_pid
+            && pid != 0
+        {
+            return Some(pid);
         }
     }
+    None
+}
 
-    let pid = target_pid?;
-    let task_output = crate::sysproxy::silent_command("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output()
-        .ok()?;
-    if !task_output.status.success() {
-        return None;
-    }
-    let task_text = String::from_utf8_lossy(&task_output.stdout);
-    for line in task_text.lines() {
+/// `tasklist /FO CSV /NH` -> image name.
+pub fn parse_tasklist_name(text: &str) -> Option<String> {
+    for line in text.lines() {
         let clean = line.trim();
         if clean.starts_with('"') {
             let name = clean.trim_start_matches('"').split('"').next()?;
@@ -737,99 +1319,35 @@ fn lookup_process_windows(port: u16) -> Option<String> {
     None
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
-fn lookup_process_linux(port: u16) -> Option<String> {
-    let output = crate::sysproxy::silent_command("ss")
-        .args(["-t", "-p", "-H"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let port_str = format!(":{port}");
+/// `ss -t -p -H` -> process name of the socket on `port` (exact port, not the gateway itself).
+pub fn parse_ss_owner(text: &str, port: u16, my_pid: u32) -> Option<String> {
     for line in text.lines() {
-        if line.contains(&port_str) && line.contains("users:((") {
-            if let Some(after) = line.split("users:((\"").nth(1) {
-                if let Some(name) = after.split('"').next() {
-                    return Some(name.to_string());
-                }
-            }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 6 {
+            continue;
         }
+        let (local, peer) = (addr_port(parts[3]), addr_port(parts[4]));
+        if local != Some(port) && peer != Some(port) {
+            continue;
+        }
+        let Some(after) = line.split("users:((\"").nth(1) else {
+            continue;
+        };
+        let Some(name) = after.split('"').next() else {
+            continue;
+        };
+        let pid = after
+            .split("pid=")
+            .nth(1)
+            .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|p| p.parse::<u32>().ok());
+        if pid == Some(my_pid) || name.is_empty() {
+            continue;
+        }
+        return Some(name.to_string());
     }
     None
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_classify_process_name_all_categories() {
-        // AI Desktop apps
-        assert_eq!(classify_process_name("Claude"), "claude-desktop");
-        assert_eq!(classify_process_name("Claude Helper"), "claude-desktop");
-        assert_eq!(classify_process_name("claude.exe"), "claude-desktop");
-        assert_eq!(classify_process_name("ChatGPT"), "chatgpt-desktop");
-        assert_eq!(classify_process_name("chatgpt.exe"), "chatgpt-desktop");
-
-        // IDEs & AI Agents
-        assert_eq!(classify_process_name("Antigravity"), "antigravity");
-        assert_eq!(classify_process_name("Cursor"), "cursor");
-        assert_eq!(classify_process_name("Cursor Helper"), "cursor");
-        assert_eq!(classify_process_name("Code"), "vscode");
-        assert_eq!(classify_process_name("Code Helper"), "vscode");
-        assert_eq!(classify_process_name("vscode.exe"), "vscode");
-        assert_eq!(classify_process_name("Windsurf"), "windsurf");
-        assert_eq!(classify_process_name("windsurf.exe"), "windsurf");
-
-        // JetBrains family
-        assert_eq!(classify_process_name("idea"), "jetbrains");
-        assert_eq!(classify_process_name("PyCharm"), "jetbrains");
-        assert_eq!(classify_process_name("pycharm64.exe"), "jetbrains");
-        assert_eq!(classify_process_name("WebStorm"), "jetbrains");
-
-        // Browsers
-        assert_eq!(classify_process_name("Google Chrome Helper"), "browsers");
-        assert_eq!(classify_process_name("Chrome"), "browsers");
-        assert_eq!(classify_process_name("Safari"), "browsers");
-        assert_eq!(classify_process_name("Arc"), "browsers");
-        assert_eq!(classify_process_name("msedge.exe"), "browsers");
-        assert_eq!(classify_process_name("Яндекс Браузер"), "browsers");
-        assert_eq!(classify_process_name("Firefox"), "browsers");
-        assert_eq!(classify_process_name("Brave"), "browsers");
-
-        // CLI
-        assert_eq!(classify_process_name("claude-code"), "claude-code");
-        assert_eq!(classify_process_name("gemini"), "gemini-cli");
-        assert_eq!(classify_process_name("node"), "node-cli");
-        assert_eq!(classify_process_name("python3"), "python-cli");
-        assert_eq!(classify_process_name("curl"), "curl");
-
-        // Unclassified fallback
-        assert_eq!(classify_process_name("unknown-binary"), "other");
-    }
-
-    #[test]
-    fn test_coverage_tracker_recording_and_snapshot() {
-        let tracker = Arc::new(CoverageTracker::new());
-        tracker.record_hit("Claude", None);
-        tracker.record_hit("Google Chrome Helper", None);
-        tracker.record_hit("curl", Some("curl/8.7.1"));
-
-        let snap = tracker.get_snapshot(true, true, Some("127.0.0.1:1080".to_string()));
-        assert!(snap.sysproxy_enabled);
-        assert!(snap.cli_protection_enabled);
-        assert_eq!(snap.chained_proxy.as_deref(), Some("127.0.0.1:1080"));
-
-        let claude = snap.apps.iter().find(|a| a.id == "claude-desktop").unwrap();
-        assert_eq!(claude.status, "verified");
-        assert_eq!(claude.requests_seen, 1);
-        assert!(claude.detail.contains("1 запр."));
-
-        let browsers = snap.apps.iter().find(|a| a.id == "browsers").unwrap();
-        assert_eq!(browsers.status, "verified");
-        assert_eq!(browsers.requests_seen, 1);
-
-        let curl = snap.apps.iter().find(|a| a.id == "curl").unwrap();
-        assert_eq!(curl.status, "verified");
-        assert_eq!(curl.requests_seen, 1);
-    }
-}
+mod tests;
