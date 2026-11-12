@@ -4,7 +4,7 @@
 use super::journal::{self, Journal, Outcome, RecoveryReport, ReportItem, Resource};
 use super::platform::PacState;
 use super::platform::{Platform, PlatformError, RegKind, RegValue};
-use super::{Run, is_known_no_proxy_value, state, with_journal};
+use super::{FileCtx, Run, is_known_no_proxy_value, state, with_journal};
 use std::collections::BTreeMap;
 use std::sync::Once;
 
@@ -73,7 +73,7 @@ const LEGACY_PROXY_VARS: [&str; 6] = [
 
 /// Whether `value` is a Zastava gateway address (`127.0.0.1`/`localhost` on 8899, 8900 or the
 /// current gateway port), with or without a scheme, trailing slash or `/proxy.pac`.
-fn is_zastava_env_signature(value: &str, gateway_port: Option<u16>) -> bool {
+pub(super) fn is_zastava_env_signature(value: &str, gateway_port: Option<u16>) -> bool {
     let v = value.trim();
     let v = v
         .strip_prefix("http://")
@@ -91,6 +91,15 @@ fn is_zastava_env_signature(value: &str, gateway_port: Option<u16>) -> bool {
         return false;
     }
     port == 8899 || port == 8900 || gateway_port.is_some_and(|gp| gp > 0 && port == gp)
+}
+
+/// Whether the raw JSON text of a value (`"http://127.0.0.1:8899"`, quotes included) is a Zastava
+/// gateway address by the strict parse of [`is_zastava_env_signature`]: userinfo, another host
+/// (`my-localhost:8900`) or a foreign port are not. The one parse used for `settings.json`
+/// cleanup and for the protection status.
+pub(super) fn is_zastava_proxy_json(raw: &str, gateway_port: Option<u16>) -> bool {
+    serde_json::from_str::<String>(raw.trim())
+        .is_ok_and(|v| is_zastava_env_signature(&v, gateway_port))
 }
 
 /// Whether `url` is a PAC address of Zastava's own gateway: exactly
@@ -441,12 +450,21 @@ pub(super) fn restore_with(j: &mut Journal, p: &dyn Platform, scope: Scope) -> R
     report
 }
 
-/// Restore of everything in the journal plus the one-time legacy migration.
+/// Restore of everything in the journal plus the one-time legacy migration, and the cut of an old
+/// Zastava block out of `~/.zshenv` by its exact markers (a half marker or an edited block is
+/// left as it is and named in the log).
 pub(super) fn restore_and_migrate(j: &mut Journal, p: &dyn Platform) -> RecoveryReport {
     let mut report = restore_with(j, p, Scope::All);
     report
         .items
         .extend(migrate_legacy(j, p, gateway_port_now()));
+    if let Some(ctx) = FileCtx::real_with_fs(j.fs()) {
+        let (strip, items) = super::cli_protection::clean_zshenv(j, p, &ctx);
+        report.items.extend(items);
+        if let Some(note) = strip.note("~/.zshenv") {
+            eprintln!("Застава: {note}");
+        }
+    }
     report
 }
 
@@ -469,8 +487,8 @@ pub(super) fn restore_user_env() -> RecoveryReport {
 
 /// IDE / CLI settings files and shell profiles: the keys and blocks Zastava wrote are put back
 /// through the journal (see `cli_protection::disable_files`).
-pub(super) fn cleanup_cli_files() {
-    super::cli_protection::disable_cli_files();
+pub(super) fn cleanup_cli_files() -> RecoveryReport {
+    super::cli_protection::disable_cli_files()
 }
 
 /// Restores everything Zastava changed in the system from the ownership journal (PAC, chained
@@ -478,7 +496,7 @@ pub(super) fn cleanup_cli_files() {
 /// files. Anything that cannot be restored right now (temporary VPN DNS, busy journal) stays
 /// recorded and is finished at the next start; the report says what was not done.
 pub fn cleanup_all_persistent_settings() -> RecoveryReport {
-    let report = match with_journal("ownership_cleanup", restore_and_migrate) {
+    let mut report = match with_journal("ownership_cleanup", restore_and_migrate) {
         Run::Done(r) => r,
         Run::Blocked => RecoveryReport {
             skipped_dry_run: true,
@@ -489,7 +507,9 @@ pub fn cleanup_all_persistent_settings() -> RecoveryReport {
             ..Default::default()
         },
     };
-    cleanup_cli_files();
+    let files = cleanup_cli_files();
+    report.items.extend(files.items);
+    report.journal_write_failed |= files.journal_write_failed;
     state().reset();
     report
 }
@@ -1152,5 +1172,51 @@ mod tests {
             chain,
             "no signature-based guessing for explicit proxies"
         );
+    }
+
+    // --- strict signature of a JSON value; ~/.zshenv at start ------------------------------------
+
+    #[test]
+    fn the_json_signature_is_strict() {
+        for (raw, gw, yes) in [
+            ("\"http://127.0.0.1:8899\"", None, true),
+            ("\"http://localhost:8900/\"", None, true),
+            ("\"http://127.0.0.1:9123\"", Some(9123), true),
+            ("\"http://127.0.0.1:9123\"", None, false),
+            ("\"http://user@127.0.0.1:8899\"", None, false),
+            ("\"http://my-localhost:8900\"", None, false),
+            ("\"http://127.0.0.1:88990\"", None, false),
+            ("http://127.0.0.1:8899", None, false), // not a JSON string
+            ("8899", None, false),
+        ] {
+            assert_eq!(is_zastava_proxy_json(raw, gw), yes, "{raw}");
+        }
+    }
+
+    #[test]
+    fn the_start_pass_cuts_an_old_block_out_of_zshenv_and_leaves_a_half_marker_alone() {
+        use crate::sysproxy::shell_rc::{build_shell_rc_guard_block_with_tz, upsert_block};
+        let fs = FakeFs::new();
+        let p = FakePlatform::new();
+        let home = crate::sysproxy::user_home_dir().expect("dry-run home");
+        let zshenv = home.join(".zshenv");
+        let block = build_shell_rc_guard_block_with_tz("http://127.0.0.1:8899", 8899, None);
+        let text = upsert_block("export A=1\n", &block).unwrap();
+        fs.put(&zshenv, text.as_bytes(), 0o600);
+        let mut j = open(&fs);
+        let report = restore_and_migrate(&mut j, &p);
+        assert!(!report.has_failures(), "{}", report.summary());
+        assert_eq!(fs.get(&zshenv).unwrap(), b"export A=1\n");
+        // Run again: nothing to do, nothing written.
+        let writes = fs.write_count();
+        restore_and_migrate(&mut j, &p);
+        assert_eq!(fs.write_count(), writes);
+        // A half marker is left alone and is not a failure.
+        let broken = format!("export A=1\n{}\n", crate::sysproxy::ZASTAVA_RC_START);
+        fs.put(&zshenv, broken.as_bytes(), 0o600);
+        let report = restore_and_migrate(&mut j, &p);
+        assert!(!report.has_failures());
+        assert!(report.external() >= 1, "{}", report.summary());
+        assert_eq!(fs.get(&zshenv).unwrap(), broken.as_bytes());
     }
 }

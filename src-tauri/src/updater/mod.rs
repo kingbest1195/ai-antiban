@@ -235,10 +235,12 @@ struct ProtectionSnapshot {
 }
 
 /// Switches protection back on through the same calls as the `toggle_sysproxy(true)` command:
-/// `enable_sysproxy` and `enable_cli_and_ide_protection_with_tz`. Only what was on is restored.
+/// `enable_sysproxy` and `enable_cli_and_ide_protection_with`. Only what was on is restored; a
+/// refused CLI / IDE enable (`enabled == false`, e.g. the journal is busy) is a failure.
 fn restore_protection(
     snap: Option<ProtectionSnapshot>,
     pac_url: Option<String>,
+    mode: crate::state::CliMode,
     tz: Option<String>,
 ) -> RestoreOutcome {
     let Some(snap) = snap else {
@@ -255,8 +257,8 @@ fn restore_protection(
         ok &= crate::sysproxy::enable_sysproxy(&pac_url).is_ok();
     }
     if snap.cli {
-        ok &=
-            crate::sysproxy::enable_cli_and_ide_protection_with_tz(&pac_url, tz.as_deref()).enabled;
+        ok &= crate::sysproxy::enable_cli_and_ide_protection_with(&pac_url, mode, tz.as_deref())
+            .enabled;
     }
     if ok {
         RestoreOutcome::Restored
@@ -306,9 +308,12 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
     let pac_url = app
         .try_state::<crate::proxy::ProxyManager>()
         .map(|pm| format!("http://{}/proxy.pac", pm.server.bound_addr));
-    let tz = match app.try_state::<crate::state::AppState>() {
-        Some(st) => st.get_data().await.synced_ai_timezone,
-        None => None,
+    let (mode, tz) = match app.try_state::<crate::state::AppState>() {
+        Some(st) => {
+            let data = st.get_data().await;
+            (data.cli_mode, data.effective_sync_tz())
+        }
+        None => (crate::state::CliMode::default(), None),
     };
     let snapshot: std::sync::Arc<std::sync::Mutex<Option<ProtectionSnapshot>>> = Default::default();
     let (snap_off, snap_restore) = (snapshot.clone(), snapshot.clone());
@@ -366,7 +371,7 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
         |u, bytes| u.install(bytes),
         move || {
             let snap = snap_restore.lock().ok().and_then(|mut g| g.take());
-            restore_protection(snap, pac_url, tz)
+            restore_protection(snap, pac_url, mode, tz)
         },
     )
     .await?;

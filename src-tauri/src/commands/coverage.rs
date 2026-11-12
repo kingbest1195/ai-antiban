@@ -2,6 +2,7 @@
 
 use crate::proxy::coverage::{CoverageEnv, JETBRAINS_XML_CONFIRMED, PacSource};
 use crate::proxy::{CoverageSnapshot, ProxyManager};
+use crate::state::{AppState, CliMode};
 use crate::sysproxy;
 use crate::sysproxy::FileCtx;
 use crate::sysproxy::platform::RealPlatform;
@@ -9,9 +10,11 @@ use crate::sysproxy::platform::RealPlatform;
 /// Reads the facts (OS, files) on the blocking pool and builds the snapshot.
 async fn build_snapshot(
     proxy_manager: &ProxyManager,
+    cli_mode: CliMode,
     force: bool,
 ) -> Result<CoverageSnapshot, String> {
     let coverage = std::sync::Arc::clone(&proxy_manager.coverage);
+    coverage.set_cli_mode(cli_mode);
     tokio::task::spawn_blocking(move || {
         let files = FileCtx::real();
         let env = CoverageEnv {
@@ -34,8 +37,9 @@ async fn build_snapshot(
 #[tauri::command]
 pub async fn get_coverage_snapshot(
     proxy_manager: tauri::State<'_, ProxyManager>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<CoverageSnapshot, String> {
-    build_snapshot(&proxy_manager, false).await
+    build_snapshot(&proxy_manager, state.get_cli_mode().await, false).await
 }
 
 /// Forced re-check: reads the OS and the files again right now (no waiting for the cache), then
@@ -43,6 +47,7 @@ pub async fn get_coverage_snapshot(
 #[tauri::command]
 pub async fn recheck_coverage(
     proxy_manager: tauri::State<'_, ProxyManager>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<CoverageSnapshot, String> {
-    build_snapshot(&proxy_manager, true).await
+    build_snapshot(&proxy_manager, state.get_cli_mode().await, true).await
 }

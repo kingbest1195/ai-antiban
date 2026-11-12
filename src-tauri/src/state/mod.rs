@@ -121,6 +121,20 @@ pub enum InterceptionBehavior {
     AutoAllowTrusted,
 }
 
+/// Where the protection of command-line tools goes (`cli_mode` in `state.json`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CliMode {
+    /// Only the AI clients and the editors: `~/.claude/settings.json`, `~/.gemini/settings.json`
+    /// and the editors' `settings.json`. Nothing is written into shell profiles, so `npm`, `brew`
+    /// and `git` in a plain terminal go directly (default).
+    #[default]
+    AiOnly,
+    /// Additionally a marked block in the interactive shell profiles (`~/.zshrc`,
+    /// `~/.bash_profile`; on Windows the PowerShell profile).
+    GlobalTerminal,
+}
+
 /// Alert popup screen placement.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -195,6 +209,14 @@ pub struct AppStateData {
     pub warmup_started_at: Option<u64>,
     #[serde(default)]
     pub synced_ai_timezone: Option<String>,
+    /// Independent switch "replace the time zone and locale for the AI tools in the terminal /
+    /// editors". Applied only while a time zone is known; has nothing to do with the CLI / IDE
+    /// protection switch. State files of 2.0.0 and older have no such field: on.
+    #[serde(default = "default_true")]
+    pub sync_ai_tz_enabled: bool,
+    /// Coverage of command-line tools (see [`CliMode`]). Older state files: `ai_only`.
+    #[serde(default)]
+    pub cli_mode: CliMode,
     #[serde(default = "default_true")]
     pub auto_update_enabled: bool,
     #[serde(default)]
@@ -244,6 +266,8 @@ impl std::fmt::Debug for AppStateData {
             .field("upstream_proxy", &self.upstream_proxy)
             .field("warmup_started_at", &self.warmup_started_at)
             .field("synced_ai_timezone", &self.synced_ai_timezone)
+            .field("sync_ai_tz_enabled", &self.sync_ai_tz_enabled)
+            .field("cli_mode", &self.cli_mode)
             .field("auto_update_enabled", &self.auto_update_enabled)
             .field("interception_behavior", &self.interception_behavior)
             .field("popup_position", &self.popup_position)
@@ -311,6 +335,17 @@ impl AppStateData {
             r.to_legacy(active)
         });
         self.upstream_proxy = mirror;
+    }
+
+    /// The time zone to put into the AI tools' environment: the stored one, and only while the
+    /// switch is on and the value is a well-formed zone name.
+    pub fn effective_sync_tz(&self) -> Option<String> {
+        if !self.sync_ai_tz_enabled {
+            return None;
+        }
+        self.synced_ai_timezone
+            .as_deref()
+            .and_then(crate::sysproxy::sanitize_timezone)
     }
 
     /// Copy safe to hand to the UI via `get_state`: route secrets are blanked
@@ -389,6 +424,8 @@ impl Default for AppStateData {
             upstream_proxy: None,
             warmup_started_at: None,
             synced_ai_timezone: None,
+            sync_ai_tz_enabled: true,
+            cli_mode: CliMode::AiOnly,
             auto_update_enabled: true,
             interception_behavior: InterceptionBehavior::AskPopup,
             popup_position: PopupPosition::TopRight,
@@ -1239,6 +1276,37 @@ impl AppState {
         self.save_async().await
     }
 
+    // --- Time zone / locale switch and CLI coverage mode ---
+
+    pub async fn get_sync_ai_tz_enabled(&self) -> bool {
+        self.inner.read().await.sync_ai_tz_enabled
+    }
+
+    pub async fn set_sync_ai_tz_enabled(&self, enabled: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.sync_ai_tz_enabled = enabled;
+        }
+        self.save_async().await
+    }
+
+    pub async fn get_cli_mode(&self) -> CliMode {
+        self.inner.read().await.cli_mode
+    }
+
+    pub async fn set_cli_mode(&self, mode: CliMode) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.cli_mode = mode;
+        }
+        self.save_async().await
+    }
+
+    /// The zone to apply now (see [`AppStateData::effective_sync_tz`]).
+    pub async fn effective_sync_tz(&self) -> Option<String> {
+        self.inner.read().await.effective_sync_tz()
+    }
+
     // --- Preset Interception Behavior & Popup Position ---
 
     pub async fn get_interception_behavior(&self) -> InterceptionBehavior {
@@ -2001,5 +2069,102 @@ mod tests {
         assert_eq!(corrupt.len(), 1);
         assert_eq!(mode_of(&corrupt[0].path()), 0o600, "state.corrupt copy");
         assert_eq!(mode_of(&path), 0o600, "rewritten state.json");
+    }
+
+    // --- time zone switch and CLI mode (2.1) ---
+
+    #[test]
+    fn state_json_of_2_0_0_without_the_new_fields_reads_with_the_defaults() {
+        let data: AppStateData = serde_json::from_str(
+            r#"{"schema_version": 2, "synced_ai_timezone": "Europe/Amsterdam", "auto_update_enabled": true}"#,
+        )
+        .unwrap();
+        assert!(
+            data.sync_ai_tz_enabled,
+            "the switch is on unless the user turned it off"
+        );
+        assert_eq!(data.cli_mode, CliMode::AiOnly);
+        assert_eq!(data.synced_ai_timezone.as_deref(), Some("Europe/Amsterdam"));
+        // The v1.3.1 file has neither field either.
+        let old: AppStateData = serde_json::from_str(V131_STATE_JSON).unwrap();
+        assert!(old.sync_ai_tz_enabled);
+        assert_eq!(old.cli_mode, CliMode::AiOnly);
+        assert_eq!(AppStateData::default().cli_mode, CliMode::AiOnly);
+        assert!(AppStateData::default().sync_ai_tz_enabled);
+    }
+
+    #[test]
+    fn cli_mode_is_snake_case_in_state_json() {
+        assert_eq!(
+            serde_json::to_string(&CliMode::AiOnly).unwrap(),
+            "\"ai_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CliMode::GlobalTerminal).unwrap(),
+            "\"global_terminal\""
+        );
+        let data: AppStateData =
+            serde_json::from_str(r#"{"cli_mode": "global_terminal", "sync_ai_tz_enabled": false}"#)
+                .unwrap();
+        assert_eq!(data.cli_mode, CliMode::GlobalTerminal);
+        assert!(!data.sync_ai_tz_enabled);
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["cli_mode"], "global_terminal");
+        assert_eq!(json["sync_ai_tz_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn the_switch_and_the_mode_are_saved_and_reloaded() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState::load_or_default(path.clone());
+        assert_eq!(state.get_cli_mode().await, CliMode::AiOnly);
+        assert!(state.get_sync_ai_tz_enabled().await);
+        state.set_cli_mode(CliMode::GlobalTerminal).await.unwrap();
+        state.set_sync_ai_tz_enabled(false).await.unwrap();
+        let reloaded = AppState::load_or_default(path.clone());
+        assert_eq!(reloaded.get_cli_mode().await, CliMode::GlobalTerminal);
+        assert!(!reloaded.get_sync_ai_tz_enabled().await);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "state.json stays private");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_zone_to_apply_needs_the_switch_and_a_well_formed_name() {
+        let state = AppState::new_in_memory();
+        assert_eq!(state.effective_sync_tz().await, None, "no zone known");
+        state
+            .set_synced_ai_timezone(Some("Europe/Amsterdam".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.effective_sync_tz().await.as_deref(),
+            Some("Europe/Amsterdam")
+        );
+        state.set_sync_ai_tz_enabled(false).await.unwrap();
+        assert_eq!(
+            state.effective_sync_tz().await,
+            None,
+            "switch off: nothing to apply"
+        );
+        // The zone stays remembered while the switch is off.
+        assert_eq!(
+            state.get_synced_ai_timezone().await.as_deref(),
+            Some("Europe/Amsterdam")
+        );
+        state.set_sync_ai_tz_enabled(true).await.unwrap();
+        state
+            .set_synced_ai_timezone(Some("Europe/Berlin; rm -rf /".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.effective_sync_tz().await,
+            None,
+            "malformed name is never applied"
+        );
     }
 }

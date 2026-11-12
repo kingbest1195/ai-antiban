@@ -5,7 +5,7 @@
 //! [`apply_settings_keys`] for the shared machinery that Claude Code / Gemini CLI settings use too.
 
 use super::fs::Fs;
-use super::journal::{Journal, Resource, Value};
+use super::journal::{Journal, ReportItem, Resource, Value};
 use super::jsonc;
 use super::platform::Platform;
 use super::{FileCtx, NO_PROXY_VALUE};
@@ -122,8 +122,16 @@ pub(super) const IDE_ENV_KEYS: [&str; 3] = [
     "terminal.integrated.env.linux",
 ];
 
-/// Names of the timezone / locale variables, written only when a timezone is synced.
-pub(super) const TZ_VARS: [&str; 4] = ["TZ", "LANG", "LC_TIME", "LC_ALL"];
+/// Names of the proxy variables Zastava writes into an `env` object.
+pub(super) const PROXY_VARS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+
+/// Names of the timezone / locale variables, written only while a timezone is synced. `LC_ALL` is
+/// never among them: it overrides every other `LC_*` and breaks Ruby / Homebrew.
+pub(super) const TZ_VARS: [&str; 3] = ["TZ", "LANG", "LC_TIME"];
+
+/// Leftovers that may be removed: [`TZ_VARS`] plus the `LC_ALL` that 2.0.0 (and early 2.1 builds)
+/// wrote. Only ever used to give a recorded key back or to clean by signature, never to write.
+pub(super) const TZ_VARS_REMOVABLE: [&str; 4] = ["TZ", "LANG", "LC_TIME", "LC_ALL"];
 
 /// JSON text of a string value, exactly as it is written into the file.
 pub(super) fn json_str(s: &str) -> String {
@@ -178,8 +186,12 @@ pub(super) fn apply_settings_keys(
     file: &Path,
     keys: &[KeySpec],
     retire: &[Vec<String>],
-) -> Result<(), String> {
+) -> Result<Vec<ReportItem>, String> {
     let name = file.to_string_lossy().into_owned();
+    if keys.is_empty() {
+        // Nothing to write: only give back what Zastava recorded (no file is read or created).
+        return Ok(retire_keys(j, p, &name, retire));
+    }
     let text = match fs.read(file) {
         Ok(None) => None,
         Ok(Some(b)) => Some(String::from_utf8(b).map_err(|_| "settings file is not UTF-8")?),
@@ -226,48 +238,146 @@ pub(super) fn apply_settings_keys(
         )
         .map_err(io)?;
     }
-    for path in retire {
-        let res = key_res(&name, path);
-        if j.entry(&res).is_some() {
-            j.restore_one(p, &res);
-        }
-    }
-    Ok(())
+    Ok(retire_keys(j, p, &name, retire))
 }
 
-/// Keys Zastava writes into an IDE `settings.json`.
-pub(super) fn ide_keys(proxy_url: &str, tz: Option<&str>) -> (Vec<KeySpec>, Vec<Vec<String>>) {
+/// Gives back the keys in `retire` that the journal records, then the objects (and the file)
+/// Zastava created while nothing it owns is left in them. Returns what each step came to.
+fn retire_keys(
+    j: &mut Journal,
+    p: &dyn Platform,
+    name: &str,
+    retire: &[Vec<String>],
+) -> Vec<ReportItem> {
+    let mut items = Vec::new();
+    for path in retire {
+        let res = key_res(name, path);
+        if j.entry(&res).is_some() {
+            items.extend(j.restore_one(p, &res));
+        }
+    }
+    items.extend(release_unused_containers(j, p, name));
+    items
+}
+
+/// A recorded object loses its record (and is removed when empty) once no recorded key is left
+/// inside it; the same for a file Zastava created.
+fn release_unused_containers(j: &mut Journal, p: &dyn Platform, name: &str) -> Vec<ReportItem> {
+    let mut items = Vec::new();
+    let objects: Vec<Resource> = j
+        .entries()
+        .iter()
+        .filter(|e| matches!(&e.resource, Resource::JsonObject { file, .. } if file == name))
+        .map(|e| e.resource.clone())
+        .collect();
+    for obj in objects {
+        let Resource::JsonObject { path: inside, .. } = &obj else {
+            continue;
+        };
+        let has_keys = j.entries().iter().any(|e| {
+            matches!(&e.resource, Resource::JsonKey { file, path }
+                if file == name && path.len() > inside.len() && path.starts_with(inside))
+        });
+        if !has_keys {
+            items.extend(j.restore_one(p, &obj));
+        }
+    }
+    let created: Vec<Resource> = j
+        .entries()
+        .iter()
+        .filter(|e| matches!(&e.resource, Resource::File { file, .. } if file == name))
+        .map(|e| e.resource.clone())
+        .collect();
+    let anything_left = j.entries().iter().any(|e| {
+        matches!(&e.resource, Resource::JsonKey { file, .. } | Resource::JsonObject { file, .. }
+            if file == name)
+    });
+    if !anything_left {
+        for f in created {
+            items.extend(j.restore_one(p, &f));
+        }
+    }
+    items
+}
+
+/// Keys Zastava writes into an IDE `settings.json`, and the keys it gives back. The proxy keys
+/// (`http.proxy`, `http.proxySupport`, the proxy variables of the integrated terminal) follow
+/// `proxy_url`; the time zone / locale variables follow `tz`. The two are independent.
+pub(super) fn ide_keys(
+    proxy_url: Option<&str>,
+    tz: Option<&str>,
+) -> (Vec<KeySpec>, Vec<Vec<String>>) {
     let env = ide_env_key();
-    let mut keys = vec![
-        KeySpec::new(&["http.proxy"], proxy_url),
-        KeySpec::new(&["http.proxySupport"], "override"),
-        KeySpec::new(&[env, "HTTP_PROXY"], proxy_url),
-        KeySpec::new(&[env, "HTTPS_PROXY"], proxy_url),
-        KeySpec::new(&[env, "ALL_PROXY"], proxy_url),
-        KeySpec::new(&[env, "NO_PROXY"], NO_PROXY_VALUE),
-    ];
+    let mut keys = Vec::new();
+    let mut retire = Vec::new();
+    match proxy_url {
+        Some(url) => {
+            keys.push(KeySpec::new(&["http.proxy"], url));
+            keys.push(KeySpec::new(&["http.proxySupport"], "override"));
+            keys.extend(proxy_env_keys(env, url));
+        }
+        None => {
+            retire.push(vec!["http.proxy".to_string()]);
+            retire.push(vec!["http.proxySupport".to_string()]);
+            retire.extend(
+                PROXY_VARS
+                    .iter()
+                    .map(|v| vec![env.to_string(), v.to_string()]),
+            );
+        }
+    }
+    let (tz_keys, tz_retire) = tz_key_specs(env, tz);
+    keys.extend(tz_keys);
+    retire.extend(tz_retire);
+    (keys, retire)
+}
+
+/// The proxy variables of one `env` object: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`.
+pub(super) fn proxy_env_keys(container: &str, proxy_url: &str) -> Vec<KeySpec> {
+    PROXY_VARS
+        .iter()
+        .map(|v| {
+            let value = if *v == "NO_PROXY" {
+                NO_PROXY_VALUE
+            } else {
+                proxy_url
+            };
+            KeySpec::new(&[container, v], value)
+        })
+        .collect()
+}
+
+/// The time zone / locale variables of one `env` object (`TZ`, `LANG`, `LC_TIME`) when a zone is
+/// given; otherwise they are all given back, `LC_ALL` of older builds included.
+pub(super) fn tz_key_specs(container: &str, tz: Option<&str>) -> (Vec<KeySpec>, Vec<Vec<String>>) {
+    let mut keys = Vec::new();
     let mut retire = Vec::new();
     match tz.and_then(super::shell_rc::sanitize_timezone) {
         Some(timezone) => {
-            keys.push(KeySpec::new(&[env, "TZ"], &timezone));
+            keys.push(KeySpec::new(&[container, "TZ"], &timezone));
             for v in &TZ_VARS[1..] {
-                keys.push(KeySpec::new(&[env, v], "en_US.UTF-8"));
+                keys.push(KeySpec::new(&[container, v], super::shell_rc::SAFE_LOCALE));
             }
+            retire.push(vec![container.to_string(), "LC_ALL".to_string()]);
         }
-        None => retire.extend(TZ_VARS.iter().map(|v| vec![env.to_string(), v.to_string()])),
+        None => retire.extend(
+            TZ_VARS_REMOVABLE
+                .iter()
+                .map(|v| vec![container.to_string(), v.to_string()]),
+        ),
     }
     (keys, retire)
 }
 
-/// Points an IDE `settings.json` at the Zastava proxy (and optionally syncs timezone / locale).
+/// Points an IDE `settings.json` at the Zastava proxy and / or syncs the time zone / locale.
 pub(super) fn apply_ide_settings(
     j: &mut Journal,
     p: &dyn Platform,
     ctx: &FileCtx,
     settings_path: &Path,
-    proxy_url: &str,
+    proxy_url: Option<&str>,
     tz: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Vec<ReportItem>, String> {
     let (keys, retire) = ide_keys(proxy_url, tz);
     apply_settings_keys(j, p, &*ctx.fs, settings_path, &keys, &retire)
 }

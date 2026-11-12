@@ -30,8 +30,9 @@ pub use cleanup::{
     spawn_signal_cleanup_watcher,
 };
 pub use cli_protection::{
-    disable_cli_and_ide_runtime_settings, disable_cli_protection, enable_cli_and_ide_protection,
-    enable_cli_and_ide_protection_with_tz, is_cli_protection_enabled,
+    CliApplied, apply_cli_settings, disable_cli_and_ide_runtime_settings, disable_cli_protection,
+    enable_cli_and_ide_protection, enable_cli_and_ide_protection_with, is_cli_protection_enabled,
+    sync_ai_tz_active,
 };
 pub use ide::{candidate_ide_settings_paths, sanitize_jsonc};
 pub use shell_rc::{
@@ -43,7 +44,7 @@ pub use shell_rc::{
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Runtime state of the protection: what this process switched on. The durable facts (what was
@@ -53,6 +54,14 @@ pub(crate) struct SysState {
     cli_protection_active: AtomicBool,
     last_pac_url: Mutex<Option<String>>,
     chained_proxy: Mutex<Option<String>>,
+    /// Proxy address (`http://127.0.0.1:<port>`, port) written into the CLI / IDE files, `None`
+    /// while the CLI / IDE protection is off.
+    cli_proxy: Mutex<Option<(String, u16)>>,
+    /// Time zone written into the CLI / IDE files, `None` while the time zone switch is off or no
+    /// zone is known. Independent of `cli_proxy`.
+    cli_tz: Mutex<Option<String>>,
+    /// The CLI mode the files were last written for (`0` = `ai_only`, `1` = `global_terminal`).
+    cli_mode: AtomicU8,
 }
 
 impl SysState {
@@ -62,7 +71,45 @@ impl SysState {
             cli_protection_active: AtomicBool::new(false),
             last_pac_url: Mutex::new(None),
             chained_proxy: Mutex::new(None),
+            cli_proxy: Mutex::new(None),
+            cli_tz: Mutex::new(None),
+            cli_mode: AtomicU8::new(0),
         }
+    }
+
+    pub(crate) fn cli_proxy(&self) -> Option<(String, u16)> {
+        self.cli_proxy.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub(crate) fn set_cli_proxy(&self, proxy: Option<(String, u16)>) {
+        if let Ok(mut g) = self.cli_proxy.lock() {
+            *g = proxy;
+        }
+    }
+
+    pub(crate) fn cli_tz(&self) -> Option<String> {
+        self.cli_tz.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub(crate) fn set_cli_tz(&self, tz: Option<String>) {
+        if let Ok(mut g) = self.cli_tz.lock() {
+            *g = tz;
+        }
+    }
+
+    pub(crate) fn cli_mode(&self) -> crate::state::CliMode {
+        match self.cli_mode.load(Ordering::SeqCst) {
+            1 => crate::state::CliMode::GlobalTerminal,
+            _ => crate::state::CliMode::AiOnly,
+        }
+    }
+
+    pub(crate) fn set_cli_mode(&self, mode: crate::state::CliMode) {
+        let v = match mode {
+            crate::state::CliMode::AiOnly => 0,
+            crate::state::CliMode::GlobalTerminal => 1,
+        };
+        self.cli_mode.store(v, Ordering::SeqCst);
     }
 
     pub(crate) fn sys_proxy_active(&self) -> bool {
@@ -114,10 +161,13 @@ impl SysState {
         }
     }
 
-    /// Everything off: protection switched off, nothing remembered.
+    /// Everything off: protection switched off, nothing remembered. The CLI mode is a setting,
+    /// not a runtime fact, and stays.
     pub(crate) fn reset(&self) {
         self.set_sys_proxy_active(false);
         self.set_cli_protection_active(false);
+        self.set_cli_proxy(None);
+        self.set_cli_tz(None);
         self.set_last_pac_url(None);
         self.set_chained_proxy(None);
     }
@@ -640,8 +690,8 @@ pub fn run_cleanup_cli() -> i32 {
         }
         Ok(report) => {
             eprintln!("Zastava --cleanup: {}", report.summary());
-            cleanup::cleanup_cli_files();
-            i32::from(report.has_failures())
+            let files = cleanup::cleanup_cli_files();
+            i32::from(report.has_failures() || files.has_failures())
         }
     }
 }
@@ -685,10 +735,17 @@ pub struct SysproxyStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliProtectionReport {
+    /// `false` when nothing was switched on (e.g. the ownership journal could not be opened).
     pub enabled: bool,
     pub proxy_url: String,
     pub configured_targets: Vec<String>,
     pub shell_command: String,
+    /// Notes for the user, Russian, no values (e.g. an old block that could not be removed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// Why `enabled` is `false`, Russian, no values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Restores everything Zastava changed in the system (PAC, chained proxy, WinINet, user
@@ -780,14 +837,6 @@ impl SysProxy {
     pub fn is_active() -> bool {
         is_sysproxy_active()
     }
-}
-
-fn is_zastava_local_proxy_val(val: &str) -> bool {
-    let v = val.trim().to_ascii_lowercase();
-    v.contains("127.0.0.1:8899")
-        || v.contains("127.0.0.1:8900")
-        || v.contains("localhost:8899")
-        || v.contains("localhost:8900")
 }
 
 pub(super) fn user_home_dir() -> Option<PathBuf> {
@@ -970,8 +1019,11 @@ mod tests {
         assert!(!home.join(".claude").exists());
         assert!(dry_run_blocked_calls() > before);
         // No `launchctl setenv` for the GUI session, with or without a timezone sync.
-        let with_tz =
-            enable_cli_and_ide_protection_with_tz("127.0.0.1:8899", Some("Europe/Berlin"));
+        let with_tz = enable_cli_and_ide_protection_with(
+            "127.0.0.1:8899",
+            crate::state::CliMode::AiOnly,
+            Some("Europe/Berlin"),
+        );
         assert!(with_tz.enabled);
         assert!(
             !dry_run_blocked_programs()
@@ -980,8 +1032,10 @@ mod tests {
             "the GUI session stays clean: {:?}",
             dry_run_blocked_programs()
         );
-        disable_cli_protection();
+        let report = disable_cli_protection();
+        assert!(report.skipped_dry_run || !report.has_failures());
         assert!(!state().cli_protection_active());
+        state().set_cli_tz(None);
     }
 
     #[test]

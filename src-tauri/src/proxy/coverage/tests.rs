@@ -2,6 +2,7 @@
 //! started and no real user directory is read.
 
 use super::*;
+use crate::state::CliMode;
 use crate::sysproxy::fs::{FakeFs, Fs, RealFs};
 use crate::sysproxy::platform::{FakePlatform, PacState, PlatOp, RegValue, ServiceId};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -790,6 +791,7 @@ fn jetbrains_xml_is_read_only_when_the_format_is_confirmed() {
 fn cli_follows_the_protection_layer_and_asks_for_a_new_terminal() {
     let (_, t) = tracker(FakeProbe::failing());
     t.set_gateway_addr(gw(8899));
+    t.set_cli_mode(CliMode::GlobalTerminal);
     let rig = Rig::new();
     let on = t.snapshot(&rig.env(PacSource::Services, true), true);
     let curl = app(&on, "curl");
@@ -797,6 +799,152 @@ fn cli_follows_the_protection_layer_and_asks_for_a_new_terminal() {
     assert!(curl.manual_steps.contains(&"reopen_terminal".to_string()));
     let off = t.snapshot(&rig.env(PacSource::Services, false), true);
     assert_eq!(app(&off, "curl").status, CoverageStatus::Off);
+}
+
+// ----- CLI modes -------------------------------------------------------------------------------
+
+fn claude_settings(rig: &Rig, text: Option<&str>) {
+    let dir = home().join(".claude");
+    rig.fs.create_private_dir_all(&dir).unwrap();
+    if let Some(t) = text {
+        rig.fs.put(&dir.join("settings.json"), t.as_bytes(), 0o600);
+    }
+}
+
+const CLAUDE_OURS: &str = "{ // mine\n \"env\": { \"HTTPS_PROXY\": \"http://127.0.0.1:8899\" } }";
+
+#[test]
+fn ai_only_is_the_default_and_the_snapshot_says_so() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(snap.cli_mode, CliMode::AiOnly);
+    let json = serde_json::to_value(&snap).unwrap();
+    assert_eq!(json["cli_mode"], "ai_only");
+    t.set_cli_mode(CliMode::GlobalTerminal);
+    let json =
+        serde_json::to_value(t.snapshot(&rig.env(PacSource::Services, true), false)).unwrap();
+    assert_eq!(
+        json["cli_mode"], "global_terminal",
+        "a mode change is not hidden by the cache"
+    );
+}
+
+#[test]
+fn ai_only_does_not_cover_the_general_tools_even_with_the_protection_on() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    for id in ["node-cli", "python-cli", "curl"] {
+        let a = app(&snap, id);
+        if !a.installed {
+            continue;
+        }
+        assert_eq!(a.status, CoverageStatus::Off, "{id}");
+        assert!(
+            a.detail
+                .contains("Не покрывается в режиме «Только ИИ-клиенты и IDE»"),
+            "{}",
+            a.detail
+        );
+        assert!(
+            !a.manual_steps.contains(&"enable_protection".to_string()),
+            "{id}"
+        );
+        assert!(
+            !a.manual_steps.contains(&"reopen_terminal".to_string()),
+            "{id}"
+        );
+    }
+    assert!(app(&snap, "curl").installed);
+}
+
+#[test]
+fn ai_only_claude_code_is_configured_only_when_its_settings_carry_our_proxy() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    // The flag says "on", the file says nothing: not configured.
+    let rig = Rig::new();
+    claude_settings(&rig, None);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Off);
+    assert!(
+        app(&snap, "claude-code")
+            .manual_steps
+            .contains(&"enable_protection".to_string())
+    );
+    // Our proxy on the gateway port (JSONC with a comment): configured, no terminal to reopen.
+    claude_settings(&rig, Some(CLAUDE_OURS));
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    let a = app(&snap, "claude-code");
+    assert_eq!(a.status, CoverageStatus::Configured);
+    assert!(!a.manual_steps.contains(&"reopen_terminal".to_string()));
+    // Another port is not the gateway.
+    claude_settings(
+        &rig,
+        Some("{\"env\": {\"HTTPS_PROXY\": \"http://127.0.0.1:10808\"}}"),
+    );
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Off);
+    // A broken file is unknown, never configured.
+    claude_settings(&rig, Some("{ not json"));
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Unknown);
+}
+
+#[test]
+fn ai_only_gemini_cli_reads_its_own_settings_file() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let dir = home().join(".gemini");
+    rig.fs.create_private_dir_all(&dir).unwrap();
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "gemini-cli").status, CoverageStatus::Off);
+    rig.fs
+        .put(&dir.join("settings.json"), CLAUDE_OURS.as_bytes(), 0o600);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "gemini-cli").status, CoverageStatus::Configured);
+    // Claude's file is not consulted for Gemini.
+    claude_settings(&rig, None);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Off);
+}
+
+#[test]
+fn ai_only_without_a_gateway_address_is_unknown_for_the_ai_clients() {
+    let (_, t) = tracker(FakeProbe::failing());
+    let rig = Rig::new();
+    claude_settings(&rig, Some(CLAUDE_OURS));
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Unknown);
+}
+
+#[test]
+fn global_terminal_keeps_the_flag_logic_and_asks_to_reopen_the_terminal() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    t.set_cli_mode(CliMode::GlobalTerminal);
+    let rig = Rig::new();
+    claude_settings(&rig, None);
+    let on = t.snapshot(&rig.env(PacSource::Services, true), true);
+    for id in ["claude-code", "curl"] {
+        let a = app(&on, id);
+        assert_eq!(a.status, CoverageStatus::Configured, "{id}");
+        assert!(
+            a.manual_steps.contains(&"reopen_terminal".to_string()),
+            "{id}"
+        );
+    }
+    let off = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&off, "claude-code").status, CoverageStatus::Off);
+    assert!(
+        app(&off, "claude-code")
+            .manual_steps
+            .contains(&"enable_protection".to_string())
+    );
 }
 
 // ----- snapshot shape --------------------------------------------------------------------------

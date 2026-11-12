@@ -314,8 +314,10 @@ pub trait SystemInfo: Send + Sync {
     fn dns_listing(&self) -> Result<String, SystemReadError>;
     /// Output of `reg query` of the location consent value (Windows only).
     fn location_consent(&self, machine_wide: bool) -> Result<String, SystemReadError>;
-    /// Whether the CLI/IDE protection of Zastava is applied on this machine.
-    fn cli_protection_active(&self) -> bool;
+    /// Whether the independent time zone / locale switch is on and really applied: a zone is being
+    /// synced and the AI tools' environment carries `LANG` and `LC_TIME` (`en_US.UTF-8`). Unrelated
+    /// to the CLI / IDE proxy protection.
+    fn sync_ai_tz_active(&self) -> bool;
 }
 
 /// The real host.
@@ -530,8 +532,8 @@ impl SystemInfo for RealSystem {
         Err(SystemReadError::Unsupported)
     }
 
-    fn cli_protection_active(&self) -> bool {
-        crate::sysproxy::is_cli_protection_enabled()
+    fn sync_ai_tz_active(&self) -> bool {
+        crate::sysproxy::sync_ai_tz_active()
     }
 }
 
@@ -808,7 +810,7 @@ pub mod fakes {
         pub dns_listing: Result<String, SystemReadError>,
         pub consent_machine: Result<String, SystemReadError>,
         pub consent_user: Result<String, SystemReadError>,
-        pub cli_protection: bool,
+        pub sync_ai_tz: bool,
     }
 
     impl FakeSystem {
@@ -828,7 +830,7 @@ pub mod fakes {
                 dns_listing: Ok("resolver #1\n  nameserver[0] : 1.1.1.1\n".into()),
                 consent_machine: Err(SystemReadError::Unsupported),
                 consent_user: Err(SystemReadError::Unsupported),
-                cli_protection: false,
+                sync_ai_tz: false,
             }
         }
 
@@ -844,7 +846,7 @@ pub mod fakes {
                 dns_listing: Err(SystemReadError::Failed),
                 consent_machine: Err(SystemReadError::Unsupported),
                 consent_user: Err(SystemReadError::Unsupported),
-                cli_protection: false,
+                sync_ai_tz: false,
             }
         }
     }
@@ -878,8 +880,8 @@ pub mod fakes {
                 self.consent_user.clone()
             }
         }
-        fn cli_protection_active(&self) -> bool {
-            self.cli_protection
+        fn sync_ai_tz_active(&self) -> bool {
+            self.sync_ai_tz
         }
     }
 }

@@ -46,22 +46,37 @@ pub fn sanitize_timezone(tz: &str) -> Option<String> {
     }
 }
 
+/// The safe locale: the only values Zastava puts next to `TZ`. `LC_ALL` is never exported (it
+/// overrides every other `LC_*` and breaks Ruby / Homebrew and build scripts).
+pub(super) const SAFE_LOCALE: &str = "en_US.UTF-8";
+
 /// Builds the shell RC block including optional timezone and clean UTF-8 locale sync.
 pub fn build_shell_rc_guard_block_with_tz(proxy_url: &str, port: u16, tz: Option<&str>) -> String {
-    let mut tz_exports = String::new();
+    build_shell_block(port, Some(proxy_url), tz)
+}
+
+/// The shell block with independent parts: the proxy variables (`proxy_url`) and the time zone /
+/// locale variables (`tz`: `TZ`, `LANG`, `LC_TIME`). Both are exported only while Zastava listens
+/// on `127.0.0.1:<port>`; with neither part the guard is empty (callers do not write such a block).
+pub(super) fn build_shell_block(port: u16, proxy_url: Option<&str>, tz: Option<&str>) -> String {
+    let mut exports = String::new();
+    if let Some(url) = proxy_url {
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+            exports.push_str(&format!("\n  export {name}=\"{url}\""));
+        }
+        for name in ["http_proxy", "https_proxy", "all_proxy"] {
+            exports.push_str(&format!("\n  export {name}=\"{url}\""));
+        }
+        exports.push_str(&format!("\n  export NO_PROXY=\"{NO_PROXY_VALUE}\""));
+        exports.push_str(&format!("\n  export no_proxy=\"{NO_PROXY_VALUE}\""));
+    }
     if let Some(timezone) = tz.and_then(sanitize_timezone) {
-        tz_exports = format!(
-            "\n  export TZ=\"{timezone}\"\n  export LANG=\"en_US.UTF-8\"\n  export LC_TIME=\"en_US.UTF-8\"\n  export LC_ALL=\"en_US.UTF-8\""
-        );
+        exports.push_str(&format!(
+            "\n  export TZ=\"{timezone}\"\n  export LANG=\"{SAFE_LOCALE}\"\n  export LC_TIME=\"{SAFE_LOCALE}\""
+        ));
     }
     format!(
-        "{start}\nif command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 {port} >/dev/null 2>&1; then\n  export HTTP_PROXY=\"{url}\"\n  export HTTPS_PROXY=\"{url}\"\n  export ALL_PROXY=\"{url}\"\n  export http_proxy=\"{url}\"\n  export https_proxy=\"{url}\"\n  export all_proxy=\"{url}\"\n  export NO_PROXY=\"{no_proxy}\"\n  export no_proxy=\"{no_proxy}\"{tz_exports}\nfi\n{end}",
-        start = ZASTAVA_RC_START,
-        port = port,
-        url = proxy_url,
-        no_proxy = NO_PROXY_VALUE,
-        tz_exports = tz_exports,
-        end = ZASTAVA_RC_END
+        "{ZASTAVA_RC_START}\nif command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 {port} >/dev/null 2>&1; then{exports}\nfi\n{ZASTAVA_RC_END}"
     )
 }
 
@@ -70,19 +85,38 @@ pub fn build_shell_rc_guard_block_with_tz(proxy_url: &str, port: u16, tz: Option
 /// or fails when Zastava is closed or uninstalled. When Zastava is down the block sets nothing and removes nothing.
 pub fn build_powershell_guard_block_with_tz(proxy_url: &str, tz: Option<&str>) -> String {
     let (url, port) = normalize_proxy_url_and_port(proxy_url);
-    let mut tz_assignment = String::new();
-    if let Some(timezone) = tz.and_then(sanitize_timezone) {
-        tz_assignment = format!("\n  $env:TZ = \"{timezone}\"");
-    }
+    build_powershell_block(port, Some(&url), tz)
+}
 
+/// The PowerShell block with independent parts (see [`build_shell_block`]); `TZ`, `LANG` and
+/// `LC_TIME` are written only together with a time zone.
+pub(super) fn build_powershell_block(
+    port: u16,
+    proxy_url: Option<&str>,
+    tz: Option<&str>,
+) -> String {
+    let mut assignments = String::new();
+    if let Some(url) = proxy_url {
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assignments.push_str(&format!("\n  $env:{name} = \"{url}\""));
+        }
+        assignments.push_str(&format!("\n  $env:NO_PROXY = \"{NO_PROXY_VALUE}\""));
+        assignments.push_str(&format!("\n  $env:no_proxy = \"{NO_PROXY_VALUE}\""));
+    }
+    if let Some(timezone) = tz.and_then(sanitize_timezone) {
+        assignments.push_str(&format!(
+            "\n  $env:TZ = \"{timezone}\"\n  $env:LANG = \"{SAFE_LOCALE}\"\n  $env:LC_TIME = \"{SAFE_LOCALE}\""
+        ));
+    }
     format!(
-        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}}\n{end}",
-        start = ZASTAVA_RC_START,
-        port = port,
-        url = url,
-        no_proxy = NO_PROXY_VALUE,
-        tz_assignment = tz_assignment,
-        end = ZASTAVA_RC_END,
+        "{ZASTAVA_RC_START}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{{assignments}\n}}\n{ZASTAVA_RC_END}"
     )
 }
 
@@ -348,7 +382,7 @@ mod tests {
         assert!(updated.contains("export TZ=\"Europe/London\""));
         assert!(updated.contains("export LANG=\"en_US.UTF-8\""));
         assert!(updated.contains("export LC_TIME=\"en_US.UTF-8\""));
-        assert!(updated.contains("export LC_ALL=\"en_US.UTF-8\""));
+        assert!(!updated.contains("LC_ALL"), "LC_ALL is never exported");
         assert!(updated.contains("export HTTPS_PROXY=\"http://127.0.0.1:8899\""));
     }
 
@@ -516,5 +550,57 @@ mod tests {
         let paths = powershell_profile_paths(Path::new("/h"));
         assert_eq!(paths.len(), 2);
         assert!(paths.iter().all(|p| p.starts_with("/h/Documents")));
+    }
+
+    #[test]
+    fn shell_block_parts_are_independent_and_never_export_lc_all() {
+        let url = "http://127.0.0.1:8899";
+        let both = build_shell_block(8899, Some(url), Some("Europe/Berlin"));
+        let proxy = build_shell_block(8899, Some(url), None);
+        let tz = build_shell_block(8899, None, Some("Europe/Berlin"));
+        let none = build_shell_block(8899, None, None);
+        assert!(both.contains("HTTPS_PROXY") && both.contains("export TZ="));
+        assert!(proxy.contains("HTTPS_PROXY") && !proxy.contains("TZ") && !proxy.contains("LANG"));
+        assert!(!tz.contains("PROXY") && !tz.contains("proxy") && tz.contains("export LC_TIME="));
+        assert!(!none.contains("export"));
+        for b in [&both, &proxy, &tz, &none] {
+            assert!(!b.contains("LC_ALL"), "{b}");
+            assert!(is_generated_block(b), "{b}");
+        }
+        // The block guards on the gateway port also without a proxy part.
+        assert!(tz.contains("nc -z 127.0.0.1 8899"));
+        // A time zone that is not a zone name is not exported.
+        assert!(!build_shell_block(8899, None, Some("Europe/Berlin; rm -rf /")).contains("TZ"));
+    }
+
+    #[test]
+    fn powershell_block_writes_locale_variables_only_with_a_zone() {
+        let url = "http://127.0.0.1:8899";
+        let proxy_only = build_powershell_guard_block_with_tz(url, None);
+        assert!(proxy_only.contains("$env:HTTPS_PROXY"));
+        for var in ["LANG", "LC_TIME", "TZ", "LC_ALL"] {
+            assert!(!proxy_only.contains(var), "{var}");
+        }
+        let with_tz = build_powershell_guard_block_with_tz(url, Some("Asia/Tokyo"));
+        assert!(with_tz.contains("$env:TZ = \"Asia/Tokyo\""));
+        assert!(with_tz.contains("$env:LANG = \"en_US.UTF-8\""));
+        assert!(with_tz.contains("$env:LC_TIME = \"en_US.UTF-8\""));
+        assert!(!with_tz.contains("LC_ALL"));
+        assert!(is_generated_block(&proxy_only) && is_generated_block(&with_tz));
+    }
+
+    #[test]
+    fn a_block_of_2_0_0_with_lc_all_is_still_recognised_for_removal_and_a_foreign_locale_is_not() {
+        let url = "http://127.0.0.1:8899";
+        let old = build_shell_rc_guard_block_with_tz(url, 8899, Some("Asia/Tokyo")).replace(
+            "  export LC_TIME=\"en_US.UTF-8\"",
+            "  export LC_TIME=\"en_US.UTF-8\"\n  export LC_ALL=\"en_US.UTF-8\"",
+        );
+        assert!(is_generated_block(&old));
+        let user_locale = old.replace("LC_ALL=\"en_US.UTF-8\"", "LC_ALL=\"ru_RU.UTF-8\"");
+        assert!(
+            !is_generated_block(&user_locale),
+            "a foreign locale value is not Zastava's"
+        );
     }
 }

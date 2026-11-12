@@ -118,6 +118,9 @@ pub fn run() {
             commands::sysproxy::disable_cli_protection,
             commands::sysproxy::check_cli_protection_status,
             commands::sysproxy::sync_ai_agents_timezone,
+            commands::sysproxy::get_cli_settings,
+            commands::sysproxy::set_cli_mode,
+            commands::sysproxy::set_sync_ai_tz_enabled,
             commands::sysproxy::open_os_datetime_settings_cmd,
             commands::sysproxy::get_sysproxy_status,
             commands::payment::check_payment_bin,
@@ -239,12 +242,22 @@ fn enable_default_protection(app_state: &state::AppState, pac_url: &str) {
         ),
         Err(e) => eprintln!("Застава: не удалось включить защиту при старте: {e}"),
     }
-    let init_tz = tauri::async_runtime::block_on(app_state.get_synced_ai_timezone());
-    let cli_report = sysproxy::enable_cli_and_ide_protection_with_tz(pac_url, init_tz.as_deref());
-    println!(
-        "Застава: защита CLI/IDE включена ({})",
-        cli_report.configured_targets.join(", ")
-    );
+    let (mode, tz) = tauri::async_runtime::block_on(async {
+        let data = app_state.get_data().await;
+        (data.cli_mode, data.effective_sync_tz())
+    });
+    let cli_report = sysproxy::enable_cli_and_ide_protection_with(pac_url, mode, tz.as_deref());
+    if cli_report.enabled {
+        println!(
+            "Застава: защита CLI/IDE включена ({})",
+            cli_report.configured_targets.join(", ")
+        );
+    } else if let Some(err) = &cli_report.error {
+        eprintln!("Застава: {err}");
+    }
+    for note in &cli_report.notes {
+        eprintln!("Застава: {note}");
+    }
 }
 
 /// Background tray status updater (network changes are handled by the NetworkGuard).
