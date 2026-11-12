@@ -6,6 +6,8 @@ export interface TabItem<T extends string = string> {
   id: T;
   label: string;
   disabled?: boolean;
+  /** Статус без захода во вкладку: точка (danger, warn) или число проблем. */
+  badge?: "danger" | "warn" | number;
 }
 
 export interface TabsProps<T extends string = string> {
@@ -15,6 +17,8 @@ export interface TabsProps<T extends string = string> {
   /** Префикс id для связи вкладок с панелями (aria-controls). */
   idPrefix?: string;
   "aria-label"?: string;
+  /** Дополнение к подписи вкладки с бейджем для скринридера, например «, есть проблема». */
+  badgeLabel?: string;
   className?: string;
 }
 
@@ -28,6 +32,7 @@ export function Tabs<T extends string = string>({
   onChange,
   idPrefix = "zs",
   className,
+  badgeLabel,
   ...rest
 }: TabsProps<T>) {
   const listRef = useRef<HTMLDivElement>(null);
@@ -68,9 +73,21 @@ export function Tabs<T extends string = string>({
             tabIndex={selected ? 0 : -1}
             disabled={item.disabled}
             className="zs-tab"
+            aria-label={item.badge !== undefined && badgeLabel ? `${item.label}${badgeLabel}` : undefined}
             onClick={() => onChange(item.id)}
           >
             {item.label}
+            {item.badge !== undefined && (
+              <span
+                aria-hidden="true"
+                className={cx(
+                  "zs-tab__badge",
+                  typeof item.badge === "number" ? "zs-tab__badge--count" : `zs-tab__badge--${item.badge}`,
+                )}
+              >
+                {typeof item.badge === "number" ? item.badge : null}
+              </span>
+            )}
           </button>
         );
       })}

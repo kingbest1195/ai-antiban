@@ -5,6 +5,7 @@ import { AppHeader, Banner, Button, Mono, TabPanel, Tabs, Toast, ToastViewport }
 import type { MenuEntry, TabItem } from "../ui";
 import { overview as overviewCopy, shell as copy, tabs as tabCopy } from "../shared/copy/ru";
 import { APP_VERSION } from "../shared/version";
+import { tabBadges, useOverviewModel } from "../features/overview/useOverviewModel";
 import {
   useClaudeBackup,
   useGatewayState,
@@ -47,6 +48,17 @@ const TAB_ITEMS: TabItem<TabId>[] = [
   { id: "guides", label: tabCopy.guides },
 ];
 
+/** Вкладки с бейджами: подмешивает их к неизменной основе. */
+function withBadges(badges: ReturnType<typeof tabBadges>): TabItem<TabId>[] {
+  return TAB_ITEMS.map((item) =>
+    item.id === "overview" && badges.overview !== undefined
+      ? { ...item, badge: badges.overview }
+      : item.id === "checks" && badges.checks !== undefined
+        ? { ...item, badge: badges.checks }
+        : item,
+  );
+}
+
 const TAB_PREFIX = "app";
 
 /** Оболочка главного окна: шапка с меню «Ещё», вкладки, активный экран, футер и все общие диалоги. */
@@ -88,6 +100,20 @@ export function AppShell() {
     onSimulateInBrowser: () => setBrowserSimulation(true),
   });
   const backup = useClaudeBackup(showToast);
+  const overviewModel = useOverviewModel({
+    reports: gw.reports,
+    activeReport: gw.activeReport,
+    state: gw.state,
+    currentIp: gw.currentIp,
+    sysproxyActive: gw.sysproxyActive,
+    killswitchFrozen: toggles.killswitchFrozen,
+    updateInfo: updater.updateInfo,
+    refreshing: gw.refreshing,
+  });
+  const tabItems = useMemo(
+    () => withBadges(tabBadges(overviewModel.banner, gw.reports, gw.state)),
+    [overviewModel.banner, gw.reports, gw.state],
+  );
   const mock = useMockScenario(runFullAudit);
 
   useTrayEvents({
@@ -287,9 +313,10 @@ export function AppShell() {
         ) : (
           <>
             <Tabs
-              items={TAB_ITEMS}
+              items={tabItems}
               value={nav.tab}
-              onChange={nav.goTab}
+              onChange={(id) => nav.goTab(id)}
+              badgeLabel={tabCopy.badgeLabel}
               idPrefix={TAB_PREFIX}
               aria-label={tabCopy.label}
             />
@@ -363,6 +390,7 @@ export function AppShell() {
                 onUnblockProvider={pinning.handleUnblockProvider}
                 onRetry={() => runFullAudit(true)}
                 onOpenChecks={() => nav.goTab("checks")}
+                onFixService={(provider) => nav.goTab("checks", { provider })}
                 onOpenTimezone={() => setTimezoneOpen(true)}
                 onOpenUpdate={() => updater.setShowUpdateModal(true)}
                 onOpenCrashTest={() => setCrashTestOpen(true)}
@@ -385,7 +413,8 @@ export function AppShell() {
 
             <TabPanel idPrefix={TAB_PREFIX} id="checks" selected={nav.tab === "checks"}>
               <ChecksScreen
-                report={gw.activeReport}
+                report={(nav.checksProvider && gw.reports[nav.checksProvider]) || gw.checksReport}
+                provider={nav.checksProvider && gw.reports[nav.checksProvider] ? nav.checksProvider : undefined}
                 state={gw.state}
                 coverageSnapshot={gw.coverageSnapshot}
                 onNavigateToGuide={nav.openGuide}

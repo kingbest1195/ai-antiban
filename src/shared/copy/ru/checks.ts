@@ -18,6 +18,8 @@ export type CheckId =
 export type CheckGroupId = "address" | "stability" | "leaks" | "environment";
 
 export const checks = {
+  /** Подпись над экраном, когда открыт отчёт конкретного сервиса. */
+  forService: (name: string) => `Проверки для: ${name}`,
   loadingTitle: "Идёт проверка сети и окружения",
   loadingText: "Это займёт несколько секунд.",
   verdict: (passed: number, total: number) => `${passed} из ${total} проверок пройдено`,

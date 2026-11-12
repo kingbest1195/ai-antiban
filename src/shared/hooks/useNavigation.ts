@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import type { ProviderId } from "../../types";
 
 export type TabId = "overview" | "connect" | "checks" | "backup" | "guides";
 
@@ -46,8 +47,12 @@ export function useNavigation() {
   const [subscriptionOpen, setSubscriptionOpen] = useState<boolean>(initial.subscription);
   const [guideTarget, setGuideTarget] = useState<string>(DEFAULT_GUIDE);
 
-  const goTab = useCallback((next: TabId) => {
+  /** Сервис, чей отчёт показывает «Проверки»; без него — худший из трёх. Сбрасывается при уходе с вкладки. */
+  const [checksProvider, setChecksProvider] = useState<ProviderId | undefined>(undefined);
+
+  const goTab = useCallback((next: TabId, opts?: { provider?: ProviderId }) => {
     setSubscriptionOpen(false);
+    setChecksProvider(next === "checks" ? opts?.provider : undefined);
     setTab(next);
   }, []);
 
@@ -55,11 +60,12 @@ export function useNavigation() {
   const openGuide = useCallback((guideId?: string) => {
     if (guideId) setGuideTarget(guideId);
     setSubscriptionOpen(false);
+    setChecksProvider(undefined);
     setTab("guides");
   }, []);
 
   const openSubscription = useCallback(() => setSubscriptionOpen(true), []);
   const closeSubscription = useCallback(() => setSubscriptionOpen(false), []);
 
-  return { tab, goTab, subscriptionOpen, openSubscription, closeSubscription, guideTarget, openGuide };
+  return { tab, goTab, checksProvider, subscriptionOpen, openSubscription, closeSubscription, guideTarget, openGuide };
 }

@@ -1,4 +1,4 @@
-import type { AppStateData, CheckResult, RiskReport } from "../../types";
+import type { AppStateData, CheckResult, ProviderId, RiskReport } from "../../types";
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckGroupId, CheckId } from "../../shared/copy/ru";
 
@@ -218,4 +218,37 @@ export function buildChecks(report: RiskReport, state: AppStateData | null): Bui
   const counts = countChecks(items.map((i) => i.result));
   const total = Math.max(counts.applicable, report.applicable_count ?? 0);
   return { groups, items, counts, total };
+}
+
+/** Порядок сервисов при равной тяжести отчётов. */
+export const PROVIDER_ORDER: ProviderId[] = ["anthropic", "openai", "gemini"];
+
+/** Тяжесть отчёта: 2 — красный, 1 — жёлтый или неполный, 0 — зелёный. */
+function reportRank(report: RiskReport): number {
+  if (report.overall_status === "red") return 2;
+  if (report.overall_status === "yellow" || report.incomplete) return 1;
+  return 0;
+}
+
+/** Худший отчёт из трёх; при равенстве — первый по порядку Claude, ChatGPT, Gemini. Без отчётов — null. */
+export function pickWorstReport(
+  reports: Partial<Record<ProviderId, RiskReport>>,
+): { provider: ProviderId; report: RiskReport } | null {
+  let best: { provider: ProviderId; report: RiskReport } | null = null;
+  let bestRank = -1;
+  for (const provider of PROVIDER_ORDER) {
+    const report = reports[provider];
+    if (!report) continue;
+    const rank = reportRank(report);
+    if (rank > bestRank) {
+      best = { provider, report };
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+/** Непройденные проверки отчёта (замечание, критично, не удалось проверить; «не применимо» не считается). Берётся из того же кода, что строит экран. */
+export function failedChecks(report: RiskReport, state: AppStateData | null): CheckItem[] {
+  return buildChecks(report, state).items.filter((i) => i.cls === "warn" || i.cls === "crit" || i.cls === "unknown");
 }
