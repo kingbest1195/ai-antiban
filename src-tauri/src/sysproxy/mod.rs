@@ -744,7 +744,10 @@ mod tests {
         let report = enable_cli_and_ide_protection("127.0.0.1:8899");
         assert!(report.enabled);
         let home = user_home_dir().unwrap();
-        assert!(home.join(".zshrc").is_file());
+        // Shell profiles are written on Unix only; Windows has no zsh rc.
+        if cfg!(unix) {
+            assert!(home.join(".zshrc").is_file());
+        }
         disable_cli_protection();
         assert!(!is_cli_protection_enabled() || CLI_PROTECTION_ACTIVE.load(Ordering::SeqCst));
         if cfg!(target_os = "macos") {
