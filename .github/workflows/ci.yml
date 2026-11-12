@@ -83,6 +83,22 @@ jobs:
         shell: bash
         run: "! grep -rnE 'download_and_install_legacy|validate_download_url|hdiutil|msiexec|zastava_autoupdate' src-tauri/src"
 
+      # Tests never touch the OS: neither tests/ nor #[cfg(test)] / test-support code may name RealPlatform.
+      - name: RealPlatform test-isolation guard
+        shell: bash
+        run: |
+          if grep -rn 'RealPlatform' src-tauri/tests; then
+            echo "tests/ must not use RealPlatform"; exit 1
+          fi
+          bad=$(find src-tauri/src -name '*.rs' -exec awk '
+            FNR == 1 { intest = 0 }
+            /^[[:space:]]*#\[cfg\(test\)\]/ || /^[[:space:]]*mod fake[[:space:]]*\{/ { intest = 1 }
+            intest && /RealPlatform/ { print FILENAME ":" FNR ": " $0 }
+          ' {} +)
+          if [ -n "$bad" ]; then
+            echo "cfg(test) code must not use RealPlatform:"; echo "$bad"; exit 1
+          fi
+
       - name: Cargo test (all)
         run: cargo test --manifest-path src-tauri/Cargo.toml
 

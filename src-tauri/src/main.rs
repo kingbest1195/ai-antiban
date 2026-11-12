@@ -3,8 +3,7 @@
 
 fn main() {
     if std::env::args().skip(1).any(|a| a == "--cleanup") {
-        zastava_lib::sysproxy::cleanup_all_persistent_settings();
-        return;
+        std::process::exit(zastava_lib::sysproxy::run_cleanup_cli());
     }
     zastava_lib::run()
 }

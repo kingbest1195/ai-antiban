@@ -8,9 +8,12 @@
 mod ai_cli;
 mod cleanup;
 mod cli_protection;
+pub mod fs;
 mod ide;
+pub mod journal;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod platform;
 mod shell_rc;
 #[cfg(target_os = "windows")]
 mod windows;
@@ -319,6 +322,66 @@ fn dry_run_home_dir() -> PathBuf {
         .clone()
 }
 
+/// Bundle identifier of the app; the app data directory is `<OS data dir>/<identifier>`.
+/// Must equal `identifier` in `tauri.conf.json` (checked by a unit test).
+pub const APP_IDENTIFIER: &str = "io.zastava.desktop";
+
+/// The directory Tauri's `app_data_dir()` resolves to, computed without an `AppHandle`
+/// (needed by `--cleanup`). `None` when the OS data directory cannot be determined.
+pub fn default_app_data_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Library").join("Application Support"));
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")));
+    base.map(|b| b.join(APP_IDENTIFIER))
+}
+
+/// Recovery pass of the ownership journal: puts back what Zastava changed in a previous run and
+/// nothing else. Runs before protection is enabled and from `--cleanup`.
+/// Fail closed: a corrupt/unknown journal or a lock held by another process is an `Err` and no
+/// OS call is made. In OS dry-run mode nothing is examined.
+pub fn recover_ownership_on_start(
+    data_dir: &std::path::Path,
+) -> Result<journal::RecoveryReport, journal::JournalError> {
+    if !os_effects_enabled() {
+        note_dry_run_blocked("ownership_recovery");
+        return Ok(journal::RecoveryReport { skipped_dry_run: true, ..Default::default() });
+    }
+    journal::recover_with(
+        std::sync::Arc::new(fs::RealFs),
+        &platform::RealPlatform,
+        data_dir,
+    )
+}
+
+/// `--cleanup`: journal recovery first. If the journal is unusable (corrupt, unknown schema,
+/// locked by another instance) the legacy blanket cleanup is NOT run: no guessing. Exit codes:
+/// 0 ok, 1 some resources could not be restored (kept for retry), 2 fail-closed.
+pub fn run_cleanup_cli() -> i32 {
+    let Some(dir) = default_app_data_dir() else {
+        eprintln!("Zastava --cleanup: data directory is unknown; nothing was changed");
+        return 2;
+    };
+    match recover_ownership_on_start(&dir) {
+        Err(e) => {
+            eprintln!("Zastava --cleanup: {e}; nothing was changed");
+            2
+        }
+        Ok(report) => {
+            eprintln!("Zastava --cleanup: {}", report.summary());
+            // Legacy (1.3.x / 2.0) traces have no journal yet; replaced by the signature-based
+            // migration in the next work package.
+            cleanup_all_persistent_settings();
+            i32::from(report.has_failures())
+        }
+    }
+}
+
 /// Spawns a Command configured on Windows with `CREATE_NO_WINDOW` (0x08000000)
 /// to completely prevent cmd.exe / PowerShell / Terminal console windows flashing.
 /// In dry-run mode (see [`os_effects_enabled`]) the real program is never started: the command
@@ -523,6 +586,22 @@ pub fn open_os_datetime_settings() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn app_identifier_matches_tauri_conf() {
+        let conf = include_str!("../../tauri.conf.json");
+        assert!(conf.contains(&format!("\"identifier\": \"{APP_IDENTIFIER}\"")));
+    }
+
+    #[test]
+    fn recovery_entry_point_is_a_no_op_in_dry_run() {
+        let before = dry_run_blocked_calls();
+        let dir = std::env::temp_dir().join("zastava-never-created-by-dry-run");
+        let r = recover_ownership_on_start(&dir).unwrap();
+        assert!(r.skipped_dry_run && r.items.is_empty());
+        assert!(!dir.exists(), "dry-run recovery must not even create the directory");
+        assert!(dry_run_blocked_calls() > before);
+    }
 
     #[test]
     fn dry_run_is_always_on_in_unit_tests() {
