@@ -1,7 +1,7 @@
 //! Shell profile blocks (zsh/bash RC files and PowerShell `$PROFILE`): building, upserting and removing
 //! the Zastava guard block that exports proxy / timezone / locale variables.
 
-use super::{FileCtx, NO_PROXY_VALUE, ZASTAVA_RC_END, ZASTAVA_RC_START};
+use super::{FileCtx, NO_PROXY_VALUE, ZASTAVA_RC_END, ZASTAVA_RC_START, is_known_no_proxy_value};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -192,7 +192,7 @@ fn assignment_is_generated(name: &str, value: &str) -> bool {
                 .or_else(|| value.strip_prefix("http://localhost:"))
                 .is_some_and(all_digits)
         }
-        "NO_PROXY" | "no_proxy" => value == NO_PROXY_VALUE,
+        "NO_PROXY" | "no_proxy" => is_known_no_proxy_value(value),
         "TZ" => sanitize_timezone(value).as_deref() == Some(value),
         "LANG" | "LC_TIME" | "LC_ALL" => value == "en_US.UTF-8",
         _ => false,

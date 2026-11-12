@@ -17,34 +17,10 @@ use super::shell_rc::{
     is_generated_block, normalize_proxy_url_and_port, remove_block, sanitize_timezone,
 };
 use super::{
-    CliProtectionReport, FileCtx, NO_PROXY_VALUE, Run, ZASTAVA_RC_START,
+    CliProtectionReport, FileCtx, KNOWN_NO_PROXY_VALUES, NO_PROXY_VALUE, Run, ZASTAVA_RC_START,
     is_zastava_local_proxy_val, state, with_files, with_journal,
 };
 use std::path::Path;
-
-/// Sets the given variables in the user environment (launchd) through the ownership journal and
-/// returns how many of them are now Zastava's. A variable that already holds a value Zastava did
-/// not write (a corporate `HTTPS_PROXY`, the user's own `TZ`) is left exactly as it is.
-pub(super) fn apply_user_env(j: &mut Journal, p: &dyn Platform, vars: &[(&str, &str)]) -> usize {
-    let mut ours = 0;
-    for (name, value) in vars {
-        let res = Resource::UserEnv {
-            name: (*name).to_string(),
-        };
-        let Ok(cur) = p.get_user_env(name).map(Value::Env) else {
-            continue;
-        };
-        let free = matches!(cur, Value::Env(None));
-        if !(free || j.owns(&res, &cur)) {
-            continue; // a foreign value: neither overwritten now nor removed later
-        }
-        match j.apply(p, &res, Value::Env(Some((*value).to_string()))) {
-            Ok(_) => ours += 1,
-            Err(e) => eprintln!("Застава: {} не записана: {e}", res.id()),
-        }
-    }
-    ours
-}
 
 /// Marker of the finished one-time cleanup of settings files that builds without a journal
 /// (1.3.x, 2.0) left behind.
@@ -196,7 +172,7 @@ fn clean_legacy_json(
                     continue;
                 };
                 let ours = match *var {
-                    "NO_PROXY" => f.raw == json_str(NO_PROXY_VALUE),
+                    "NO_PROXY" => KNOWN_NO_PROXY_VALUES.iter().any(|v| f.raw == json_str(v)),
                     "TZ" => serde_json::from_str::<String>(f.raw)
                         .ok()
                         .is_some_and(|v| sanitize_timezone(&v).as_deref() == Some(v.as_str())),
@@ -338,7 +314,8 @@ pub(super) fn disable_files(
 /// 1. `~/.claude/settings.json` and `~/.gemini/settings.json` (`env.HTTPS_PROXY`, `env.HTTP_PROXY`, optional `TZ`)
 /// 2. VS Code / Cursor / Windsurf `settings.json` (`http.proxy` + `terminal.integrated.env.*`)
 /// 3. Shell profiles (`~/.zshrc`, `~/.bash_profile`) with an automatic `nc -z` liveness check
-/// 4. macOS `launchctl setenv` for GUI apps launched from Dock
+///
+/// macOS `launchctl setenv` is no longer used: the GUI session stays clean.
 pub fn enable_cli_and_ide_protection(proxy_addr_or_url: &str) -> CliProtectionReport {
     enable_cli_and_ide_protection_with_tz(proxy_addr_or_url, None)
 }
@@ -351,25 +328,10 @@ pub fn enable_cli_and_ide_protection_with_tz(
     let (proxy_url, port) = normalize_proxy_url_and_port(proxy_addr_or_url);
     let mut configured_targets = Vec::new();
 
-    // GUI apps started from the Dock inherit these from launchd. On Windows nothing is written
-    // into `HKCU\Environment`: the CRT and Qt/Electron cannot parse IANA timezones there.
-    if cfg!(target_os = "macos") {
-        let mut vars = vec![
-            ("HTTP_PROXY", proxy_url.as_str()),
-            ("HTTPS_PROXY", proxy_url.as_str()),
-            ("ALL_PROXY", proxy_url.as_str()),
-            ("NO_PROXY", NO_PROXY_VALUE),
-        ];
-        let sanitized_tz = tz.and_then(sanitize_timezone);
-        if let Some(ref timezone) = sanitized_tz {
-            vars.push(("TZ", timezone.as_str()));
-        }
-        if let Run::Done(n) = with_journal("launchctl:setenv", |j, p| apply_user_env(j, p, &vars))
-            && n > 0
-        {
-            configured_targets.push("macOS Launchd (GUI)".to_string());
-        }
-    }
+    // Since 2.1 nothing is put into the launchd (GUI session) environment: not the proxy variables
+    // and not TZ / LANG / LC_TIME. CUPS / IPP, Finder and the system services must not inherit
+    // them. Leftovers of 2.0.0 are removed by the one-time migration (see `cleanup`). On Windows
+    // nothing is written into `HKCU\Environment` either.
 
     if let Run::Done(targets) = with_files("cli_files:enable", |j, p, ctx| {
         enable_files(j, p, ctx, &proxy_url, port, tz)
@@ -397,8 +359,8 @@ pub fn enable_cli_and_ide_protection_with_tz(
 }
 
 /// Puts back the IDE `settings.json`, `~/.claude/settings.json` and `~/.gemini/settings.json`
-/// keys Zastava wrote. The launchd environment is restored from the ownership journal (see
-/// [`disable_cli_protection`]), not guessed here.
+/// keys Zastava wrote. A user environment recorded in the journal by an earlier build is
+/// restored from the journal (see [`disable_cli_protection`]), not guessed here.
 pub fn disable_cli_and_ide_runtime_settings() {
     let _ = with_files("cli_settings:restore", |j, p, ctx| {
         migrate_legacy_files(j, p, ctx);
@@ -474,88 +436,6 @@ pub fn is_cli_protection_enabled() -> bool {
         }
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sysproxy::fs::FakeFs;
-    use crate::sysproxy::platform::FakePlatform;
-    use std::path::Path;
-    use std::sync::Arc;
-
-    fn open(fs: &FakeFs) -> Journal {
-        Journal::open(Arc::new(fs.clone()), Path::new("/data")).unwrap()
-    }
-
-    const VARS: [(&str, &str); 3] = [
-        ("HTTP_PROXY", "http://127.0.0.1:8899"),
-        ("HTTPS_PROXY", "http://127.0.0.1:8899"),
-        ("TZ", "Europe/Amsterdam"),
-    ];
-
-    #[test]
-    fn foreign_variables_are_neither_overwritten_nor_removed() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        p.seed_env("HTTPS_PROXY", "http://corp:3128");
-        p.seed_env("TZ", "Europe/Berlin");
-        let mut j = open(&fs);
-        let ours = apply_user_env(&mut j, &p, &VARS);
-        assert_eq!(ours, 1, "only the free HTTP_PROXY is ours");
-        assert_eq!(p.env_of("HTTPS_PROXY"), Some("http://corp:3128".into()));
-        assert_eq!(p.env_of("TZ"), Some("Europe/Berlin".into()));
-        assert_eq!(p.env_of("HTTP_PROXY"), Some("http://127.0.0.1:8899".into()));
-        // Cleanup restores what is ours and leaves the foreign values.
-        let rep = crate::sysproxy::cleanup::restore_with(
-            &mut j,
-            &p,
-            crate::sysproxy::cleanup::Scope::UserEnv,
-        );
-        assert_eq!(rep.restored(), 1);
-        assert_eq!(p.env_of("HTTP_PROXY"), None);
-        assert_eq!(p.env_of("HTTPS_PROXY"), Some("http://corp:3128".into()));
-        assert_eq!(p.env_of("TZ"), Some("Europe/Berlin".into()));
-    }
-
-    #[test]
-    fn our_own_values_are_updated_and_restored_to_absence() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        let mut j = open(&fs);
-        assert_eq!(apply_user_env(&mut j, &p, &VARS), 3);
-        // The timezone is re-synced to another value: still ours, so it may be updated.
-        let again = [("TZ", "Asia/Tokyo")];
-        assert_eq!(apply_user_env(&mut j, &p, &again), 1);
-        assert_eq!(p.env_of("TZ"), Some("Asia/Tokyo".into()));
-        let before = p.os_writes();
-        assert_eq!(apply_user_env(&mut j, &p, &VARS[..2]), 2);
-        assert_eq!(p.os_writes(), before, "repeating changes nothing");
-        j.restore_all(&p);
-        for n in ["HTTP_PROXY", "HTTPS_PROXY", "TZ"] {
-            assert_eq!(p.env_of(n), None, "{n}");
-        }
-    }
-
-    #[test]
-    fn a_variable_changed_by_the_user_after_us_is_not_overwritten_again() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        let mut j = open(&fs);
-        apply_user_env(&mut j, &p, &VARS[..1]);
-        p.seed_env("HTTP_PROXY", "http://mine:1");
-        assert_eq!(apply_user_env(&mut j, &p, &VARS[..1]), 0);
-        assert_eq!(p.env_of("HTTP_PROXY"), Some("http://mine:1".into()));
-        let rep = j.restore_all(&p);
-        assert_eq!(rep.external(), 1);
-        assert_eq!(p.env_of("HTTP_PROXY"), Some("http://mine:1".into()));
-    }
-
-    #[test]
-    fn an_unreadable_variable_is_skipped_not_guessed() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        let mut j = open(&fs);
-        p.fail_next(crate::sysproxy::platform::PlatOp::GetEnv);
-        assert_eq!(apply_user_env(&mut j, &p, &VARS[..2]), 1);
-        assert_eq!(p.env_of("HTTP_PROXY"), None);
-    }
 }
 
 #[cfg(test)]
@@ -1338,5 +1218,74 @@ mod file_tests {
         );
         assert!(!home.join(".claude").join("settings.json").exists());
         assert!(j.is_empty());
+    }
+
+    // --- WP-23: the GUI session is not touched, the NO_PROXY of 2.0.0 stays recognised -------
+
+    #[test]
+    fn enable_never_touches_the_user_environment_with_or_without_a_timezone() {
+        for tz in [None, Some("Europe/Berlin")] {
+            let e = env();
+            e.p.seed_env("HTTPS_PROXY", "http://corp:3128");
+            e.enable(tz);
+            assert_eq!(e.p.os_writes(), 0, "no launchctl / registry write");
+            assert!(
+                e.p.calls()
+                    .iter()
+                    .all(|c| !c.contains("user_env") && !c.contains("broadcast")),
+                "{:?}",
+                e.p.calls()
+            );
+            assert_eq!(e.p.env_of("HTTPS_PROXY"), Some("http://corp:3128".into()));
+            assert_eq!(e.p.env_of("TZ"), None);
+        }
+    }
+
+    #[test]
+    fn every_writer_uses_the_one_no_proxy_constant() {
+        let e = env();
+        let ide = e.ide_with("{\n  \"a\": 1\n}\n", 0o644);
+        e.enable(None);
+        assert_eq!(
+            raw(&e.text(&ide), &[ide_env_key(), "NO_PROXY"]),
+            Some(json_str(NO_PROXY_VALUE))
+        );
+        let block = build_shell_rc_guard_block_with_tz(URL, 8899, None);
+        assert!(block.contains(&format!("NO_PROXY=\"{NO_PROXY_VALUE}\"")));
+        let ps = build_powershell_guard_block_with_tz(URL, None);
+        assert!(ps.contains(NO_PROXY_VALUE));
+    }
+
+    #[test]
+    fn a_profile_block_with_the_2_0_0_no_proxy_is_still_ours_and_gets_replaced() {
+        let e = env();
+        let new_block = build_shell_rc_guard_block_with_tz(URL, 8899, None);
+        let old_block = new_block.replace(NO_PROXY_VALUE, crate::sysproxy::NO_PROXY_VALUE_2_0);
+        assert_ne!(new_block, old_block);
+        assert!(is_generated_block(&old_block));
+        assert!(is_generated_block(&new_block));
+        let zshrc = Path::new("/home/u/.zshrc");
+        e.fs.put(zshrc, format!("# mine\n\n{old_block}\n").as_bytes(), 0o644);
+        let targets = e.enable(None);
+        assert!(!targets.is_empty());
+        let after = e.text(zshrc);
+        assert!(after.starts_with("# mine\n"));
+        assert!(after.contains(NO_PROXY_VALUE), "refreshed to the new value");
+        assert_eq!(after.matches(ZASTAVA_RC_START).count(), 1);
+    }
+
+    #[test]
+    fn a_settings_file_with_the_2_0_0_no_proxy_is_cleaned_by_its_signature() {
+        let e = env();
+        let key = ide_env_key();
+        let text = format!(
+            "{{\n  \"{key}\": {{\n    \"HTTP_PROXY\": \"{URL}\",\n    \"HTTPS_PROXY\": \"{URL}\",\n    \"NO_PROXY\": \"{}\"\n  }},\n  \"a\": 1\n}}\n",
+            crate::sysproxy::NO_PROXY_VALUE_2_0
+        );
+        let ide = e.ide_with(&text, 0o644);
+        e.disable();
+        let after = e.text(&ide);
+        assert_eq!(raw(&after, &[key]), None, "{after}");
+        assert_eq!(raw(&after, &["a"]), Some("1".into()));
     }
 }

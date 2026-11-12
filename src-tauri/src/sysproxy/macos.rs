@@ -181,6 +181,19 @@ pub(super) fn enable_pac(
             }
         }
         if let Some(u) = &plan.upstream {
+            // The bypass list of this service is recorded before its explicit proxy is touched,
+            // so it can be put back exactly. Services without an upstream are not touched at all.
+            let bypass_res = Resource::Bypass {
+                service: plan.svc.clone(),
+            };
+            match p.get_proxy_bypass_domains(&plan.svc) {
+                Ok(list) => {
+                    if let Err(e) = j.apply(p, &bypass_res, Value::Bypass(list)) {
+                        eprintln!("Застава: {} не записан: {e}", bypass_res.id());
+                    }
+                }
+                Err(_) => eprintln!("Застава: {} не прочитан", bypass_res.id()),
+            }
             let chain_res = Resource::Chain {
                 service: plan.svc.clone(),
             };
@@ -567,5 +580,160 @@ mod tests {
         let mut j = open(&fs);
         let r = enable_pac(&mut j, &p, PAC).unwrap();
         assert_eq!(r.configured, vec!["USB LAN".to_string()]);
+    }
+
+    // --- WP-23: PAC off clears the URL; explicit proxy returns per service, with bypass -------
+
+    #[test]
+    fn switching_the_pac_off_also_clears_our_url() {
+        let (fs, p) = setup();
+        let mut j = open(&fs);
+        enable_pac(&mut j, &p, PAC).unwrap();
+        assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)));
+        j.restore_all(&p);
+        assert_eq!(p.pac_of(&wifi()), pac(None, Some(false)));
+    }
+
+    #[test]
+    fn a_foreign_pac_url_and_its_state_come_back_as_they_were() {
+        for on in [true, false] {
+            let (fs, p) = setup();
+            p.seed_pac(&wifi(), pac(Some("http://corp/p.pac"), Some(on)));
+            let mut j = open(&fs);
+            enable_pac(&mut j, &p, PAC).unwrap();
+            j.restore_all(&p);
+            assert_eq!(p.pac_of(&wifi()), pac(Some("http://corp/p.pac"), Some(on)));
+        }
+    }
+
+    #[test]
+    fn the_explicit_proxy_returns_on_its_own_service_with_the_original_bypass_list() {
+        let (fs, p) = setup();
+        p.add_service(usb());
+        let mut quiet = usb();
+        quiet.enabled = true;
+        // Wi-Fi: a third-party web proxy (enabled) with its own bypass list.
+        let both = ChainState {
+            http: ep(true, "127.0.0.1", 2080),
+            https: ep(true, "127.0.0.1", 2080),
+        };
+        p.seed_chain(&wifi(), both.clone());
+        p.seed_bypass(&wifi(), &["*.corp.example", "10.1.0.0/16"]);
+        // USB: a proxy that is configured but off, and a bypass list the user has.
+        let off = ChainState {
+            http: ep(false, "old.example", 3128),
+            https: ep(false, "old.example", 3128),
+        };
+        p.seed_chain(&usb(), off.clone());
+        p.seed_bypass(&usb(), &["usb.local"]);
+        let mut j = open(&fs);
+        enable_pac(&mut j, &p, PAC).unwrap();
+        assert_eq!(p.chain_of(&wifi()).http.enabled, Some(false));
+        assert_eq!(
+            j.entry(&Resource::Bypass { service: wifi() })
+                .unwrap()
+                .baseline,
+            Value::Bypass(vec!["*.corp.example".into(), "10.1.0.0/16".into()]),
+            "the baseline holds the bypass list"
+        );
+        assert!(
+            j.entry(&Resource::Bypass { service: usb() }).is_none()
+                && j.entry(&Resource::Chain { service: usb() }).is_none(),
+            "the service whose proxy was off is not recorded"
+        );
+        p.clear_calls();
+        j.restore_all(&p);
+        assert_eq!(p.chain_of(&wifi()), both);
+        assert_eq!(p.bypass_of(&wifi()), vec!["*.corp.example", "10.1.0.0/16"]);
+        assert_eq!(p.chain_of(&usb()), off);
+        assert_eq!(p.bypass_of(&usb()), vec!["usb.local"]);
+        assert!(
+            !p.calls()
+                .iter()
+                .any(|c| c.contains("set_chain") && c.contains("en5")),
+            "no chain write on USB: {:?}",
+            p.calls()
+        );
+        assert!(
+            !p.calls()
+                .iter()
+                .any(|c| c.starts_with("set_proxy_bypass_domains:dev:en5"))
+        );
+    }
+
+    #[test]
+    fn a_service_zastava_did_not_touch_gets_no_call_at_all() {
+        let (fs, p) = setup();
+        let mut off_svc = usb();
+        off_svc.enabled = false;
+        p.add_service(off_svc.clone());
+        p.seed_chain(
+            &off_svc,
+            ChainState {
+                http: ep(true, "192.168.1.5", 3128),
+                https: ep(true, "192.168.1.5", 3128),
+            },
+        );
+        p.seed_bypass(&off_svc, &["x.local"]);
+        p.seed_pac(&off_svc, pac(Some("http://user/p.pac"), Some(true)));
+        p.seed_chain(
+            &wifi(),
+            ChainState {
+                http: ep(true, "127.0.0.1", 2080),
+                https: ep(true, "127.0.0.1", 2080),
+            },
+        );
+        let mut j = open(&fs);
+        enable_pac(&mut j, &p, PAC).unwrap();
+        j.restore_all(&p);
+        let key = off_svc.key();
+        assert!(
+            !p.calls().iter().any(|c| c.contains(&key)),
+            "{:?}",
+            p.calls()
+        );
+        assert_eq!(
+            p.pac_of(&off_svc),
+            pac(Some("http://user/p.pac"), Some(true))
+        );
+    }
+
+    #[test]
+    fn a_bypass_list_the_user_changed_after_us_is_left_and_the_proxy_still_returns() {
+        let (fs, p) = setup();
+        let both = ChainState {
+            http: ep(true, "127.0.0.1", 2080),
+            https: ep(true, "127.0.0.1", 2080),
+        };
+        p.seed_chain(&wifi(), both.clone());
+        p.seed_bypass(&wifi(), &["a.example"]);
+        let mut j = open(&fs);
+        enable_pac(&mut j, &p, PAC).unwrap();
+        p.seed_bypass(&wifi(), &["a.example", "b.example"]); // the user edits it meanwhile
+        let rep = j.restore_all(&p);
+        assert_eq!(
+            rep.external(),
+            1,
+            "only the bypass list is a foreign change"
+        );
+        assert_eq!(p.bypass_of(&wifi()), vec!["a.example", "b.example"]);
+        assert_eq!(p.chain_of(&wifi()), both);
+    }
+
+    #[test]
+    fn an_unreadable_bypass_list_does_not_stop_the_chain() {
+        let (fs, p) = setup();
+        p.seed_chain(
+            &wifi(),
+            ChainState {
+                http: ep(true, "127.0.0.1", 2080),
+                https: ep(true, "127.0.0.1", 2080),
+            },
+        );
+        p.fail_next(PlatOp::GetBypass);
+        let mut j = open(&fs);
+        enable_pac(&mut j, &p, PAC).unwrap();
+        assert_eq!(p.chain_of(&wifi()).http.enabled, Some(false));
+        assert!(j.entry(&Resource::Bypass { service: wifi() }).is_none());
     }
 }
