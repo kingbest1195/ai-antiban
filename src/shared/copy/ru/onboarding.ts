@@ -37,6 +37,7 @@ export const onboarding = {
       ok: "Сеть в порядке",
       attention: "Есть замечания к сети",
       bad: "Сеть не подходит для ИИ",
+      partial: "Проверено частично",
     },
     checks: (passed: number, total: number, word: string) => `${passed} из ${total} ${word}`,
     /** Подпись, если часть проверок не зелёные, но вердикт хороший: остальное — рекомендации. */

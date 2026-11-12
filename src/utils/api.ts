@@ -2,6 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import {
   AppStateData,
   BinAuditResult,
+  CheckResult,
   CleanResult,
   ClaudeExportResult,
   ClaudeLocalDataSummary,
@@ -213,7 +214,7 @@ export async function auditConnection(
     code: isTurkey ? "DNSBL_LISTED_WARNING" : "DNSBL_CLEAN",
     message: isTurkey
       ? "IP найден в базе абузных прокси DroneBL (пул M247 Europe SRL — 400+ соседей на IP)."
-      : "Проверка DNSBL: 0/4 Clean — IP чист во всех 4 спам-базах (Spamhaus, SORBS, Barracuda, DroneBL).",
+      : "Проверка DNSBL: ответили 4 из 4 спам-баз, совпадений нет.",
   };
 
   const asnResult = {
@@ -224,17 +225,27 @@ export async function auditConnection(
       : "AS20473 (HostVDS / Choopa LLC) подтвержден как выделенный личный сервер.",
   };
 
-  const ipv6Result = {
-    status: "ok" as const,
-    code: "IPV6_DISABLED_SAFE",
-    message: "Утечек по протоколу IPv6 не обнаружено (трафик идет строго через IPv4-туннель).",
-  };
+  // В турецком сценарии мок показывает все цвета сразу: ok, warning, critical и «не удалось проверить».
+  const ipv6Result: CheckResult = isTurkey
+    ? { status: "critical", code: "IPV6_LEAK_DETECTED", message: "Найден глобальный IPv6-адрес: реальный адрес может уйти мимо VPN." }
+    : {
+        status: "ok",
+        code: "IPV6_DISABLED_SAFE",
+        message: "Утечек по протоколу IPv6 не обнаружено (трафик идет строго через IPv4-туннель).",
+      };
 
-  const dnsResult = {
-    status: "ok" as const,
-    code: "DNS_CLEAN",
-    message: "Утечек через локальные DNS-резолверы РФ не обнаружено (Cloudflare 1.1.1.1).",
-  };
+  const dnsResult: CheckResult = isTurkey
+    ? {
+        status: "unknown",
+        code: "DNS_TIMEOUT",
+        message: "Проверка DNS-серверов не завершилась.",
+        reason: "timeout",
+      }
+    : {
+        status: "ok",
+        code: "DNS_CLEAN",
+        message: "Утечек через локальные DNS-резолверы РФ не обнаружено (Cloudflare 1.1.1.1).",
+      };
 
   const tzResult = {
     status: isTurkey ? ("warning" as const) : ("ok" as const),
@@ -244,13 +255,15 @@ export async function auditConnection(
       : "Системный часовой пояс совпадает с регионом сервера (Europe/Amsterdam).",
   };
 
-  const locResult = {
-    status: "ok" as const,
-    code: "OS_LOCATION_SAFE",
-    message: "Защита Wi-Fi BSSID активна: передача координат роутеров заблокирована.",
+  // Мок показывает «не применимо»: Wi-Fi не используется.
+  const locResult: CheckResult = {
+    status: "unknown",
+    code: "OS_LOCATION_NOT_APPLICABLE",
+    message: "Компьютер не подключён к Wi-Fi: проверять геолокацию по роутерам нечего.",
+    reason: "not_applicable",
   };
 
-  return {
+  const report: RiskReport = {
     provider,
     overall_status: overall,
     trust_score: score,
@@ -301,6 +314,12 @@ export async function auditConnection(
       },
     ],
   };
+  // Счётчики как у шлюза: «не применимо» не входит ни в unknown_count, ни в applicable_count.
+  const notApplicable = report.checks.filter((c) => c.status === "unknown" && c.reason === "not_applicable").length;
+  report.unknown_count = report.checks.filter((c) => c.status === "unknown").length - notApplicable;
+  report.applicable_count = report.checks.length - notApplicable;
+  report.incomplete = report.unknown_count > 0;
+  return report;
 }
 
 export async function pinCurrentIp(ip: string): Promise<void> {
@@ -382,6 +401,9 @@ function mockAlertReport(): RiskReport {
     provider: "anthropic",
     overall_status: "red",
     trust_score: 28,
+    unknown_count: 1,
+    applicable_count: 12,
+    incomplete: true,
     telemetry: {
       ip: "185.220.101.5",
       country_code: "RU",

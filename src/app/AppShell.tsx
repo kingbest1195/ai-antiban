@@ -3,7 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AppHeader, Banner, Button, Mono, TabPanel, Tabs, Toast, ToastViewport } from "../ui";
 import type { MenuEntry, TabItem } from "../ui";
-import { shell as copy, tabs as tabCopy } from "../shared/copy/ru";
+import { overview as overviewCopy, shell as copy, tabs as tabCopy } from "../shared/copy/ru";
 import { APP_VERSION } from "../shared/version";
 import {
   useClaudeBackup,
@@ -294,6 +294,21 @@ export function AppShell() {
               aria-label={tabCopy.label}
             />
 
+            {/* Отчёт неполный: на «Обзоре» то же говорит его собственный баннер, поэтому там не дублируем */}
+            {gw.activeReport?.incomplete && nav.tab !== "overview" && (
+              <Banner
+                tone="neutral"
+                title={overviewCopy.banner.incomplete.title}
+                action={
+                  <Button size="sm" onClick={() => runFullAudit(true)} disabled={gw.refreshing}>
+                    {overviewCopy.banner.incomplete.action}
+                  </Button>
+                }
+              >
+                {overviewCopy.banner.incomplete.text}
+              </Banner>
+            )}
+
             {/* Перехват запроса в главном окне (Tauri): неблокирующий баннер */}
             {isTauri() && payload && (
               <Banner
@@ -333,6 +348,7 @@ export function AppShell() {
                 gatewayStats={stats.gatewayStats}
                 updateInfo={updater.updateInfo}
                 coverageSnapshot={gw.coverageSnapshot}
+                dataAgeMinutes={gw.dataAgeMinutes}
                 sysproxyActive={gw.sysproxyActive}
                 cliProtected={toggles.cliProtected}
                 killswitchFrozen={toggles.killswitchFrozen}
@@ -379,6 +395,7 @@ export function AppShell() {
                 onOpenCrashTest={() => setCrashTestOpen(true)}
                 onRecheck={() => runFullAudit(true)}
                 rechecking={gw.refreshing}
+                dataAgeMinutes={gw.dataAgeMinutes}
               />
             </TabPanel>
 

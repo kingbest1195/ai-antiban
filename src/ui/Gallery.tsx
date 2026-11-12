@@ -408,7 +408,7 @@ export default function Gallery() {
           </div>
         </Sec>
 
-        <Sec title="Icon (18 иконок ДС → lucide)">
+        <Sec title="Icon (19 иконок ДС → lucide)">
           <div className="gl__icons">
             {ICON_NAMES.map((n) => (
               <div key={n} className="gl__icon"><Icon name={n} />{n}</div>

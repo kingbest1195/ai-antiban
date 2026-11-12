@@ -2,7 +2,19 @@ export type ProviderId = "anthropic" | "openai" | "gemini";
 
 export type OverallStatus = "green" | "yellow" | "red";
 
-export type CheckStatus = "ok" | "warning" | "critical" | "green" | "yellow" | "red";
+/** "unknown" — проверку не удалось выполнить: это не «чисто» и не «плохо». Незнакомая строка статуса читается так же. */
+export type CheckStatus = "ok" | "warning" | "critical" | "unknown" | "green" | "yellow" | "red";
+
+/** Почему проверка закончилась статусом unknown (snake_case, как в отчёте шлюза). */
+export type UnknownReason =
+  | "timeout"
+  | "network_error"
+  | "empty_response"
+  | "no_data"
+  | "unsupported_os"
+  | "internal_error"
+  | "not_applicable"
+  | "source_refused";
 
 export type InterceptionBehavior = "ask_popup" | "auto_lock_silent" | "auto_allow_trusted";
 export type PopupPosition = "top_right" | "top_center";
@@ -12,6 +24,12 @@ export interface CheckResult {
   code: string;
   message: string;
   guide_ref?: string | null;
+  /** Только вместе со статусом unknown. */
+  reason?: UnknownReason | null;
+  /** Unix-секунды окончания проверки. */
+  checked_at?: number | null;
+  /** Через какой источник измерено (справочно). */
+  measured_via?: string | null;
 }
 
 export interface NetworkTelemetry {
@@ -38,6 +56,12 @@ export interface RiskReport {
   ipv6_result: CheckResult;
   timezone_result: CheckResult;
   checks: CheckResult[];
+  /** Сколько проверок не удалось выполнить (без «не применимо»). Старый отчёт поля не содержит. */
+  unknown_count?: number;
+  /** Сколько проверок применимо к этой конфигурации (M в «N из M»). */
+  applicable_count?: number;
+  /** unknown_count > 0: часть защиты не проверена, отчёт не «чистый». */
+  incomplete?: boolean;
 }
 
 export interface CleanResult {
