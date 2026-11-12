@@ -1,5 +1,9 @@
 use std::time::Duration;
-use crate::auditor::geo_matrix::{CheckResult, UnknownReason, GUIDE_OS_PRIVACY};
+
+use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_PRIVACY, UnknownReason};
+use crate::auditor::seams::{
+    HttpProbeOutcome, IpProbe, RealSystem, ReqwestProbe, SystemInfo, SystemReadError,
+};
 
 pub const IPV6_CHECK_URL: &str = "https://[2606:4700:4700::1111]/cdn-cgi/trace";
 pub const IPV6_CHECK_TIMEOUT_MS: u64 = 800;
@@ -25,6 +29,8 @@ pub fn evaluate_system_timezone_with_synced(
 /// Checks for dual-stack IPv6 leaks by pinging Cloudflare IPv6-only CDN trace endpoint.
 pub async fn check_ipv6_leak(ipv4_country: &str, global_blocked: &[String]) -> CheckResult {
     check_ipv6_leak_with(
+        &ReqwestProbe,
+        &RealSystem,
         IPV6_CHECK_URL,
         Duration::from_millis(IPV6_CHECK_TIMEOUT_MS),
         ipv4_country,
@@ -33,74 +39,75 @@ pub async fn check_ipv6_leak(ipv4_country: &str, global_blocked: &[String]) -> C
     .await
 }
 
-/// [`check_ipv6_leak`] against `url` with `limit` (injectable for tests).
-/// A probe that did not produce a usable answer is `Unknown`, never "no leak".
+/// [`check_ipv6_leak`] through `probe` / `system` (injectable for tests).
+/// A host without a global IPv6 address cannot leak over IPv6; a probe that did not produce a
+/// usable answer is `Unknown`, never "no leak".
 pub async fn check_ipv6_leak_with(
+    probe: &dyn IpProbe,
+    system: &dyn SystemInfo,
     url: &str,
     limit: Duration,
     ipv4_country: &str,
     global_blocked: &[String],
 ) -> CheckResult {
-    let client = match reqwest::Client::builder().timeout(limit).build() {
-        Ok(c) => c,
-        Err(_) => {
-            return CheckResult::unknown(
+    if system.has_global_ipv6() == Some(false) {
+        return CheckResult::ok(
+            "IPV6_NOT_CONFIGURED",
+            "IPv6 не настроен: у этого компьютера нет глобального IPv6-адреса, утечка по IPv6 невозможна.",
+        );
+    }
+
+    let unknown = |code: &str, text: String, reason: UnknownReason| {
+        CheckResult::unknown(code, format!("Проверка IPv6 не выполнена: {text}"), reason)
+    };
+
+    let (status, text) = match probe.get(url, limit).await {
+        HttpProbeOutcome::Response { status, body } => (status, body),
+        HttpProbeOutcome::Timeout => {
+            return unknown(
+                "IPV6_PROBE_TIMEOUT",
+                format!("проба к Cloudflare не ответила за {} мс.", limit.as_millis()),
+                UnknownReason::Timeout,
+            );
+        }
+        HttpProbeOutcome::ConnectFailed => {
+            return unknown(
+                "IPV6_PROBE_UNREACHABLE",
+                "соединение с пробой по IPv6 не установилось, утечку исключить нельзя.".to_string(),
+                UnknownReason::NetworkError,
+            );
+        }
+        HttpProbeOutcome::ReadFailed => {
+            return unknown(
+                "IPV6_PROBE_READ_ERROR",
+                "ответ сервиса проверки не удалось прочитать.".to_string(),
+                UnknownReason::NetworkError,
+            );
+        }
+        HttpProbeOutcome::ClientError => {
+            return unknown(
                 "IPV6_PROBE_INTERNAL_ERROR",
-                "Проверка IPv6 не выполнена: не удалось создать HTTP-клиент.",
+                "не удалось создать HTTP-клиент.".to_string(),
                 UnknownReason::InternalError,
             );
         }
     };
 
-    let resp = match client.get(url).send().await {
-        Ok(resp) => resp,
-        Err(e) if e.is_timeout() => {
-            return CheckResult::unknown(
-                "IPV6_PROBE_TIMEOUT",
-                format!(
-                    "Проверка IPv6 не выполнена: проба к Cloudflare не ответила за {} мс.",
-                    limit.as_millis()
-                ),
-                UnknownReason::Timeout,
-            );
-        }
-        // No route / connection refused outside the tunnel: IPv6 does not leave this host.
-        Err(_) => {
-            return CheckResult::ok(
-                "IPV6_DISABLED_SAFE",
-                "IPv6 отключен или заблокирован вне туннеля (утечек нет).",
-            );
-        }
-    };
-
-    if !resp.status().is_success() {
-        return CheckResult::unknown(
+    if !(200..300).contains(&status) {
+        return unknown(
             "IPV6_PROBE_BAD_STATUS",
-            format!(
-                "Проверка IPv6 не выполнена: сервис проверки ответил статусом {}.",
-                resp.status().as_u16()
-            ),
+            format!("сервис проверки ответил статусом {status}."),
             UnknownReason::EmptyResponse,
         );
     }
-    let text = match resp.text().await {
-        Ok(t) => t,
-        Err(_) => {
-            return CheckResult::unknown(
-                "IPV6_PROBE_READ_ERROR",
-                "Проверка IPv6 не выполнена: ответ сервиса проверки не удалось прочитать.",
-                UnknownReason::NetworkError,
-            );
-        }
-    };
     let loc = text
         .lines()
         .find_map(|line| line.strip_prefix("loc="))
         .map(|val| val.trim().to_uppercase());
     let Some(ipv6_loc) = loc else {
-        return CheckResult::unknown(
+        return unknown(
             "IPV6_PROBE_NO_LOC",
-            "Проверка IPv6 не выполнена: в ответе сервиса нет страны (loc).",
+            "в ответе сервиса нет страны (loc).".to_string(),
             UnknownReason::EmptyResponse,
         );
     };
@@ -115,7 +122,21 @@ pub async fn check_ipv6_leak_with(
         );
     }
 
-    if !ipv4_country.is_empty() && ipv6_loc != ipv4_country.to_uppercase() {
+    let is_country = ipv6_loc.len() == 2
+        && ipv6_loc.bytes().all(|b| b.is_ascii_uppercase())
+        && !matches!(ipv6_loc.as_str(), "XX" | "ZZ");
+    if !is_country || ipv4_country.trim().is_empty() {
+        return unknown(
+            "IPV6_PROBE_NO_COUNTRY",
+            format!(
+                "страну IPv6 ({ipv6_loc}) не с чем сравнить с IPv4 ({}).",
+                if ipv4_country.trim().is_empty() { "страна не определена" } else { ipv4_country },
+            ),
+            UnknownReason::NoData,
+        );
+    }
+
+    if ipv6_loc != ipv4_country.trim().to_uppercase() {
         return CheckResult::warning(
             "IPV6_LEAK_MISMATCH",
             format!(
@@ -127,76 +148,116 @@ pub async fn check_ipv6_leak_with(
 
     CheckResult::ok(
         "IPV6_ENCAPSULATED",
-        format!("Трафик IPv6 надежно упакован в туннель ({ipv6_loc})."),
+        format!("IPv6-проба вышла из {ipv6_loc}, как и IPv4: IPv6-трафик идет тем же маршрутом, что и IPv4."),
     )
 }
 
 /// Checks OS DNS resolvers for Russian domestic ISP leaks (`scutil --dns` on macOS, `ipconfig /all` on Windows).
 pub fn check_dns_leak(ipv4_country: &str, russian_keywords: &[String]) -> CheckResult {
-    // Whether the OS resolver list could be read at all (a failed read is not "clean").
-    #[allow(unused_mut)]
-    let mut probed = false;
+    check_dns_leak_with(&RealSystem, ipv4_country, russian_keywords)
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = crate::sysproxy::silent_command("scutil").arg("--dns").output() {
-            probed = true;
-            let text = String::from_utf8_lossy(&output.stdout);
-            for kw in russian_keywords {
-                if text.to_lowercase().contains(&kw.to_lowercase()) {
-                    return CheckResult::warning(
-                        "DNS_DOMESTIC_WARNING",
-                        format!("В системном DNS обнаружен провайдер «{kw}». Пропишите публичный DNS (1.1.1.1 / 8.8.8.8) в настройках сети."),
-                        Some(GUIDE_OS_PRIVACY.to_string()),
-                    );
-                }
-            }
-            // Check if nameserver[0] is a known domestic ISP public DNS (e.g. 77.88.8.8 Yandex DNS)
-            if text.contains("77.88.8.") && ipv4_country != "RU" {
-                return CheckResult::warning(
-                    "DNS_YANDEX_LEAK",
-                    "Обнаружен Яндекс.DNS (77.88.8.8) при зарубежном VPN. Смените DNS на Cloudflare (1.1.1.1).",
-                    Some(GUIDE_OS_PRIVACY.to_string()),
-                );
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(output) = crate::sysproxy::silent_command("ipconfig").arg("/all").output() {
-            probed = true;
-            let text = String::from_utf8_lossy(&output.stdout);
-            if text.contains("77.88.8.") && ipv4_country != "RU" {
-                return CheckResult::warning(
-                    "DNS_YANDEX_LEAK",
-                    "Обнаружен Яндекс.DNS (77.88.8.8) при зарубежном VPN. Смените DNS на Cloudflare (1.1.1.1).",
-                    Some(GUIDE_OS_PRIVACY.to_string()),
-                );
-            }
-        }
-    }
-
-    let _ = (ipv4_country, russian_keywords);
-    if !probed {
-        return CheckResult::unknown(
+/// [`check_dns_leak`] through `system` (injectable for tests).
+pub fn check_dns_leak_with(
+    system: &dyn SystemInfo,
+    ipv4_country: &str,
+    russian_keywords: &[String],
+) -> CheckResult {
+    match system.dns_listing() {
+        Ok(text) => evaluate_dns_listing(&text, ipv4_country, russian_keywords),
+        Err(SystemReadError::Unsupported) => CheckResult::unknown(
+            "DNS_UNSUPPORTED_OS",
+            "Проверка DNS-резолверов не выполнена: на этой системе список DNS-серверов ОС не читается.",
+            UnknownReason::UnsupportedOs,
+        ),
+        Err(SystemReadError::Failed) => CheckResult::unknown(
             "DNS_RESOLVERS_UNREADABLE",
             "Проверка DNS-резолверов не выполнена: список DNS-серверов ОС не удалось прочитать.",
             UnknownReason::InternalError,
+        ),
+    }
+}
+
+/// Decision of the DNS check on the text of the OS resolver configuration.
+pub fn evaluate_dns_listing(
+    text: &str,
+    ipv4_country: &str,
+    russian_keywords: &[String],
+) -> CheckResult {
+    // Only the lines about DNS carry names of resolvers and search domains; the rest of
+    // `ipconfig /all` / `scutil --dns` (adapter names, flags) would give false matches.
+    let dns_lines: Vec<String> = text
+        .lines()
+        .map(str::to_lowercase)
+        .filter(|l| l.contains("dns") || l.contains("domain") || l.contains("nameserver"))
+        .collect();
+    let has_addresses = text.split(|c: char| !(c.is_ascii_hexdigit() || c == '.' || c == ':')).any(|t| {
+        t.parse::<std::net::IpAddr>().is_ok()
+    });
+    if !has_addresses {
+        return CheckResult::unknown(
+            "DNS_RESOLVERS_EMPTY",
+            "Проверка DNS-резолверов не выполнена: в настройках ОС не найдено ни одного DNS-адреса.",
+            UnknownReason::EmptyResponse,
         );
     }
+
+    for kw in russian_keywords {
+        let kw_lower = kw.to_lowercase();
+        if !kw_lower.is_empty() && dns_lines.iter().any(|l| l.contains(&kw_lower)) {
+            return CheckResult::warning(
+                "DNS_DOMESTIC_WARNING",
+                format!("В системном DNS обнаружен провайдер «{kw}». Пропишите публичный DNS (1.1.1.1 / 8.8.8.8) в настройках сети."),
+                Some(GUIDE_OS_PRIVACY.to_string()),
+            );
+        }
+    }
+
+    // A known domestic public DNS (Yandex DNS, 77.88.8.x) as a whole address, not as a substring.
+    let yandex_dns = text
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .any(|t| t.starts_with("77.88.8.") && t.parse::<std::net::Ipv4Addr>().is_ok());
+    if yandex_dns && ipv4_country != "RU" {
+        return CheckResult::warning(
+            "DNS_YANDEX_LEAK",
+            "Обнаружен Яндекс.DNS (77.88.8.8) при зарубежном VPN. Смените DNS на Cloudflare (1.1.1.1).",
+            Some(GUIDE_OS_PRIVACY.to_string()),
+        );
+    }
+
     CheckResult::ok(
         "DNS_CLEAN",
-        "Утечек через локальные DNS-резолверы РФ не обнаружено.",
+        format!(
+            "В настройках DNS ОС нет имён {} провайдеров РФ и Яндекс.DNS; проверен только список настроенных резолверов, не фактический путь запросов.",
+            russian_keywords.len()
+        ),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auditor::geo_matrix::CheckStatus;
+    use crate::auditor::seams::fakes::{FakeProbe, FakeSystem};
+
+    const URL: &str = "https://probe.invalid/cdn-cgi/trace";
+    const LIMIT: Duration = Duration::from_millis(50);
+
+    fn v6_host() -> FakeSystem {
+        FakeSystem {
+            global_ipv6: Some(true),
+            ..FakeSystem::healthy()
+        }
+    }
+
+    async fn ipv6(probe: &FakeProbe, sys: &FakeSystem, country: &str, blocked: &[&str]) -> CheckResult {
+        let blocked: Vec<String> = blocked.iter().map(|s| s.to_string()).collect();
+        check_ipv6_leak_with(probe, sys, URL, LIMIT, country, &blocked).await
+    }
 
     #[test]
     fn test_russian_timezone_detection() {
+        use crate::auditor::os_env::is_russian_or_belarusian_timezone;
         assert!(is_russian_or_belarusian_timezone("Europe/Moscow"));
         assert!(is_russian_or_belarusian_timezone("Asia/Vladivostok"));
         assert!(is_russian_or_belarusian_timezone("Europe/Minsk"));
@@ -204,71 +265,141 @@ mod tests {
         assert!(!is_russian_or_belarusian_timezone("America/New_York"));
     }
 
-    #[test]
-    fn test_timezone_evaluation_mismatch() {
-        // If system is e.g. UTC and target is Amsterdam
-        let res = evaluate_system_timezone(Some("Europe/Amsterdam"));
-        // Either Ok or Warning depending on the machine's actual timezone, but must not panic
-        assert!(!res.code.is_empty());
-    }
-
-    use crate::auditor::geo_matrix::CheckStatus;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// One-shot local HTTP server; `None` = accept and stay silent.
-    async fn serve(response: Option<&'static str>) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut sock, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 1024];
-                    let _ = sock.read(&mut buf).await;
-                    match response {
-                        Some(r) => {
-                            let _ = sock.write_all(r.as_bytes()).await;
-                            let _ = sock.shutdown().await;
-                        }
-                        None => tokio::time::sleep(Duration::from_secs(30)).await,
-                    }
-                });
-            }
-        });
-        format!("http://{addr}/cdn-cgi/trace")
-    }
-
+    // (1) a host with IPv6 whose probe stays silent
     #[tokio::test]
-    async fn ipv6_silent_probe_is_unknown_timeout_not_ok() {
-        let url = serve(None).await;
-        let r = check_ipv6_leak_with(&url, Duration::from_millis(50), "NL", &[]).await;
+    async fn ipv6_timeout_on_a_host_with_ipv6_is_unknown_not_ok() {
+        let probe = FakeProbe::new(HttpProbeOutcome::Timeout);
+        let r = ipv6(&probe, &v6_host(), "NL", &[]).await;
         assert_eq!(r.status, CheckStatus::Unknown);
         assert_eq!(r.reason, Some(UnknownReason::Timeout));
+        assert_eq!(probe.calls(), 1);
     }
 
+    // (2) a host without global IPv6: nothing to leak, the probe is not even needed
+    #[tokio::test]
+    async fn ipv6_not_configured_is_ok_even_if_the_probe_would_time_out() {
+        let probe = FakeProbe::new(HttpProbeOutcome::Timeout);
+        let sys = FakeSystem {
+            global_ipv6: Some(false),
+            ..FakeSystem::healthy()
+        };
+        let r = ipv6(&probe, &sys, "NL", &[]).await;
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert_eq!(r.code, "IPV6_NOT_CONFIGURED");
+        assert!(r.message.contains("IPv6 не настроен"));
+        assert_eq!(probe.calls(), 0);
+    }
+
+    // (3) HTTP 500 / 403 / HTML without loc=
     #[tokio::test]
     async fn ipv6_bad_status_or_no_loc_is_unknown_empty_response() {
-        let url = serve(Some(
-            "HTTP/1.1 403 Forbidden\r\ncontent-length: 4\r\n\r\nnope",
-        ))
-        .await;
-        let r = check_ipv6_leak_with(&url, Duration::from_secs(2), "NL", &[]).await;
-        assert_eq!(r.reason, Some(UnknownReason::EmptyResponse));
-
-        let url = serve(Some("HTTP/1.1 200 OK\r\ncontent-length: 7\r\n\r\nip=1.2.3")).await;
-        let r = check_ipv6_leak_with(&url, Duration::from_secs(2), "NL", &[]).await;
-        assert_eq!(r.status, CheckStatus::Unknown);
-        assert_eq!(r.code, "IPV6_PROBE_NO_LOC");
+        for (status, body) in [(500, "oops"), (403, "<html>blocked</html>"), (200, "<html>portal</html>"), (200, "ip=1.2.3.4")] {
+            let r = ipv6(&FakeProbe::body(status, body), &v6_host(), "NL", &[]).await;
+            assert_eq!(r.status, CheckStatus::Unknown, "{status} {body}");
+            assert_eq!(r.reason, Some(UnknownReason::EmptyResponse), "{status} {body}");
+        }
     }
 
+    // (4) the answer is the blocked country
     #[tokio::test]
-    async fn ipv6_loc_is_classified() {
-        let url = serve(Some("HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nloc=RU")).await;
-        let blocked = vec!["RU".to_string()];
-        let r = check_ipv6_leak_with(&url, Duration::from_secs(2), "NL", &blocked).await;
+    async fn ipv6_from_a_blocked_country_is_critical() {
+        let r = ipv6(&FakeProbe::body(200, "ip=2a00::1\nloc=RU\n"), &v6_host(), "NL", &["RU"]).await;
         assert_eq!(r.status, CheckStatus::Critical);
-        let r = check_ipv6_leak_with(&url, Duration::from_secs(2), "NL", &[]).await;
+        assert_eq!(r.code, "IPV6_LEAK_SANCTIONED_CRITICAL");
+    }
+
+    // (5) a different country than IPv4 is a warning, the same one is ok
+    #[tokio::test]
+    async fn ipv6_country_is_compared_with_ipv4() {
+        let probe = FakeProbe::body(200, "loc=DE\n");
+        let r = ipv6(&probe, &v6_host(), "NL", &[]).await;
         assert_eq!(r.status, CheckStatus::Warning);
-        let r = check_ipv6_leak_with(&url, Duration::from_secs(2), "RU", &[]).await;
+        let r = ipv6(&probe, &v6_host(), "de", &[]).await;
         assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.message.contains("DE"));
+        // Nothing to compare with: not a match.
+        let r = ipv6(&probe, &v6_host(), "", &[]).await;
+        assert_eq!(r.status, CheckStatus::Unknown);
+        let r = ipv6(&FakeProbe::body(200, "loc=XX\n"), &v6_host(), "NL", &[]).await;
+        assert_eq!(r.status, CheckStatus::Unknown);
+    }
+
+    // (6) the client could not be built, and the other probe failures
+    #[tokio::test]
+    async fn ipv6_probe_errors_are_unknown() {
+        let r = ipv6(&FakeProbe::new(HttpProbeOutcome::ClientError), &v6_host(), "NL", &[]).await;
+        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::InternalError)));
+        for out in [HttpProbeOutcome::ConnectFailed, HttpProbeOutcome::ReadFailed] {
+            let r = ipv6(&FakeProbe::new(out), &v6_host(), "NL", &[]).await;
+            assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NetworkError)));
+        }
+    }
+
+    // The host could not tell whether it has IPv6: the probe decides, and a failed probe is Unknown.
+    #[tokio::test]
+    async fn ipv6_undetermined_host_falls_back_to_the_probe() {
+        let sys = FakeSystem {
+            global_ipv6: None,
+            ..FakeSystem::healthy()
+        };
+        let probe = FakeProbe::new(HttpProbeOutcome::Timeout);
+        assert_eq!(ipv6(&probe, &sys, "NL", &[]).await.status, CheckStatus::Unknown);
+        assert_eq!(probe.calls(), 1);
+    }
+
+    fn kws() -> Vec<String> {
+        ["Rostelecom", "MTS", "VK", "Yandex"].iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn dns_unreadable_or_empty_is_unknown() {
+        let offline = FakeSystem::offline();
+        let r = check_dns_leak_with(&offline, "NL", &kws());
+        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::InternalError)));
+        let unsupported = FakeSystem {
+            dns_listing: Err(SystemReadError::Unsupported),
+            ..FakeSystem::healthy()
+        };
+        let r = check_dns_leak_with(&unsupported, "NL", &kws());
+        assert_eq!(r.reason, Some(UnknownReason::UnsupportedOs));
+        // A command that ran but printed no resolver address (also what a dry-run stub gives).
+        let empty = FakeSystem {
+            dns_listing: Ok("DNS configuration\n".into()),
+            ..FakeSystem::healthy()
+        };
+        let r = check_dns_leak_with(&empty, "NL", &kws());
+        assert_eq!(r.reason, Some(UnknownReason::EmptyResponse));
+    }
+
+    #[test]
+    fn dns_listing_is_matched_on_dns_lines_only() {
+        // Windows `ipconfig /all`: the provider shows in the DNS suffix line.
+        let win = "Ethernet adapter Ethernet:\n   Description . . . : Realtek PCIe\n   Connection-specific DNS Suffix  . : mts.ru\n   DNS Servers . . . . . . . . . . . : 192.168.1.1\n";
+        let r = evaluate_dns_listing(win, "NL", &kws());
+        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "DNS_DOMESTIC_WARNING"));
+        // The same keyword outside of DNS lines (an adapter description) is not a finding.
+        let desc = "Description . . . : Gigabit MTS Adapter\n   DNS Servers . . . : 1.1.1.1\n";
+        assert_eq!(evaluate_dns_listing(desc, "NL", &kws()).status, CheckStatus::Ok);
+        // macOS `scutil --dns`.
+        let mac = "resolver #1\n  search domain[0] : beeline.local\n  nameserver[0] : 8.8.8.8\n";
+        assert_eq!(evaluate_dns_listing(mac, "NL", &["Beeline".to_string()]).status, CheckStatus::Warning);
+    }
+
+    #[test]
+    fn yandex_dns_is_an_address_match_not_a_substring() {
+        let yandex = "resolver #1\n  nameserver[0] : 77.88.8.8\n";
+        assert_eq!(evaluate_dns_listing(yandex, "NL", &[]).code, "DNS_YANDEX_LEAK");
+        // Exit in Russia: not a leak of this kind.
+        assert_eq!(evaluate_dns_listing(yandex, "RU", &[]).status, CheckStatus::Ok);
+        // 177.88.8.8 only contains the digits.
+        let other = "resolver #1\n  nameserver[0] : 177.88.8.8\n";
+        assert_eq!(evaluate_dns_listing(other, "NL", &[]).status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn dns_ok_text_states_what_was_checked() {
+        let r = evaluate_dns_listing("resolver #1\n  nameserver[0] : 1.1.1.1\n", "NL", &kws());
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert!(r.message.contains("список настроенных резолверов"), "{}", r.message);
     }
 }

@@ -144,7 +144,7 @@ mod tests {
 
         let asns = rules.dangerous_asns.blocking_read();
         assert_eq!(asns.version, "1.1.0");
-        assert_eq!(asns.dnsbl_zones.len(), 4);
+        assert_eq!(asns.dnsbl_zones.len(), 5);
         assert!(asns.is_high_risk_asn(9009).is_some());
         assert_eq!(asns.matches_russian_isp("Rostelecom broadband"), Some("Rostelecom"));
     }

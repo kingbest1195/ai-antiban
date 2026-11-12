@@ -10,6 +10,7 @@ pub mod os_env;
 pub mod profile_switcher;
 pub mod rules;
 pub mod run_check;
+pub mod seams;
 pub mod telemetry;
 
 use serde::{Deserialize, Serialize};
@@ -21,17 +22,19 @@ use cache::{DNSBL_TTL, IPV6_TTL, OS_TTL, cached_check};
 use run_check::{blocking_check, run_check};
 
 pub use cache_cleaner::clean_ai_app_cache;
-pub use dnsbl::{check_all_dnsbl, evaluate_asn_reputation, evaluate_dnsbl_report};
+pub use dnsbl::{check_all_dnsbl, check_all_dnsbl_with, evaluate_asn_reputation, evaluate_dnsbl_report};
 pub use geo_matrix::{CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo};
 pub use history::{evaluate_impossible_travel, evaluate_ip_pinning};
-pub use leaks::{check_dns_leak, check_ipv6_leak};
+pub use leaks::{check_dns_leak, check_dns_leak_with, check_ipv6_leak, check_ipv6_leak_with};
 pub use network::{
     build_upstream_client, evaluate_dns_country_consistency, evaluate_reverse_dns_ptr,
     NetworkResolver, NetworkTelemetry,
 };
 pub use os_env::{
-    check_os_location_services, evaluate_locale_env_hygiene, evaluate_system_timezone,
+    check_os_location_services, check_os_location_services_with, evaluate_locale_env_hygiene,
+    evaluate_locale_env_hygiene_with, evaluate_system_timezone, evaluate_system_timezone_with,
 };
+pub use seams::AuditEnv;
 pub use rules::RuleSet;
 use crate::routing::{Route, RouteSelection};
 use crate::state::AppState;
@@ -175,6 +178,8 @@ pub fn score_checks(checks: &[CheckResult], is_pinned: bool) -> Verdict {
 pub struct Auditor {
     pub rules: RuleSet,
     pub resolver: NetworkResolver,
+    /// DNS, HTTP probe and host reads of the checks (replaceable in tests).
+    env: AuditEnv,
     /// Last logged set of unfinished checks per provider (the journal gets a line on change only).
     incomplete_logged: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -192,7 +197,16 @@ impl Auditor {
         Ok(Self {
             rules,
             resolver,
+            env: AuditEnv::real(),
             incomplete_logged: Arc::default(),
+        })
+    }
+
+    /// An auditor whose DNS, probe and host reads come from `env` (tests: no network, no processes).
+    pub fn with_env(env: AuditEnv) -> Result<Self, String> {
+        Ok(Self {
+            env,
+            ..Self::new()?
         })
     }
 
@@ -291,6 +305,7 @@ impl Auditor {
         let dangerous_asns = Arc::new(self.rules.dangerous_asns.read().await.clone());
         let state_data = state.get_data().await;
         let cache = self.resolver.check_cache().clone();
+        let env = self.env.clone();
 
         let is_pinned = match &state_data.pinned_ip {
             Some(pinned) => pinned.trim() == telemetry.ip.trim(),
@@ -325,17 +340,18 @@ impl Auditor {
             async move { evaluate_impossible_travel(&history, &country, resolved_at, provider) }
         });
         let dnsbl = run_check("DNSBL", CHECK_LIMIT_IO, {
-            let (cache, asns, ip, label) = (
+            let (cache, asns, ip, label, dns) = (
                 cache.clone(),
                 dangerous_asns.clone(),
                 telemetry.ip.clone(),
                 dnsbl_label.clone(),
+                env.dns.clone(),
             );
             async move {
                 let (result, summary) = cache
                     .dnsbl
                     .get_or_compute(&ip, DNSBL_TTL, |(r, _)| !r.is_unknown(), async {
-                        let report = check_all_dnsbl(&ip, &asns).await;
+                        let report = check_all_dnsbl_with(dns, &ip, &asns).await;
                         (evaluate_dnsbl_report(&report), report.summary_label)
                     })
                     .await;
@@ -356,28 +372,43 @@ impl Auditor {
             }
         });
         let ipv6 = run_check("IPv6 Leak", CHECK_LIMIT_IO, {
-            let (cache, matrix, country) = (cache.clone(), matrix.clone(), country.clone());
+            let (cache, matrix, country, env) =
+                (cache.clone(), matrix.clone(), country.clone(), env.clone());
             async move {
                 cached_check(&cache.ipv6, &country, IPV6_TTL, async {
-                    check_ipv6_leak(&country, &matrix.global_blocked_countries).await
+                    check_ipv6_leak_with(
+                        &*env.probe,
+                        &*env.system,
+                        leaks::IPV6_CHECK_URL,
+                        Duration::from_millis(leaks::IPV6_CHECK_TIMEOUT_MS),
+                        &country,
+                        &matrix.global_blocked_countries,
+                    )
+                    .await
                 })
                 .await
             }
         });
         let dns = run_check("DNS Resolver", CHECK_LIMIT_IO, {
-            let (cache, asns, country) = (cache.clone(), dangerous_asns.clone(), country.clone());
+            let (cache, asns, country, env) =
+                (cache.clone(), dangerous_asns.clone(), country.clone(), env.clone());
             async move {
                 cached_check(&cache.os, &format!("dns:{country}"), OS_TTL, async {
                     let keywords = asns.russian_isp_keywords.clone();
                     let cc = country.clone();
-                    blocking_check(move || check_dns_leak(&cc, &keywords)).await
+                    let system = env.system.clone();
+                    blocking_check(move || check_dns_leak_with(&*system, &cc, &keywords)).await
                 })
                 .await
             }
         });
-        let timezone = run_check("Timezone", CHECK_LIMIT_LOCAL, {
-            let (cache, ip_tz, synced) =
-                (cache.clone(), telemetry.timezone.clone(), synced_tz.clone());
+        let timezone = run_check("Timezone", CHECK_LIMIT_IO, {
+            let (cache, ip_tz, synced, env) = (
+                cache.clone(),
+                telemetry.timezone.clone(),
+                synced_tz.clone(),
+                env.clone(),
+            );
             async move {
                 let key = format!(
                     "tz:{}|{}",
@@ -385,16 +416,21 @@ impl Auditor {
                     synced.as_deref().unwrap_or_default()
                 );
                 cached_check(&cache.os, &key, OS_TTL, async {
-                    evaluate_system_timezone(ip_tz.as_deref(), synced.as_deref())
+                    let system = env.system.clone();
+                    blocking_check(move || {
+                        evaluate_system_timezone_with(&*system, ip_tz.as_deref(), synced.as_deref())
+                    })
+                    .await
                 })
                 .await
             }
         });
         let location = run_check("OS Location", CHECK_LIMIT_IO, {
-            let cache = cache.clone();
+            let (cache, env) = (cache.clone(), env.clone());
             async move {
                 cached_check(&cache.os, "location", OS_TTL, async {
-                    blocking_check(check_os_location_services).await
+                    let system = env.system.clone();
+                    blocking_check(move || check_os_location_services_with(&*system)).await
                 })
                 .await
             }
@@ -408,11 +444,15 @@ impl Auditor {
             let tel = telemetry.clone();
             async move { evaluate_dns_country_consistency(&tel, None) }
         });
-        let locale = run_check("Locale", CHECK_LIMIT_LOCAL, {
-            let cache = cache.clone();
+        let locale = run_check("Locale", CHECK_LIMIT_IO, {
+            let (cache, env) = (cache.clone(), env.clone());
             async move {
                 cached_check(&cache.os, &format!("locale:{synced_key}"), OS_TTL, async {
-                    evaluate_locale_env_hygiene(synced_tz.as_deref())
+                    let system = env.system.clone();
+                    blocking_check(move || {
+                        evaluate_locale_env_hygiene_with(&*system, synced_tz.as_deref())
+                    })
+                    .await
                 })
                 .await
             }
@@ -735,5 +775,180 @@ mod tests {
         assert!(report.incomplete && report.unknown_count >= 3);
         assert!(report.trust_score <= 94);
         assert!(report.checks.iter().all(|c| c.checked_at.is_some()));
+    }
+
+    // ---- the whole audit on substituted sources (no network, no processes) ----
+
+    use seams::fakes::{FakeDns, FakeProbe, FakeSystem, addr};
+    use seams::{HttpProbeOutcome, LookupOutcome};
+
+    fn rich_telemetry() -> NetworkTelemetry {
+        NetworkTelemetry {
+            ip: "203.0.113.9".into(),
+            country_code: "NL".into(),
+            hostname: Some("host.example".into()),
+            asn: Some(64500),
+            org: Some("Example Net".into()),
+            isp: Some("Example Net".into()),
+            timezone: Some("Europe/Amsterdam".into()),
+            resolved_at: network::current_timestamp(),
+        }
+    }
+
+    /// What `1.1.1.1/cdn-cgi/trace` gives: an IP and a country, nothing else.
+    fn trace_only_telemetry() -> NetworkTelemetry {
+        NetworkTelemetry {
+            hostname: None,
+            asn: None,
+            org: None,
+            isp: None,
+            timezone: None,
+            ..rich_telemetry()
+        }
+    }
+
+    fn zones_answering(dns: FakeDns) -> FakeDns {
+        let asns = rules::DangerousAsns::load_bundled().unwrap();
+        asns.dnsbl_zones.iter().fold(dns, |d, z| {
+            d.with(&format!("2.0.0.127.{}", z.zone), addr("127.0.0.2"))
+                .with(&format!("9.113.0.203.{}", z.zone), LookupOutcome::NotFound)
+        })
+    }
+
+    async fn audit(
+        env: AuditEnv,
+        tel: NetworkTelemetry,
+    ) -> RiskReport {
+        let auditor = Auditor::with_env(env).unwrap();
+        auditor.resolver.set_cached(tel).await;
+        auditor
+            .evaluate_all(ProviderId::Anthropic, &AppState::new_in_memory(), false)
+            .await
+            .unwrap()
+    }
+
+    fn env_of(dns: FakeDns, probe: FakeProbe, system: FakeSystem) -> AuditEnv {
+        AuditEnv {
+            dns: Arc::new(dns),
+            probe: Arc::new(probe),
+            system: Arc::new(system),
+        }
+    }
+
+    /// DNSBL zones and the IPv6 probe all time out: not Green-100, the report says it is incomplete.
+    #[tokio::test]
+    async fn evaluate_all_with_substituted_probes_all_timing_out_is_incomplete() {
+        let report = audit(
+            env_of(
+                FakeDns::new(LookupOutcome::Timeout),
+                FakeProbe::new(HttpProbeOutcome::Timeout),
+                FakeSystem {
+                    global_ipv6: Some(true),
+                    ..FakeSystem::healthy()
+                },
+            ),
+            rich_telemetry(),
+        )
+        .await;
+        assert_eq!(report.checks.len(), 12);
+        assert!(report.dnsbl_result.is_unknown());
+        assert_eq!(report.dnsbl_result.reason, Some(UnknownReason::Timeout));
+        assert!(report.ipv6_result.is_unknown());
+        assert_eq!(report.ipv6_result.reason, Some(UnknownReason::Timeout));
+        assert!(report.incomplete);
+        assert!(report.unknown_count >= 3, "{}", report.unknown_count);
+        assert!(report.trust_score <= 94);
+        assert!(!(report.overall_status == OverallStatus::Green && report.trust_score == 100));
+    }
+
+    /// Nothing reachable: every check that depends on the network or on a read of the host is Unknown.
+    #[tokio::test]
+    async fn evaluate_all_internet_off_every_network_check_is_unknown() {
+        let report = audit(
+            env_of(
+                FakeDns::new(LookupOutcome::Failed),
+                FakeProbe::new(HttpProbeOutcome::ConnectFailed),
+                FakeSystem {
+                    global_ipv6: Some(true),
+                    ..FakeSystem::offline()
+                },
+            ),
+            // Only the cached egress is left; its metadata is missing as in the 1.1.1.1 fallback.
+            trace_only_telemetry(),
+        )
+        .await;
+        let names = [
+            (3, "dnsbl"),
+            (4, "asn"),
+            (5, "ipv6"),
+            (6, "dns"),
+            (7, "timezone"),
+            (9, "reverse dns"),
+            (10, "dns country"),
+            (11, "locale"),
+        ];
+        for (i, name) in names {
+            assert!(report.checks[i].is_unknown(), "{name}: {:?}", report.checks[i]);
+            assert!(!report.checks[i].is_not_applicable(), "{name} must be a real Unknown");
+        }
+        // Not applicable here: pinning off, first session, no location setting on this host.
+        for i in [1, 2, 8] {
+            assert!(report.checks[i].is_not_applicable(), "check {i}: {:?}", report.checks[i]);
+        }
+        assert_eq!(report.unknown_count, 8);
+        assert_eq!(report.applicable_count, 9);
+        assert!(report.incomplete && report.trust_score <= 94);
+    }
+
+    /// A fallback geolocation answer without metadata must not leave a cascade of green checks.
+    #[tokio::test]
+    async fn evaluate_all_trace_fallback_has_no_cascade_of_false_greens() {
+        let report = audit(
+            env_of(
+                zones_answering(FakeDns::new(LookupOutcome::Timeout)),
+                FakeProbe::body(200, "loc=NL\n"),
+                FakeSystem {
+                    global_ipv6: Some(true),
+                    ..FakeSystem::healthy()
+                },
+            ),
+            trace_only_telemetry(),
+        )
+        .await;
+        // The checks that need ASN / ISP / time zone of the exit IP.
+        for i in [4, 7, 9] {
+            assert!(report.checks[i].is_unknown(), "check {i}: {:?}", report.checks[i]);
+            assert_eq!(report.checks[i].reason, Some(UnknownReason::NoData), "check {i}");
+        }
+        // The checks with their own sources still give an answer.
+        assert!(report.dnsbl_result.status.is_ok(), "{:?}", report.dnsbl_result);
+        assert!(report.ipv6_result.status.is_ok(), "{:?}", report.ipv6_result);
+        assert!(report.incomplete);
+    }
+
+    /// With every source answering, the Ok texts claim only what was verified.
+    #[tokio::test]
+    async fn evaluate_all_healthy_sources_state_verified_facts() {
+        let report = audit(
+            env_of(
+                zones_answering(FakeDns::new(LookupOutcome::Timeout)),
+                FakeProbe::body(200, "loc=NL\n"),
+                FakeSystem {
+                    global_ipv6: Some(true),
+                    ..FakeSystem::healthy()
+                },
+            ),
+            rich_telemetry(),
+        )
+        .await;
+        assert!(report.dnsbl_result.status.is_ok());
+        assert!(report.dnsbl_result.message.contains("Ответили 5 из 5"), "{}", report.dnsbl_result.message);
+        assert_eq!(report.dnsbl_clean_count, "Ответили 5 из 5 баз");
+        assert_eq!(report.ipv6_result.code, "IPV6_ENCAPSULATED");
+        assert_eq!(report.timezone_result.code, "TIMEZONE_MATCH");
+        // Only the DNS country (no source yet), pinning, first session and location do not apply.
+        assert!(report.checks[10].is_unknown() && !report.checks[10].is_not_applicable());
+        assert_eq!(report.unknown_count, 1);
+        assert!(report.incomplete);
     }
 }

@@ -640,7 +640,7 @@ pub fn evaluate_reverse_dns_ptr(telemetry: &NetworkTelemetry) -> CheckResult {
 
     CheckResult::ok(
         "REVERSE_DNS_CLEAN",
-        format!("Reverse DNS и ISP выходного IP ({detail}) чисты, маркеров публичных прокси не обнаружено."),
+        format!("В имени узла/провайдера выходного IP ({detail}) нет маркеров публичных анонимайзеров из встроенного списка. PTR-запись не запрашивалась: проверены данные сервиса геолокации."),
     )
 }
 
