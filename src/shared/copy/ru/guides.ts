@@ -53,16 +53,22 @@ export const guides = {
       "В массовых VPN на одном IP сидят сотни человек, а частая смена стран (Impossible Travel) вызывает мгновенный бан у Anthropic. Свой VPS дает личный статический IP в NL / DE / US без соседей-спамеров.",
     methodLabel: "Способ настройки",
     methods: {
-      amnezia: "Amnezia (Без\u00a0кода)",
-      vless: "VLESS в\u00a01\u00a0команду",
-      cascade: "Непробиваемый (3\u00a0способа)",
+      amnezia: "Amnezia",
+      vless: "VLESS",
+      cascade: "Каскад",
+    },
+    /** Описание способа — под переключателем, не в подписи. */
+    methodHints: {
+      amnezia: "Без\u00a0кода",
+      vless_one_cmd: "В\u00a01\u00a0команду",
+      cascade: "Непробиваемый, 3\u00a0способа",
     },
 
     // --- Amnezia ---
     amnezia: {
       step1Title: "Арендуйте чистый VPS ($1–$4/мес)",
       step1Text: "Оплата картой РФ / СБП",
-      mailTitle: "Данные из письма хостинга на почте:",
+      mailTitle: "Данные из письма:",
       mailReady: "Готово",
       mailIp: "IP сервера:",
       mailIpValue: "45.142.214.88",
@@ -89,7 +95,7 @@ export const guides = {
       step3Title: "Проверка и закрепление в Заставе",
       step3Text: (ip: string) => `Текущий IP: \`${ip}\` · Защита от разрывов`,
       fallbackTitle: "Не подключается рекомендованный сервер в Amnezia?",
-      fallbackText: "Открыть вкладку «VLESS в 1 команду»",
+      fallbackText: "Открыть способ «VLESS»",
     },
 
     // --- VLESS в одну команду ---
@@ -130,7 +136,9 @@ export const guides = {
         },
       ],
       waysLabel: "Способ",
-      ways: ["Способ 1: Каскад / Xray", "Способ 2: CDN + XHTTP", "Способ 3: IPv6 + 3x-ui"],
+      ways: ["1 · Xray", "2 · CDN", "3 · IPv6"],
+      /** Описание способа — под переключателем. */
+      waysHints: ["Каскад / Xray", "CDN + XHTTP", "IPv6 + 3x-ui"],
       way1: {
         intro:
           "**Пошаговая инструкция (Способ 1):** войдите на ваш зарубежный VPS по SSH (`ssh root@IP`) и выполните команду №1. Если прямые зарубежные IP у вашего провайдера заблокированы — дополнительно арендуйте сервер в РФ (Timeweb) и выполните на нём команду №2.",

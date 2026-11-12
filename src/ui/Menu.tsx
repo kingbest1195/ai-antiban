@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { Button } from "./Button";
 import { Icon } from "./Icon";
@@ -33,15 +33,47 @@ export interface MenuProps {
   className?: string;
 }
 
+/** Отступ списка от края окна, px. */
+const EDGE = 16;
+
 /** Выпадающее меню «Ещё»: Esc и клик вне закрывают, стрелки двигают по пунктам. */
 export function Menu({ items, label = "Ещё", align = "end", className }: MenuProps) {
   const [open, setOpen] = useState(false);
+  /** Список перевёрнут относительно align: не помещался у своего края окна. */
+  const [flip, setFlip] = useState(false);
+  /** Сдвиг списка по горизонтали, px: прижимает к полю окна, если не помещается ни с одной стороны. */
+  const [shift, setShift] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listId = useId();
 
   useClickOutside(rootRef, open, () => setOpen(false));
+
+  // До отрисовки кадра: если список у стороны align выходит за край окна, берём противоположную сторону;
+  // если не помещается ни с одной, прижимаем к полю окна.
+  useLayoutEffect(() => {
+    if (!open) {
+      setFlip(false);
+      setShift(0);
+      return;
+    }
+    const list = listRef.current;
+    const trigger = triggerRef.current;
+    if (!list || !trigger) return;
+    const t = trigger.getBoundingClientRect();
+    const width = list.getBoundingClientRect().width;
+    const viewport = document.documentElement.clientWidth;
+    const fits = (left: number) => left >= EDGE && left + width <= viewport - EDGE;
+    const startLeft = t.left;
+    const endLeft = t.right - width;
+    const [preferred, other] = align === "start" ? [startLeft, endLeft] : [endLeft, startLeft];
+    const useFlip = !fits(preferred) && fits(other);
+    const left = useFlip ? other : preferred;
+    const clamped = Math.min(Math.max(left, EDGE), Math.max(EDGE, viewport - EDGE - width));
+    setFlip(useFlip);
+    setShift(clamped - left);
+  }, [open, align]);
 
   const enabledItems = () =>
     Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? []);
@@ -96,7 +128,7 @@ export function Menu({ items, label = "Ещё", align = "end", className }: Menu
   };
 
   return (
-    <div ref={rootRef} className={cx("zs-menu", align === "start" && "zs-menu--start", className)}>
+    <div ref={rootRef} className={cx("zs-menu", align === "start" && "zs-menu--start", flip && "zs-menu--flip", className)}>
       <Button
         ref={triggerRef}
         variant="quiet"
@@ -110,7 +142,15 @@ export function Menu({ items, label = "Ещё", align = "end", className }: Menu
         onKeyDown={onTriggerKey}
       />
       {open && (
-        <ul ref={listRef} id={listId} role="menu" aria-label={label} className="zs-menu__list" onKeyDown={onListKey}>
+        <ul
+          ref={listRef}
+          id={listId}
+          role="menu"
+          aria-label={label}
+          className="zs-menu__list"
+          style={shift ? { transform: `translateX(${shift}px)` } : undefined}
+          onKeyDown={onListKey}
+        >
           {items.map((entry) =>
             entry.type === "separator" ? (
               <li key={entry.id} role="separator" className="zs-menu__sep" />

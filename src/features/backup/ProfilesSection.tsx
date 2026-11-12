@@ -155,6 +155,14 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
 
   const menuFor = (p: ClaudeProfile, isActive: boolean): MenuEntry[] => {
     const items: MenuEntry[] = [];
+    if (!isActive) {
+      items.push({
+        id: "switch",
+        label: switchingId === p.id ? t.switching : t.switchTo,
+        disabled: switchingId === p.id,
+        onSelect: () => handleSwitch(p.id),
+      });
+    }
     if (ipKnown && p.bound_ip !== currentIp) {
       items.push({ id: "bind-ip", label: t.bindIp, icon: "lock", disabled: bindingId === p.id, onSelect: () => handleBindCurrentIp(p.id) });
     }
@@ -202,7 +210,6 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
               <Rows>
                 {profiles.map((p) => {
                   const isActive = p.id === activeProfileId;
-                  const isSwitching = switchingId === p.id;
                   const country = countryName(p.bound_country);
                   return (
                     <Row
@@ -211,7 +218,7 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
                       tone={isActive ? "ok" : "neutral"}
                       title={
                         <span className="zs-profile__name">
-                          {p.name}
+                          <span className="zs-profile__text">{p.name}</span>
                           {p.bound_upstream_key && (
                             <Badge tone="info" icon="key">
                               {t.keyBound}
@@ -220,33 +227,30 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
                         </span>
                       }
                       sub={
-                        <span className="zs-profile__sub">
-                          {p.bound_ip ? (
-                            <>
-                              {t.boundIp} <Mono>{p.bound_ip}</Mono>
-                              {country ? ` · ${country}` : ""}
-                            </>
-                          ) : (
-                            t.noIp
-                          )}
+                        <>
+                          <span className="zs-profile__line">
+                            {p.bound_ip ? (
+                              <>
+                                {t.boundIp} <Mono>{p.bound_ip}</Mono>
+                                {country ? ` · ${country}` : ""}
+                              </>
+                            ) : (
+                              t.noIp
+                            )}
+                          </span>
                           {p.isolated_device_id && (
-                            <>
-                              {" · "}
+                            <span className="zs-profile__line">
                               {t.deviceId} <Mono>{p.isolated_device_id.slice(0, 8)}</Mono>
-                            </>
+                            </span>
                           )}
-                        </span>
+                        </>
                       }
                       trail={
                         <>
-                          {isActive ? (
+                          {isActive && (
                             <Badge tone="ok" icon="check">
                               {t.active}
                             </Badge>
-                          ) : (
-                            <Button size="sm" disabled={isSwitching} onClick={() => handleSwitch(p.id)}>
-                              {isSwitching ? t.switching : t.switchTo}
-                            </Button>
                           )}
                           <Menu items={menuFor(p, isActive)} label={t.actionsLabel(p.name)} />
                         </>

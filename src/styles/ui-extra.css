@@ -48,9 +48,12 @@
 
 /* Menu */
 .zs-menu{position:relative;display:inline-flex}
-.zs-menu__list{position:absolute;z-index:30;top:calc(100% + var(--space-1));right:0;min-width:220px;max-width:min(320px,calc(100vw - var(--space-8)));margin:0;padding:var(--space-1);list-style:none;border-radius:var(--radius-md);background:var(--bg-2);box-shadow:var(--shadow-pop)}
+.zs-menu__list{position:absolute;z-index:30;top:calc(100% + var(--space-1));right:0;min-width:220px;width:max-content;max-width:min(320px,calc(100vw - var(--space-8)));margin:0;padding:var(--space-1);list-style:none;border-radius:var(--radius-md);background:var(--bg-2);box-shadow:var(--shadow-pop)}
 .zs-menu--start .zs-menu__list{left:0;right:auto}
-.zs-menu__item{display:flex;align-items:center;gap:var(--space-3);width:100%;min-height:36px;padding:6px var(--space-3);border:0;border-radius:var(--radius-sm);background:none;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+/* flip: список у противоположного края триггера (Menu переворачивает, если не влезает в окно) */
+.zs-menu--flip .zs-menu__list{left:0;right:auto}
+.zs-menu--start.zs-menu--flip .zs-menu__list{left:auto;right:0}
+.zs-menu__item{display:flex;align-items:center;gap:var(--space-3);width:100%;min-height:36px;padding:6px var(--space-3);border:0;border-radius:var(--radius-sm);background:none;color:var(--ink);font:inherit;text-align:left;white-space:nowrap;cursor:pointer}
 .zs-menu__item:hover,.zs-menu__item:focus-visible{background:var(--bg-3)}
 .zs-root .zs-menu__item:focus-visible{outline-offset:-2px}
 .zs-menu__item .zs-ic{color:var(--ink-2)}
@@ -87,6 +90,9 @@
 .zs-seg__opt:hover{color:var(--ink)}
 .zs-seg__opt[aria-checked=true]{background:var(--bg-3);color:var(--ink);font-weight:600}
 .zs-seg__opt:disabled{color:var(--ink-3);cursor:not-allowed}
+@media (max-width:440px){
+  .zs-seg__opt{font-size:12px}
+}
 
 /* Progress */
 .zs-progress__head{display:flex;justify-content:space-between;gap:var(--space-3);margin-bottom:6px;font-size:13px;line-height:18px;color:var(--ink-2)}
@@ -122,6 +128,8 @@
 @media (max-width:440px){
   .zs-tab{padding:0 var(--space-2)}
 }
+/* На случай, если вкладки не влезут (системный шрифт, масштаб): прокрутка вместо вылета за окно */
+.zs-tabs{overflow-x:auto}
 
 /* ExpandRow: раскрывающаяся строка списка. Заголовок — кнопка на всю ширину, подробности на слое bg-2 */
 .zs-xrow{border-top:1px solid var(--line)}

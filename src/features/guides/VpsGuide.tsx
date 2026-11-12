@@ -51,6 +51,7 @@ export function VpsGuide({ method, onMethodChange }: VpsGuideProps) {
           { value: "cascade", label: copy.vps.methods.cascade },
         ]}
       />
+      <p className="guides-note">{copy.vps.methodHints[method]}</p>
 
       {method === "amnezia" && <AmneziaMethod onMethodChange={onMethodChange} />}
       {method === "vless_one_cmd" && <VlessMethod />}
@@ -208,6 +209,7 @@ function CascadeMethod() {
                     { value: "3", label: t.ways[2] },
                   ]}
                 />
+                <p className="guides-note">{t.waysHints[way - 1]}</p>
                 {way === 1 && <WayOne />}
                 {way === 2 && <WayTwo />}
                 {way === 3 && <WayThree />}

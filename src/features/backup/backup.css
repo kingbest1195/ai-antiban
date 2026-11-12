@@ -4,7 +4,8 @@
 .zs-backup__block{margin-top:var(--space-3)}
 .zs-backup__block+.zs-backup__block{margin-top:var(--space-3)}
 .zs-path{display:block;margin-top:var(--space-1);color:var(--ink);overflow-wrap:anywhere}
-.zs-profile__name{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
-.zs-profile__sub{overflow-wrap:anywhere}
+.zs-profile__name{display:flex;flex-wrap:nowrap;align-items:center;gap:var(--space-2);min-width:0}
+.zs-profile__text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.zs-profile__line{display:block}
 .zs-backup__create{display:flex;flex-direction:column;gap:var(--space-3);margin:0}
 .zs-backup__create .zs-row{padding-left:0;padding-right:0}

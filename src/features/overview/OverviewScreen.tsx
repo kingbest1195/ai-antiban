@@ -366,7 +366,7 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
       </Badge>
       {model.providerName && <Badge>{model.providerName}</Badge>}
       {extra}
-      <Menu items={menu} label={copy.ipMenu.label} align="start" className="-my-1" />
+      <Menu items={menu} label={copy.ipMenu.label} align="end" className="-my-1" />
     </>
   );
 }
