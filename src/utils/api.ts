@@ -484,15 +484,10 @@ export async function checkForUpdates(): Promise<UpdateCheckResult> {
   };
 }
 
-export async function installUpdate(
-  downloadUrl: string,
-  assetName: string
-): Promise<InstallUpdateResult> {
+/** Установка подписанного обновления. Ничего не принимает: адрес и подпись бэкенд берёт из latest.json. */
+export async function installUpdate(): Promise<InstallUpdateResult> {
   if (isTauri()) {
-    return await invoke<InstallUpdateResult>("install_update", {
-      downloadUrl,
-      assetName,
-    });
+    return await invoke<InstallUpdateResult>("install_update");
   }
   return {
     success: true,
