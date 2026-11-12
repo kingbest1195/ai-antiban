@@ -149,6 +149,13 @@ jobs:
         run: |
           set -euo pipefail
           args=(--repo "$REPO" --tag "$TAG" --dl-dir "$RUNNER_TEMP/release-assets")
+          # Tag v2.1.0-rc.1 is built from config version 2.1.0-1 (MSI needs a numeric
+          # pre-release); accept both unless the repository variable says otherwise.
+          if [ -z "${VERIFY_VERSIONS:-}" ]; then
+            case "$TAG" in
+              v*-rc.*) base="${TAG#v}"; VERIFY_VERSIONS="${base},${base%-rc.*}-${base##*-rc.}" ;;
+            esac
+          fi
           if [ -n "${VERIFY_VERSIONS:-}" ]; then args+=(--version "$VERIFY_VERSIONS"); fi
           node scripts/verify-release.mjs "${args[@]}"
 
