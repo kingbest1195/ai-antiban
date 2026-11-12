@@ -74,6 +74,8 @@ pub type AuditFn =
     Arc<dyn Fn(ProviderId, bool) -> BoxFuture<Result<RiskReport, String>> + Send + Sync>;
 /// Fetches the current egress IP; `None` when offline. Production: [`NetworkGuard::probe_ip`].
 pub type ProbeFn = Arc<dyn Fn() -> BoxFuture<Option<String>> + Send + Sync>;
+/// Egress telemetry for a manual override (`accept_current`). Production: the resolver.
+pub type ResolveFn = Arc<dyn Fn() -> BoxFuture<Result<NetworkTelemetry, String>> + Send + Sync>;
 /// Outcome of [`audit_all`]: one entry per provider in the fixed order anthropic, openai, gemini.
 pub type AuditResults = Vec<(ProviderId, Result<RiskReport, String>)>;
 
@@ -123,6 +125,7 @@ pub(crate) struct Env {
     io: Arc<dyn GuardIo>,
     audit: AuditFn,
     probe: Option<ProbeFn>,
+    resolve: Option<ResolveFn>,
     audit_timeout: Duration,
 }
 
@@ -140,7 +143,15 @@ impl Env {
             io: Arc::new(TauriIo { app: ctx.app }),
             audit,
             probe: None,
+            resolve: None,
             audit_timeout: Duration::from_secs(AUDIT_TIMEOUT_SECS),
+        }
+    }
+
+    async fn resolve_telemetry(&self) -> Result<NetworkTelemetry, String> {
+        match &self.resolve {
+            Some(resolve) => resolve().await,
+            None => self.auditor.resolver.resolve(false).await,
         }
     }
 
@@ -167,6 +178,9 @@ struct Pending {
     epoch: u64,
     /// Telemetry of the new network; `None` until the audit has finished (or when it failed).
     tel: Option<NetworkTelemetry>,
+    /// Background clean-up of the old network's allowances / blocks. Whoever decides for this
+    /// alert awaits it first, so the clean-up can never land after the decision's own writes.
+    clear_old_state: Option<JoinHandle<()>>,
 }
 
 #[derive(Default)]
@@ -395,9 +409,9 @@ pub async fn gate_closed(rx: &mut watch::Receiver<Gate>) {
 enum TickPlan {
     Done,
     /// The route changed (or was reported changed by a CONNECT): probe at once, ignore the min gap.
-    ProbeChanged(Instant),
-    /// Regular periodic probe.
-    ProbeRegular,
+    ProbeChanged(Instant, String),
+    /// Regular periodic probe. Both carry the route fingerprint the plan was made for.
+    ProbeRegular(String),
 }
 
 impl NetworkGuard {
@@ -701,20 +715,31 @@ impl NetworkGuard {
         };
 
         if route_changed {
-            inner.last_route_fp = Some(current_fp);
+            inner.last_route_fp = Some(current_fp.clone());
             // 1. Immediately freeze gate (so zero packets leak during the probe!)
             self.set_gate(Gate::Pending);
-            return TickPlan::ProbeChanged(dirty_since.unwrap_or_else(Instant::now));
+            return TickPlan::ProbeChanged(dirty_since.unwrap_or_else(Instant::now), current_fp);
         }
 
-        inner.last_route_fp = Some(current_fp);
+        inner.last_route_fp = Some(current_fp.clone());
 
         if let Some(t) = inner.last_probe {
             if t.elapsed() < Duration::from_millis(PROBE_MIN_GAP_MS) {
                 return TickPlan::Done;
             }
         }
-        TickPlan::ProbeRegular
+        TickPlan::ProbeRegular(current_fp)
+    }
+
+    /// True when the route moved (or a CONNECT flagged it) while a probe was in flight. Such a
+    /// probe may have travelled over the old route, so it must never open the gate: the gate is
+    /// kept closed and the next tick (fingerprint differs / `route_dirty`) handles the change.
+    fn probe_is_stale(&self, inner: &Inner, planned_fp: &str) -> bool {
+        let stale = inner.route_dirty || compute_local_route_fingerprint(None) != planned_fp;
+        if stale && self.gate() == Gate::Open {
+            self.set_gate(Gate::Pending);
+        }
+        stale
     }
 
     async fn check_route_and_tick(self: &Arc<Self>, env: &Env) {
@@ -726,16 +751,18 @@ impl NetworkGuard {
 
         match self.plan_tick(current_fp, &unrouted).await {
             TickPlan::Done => {}
-            TickPlan::ProbeChanged(t0) => {
+            TickPlan::ProbeChanged(t0, planned_fp) => {
                 // 2. Probe external IP (no lock held: other tasks keep working meanwhile)
                 let probed = self.probe(env).await;
                 let mut inner = self.inner.lock().await;
-                self.apply_changed_probe(env, &mut inner, probed, t0).await;
+                self.apply_changed_probe(env, &mut inner, probed, t0, &planned_fp)
+                    .await;
             }
-            TickPlan::ProbeRegular => {
+            TickPlan::ProbeRegular(planned_fp) => {
                 let probed = self.probe(env).await;
                 let mut inner = self.inner.lock().await;
-                self.apply_regular_probe(env, &mut inner, probed).await;
+                self.apply_regular_probe(env, &mut inner, probed, &planned_fp)
+                    .await;
             }
         }
     }
@@ -747,6 +774,7 @@ impl NetworkGuard {
         inner: &mut Inner,
         probed: Option<String>,
         t0: Instant,
+        planned_fp: &str,
     ) {
         inner.last_probe = Some(Instant::now());
 
@@ -764,6 +792,9 @@ impl NetworkGuard {
             if baseline_ip.as_deref() == Some(new_ip.as_str()) {
                 // The external IP did NOT change at all — local utun refresh on macOS (e.g. Amnezia)!
                 if baseline_trusted {
+                    if self.probe_is_stale(inner, planned_fp) {
+                        return; // the route moved again meanwhile: the next tick decides
+                    }
                     if inner.pending.is_some() {
                         // An alert for another network is still open: the old network is back.
                         self.restore_locked(env, inner).await;
@@ -801,6 +832,7 @@ impl NetworkGuard {
         env: &Env,
         inner: &mut Inner,
         probed: Option<String>,
+        planned_fp: &str,
     ) {
         inner.last_probe = Some(Instant::now());
         let t0 = Instant::now();
@@ -841,6 +873,9 @@ impl NetworkGuard {
         if ip == baseline_ip {
             if baseline_trusted {
                 if self.gate() != Gate::Open {
+                    if self.probe_is_stale(inner, planned_fp) {
+                        return; // the route moved again meanwhile: the next tick decides
+                    }
                     self.restore_locked(env, inner).await;
                 } else {
                     inner.handled_ip = None;
@@ -1009,6 +1044,7 @@ impl NetworkGuard {
             id: id.clone(),
             epoch,
             tel: Some(tel.clone()),
+            clear_old_state: None,
         });
 
         let payload = RiskInterceptPayload {
@@ -1034,7 +1070,7 @@ impl NetworkGuard {
         env.emit("network://changed", &worst);
 
         // 5. Wait for the decision in the background.
-        self.spawn_decision_waiter(env, id, epoch, rx, None);
+        self.spawn_decision_waiter(env, id, epoch, rx);
     }
 
     /// `AskPopup` and the new IP is not the pinned one: the gate is already `Pending`; emit the
@@ -1055,7 +1091,10 @@ impl NetworkGuard {
         }
         inner.handled_ip = Some(new_ip.clone());
 
-        let clear_old_state = self.spawn_clear_old_network_state(env);
+        // The audit must not see telemetry cached for the previous network. This is the last
+        // await before the alert, its audit and its waiter all exist: a cancelled tick cannot
+        // leave a window without an audit and without the TTL block.
+        env.auditor.resolver.invalidate_cache().await;
 
         let id = Uuid::new_v4().to_string();
         let rx = env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
@@ -1064,6 +1103,7 @@ impl NetworkGuard {
             id: id.clone(),
             epoch,
             tel: None,
+            clear_old_state: Some(self.spawn_clear_old_network_state(env)),
         });
 
         let provider = unrouted
@@ -1089,9 +1129,9 @@ impl NetworkGuard {
         log_timing(&id, "risk_detected_emitted", t0);
         env.io.show_alert_popup(Some((id.clone(), t0)));
         log_timing(&id, "popup_show_queued", t0);
+        // Gate is Pending: the tray must not stay green while the window asks.
+        env.io.tray_status("yellow", None);
 
-        // The audit must not see telemetry cached for the previous network.
-        env.auditor.resolver.invalidate_cache().await;
         let audit_env = env.clone();
         let audit = tokio::spawn(async move { audit_all(&audit_env.audit).await });
         let audit_abort = audit.abort_handle();
@@ -1104,7 +1144,9 @@ impl NetworkGuard {
             let results = match tokio::time::timeout(env2.audit_timeout, audit).await {
                 Ok(Ok(results)) => Some(results),
                 Ok(Err(e)) => {
-                    eprintln!("Network guard: audit task ended abnormally: {e}");
+                    if !e.is_cancelled() {
+                        eprintln!("Network guard: audit task ended abnormally: {e}");
+                    }
                     None
                 }
                 Err(_) => {
@@ -1118,7 +1160,7 @@ impl NetworkGuard {
                 .await;
         });
 
-        self.spawn_decision_waiter(env, id, epoch, rx, Some(clear_old_state));
+        self.spawn_decision_waiter(env, id, epoch, rx);
     }
 
     /// Delivers the result of the background audit. Applied only to the alert it was started for
@@ -1154,6 +1196,7 @@ impl NetworkGuard {
                 };
                 env.hold_queue.update_alert(&enriched);
                 env.emit("interceptor://enriched", &enriched);
+                env.io.tray_status("red", None);
                 log_timing(id, "enriched_failed", t0);
             }
             Some(summary) => {
@@ -1190,17 +1233,12 @@ impl NetworkGuard {
         id: String,
         epoch: u64,
         rx: oneshot::Receiver<HoldResolution>,
-        clear_old_state: Option<JoinHandle<()>>,
     ) {
         let guard = Arc::clone(self);
         let env = env.clone();
         tokio::spawn(async move {
             let res = tokio::time::timeout(Duration::from_secs(DEFAULT_HOLD_TTL_SECS), rx).await;
             let allow = matches!(res, Ok(Ok(HoldResolution::Allow)));
-            if let Some(clear) = clear_old_state {
-                // The old network's clean-up lands before anything this decision writes.
-                let _ = clear.await;
-            }
 
             let mut inner = guard.inner.lock().await;
             if !inner.is_current(&id, epoch) {
@@ -1208,32 +1246,42 @@ impl NetworkGuard {
             }
             let pending = inner.invalidate_alert();
             env.hold_queue.remove(&id).await;
-            let tel = pending.and_then(|p| p.tel);
+            let (tel, clear_old_state) = match pending {
+                Some(p) => (p.tel, p.clear_old_state),
+                None => (None, None),
+            };
+            if let Some(clear) = clear_old_state {
+                // The old network's clean-up lands before anything this decision writes.
+                let _ = clear.await;
+            }
 
+            // An allow is honoured only for a network that was audited (telemetry known). An
+            // allow before / without the audit is NOT a decision about anything the user saw.
             if allow {
-                let tel = match tel {
-                    Some(tel) => Some(tel),
-                    // Allowed before / without the audit: take what the resolver can tell now.
-                    None => env.auditor.resolver.resolve(false).await.ok(),
-                };
                 if let Some(tel) = tel {
                     let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
                     guard.accept_locked(&env, &mut inner, &ip, &tel).await;
                     return;
                 }
-                eprintln!("Network guard: network cannot be verified, traffic stays blocked");
+                eprintln!("Network guard: allow without a finished audit, traffic stays blocked");
             }
             for p in env.state.unrouted_providers().await {
                 let _ = env.state.block_provider(p).await;
             }
             guard.set_gate(Gate::Blocked);
             guard.hide_popup(&env);
-            guard.refresh_tray(&env).await;
+            guard.spawn_refresh_tray(&env);
         });
     }
 
     /// Confirms the current network as the new trusted baseline and resumes traffic.
-    async fn accept_locked(&self, env: &Env, inner: &mut Inner, ip: &str, tel: &NetworkTelemetry) {
+    async fn accept_locked(
+        self: &Arc<Self>,
+        env: &Env,
+        inner: &mut Inner,
+        ip: &str,
+        tel: &NetworkTelemetry,
+    ) {
         inner.baseline = Some(Baseline {
             ip: ip.to_string(),
             country: Some(tel.country_code.clone()),
@@ -1254,11 +1302,11 @@ impl NetworkGuard {
         self.set_gate(Gate::Open);
         self.hide_popup(env);
         env.emit("network://changed", &());
-        self.refresh_tray(env).await;
+        self.spawn_refresh_tray(env);
     }
 
     /// The previous (trusted) IP is back: resume traffic.
-    async fn restore_locked(&self, env: &Env, inner: &mut Inner) {
+    async fn restore_locked(self: &Arc<Self>, env: &Env, inner: &mut Inner) {
         if let Some(p) = inner.invalidate_alert() {
             env.hold_queue.remove(&p.id).await;
         }
@@ -1270,10 +1318,12 @@ impl NetworkGuard {
         self.set_gate(Gate::Open);
         self.hide_popup(env);
         env.emit("network://changed", &());
-        self.refresh_tray(env).await;
+        self.spawn_refresh_tray(env);
     }
 
     /// Manual override from the main window ("Разблокировать и разрешить доступ").
+    /// If the current network cannot be resolved, nothing is opened: the gate stays as it is
+    /// (an unverifiable network is never confirmed by a side effect).
     pub async fn accept_current(self: &Arc<Self>) {
         let Some(env) = self.env.get() else {
             return;
@@ -1286,17 +1336,55 @@ impl NetworkGuard {
         if self.gate() == Gate::Open {
             return;
         }
-        if let Ok(tel) = env.auditor.resolver.resolve(false).await {
-            let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
-            self.accept_locked(env, &mut inner, &ip, &tel).await;
-        } else {
-            // The user's explicit override. The open alert is withdrawn so that a late audit
-            // result cannot be applied to it.
-            if let Some(p) = inner.invalidate_alert() {
-                env.hold_queue.remove(&p.id).await;
+        match env.resolve_telemetry().await {
+            Ok(tel) => {
+                let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
+                self.accept_locked(env, &mut inner, &ip, &tel).await;
             }
-            self.set_gate(Gate::Open);
+            Err(e) => {
+                eprintln!("Network guard: cannot confirm the network, gate stays closed: {e}")
+            }
         }
+    }
+
+    /// The user's "allow" for the network alert `id` (command layer). Accepted only while that
+    /// alert is still the current one (same id and epoch) AND its audit finished (`phase ==
+    /// "ready"`); otherwise nothing is opened or written and an error goes back to the window.
+    /// The session allowances for `providers` are written under the same lock, so a newer
+    /// change cannot interleave between the check and the decision.
+    pub async fn allow_network_alert(
+        self: &Arc<Self>,
+        id: &str,
+        providers: &[String],
+    ) -> Result<(), String> {
+        let env = self.env.get().ok_or("network guard is not running")?;
+        if self.is_manual_killswitch() {
+            return Err("manual kill-switch is engaged".to_string());
+        }
+        let mut inner = self.inner.lock().await;
+        let epoch = inner.epoch;
+        if !inner.is_current(id, epoch) {
+            return Err("this alert is no longer current".to_string());
+        }
+        let Some(tel) = inner.pending.as_ref().and_then(|p| p.tel.clone()) else {
+            return Err("the network audit is not finished".to_string());
+        };
+        if let Some(clear) = inner
+            .pending
+            .as_mut()
+            .and_then(|p| p.clear_old_state.take())
+        {
+            let _ = clear.await;
+        }
+        for p in providers {
+            env.state
+                .allow_provider_for_session(p)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
+        self.accept_locked(env, &mut inner, &ip, &tel).await;
+        Ok(())
     }
 
     fn hide_popup(&self, env: &Env) {
@@ -1318,10 +1406,16 @@ impl NetworkGuard {
         env.io.tray_report(report, is_pinned, held);
     }
 
-    async fn refresh_tray(&self, env: &Env) {
-        if let Ok(report) = (env.audit)(ProviderId::Anthropic, false).await {
-            self.update_tray(env, &report).await;
-        }
+    /// Re-reads the status for the tray in the background (a full audit: 0.3-2 s must never be
+    /// spent under `tick_lock` / `inner`).
+    fn spawn_refresh_tray(self: &Arc<Self>, env: &Env) {
+        let guard = Arc::clone(self);
+        let env = env.clone();
+        tokio::spawn(async move {
+            if let Ok(report) = (env.audit)(ProviderId::Anthropic, false).await {
+                guard.update_tray(&env, &report).await;
+            }
+        });
     }
 }
 
@@ -1478,10 +1572,12 @@ mod tests {
     use crate::auditor::CheckResult;
     use crate::state::InterceptionBehavior;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::Instant as TInstant;
 
     #[derive(Default)]
     struct TestIo {
-        events: std::sync::Mutex<Vec<(String, serde_json::Value, Instant)>>,
+        events: std::sync::Mutex<Vec<(String, serde_json::Value, TInstant)>>,
+        trays: std::sync::Mutex<Vec<String>>,
         shows: AtomicUsize,
         hides: AtomicUsize,
     }
@@ -1500,14 +1596,14 @@ mod tests {
             self.names().iter().filter(|n| *n == name).count()
         }
 
-        fn first(&self, name: &str) -> Option<(serde_json::Value, Instant)> {
+        fn first(&self, name: &str) -> Option<(serde_json::Value, TInstant)> {
             let ev = self.events.lock().unwrap();
             ev.iter().find(|e| e.0 == name).map(|e| (e.1.clone(), e.2))
         }
 
-        async fn wait_for(&self, name: &str, ms: u64) -> Option<(serde_json::Value, Instant)> {
-            let deadline = Instant::now() + Duration::from_millis(ms);
-            while Instant::now() < deadline {
+        async fn wait_for(&self, name: &str, ms: u64) -> Option<(serde_json::Value, TInstant)> {
+            let deadline = TInstant::now() + Duration::from_millis(ms);
+            while TInstant::now() < deadline {
                 if let Some(e) = self.first(name) {
                     return Some(e);
                 }
@@ -1522,7 +1618,7 @@ mod tests {
             self.events
                 .lock()
                 .unwrap()
-                .push((event.to_string(), payload, Instant::now()));
+                .push((event.to_string(), payload, TInstant::now()));
         }
 
         fn show_alert_popup(&self, _timing: Option<(String, Instant)>) {
@@ -1535,7 +1631,9 @@ mod tests {
 
         fn tray_report(&self, _report: &RiskReport, _pinned: bool, _blocked: bool) {}
 
-        fn tray_status(&self, _color: &str, _title: Option<&str>) {}
+        fn tray_status(&self, color: &str, _title: Option<&str>) {
+            self.trays.lock().unwrap().push(color.to_string());
+        }
     }
 
     fn test_report(provider: ProviderId, status: OverallStatus, ip: &str, cc: &str) -> RiskReport {
@@ -1585,6 +1683,14 @@ mod tests {
     }
 
     async fn harness(audit: AuditFn, probe_ip: &'static str) -> Harness {
+        harness_env(audit, probe_ip, |_| {}).await
+    }
+
+    async fn harness_env(
+        audit: AuditFn,
+        probe_ip: &'static str,
+        tweak: impl FnOnce(&mut Env),
+    ) -> Harness {
         let io = Arc::new(TestIo::default());
         let state = AppState::new_in_memory();
         let probes = Arc::new(AtomicUsize::new(0));
@@ -1593,15 +1699,17 @@ mod tests {
             probes2.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move { Some(probe_ip.to_string()) })
         });
-        let env = Env {
+        let mut env = Env {
             auditor: Auditor::new().expect("auditor"),
             state: state.clone(),
             hold_queue: Arc::new(HoldQueue::new()),
             io: io.clone(),
             audit,
             probe: Some(probe),
+            resolve: None,
             audit_timeout: Duration::from_secs(5),
         };
+        tweak(&mut env);
         let guard = Arc::new(NetworkGuard::new());
         assert!(guard.install_env(env.clone()));
         {
@@ -1630,18 +1738,18 @@ mod tests {
         }
     }
 
-    fn alert_id(ev: &(serde_json::Value, Instant)) -> String {
+    fn alert_id(ev: &(serde_json::Value, TInstant)) -> String {
         ev.0["id"].as_str().expect("id").to_string()
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(start_paused = true)]
     async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
         let h = harness(
             slow_audit(Duration::from_secs(2), "9.9.9.9", OverallStatus::Red),
             "9.9.9.9",
         )
         .await;
-        let started = Instant::now();
+        let started = TInstant::now();
         h.change("9.9.9.9").await;
 
         // risk-detected comes out at once, long before the 2 s audit is done.
@@ -1659,6 +1767,11 @@ mod tests {
         assert_eq!(detected["network_change"]["new_ip"], "9.9.9.9");
         assert!(detected["network_change"]["new_country"].is_null());
         assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+        // The tray does not stay green while the gate is Pending.
+        assert_eq!(
+            h.io.trays.lock().unwrap().first().map(String::as_str),
+            Some("yellow")
+        );
         // The gate has been closed since detection; nothing is enriched yet.
         assert_eq!(h.guard.gate(), Gate::Pending);
         assert_eq!(h.io.count("interceptor://enriched"), 0);
@@ -1698,7 +1811,7 @@ mod tests {
         assert!(snapshot.report.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_stale_enriched_is_ignored() {
         let h = harness(
             slow_audit(Duration::from_millis(100), "9.9.9.9", OverallStatus::Yellow),
@@ -1758,7 +1871,7 @@ mod tests {
         assert_eq!(h.guard.gate(), Gate::Pending);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_accept_cancels_inflight_audit() {
         let h = harness(
             slow_audit(Duration::from_millis(300), "9.9.9.9", OverallStatus::Yellow),
@@ -1782,7 +1895,7 @@ mod tests {
         assert!(h.env.hold_queue.current_alert().is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_pinned_ip_with_green_audit_shows_no_window() {
         let h = harness(
             slow_audit(Duration::from_millis(20), "9.9.9.9", OverallStatus::Green),
@@ -1805,7 +1918,7 @@ mod tests {
         assert!(inner.pending.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_silent_behavior_keeps_audit_first_order() {
         let h = harness(
             slow_audit(Duration::from_millis(20), "9.9.9.9", OverallStatus::Yellow),
@@ -1824,7 +1937,7 @@ mod tests {
         assert_eq!(h.io.count("network://changed"), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_audit_failure_keeps_gate_closed_and_does_not_reopen_window() {
         let failing: AuditFn = Arc::new(|_, _| Box::pin(async { Err("geo down".to_string()) }));
         let h = harness(failing, "9.9.9.9").await;
@@ -1835,6 +1948,10 @@ mod tests {
                 .await
                 .expect("enriched");
         assert_eq!(enriched.0["phase"], "failed");
+        assert_eq!(
+            h.io.trays.lock().unwrap().last().map(String::as_str),
+            Some("red")
+        );
         assert!(enriched.0["report"].is_null());
         assert_eq!(enriched.0["network_change"]["new_ip"], "9.9.9.9");
         assert!(enriched.0["network_change"]["new_country"].is_null());
@@ -1859,7 +1976,7 @@ mod tests {
         assert_eq!(snapshot.phase, "failed");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_audit_timeout_is_a_failure() {
         let mut h = harness(
             slow_audit(Duration::from_secs(10), "9.9.9.9", OverallStatus::Green),
@@ -1881,7 +1998,7 @@ mod tests {
         assert_eq!(h.guard.gate(), Gate::Pending);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_decision_block_and_allow_after_enriched() {
         // Deny right away (audit still running): providers blocked, gate Blocked, popup hidden.
         let h = harness(
@@ -1937,7 +2054,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_route_dirty_bypasses_probe_min_gap() {
         let h = harness(
             slow_audit(Duration::from_millis(10), "1.1.1.1", OverallStatus::Green),
@@ -1966,7 +2083,7 @@ mod tests {
         assert_eq!(h.guard.gate(), Gate::Open);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_route_dirty_with_new_ip_opens_window_immediately() {
         let h = harness(
             slow_audit(Duration::from_secs(1), "9.9.9.9", OverallStatus::Red),
@@ -1980,7 +2097,7 @@ mod tests {
             inner.route_dirty = true;
         }
         h.guard.set_gate(Gate::Pending);
-        let started = Instant::now();
+        let started = TInstant::now();
         let env = h.env.clone();
         h.guard.check_route_and_tick(&env).await;
         assert!(started.elapsed() < Duration::from_millis(300));
@@ -1988,7 +2105,7 @@ mod tests {
         assert_eq!(h.guard.gate(), Gate::Pending);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_audit_all_forces_only_first_and_isolates_failures() {
         let calls: Arc<std::sync::Mutex<Vec<(ProviderId, bool)>>> = Arc::default();
         let calls2 = Arc::clone(&calls);
@@ -2049,5 +2166,335 @@ mod tests {
         assert!(!s.all_green);
         let s = summarize(&r, &["anthropic", "gemini"]).unwrap();
         assert!(s.all_green);
+    }
+
+    // ---- review fixes: stale probe, stale / premature allow, TTL, cancellation ----
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn all_providers() -> Vec<String> {
+        KNOWN_PROVIDERS.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_stale_probe_never_opens_gate() {
+        // The route moves (a CONNECT sees it) while the tick's probe is in flight, and the probe
+        // still answers with the old, trusted baseline IP.
+        let slot: Arc<std::sync::OnceLock<Arc<NetworkGuard>>> = Arc::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (slot2, calls2) = (Arc::clone(&slot), Arc::clone(&calls));
+        let h = harness_env(
+            slow_audit(Duration::from_millis(50), "9.9.9.9", OverallStatus::Yellow),
+            "1.1.1.1",
+            move |env| {
+                env.probe = Some(Arc::new(move || {
+                    let first = calls2.fetch_add(1, Ordering::SeqCst) == 0;
+                    let guard = slot2.get().cloned();
+                    Box::pin(async move {
+                        if first {
+                            let g = guard.expect("guard");
+                            assert!(g.check_route_fingerprint_sync(Some("moved")));
+                            Some("1.1.1.1".to_string())
+                        } else {
+                            Some("9.9.9.9".to_string())
+                        }
+                    })
+                }));
+            },
+        )
+        .await;
+        slot.set(Arc::clone(&h.guard)).ok();
+        {
+            let mut inner = h.guard.inner.lock().await;
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+        }
+        h.guard.set_gate(Gate::Pending);
+        let env = h.env.clone();
+
+        h.guard.check_route_and_tick(&env).await;
+        assert_eq!(
+            h.guard.gate(),
+            Gate::Pending,
+            "stale probe must not open the gate"
+        );
+        assert!(
+            h.guard.inner.lock().await.route_dirty,
+            "change stays flagged"
+        );
+        assert_eq!(h.io.count("network://changed"), 0);
+        assert_eq!(h.io.hides.load(Ordering::SeqCst), 0);
+
+        // The next tick handles the change at once and opens the window for the new network.
+        h.guard.check_route_and_tick(&env).await;
+        assert_eq!(h.io.count("interceptor://risk-detected"), 1);
+        assert_eq!(h.guard.gate(), Gate::Pending);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_allow_for_superseded_alert_changes_nothing() {
+        let h = harness(
+            slow_audit(Duration::from_millis(20), "9.9.9.9", OverallStatus::Yellow),
+            "9.9.9.9",
+        )
+        .await;
+        h.change("9.9.9.9").await;
+        let ev =
+            h.io.wait_for("interceptor://enriched", 2000)
+                .await
+                .expect("enriched");
+        let id1 = ev.0["id"].as_str().unwrap().to_string();
+
+        // A new change C arrives; the user's allow for alert 1 reaches the guard afterwards.
+        h.change("8.8.8.8").await;
+        let err = h.guard.allow_network_alert(&id1, &all_providers()).await;
+        assert!(err.is_err());
+        assert_eq!(h.guard.gate(), Gate::Pending);
+        let inner = h.guard.inner.lock().await;
+        assert_eq!(
+            inner.baseline.as_ref().map(|b| b.ip.as_str()),
+            Some("1.1.1.1")
+        );
+        let id2 = inner.pending.as_ref().expect("alert 2 alive").id.clone();
+        drop(inner);
+        assert_ne!(id1, id2);
+        assert_eq!(h.env.hold_queue.current_alert().map(|a| a.id), Some(id2));
+        for p in KNOWN_PROVIDERS {
+            assert!(!h.state.is_provider_blocked(p).await);
+            assert!(!h.state.is_provider_session_allowed(p).await);
+        }
+        let mut rx = h.guard.subscribe();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), wait_open(&mut rx))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_network_allow_only_when_ready() {
+        // detecting: refused, nothing changes.
+        let h = harness(
+            slow_audit(Duration::from_millis(300), "9.9.9.9", OverallStatus::Yellow),
+            "9.9.9.9",
+        )
+        .await;
+        h.change("9.9.9.9").await;
+        let id = alert_id(&h.io.first("interceptor://risk-detected").unwrap());
+        assert!(
+            h.guard
+                .allow_network_alert(&id, &all_providers())
+                .await
+                .is_err()
+        );
+        assert_eq!(h.guard.gate(), Gate::Pending);
+        assert!(h.env.hold_queue.current_alert().is_some());
+        assert!(!h.state.is_provider_session_allowed("anthropic").await);
+
+        // ready: accepted, gate opens, session allowances written, alert gone.
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("enriched");
+        h.guard
+            .allow_network_alert(&id, &all_providers())
+            .await
+            .expect("allowed");
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert!(h.state.is_provider_session_allowed("anthropic").await);
+        assert!(h.env.hold_queue.current_alert().is_none());
+        assert_eq!(
+            h.guard
+                .inner
+                .lock()
+                .await
+                .baseline
+                .as_ref()
+                .map(|b| b.ip.as_str()),
+            Some("9.9.9.9")
+        );
+        // The same allow again (stale id) is refused.
+        assert!(
+            h.guard
+                .allow_network_alert(&id, &all_providers())
+                .await
+                .is_err()
+        );
+
+        // failed: refused as well, window and gate stay.
+        let failing: AuditFn = Arc::new(|_, _| Box::pin(async { Err("geo down".to_string()) }));
+        let h = harness(failing, "9.9.9.9").await;
+        h.change("9.9.9.9").await;
+        let ev =
+            h.io.wait_for("interceptor://enriched", 3000)
+                .await
+                .expect("failed");
+        assert_eq!(ev.0["phase"], "failed");
+        let id = ev.0["id"].as_str().unwrap().to_string();
+        assert!(
+            h.guard
+                .allow_network_alert(&id, &all_providers())
+                .await
+                .is_err()
+        );
+        assert_eq!(h.guard.gate(), Gate::Pending);
+        assert!(h.env.hold_queue.current_alert().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_allow_without_audit_never_opens_gate() {
+        // An allow that reaches the waiter before the audit finished is not honoured.
+        let h = harness(
+            slow_audit(Duration::from_secs(5), "9.9.9.9", OverallStatus::Yellow),
+            "9.9.9.9",
+        )
+        .await;
+        h.change("9.9.9.9").await;
+        let id = alert_id(&h.io.first("interceptor://risk-detected").unwrap());
+        assert!(h.env.hold_queue.resolve(&id, HoldResolution::Allow).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+        assert_ne!(h.guard.gate(), Gate::Open);
+        assert!(h.state.is_provider_blocked("anthropic").await);
+        assert_eq!(
+            h.guard
+                .inner
+                .lock()
+                .await
+                .baseline
+                .as_ref()
+                .map(|b| b.ip.as_str()),
+            Some("1.1.1.1")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_accept_current_error_does_not_open_gate() {
+        let tel =
+            test_report(ProviderId::Anthropic, OverallStatus::Green, "9.9.9.9", "NL").telemetry;
+        let ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ok2 = Arc::clone(&ok);
+        let h = harness_env(
+            slow_audit(Duration::from_millis(20), "9.9.9.9", OverallStatus::Yellow),
+            "9.9.9.9",
+            move |env| {
+                env.resolve = Some(Arc::new(move || {
+                    let tel = tel.clone();
+                    let ok = ok2.load(Ordering::SeqCst);
+                    Box::pin(async move {
+                        if ok {
+                            Ok(tel)
+                        } else {
+                            Err("offline".to_string())
+                        }
+                    })
+                }));
+            },
+        )
+        .await;
+        h.change("9.9.9.9").await;
+        let hides = h.io.hides.load(Ordering::SeqCst);
+
+        h.guard.accept_current().await;
+        assert_eq!(
+            h.guard.gate(),
+            Gate::Pending,
+            "unverifiable network stays closed"
+        );
+        assert!(
+            h.env.hold_queue.current_alert().is_some(),
+            "alert is untouched"
+        );
+        assert_eq!(h.io.hides.load(Ordering::SeqCst), hides);
+
+        ok.store(true, Ordering::SeqCst);
+        h.guard.accept_current().await;
+        assert_eq!(h.guard.gate(), Gate::Open);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_hold_ttl_blocks_a_ready_alert() {
+        let h = harness(
+            slow_audit(Duration::from_millis(20), "9.9.9.9", OverallStatus::Yellow),
+            "9.9.9.9",
+        )
+        .await;
+        h.change("9.9.9.9").await;
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("enriched");
+        assert_eq!(h.guard.gate(), Gate::Pending);
+
+        tokio::time::sleep(Duration::from_secs(DEFAULT_HOLD_TTL_SECS - 1)).await;
+        assert_eq!(h.guard.gate(), Gate::Pending);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+        assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
+        for p in KNOWN_PROVIDERS {
+            assert!(h.state.is_provider_blocked(p).await);
+        }
+        assert!(h.env.hold_queue.current_alert().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_default_audit_timeout_then_ttl_blocks() {
+        // A hanging audit: failed after AUDIT_TIMEOUT_SECS, the hold TTL then blocks.
+        let hanging: AuditFn = Arc::new(|_, _| Box::pin(std::future::pending()));
+        let h = harness_env(hanging, "9.9.9.9", |env| {
+            env.audit_timeout = Duration::from_secs(AUDIT_TIMEOUT_SECS);
+        })
+        .await;
+        h.change("9.9.9.9").await;
+
+        tokio::time::sleep(Duration::from_secs(AUDIT_TIMEOUT_SECS - 1)).await;
+        assert_eq!(h.io.count("interceptor://enriched"), 0);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let failed =
+            h.io.first("interceptor://enriched")
+                .expect("failed after the timeout");
+        assert_eq!(failed.0["phase"], "failed");
+        assert_eq!(h.guard.gate(), Gate::Pending);
+
+        tokio::time::sleep(Duration::from_secs(DEFAULT_HOLD_TTL_SECS)).await;
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+        assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
+        assert!(h.state.is_provider_blocked("anthropic").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_killswitch_mid_alert_really_cancels_the_audit() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let dropped2 = Arc::clone(&dropped);
+        let audit: AuditFn = Arc::new(move |_, _| {
+            let guard = DropCounter(Arc::clone(&dropped2));
+            Box::pin(async move {
+                let _guard = guard;
+                std::future::pending().await
+            })
+        });
+        let h = harness(audit, "9.9.9.9").await;
+        h.change("9.9.9.9").await;
+        tokio::time::sleep(Duration::from_millis(50)).await; // the three audits are running
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert!(h.env.hold_queue.current_alert().is_some());
+
+        assert!(h.guard.set_manual_killswitch(true, &h.state).await);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            3,
+            "the audit futures were dropped"
+        );
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+        assert!(h.env.hold_queue.current_alert().is_none());
+        assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
+
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        assert_eq!(h.io.count("interceptor://enriched"), 0);
+        assert_eq!(h.guard.gate(), Gate::Blocked);
     }
 }

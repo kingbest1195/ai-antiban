@@ -1,18 +1,13 @@
 //! Alert popup window positioning.
 
 use crate::state;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::Instant;
 use tauri::Manager;
 
 /// Must match the alert-popup width in tauri.conf.json (440x360). Only the width matters here:
 /// the window is anchored to the top edge, so the height does not affect the position.
 const POPUP_WIDTH: f64 = 440.0;
-/// How long the primary monitor width is reused before it is read again (display changes).
-const MONITOR_CACHE_TTL: Duration = Duration::from_secs(10);
-
-/// Logical width of the primary monitor and when it was read.
-static MONITOR_WIDTH: Mutex<Option<(f64, Instant)>> = Mutex::new(None);
 
 /// True when `ZASTAVA_TIMING=1`: the guard logs detect -> emit -> show -> enriched to stderr.
 pub fn timing_enabled() -> bool {
@@ -30,17 +25,11 @@ pub fn log_timing(id: &str, stage: &str, t0: Instant) {
     }
 }
 
+/// Logical width of the primary monitor. Read on every show (inline on the main thread, so it is
+/// cheap) and never cached: a display change must move the window on-screen at once.
 fn primary_monitor_width(popup: &tauri::WebviewWindow) -> Option<f64> {
-    let cached = MONITOR_WIDTH.lock().ok().and_then(|cache| *cache);
-    if let Some((width, _)) = cached.filter(|(_, at)| at.elapsed() < MONITOR_CACHE_TTL) {
-        return Some(width);
-    }
     let monitor = popup.primary_monitor().ok().flatten()?;
-    let width = monitor.size().width as f64 / monitor.scale_factor();
-    if let Ok(mut cache) = MONITOR_WIDTH.lock() {
-        *cache = Some((width, Instant::now()));
-    }
-    Some(width)
+    Some(monitor.size().width as f64 / monitor.scale_factor())
 }
 
 /// Positions the alert-popup window directly under the notch or top-right of the screen

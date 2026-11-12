@@ -44,6 +44,8 @@ test-support = []
 [dev-dependencies]
 zastava = { path = ".", features = ["test-support"] }
 tempfile = "3"
+# Virtual time (`start_paused`) for the guard's TTL / audit-timeout tests; same crate, test-only feature.
+tokio = { version = "1", features = ["test-util"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
 
 [profile.release]

@@ -47,24 +47,32 @@ pub async fn resolve_interception(
 
     match action {
         proxy::InterceptionAction::AllowSession => {
-            for p in &targets {
-                state
-                    .allow_provider_for_session(p)
-                    .await
-                    .map_err(|e| e.to_string())?;
+            if is_network_scope {
+                // Network-wide allow: only for the alert that is still current and fully audited
+                // (checked and applied by the guard under its lock). A stale / premature allow
+                // opens nothing and writes nothing.
+                proxy_manager
+                    .guard
+                    .allow_network_alert(&id, &targets)
+                    .await?;
+            } else {
+                for p in &targets {
+                    state
+                        .allow_provider_for_session(p)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                proxy_manager
+                    .hold_queue
+                    .resolve(&id, proxy::HoldResolution::Allow)
+                    .await;
             }
-            proxy_manager
-                .hold_queue
-                .resolve(&id, proxy::HoldResolution::Allow)
-                .await;
-            for p in targets.iter().map(String::as_str).chain([proxy::ALL_PROVIDERS]) {
+            // Provider holds only: an allow never reaches the network-wide `all` hold.
+            for p in targets.iter().map(String::as_str) {
                 proxy_manager
                     .hold_queue
                     .resolve_all_for_provider(p, proxy::HoldResolution::Allow)
                     .await;
-            }
-            if is_network_scope {
-                proxy_manager.guard.accept_current().await;
             }
         }
         proxy::InterceptionAction::BlockUntilNetworkChange => {
