@@ -26,6 +26,8 @@ export interface CheckItem {
   data: CheckDatum[];
   /** Главное действие непройденной проверки. */
   action: CheckAction | null;
+  /** «Что делать» при замечании или «не удалось проверить»; у проверок без такого текста null. */
+  advice: string | null;
 }
 
 export interface CheckGroup {
@@ -95,6 +97,7 @@ const ORDER: { id: CheckId; group: CheckGroupId; index: number }[] = [
   { id: "wifi_geo", group: "leaks", index: 8 },
   { id: "timezone", group: "environment", index: 7 },
   { id: "locale_hygiene", group: "environment", index: 11 },
+  { id: "udp_stun", group: "leaks", index: 12 },
 ];
 
 const GROUP_ORDER: CheckGroupId[] = ["address", "stability", "leaks", "environment"];
@@ -170,6 +173,14 @@ function actionFor(id: string, result: CheckResult, cls: CheckClass): CheckActio
   return result.guide_ref ? "guide" : null;
 }
 
+function adviceFor(id: CheckId, cls: CheckClass): string | null {
+  const text = (copy.advice as Partial<Record<CheckId, { warn: string; unknown: string }>>)[id];
+  if (!text) return null;
+  if (cls === "warn" || cls === "crit") return text.warn;
+  if (cls === "unknown") return text.unknown;
+  return null;
+}
+
 /** Заглушка для проверки, которой нет в отчёте: не пропадает из счёта, а считается «не удалось проверить». */
 function missingResult(): CheckResult {
   return { status: "unknown", code: "CHECK_MISSING", message: copy.missingMessage, reason: "no_data" };
@@ -200,6 +211,7 @@ export function buildChecks(report: RiskReport, state: AppStateData | null): Bui
       missing,
       data: known ? dataFor(id as CheckId, report, state) : [],
       action: actionFor(id, result, cls),
+      advice: known ? adviceFor(id as CheckId, cls) : null,
     });
   };
   for (const spec of ORDER) {

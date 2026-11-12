@@ -1,16 +1,19 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { InterceptionBehavior, PopupPosition } from "../../types";
+import type { CliMode, InterceptionBehavior, PopupPosition } from "../../types";
 import type { ShowToast } from "../../shared/hooks";
 import {
   addCustomAiDomain,
   forceCleanOsProxy,
+  getCliSettings,
   getCustomAiDomains,
   getInterceptionBehavior,
   getPopupPosition,
   removeCustomAiDomain,
+  setCliMode,
   setInterceptionBehavior,
   setPopupPosition,
+  setSyncAiTzEnabled,
 } from "../../utils/api";
 import { openExternal } from "../../utils/opener";
 import { Badge, Banner, Button, ConfirmModal, Field, Link, Modal, Mono, Row, Rows, Section, Segmented, Switch } from "../../ui";
@@ -36,6 +39,11 @@ export interface SettingsModalProps {
 const BEHAVIOR_OPTIONS: SegmentedOption<InterceptionBehavior>[] = (
   ["ask_popup", "auto_lock_silent", "auto_allow_trusted"] as const
 ).map((value) => ({ value, label: copy.behavior.options[value] }));
+
+const CLI_MODE_OPTIONS: SegmentedOption<CliMode>[] = (["ai_only", "global_terminal"] as const).map((value) => ({
+  value,
+  label: copy.terminal.mode.options[value],
+}));
 
 const POSITION_OPTIONS: SegmentedOption<PopupPosition>[] = (["top_right", "top_center"] as const).map((value) => ({
   value,
@@ -64,6 +72,10 @@ export function SettingsModal({
   const [domainBusy, setDomainBusy] = useState(false);
   const [confirmProxy, setConfirmProxy] = useState(false);
   const [cleaningProxy, setCleaningProxy] = useState(false);
+  const [cliMode, setCliModeState] = useState<CliMode>("ai_only");
+  const [syncTz, setSyncTz] = useState(false);
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const [confirmGlobal, setConfirmGlobal] = useState(false);
   const [proxyResult, setProxyResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   // При открытии окна подтягиваем сохранённые значения из шлюза.
@@ -81,6 +93,12 @@ export function SettingsModal({
     getCustomAiDomains()
       .then(setCustomDomains)
       .catch(() => {});
+    getCliSettings()
+      .then((cli) => {
+        setCliModeState(cli.cli_mode);
+        setSyncTz(cli.sync_ai_tz_enabled);
+      })
+      .catch(() => {});
     setProxyResult(null);
   }, [open, propBehavior, propPosition, propCustomDomains]);
 
@@ -92,6 +110,45 @@ export function SettingsModal({
     } finally {
       setUpdatingToggle(false);
     }
+  };
+
+  /** Тумблер подмены TZ/локали: независим от защиты CLI; при ошибке показываем текст и оставляем прежнее значение. */
+  const handleToggleSyncTz = async () => {
+    if (terminalBusy) return;
+    const next = !syncTz;
+    setTerminalBusy(true);
+    try {
+      const res = await setSyncAiTzEnabled(next);
+      setSyncTz(res.sync_ai_tz_enabled);
+      onStateUpdated?.();
+      if (res.sync_ai_tz_enabled) onToast?.(copy.terminal.tz.toastOnTitle, copy.terminal.tz.toastOnText, "success");
+      else onToast?.(copy.terminal.tz.toastOffTitle, copy.terminal.tz.toastOffText, "info");
+    } catch (err) {
+      onToast?.(copy.terminal.tz.error, errText(err), "warning");
+    } finally {
+      setTerminalBusy(false);
+    }
+  };
+
+  const applyCliMode = async (next: CliMode) => {
+    setTerminalBusy(true);
+    try {
+      const res = await setCliMode(next);
+      setCliModeState(res.cli_mode);
+      onStateUpdated?.();
+      onToast?.(copy.terminal.mode.toastTitle, copy.terminal.mode.toastText[res.cli_mode], "success");
+    } catch (err) {
+      // Режим не изменился: показываем текст отказа и остаёмся на прежнем значении.
+      onToast?.(copy.terminal.mode.error, errText(err), "warning");
+    } finally {
+      setTerminalBusy(false);
+    }
+  };
+
+  const handleCliModeChange = (next: CliMode) => {
+    if (terminalBusy || next === cliMode) return;
+    if (next === "global_terminal") setConfirmGlobal(true);
+    else void applyCliMode(next);
   };
 
   const handleBehaviorChange = async (next: InterceptionBehavior) => {
@@ -204,6 +261,35 @@ export function SettingsModal({
                 />
               </>
             )}
+          </Section>
+
+          {/* Терминал и редакторы: режим покрытия CLI и подмена часового пояса */}
+          <Section title={copy.terminal.section}>
+            <p className="zs-settings__label">{copy.terminal.mode.title}</p>
+            <Segmented
+              aria-label={copy.terminal.mode.label}
+              options={CLI_MODE_OPTIONS}
+              value={cliMode}
+              onChange={handleCliModeChange}
+            />
+            <p className="zs-settings__hint" aria-live="polite">
+              {copy.terminal.mode.hints[cliMode]}
+            </p>
+            <Rows className="zs-settings__rows">
+              <Row
+                icon="refresh"
+                title={copy.terminal.tz.title}
+                sub={copy.terminal.tz.sub}
+                trail={
+                  <Switch
+                    checked={syncTz}
+                    disabled={terminalBusy}
+                    onChange={handleToggleSyncTz}
+                    aria-label={copy.terminal.tz.label}
+                  />
+                }
+              />
+            </Rows>
           </Section>
 
           {/* Сервисы ИИ и свои домены */}
@@ -337,6 +423,20 @@ export function SettingsModal({
           </Section>
         </div>
       </Modal>
+
+      <ConfirmModal
+        open={open && confirmGlobal}
+        title={copy.terminal.mode.confirmTitle}
+        confirmLabel={copy.terminal.mode.confirmAction}
+        busy={terminalBusy}
+        onConfirm={async () => {
+          await applyCliMode("global_terminal");
+          setConfirmGlobal(false);
+        }}
+        onCancel={() => setConfirmGlobal(false)}
+      >
+        {copy.terminal.mode.confirmText}
+      </ConfirmModal>
 
       <ConfirmModal
         open={open && confirmProxy}

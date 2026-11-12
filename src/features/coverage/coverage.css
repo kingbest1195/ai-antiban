@@ -1,0 +1,13 @@
+/* Секция «Покрытие приложений»: только токены ДС. Строки — ExpandRow, шаги — Steps, адреса — CopyBlock из src/ui. */
+.zs-cov__head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding-bottom:var(--space-2)}
+.zs-cov__lead{flex:1;min-width:0;margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-cov__head .zs-btn{flex:none}
+.zs-cov__empty{margin:0;font-size:13px;line-height:18px;color:var(--ink-3)}
+.zs-cov__detail{display:flex;flex-direction:column;gap:var(--space-3);min-width:0}
+.zs-cov__hint{margin:0;font-size:12px;line-height:16px;color:var(--ink-3)}
+.zs-cov__pending{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-cov__blocks{display:flex;flex-direction:column;gap:var(--space-1)}
+.zs-cov__blocks .zs-code{margin:0}
+.zs-cov__label{margin:0;font-size:12px;line-height:16px;color:var(--ink-3)}
+.zs-cov__actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+@media (max-width:420px){.zs-cov__head{flex-direction:column;align-items:flex-start}}

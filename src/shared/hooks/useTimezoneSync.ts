@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import type { RiskReport } from "../../types";
-import { openOsDatetimeSettings, syncAiAgentsTimezone } from "../../utils/api";
+import { openOsDatetimeSettings, setSyncAiTzEnabled, syncAiAgentsTimezone } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
@@ -20,6 +20,8 @@ export function useTimezoneSync({ activeReport, runFullAudit, showToast }: Optio
       const tz = tzOverride || activeReport?.telemetry?.timezone || "Europe/Amsterdam";
       setSyncingTz(true);
       try {
+        // Явное нажатие кнопки: сначала включаем подмену, иначе зона только сохранится.
+        await setSyncAiTzEnabled(true);
         const res = await syncAiAgentsTimezone(tz);
         setTzSyncedNotice(true);
         showToast(t.timezone.done, res, "success");

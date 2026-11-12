@@ -10,7 +10,7 @@ const unknown = (): CheckResult => ({ status: "unknown", code: "U", message: "u"
 const na = (): CheckResult => ({ status: "unknown", code: "N", message: "n", reason: "not_applicable" });
 
 function rep(provider: ProviderId, overall: RiskReport["overall_status"], checks: CheckResult[], over: Partial<RiskReport> = {}): RiskReport {
-  const full = Array.from({ length: 12 }, (_, i) => checks[i] ?? ok());
+  const full = Array.from({ length: 13 }, (_, i) => checks[i] ?? ok());
   return {
     provider,
     overall_status: overall,

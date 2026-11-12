@@ -105,7 +105,7 @@ function ScreenOverview() {
         country="Великобритания"
         facts={
           <>
-            <Badge tone="ok" icon="check">12 из 12 проверок</Badge>
+            <Badge tone="ok" icon="check">13 из 13 проверок</Badge>
             <Badge>Oracle Cloud</Badge>
             <Badge icon="lock">IP закреплён</Badge>
           </>
@@ -503,7 +503,7 @@ export default function Gallery() {
             </Card>
             <Card>
               <Stats>
-                <Stat tone="ok" value="12" label="проверок пройдено" />
+                <Stat tone="ok" value="13" label="проверок пройдено" />
                 <Stat tone="danger" value="3" label="утечки остановлены" />
                 <Stat value="41 мс" label="отклик шлюза" />
               </Stats>
@@ -518,7 +518,7 @@ export default function Gallery() {
               title="Вы защищены"
               ip="145.241.193.245"
               country="Великобритания"
-              facts={<><Badge tone="ok" icon="check">12 из 12 проверок</Badge><Badge>Oracle Cloud</Badge><Badge icon="lock">IP закреплён</Badge></>}
+              facts={<><Badge tone="ok" icon="check">13 из 13 проверок</Badge><Badge>Oracle Cloud</Badge><Badge icon="lock">IP закреплён</Badge></>}
             />
             <StatusHero
               score={64}

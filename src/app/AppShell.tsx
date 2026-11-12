@@ -382,6 +382,7 @@ export function AppShell() {
                 onToggleSysproxy={toggles.handleToggleSysproxy}
                 onToggleCli={toggles.handleToggleCliProtection}
                 onToggleKillswitch={toggles.handleToggleKillswitch}
+                onToast={showToast}
                 onCopyIp={pinning.handleCopyIp}
                 onPinIp={pinning.handlePinIp}
                 onUnpinIp={pinning.handleUnpinIp}
@@ -417,6 +418,9 @@ export function AppShell() {
                 provider={nav.checksProvider && gw.reports[nav.checksProvider] ? nav.checksProvider : undefined}
                 state={gw.state}
                 coverageSnapshot={gw.coverageSnapshot}
+                onToggleSysproxy={toggles.handleToggleSysproxy}
+                onToggleCli={toggles.handleToggleCliProtection}
+                onToast={showToast}
                 onNavigateToGuide={nav.openGuide}
                 onSimulate={intercept.handleSimulate}
                 onPinCurrentIp={pinning.handlePinIp}

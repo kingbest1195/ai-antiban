@@ -13,7 +13,8 @@ export type CheckId =
   | "dns_country"
   | "wifi_geo"
   | "timezone"
-  | "locale_hygiene";
+  | "locale_hygiene"
+  | "udp_stun";
 
 export type CheckGroupId = "address" | "stability" | "leaks" | "environment";
 
@@ -77,6 +78,17 @@ export const checks = {
   } satisfies Record<CheckGroupId, string>,
   detail: {
     result: "Что показала проверка",
+    todo: "Что делать",
+  },
+  /** Справочно: через какой источник измерено («stun:cloudflare+google»). */
+  source: (via: string) => `Источник: ${via}`,
+  /** «Что делать» при замечании (warn) и при «не удалось проверить» (unknown). */
+  advice: {
+    udp_stun: {
+      warn: "UDP-трафик (QUIC, звонки, WebRTC) идёт мимо туннеля и может раскрыть реальный адрес. Включите в VPN-клиенте проброс UDP или полный туннель, либо отключите QUIC в браузере, затем перепроверьте.",
+      unknown:
+        "Ответа по UDP получить не удалось: сеть или VPN могут блокировать STUN. Это не значит, что утечки нет. Перепроверьте позже или в другой сети.",
+    },
   },
   /** Подписи пар «название — значение» во втором уровне. */
   data: {
@@ -142,6 +154,10 @@ export const checks = {
     locale_hygiene: {
       title: "Язык и окружение ИИ-инструментов",
       what: "VS Code, Cursor и терминал передают часовой пояс и язык: по ним тоже определяют страну.",
+    },
+    udp_stun: {
+      title: "UDP идёт через туннель?",
+      what: "Проверяет, что UDP-запросы (QUIC, звонки, WebRTC) выходят с тем же адресом, что и обычный трафик, а не мимо VPN.",
     },
   } satisfies Record<CheckId, { title: string; what: string }>,
   actions: {

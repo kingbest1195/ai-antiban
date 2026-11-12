@@ -115,6 +115,10 @@ export interface AppStateData {
   interception_behavior?: InterceptionBehavior;
   popup_position?: PopupPosition;
   custom_ai_domains?: string[];
+  /** Независимый тумблер «Подменять часовой пояс и локаль для ИИ в терминале/IDE». */
+  sync_ai_tz_enabled?: boolean;
+  /** Режим покрытия CLI. */
+  cli_mode?: CliMode;
 }
 
 export type AppStateSnapshot = AppStateData;
@@ -239,6 +243,8 @@ export interface CliProtectionReport {
   proxy_url: string;
   configured_targets: string[];
   shell_command: string;
+  notes?: string[];
+  error?: string | null;
 }
 
 export interface RecentGatewayEvent {
@@ -376,7 +382,21 @@ export interface RouteTestResult {
 // ---- Подсистема покрытия приложений и цепочки PAC ----
 
 export type AppCoverageCategory = "browser" | "desktop" | "ide" | "cli";
-export type AppCoverageStatus = "verified" | "configured" | "unconfigured";
+/** confirmed — был ИИ-запрос через шлюз; configured — настроено, ждём первый запрос; unknown — проверить нечем; off — не настроено. */
+export type AppCoverageStatus = "confirmed" | "configured" | "unknown" | "off" | "not_installed";
+
+/** Режим покрытия CLI: только ИИ-клиенты и IDE (по умолчанию) или глобальный перехват терминала. */
+export type CliMode = "ai_only" | "global_terminal";
+
+/** Что осталось сделать вручную; подробности подбирает фронт по приложению и режиму. */
+export type ManualStepKey =
+  | "enable_protection"
+  | "set_pac_url"
+  | "set_http_proxy"
+  | "set_env_proxy"
+  | "restart_app"
+  | "reopen_terminal"
+  | "jetbrains_proxy_settings";
 
 export interface AppCoverageItem {
   id: string;
@@ -384,14 +404,34 @@ export interface AppCoverageItem {
   category: AppCoverageCategory;
   installed: boolean;
   status: AppCoverageStatus;
+  /** То же, что ai_requests (для старого кода). */
   requests_seen: number;
+  ai_requests: number;
+  pac_fetches: number;
+  /** Unix-время (мс) последнего ИИ-запроса через шлюз. */
+  last_seen_ms: number | null;
+  manual_steps: ManualStepKey[];
+  /** Короткий текст от шлюза по-русски. */
   detail: string;
+}
+
+export interface CliSettings {
+  cli_mode: CliMode;
+  sync_ai_tz_enabled: boolean;
+  cli_protection_enabled: boolean;
+  synced_ai_timezone: string | null;
 }
 
 export interface CoverageSnapshot {
   sysproxy_enabled: boolean;
   cli_protection_enabled: boolean;
   chained_proxy?: string | null;
+  /** "127.0.0.1:<порт>"; null до привязки шлюза. */
+  gateway_addr: string | null;
+  /** "http://<gateway_addr>/proxy.pac"; null до привязки шлюза. */
+  pac_url: string | null;
+  generated_at_ms: number;
+  cli_mode: CliMode;
   apps: AppCoverageItem[];
 }
 

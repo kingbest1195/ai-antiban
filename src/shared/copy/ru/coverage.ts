@@ -1,0 +1,155 @@
+/** Строки секции «Покрытие приложений» («Обзор» и «Проверки») и инструкций «Как настроить». */
+
+/** «5 с назад», «2 мин назад», «3 ч назад»: давность последнего запроса. */
+function ago(ms: number): string {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return `${sec} с назад`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} мин назад`;
+  return `${Math.round(min / 60)} ч назад`;
+}
+
+/** «1 запрос», «2 запроса», «5 запросов». */
+function requestsWord(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} запрос`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} запроса`;
+  return `${n} запросов`;
+}
+
+export const coverage = {
+  section: "Покрытие приложений",
+  lead: "Показываем, подключено ли приложение к Заставе и ходит ли оно через неё.",
+  recheck: "Проверить снова",
+  rechecking: "Проверяем…",
+  howTo: "Как настроить",
+  howToLabel: (name: string) => `Как настроить: ${name}`,
+  copyAddress: "Копировать адрес",
+  copyAddressAria: (label: string) => `Копировать адрес: ${label}`,
+  copied: "Скопировано",
+  copyTitle: "Адрес скопирован",
+  enableProtection: "Включить защиту",
+  enableProtectionBusy: "Включаем…",
+  iSetUp: "Я настроил",
+  loading: "Читаем состояние приложений…",
+  loadFailed: "Не удалось получить состояние приложений. Повторите проверку.",
+  empty: "Установленных приложений не найдено.",
+  gatewayPending: "Адрес шлюза определяется…",
+
+  chain: {
+    title: (proxy: string) => `Цепочка PAC: не-ИИ трафик идёт через ${proxy}`,
+    sub: "Маршрутизация обычного веб-трафика через внешний прокси",
+    badge: "Внешний прокси",
+  },
+
+  /** Бейджи статусов: подпись и пояснение к ним. */
+  status: {
+    confirmed: "Подтверждено трафиком",
+    configured: "Настроено — ждём первый запрос",
+    waiting: "Ожидаем подтверждения…",
+    waitingTimeout: "Не подтверждено — проверьте шаги",
+    unknown: "Неизвестно",
+    off: "Не настроено",
+    notInstalled: "Не установлено",
+  },
+  /** Вторая строка у подтверждённых: «5 запросов, последний — 2 мин назад». */
+  seen: (requests: number, sinceMs: number | null) =>
+    sinceMs == null ? requestsWord(requests) : `${requestsWord(requests)}, последний — ${ago(sinceMs)}`,
+
+  hints: {
+    effect: "Изменения вступают в силу для новых соединений. Откройте приложение и выполните запрос к ИИ: статус обновится сам.",
+    reopenTerminal: "Уже запущенные терминалы нужно открыть заново.",
+    waitingTimeout: "Не подтверждено за 60 секунд: приложение пока не обращалось к ИИ. Откройте его и выполните запрос.",
+    protectionOnOverview: "Переключатель находится на вкладке «Обзор», раздел «Под защитой».",
+  },
+
+  /** Текущий режим покрытия CLI: подпись в инструкциях терминальных программ. */
+  mode: {
+    ai_only: "Режим терминала: «Только ИИ-клиенты и IDE».",
+    global_terminal: "Режим терминала: «Глобальный перехват терминала».",
+  },
+
+  /** Тексты шагов; порт и адрес подставляет manualSetup по данным шлюза. */
+  steps: {
+    enable: {
+      sysproxy: {
+        title: "Включите защиту",
+        text: "Включите «Браузеры» и «Десктопные приложения» на вкладке «Обзор» или кнопкой ниже: приложение возьмёт системный PAC.",
+      },
+      cli: {
+        title: "Включите защиту IDE и терминала",
+        text: "Включите «IDE и терминал» на вкладке «Обзор» или кнопкой ниже: Застава пропишет прокси для редакторов и ИИ-клиентов.",
+      },
+    },
+    pac: {
+      title: "Укажите адрес PAC",
+      text: "Вставьте адрес в поле автоматической настройки прокси (PAC / Automatic proxy configuration URL).",
+      blockLabel: "Адрес PAC",
+    },
+    httpProxy: {
+      title: "Укажите адрес прокси",
+      text: "Впишите адрес шлюза как HTTP-прокси.",
+      blockLabel: "Адрес прокси",
+    },
+    firefox: {
+      title: "Firefox: системный прокси",
+      text: "Settings → General → Network Settings → «Use system proxy settings». Иначе Firefox идёт мимо PAC.",
+    },
+    vscode: {
+      title: "Настройте прокси в редакторе",
+      text: "Settings (Ctrl+, или Cmd+,) → найдите «proxy» → «Http: Proxy» = адрес шлюза ниже, «Http: Proxy Support» = override. Терминал откройте новый.",
+    },
+    jetbrains: {
+      open: {
+        title: "Откройте настройки прокси",
+        text: "Windows и Linux: File → Settings (Ctrl+Alt+S). macOS: меню IDE → Settings (Cmd+,). Дальше Appearance & Behavior → System Settings → HTTP Proxy.",
+      },
+      auto: {
+        title: "Выберите «Auto-detect proxy settings»",
+        text: "Если Застава включена, IDE возьмёт системный PAC сама. Если нет, отметьте «Automatic proxy configuration URL» и вставьте адрес PAC.",
+      },
+      manual: {
+        title: "Если PAC не помог: «Manual proxy configuration»",
+        text: "Выберите HTTP, впишите Host name 127.0.0.1 и Port number из адреса ниже. «No proxy for» оставьте как есть. Нажмите «Check connection» и введите https://api.anthropic.com.",
+      },
+      confirm: {
+        title: "Подтвердите и вернитесь в Заставу",
+        text: "Нажмите OK. Статус сменится на «Подтверждено», когда IDE (например, AI Assistant) сделает первый запрос.",
+      },
+      warning: {
+        title: "При ручном прокси IDE отправляет через Заставу весь трафик",
+        text: "Закроете Заставу — верните «Auto-detect proxy settings», иначе сеть в IDE пропадёт.",
+      },
+    },
+    cli: {
+      env: {
+        title: "Задайте прокси в новом терминале",
+        text: "Выполните команду в новом окне терминала: она действует только в нём. Не используйте setx: Застава сама чистит такие переменные.",
+        unixLabel: "macOS и Linux",
+        powershellLabel: "Windows PowerShell",
+      },
+      reopen: {
+        title: "Откройте новый терминал",
+        text: "Уже запущенные терминалы и сессии не подхватят изменения. Закройте их и откройте заново.",
+      },
+      aiOnlyDirect: {
+        title: "В этом режиме программа идёт напрямую",
+        text: "В режиме «Только ИИ-клиенты и IDE» Node.js, Python и curl работают напрямую. Включите «Глобальный перехват терминала» в настройках, если нужно.",
+      },
+      aiOnlyEnable: {
+        title: "Включите защиту CLI и IDE",
+        text: "В режиме «Только ИИ-клиенты и IDE» Застава прописывает прокси только Claude Code, Gemini CLI и редакторам. Включите «IDE и терминал».",
+      },
+    },
+    restart: {
+      title: "Перезапустите приложение",
+      text: "Закройте приложение полностью и откройте снова.",
+    },
+    /** Запасной шаг, когда шлюз вернул неизвестный ключ. */
+    generic: {
+      title: "Выполните настройку вручную",
+      text: "Откройте настройки прокси приложения и укажите адрес шлюза.",
+    },
+  },
+} as const;
