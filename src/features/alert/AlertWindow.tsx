@@ -10,7 +10,7 @@ import {
   takePendingAlert,
 } from "../../utils/api";
 import { Dialog, Skeleton } from "../../ui";
-import { alertReducer, canAllow, classifyAllowError, initialAlertState, isDetecting, isFailed } from "./alertState";
+import { alertReducer, allowErrorText, canAllow, classifyAllowError, initialAlertState, isDetecting, isFailed } from "./alertState";
 import type { AlertState } from "./alertState";
 import { alertDialog as copy, providers as providerCopy } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
@@ -137,10 +137,7 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
         console.error("Failed to resolve interception:", err);
         if (action === "AllowSession") {
           // Бэкенд отказал (алерт устарел или проверка не завершена): окно остаётся, запросы остановлены.
-          const kind = classifyAllowError(err);
-          setAllowError(
-            kind === "stale" ? copy.allowErrorStale : kind === "pending" ? copy.allowErrorPending : copy.allowErrorGeneric,
-          );
+          setAllowError(allowErrorText(classifyAllowError(err)));
         } else if (onResolved) {
           onResolved(action);
         }

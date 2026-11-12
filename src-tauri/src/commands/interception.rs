@@ -17,7 +17,7 @@ pub async fn resolve_interception(
     proxy_manager: tauri::State<'_, proxy::ProxyManager>,
     state: tauri::State<'_, state::AppState>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<(), proxy::AllowError> {
     let is_simulation = scope.as_deref() == Some("simulation") || id.starts_with("sim-");
     if is_simulation {
         let resolution = match action {

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { RiskInterceptPayload } from "../../types";
 import { resolveInterception, simulateInterception } from "../../utils/api";
-import { alertDialog as alertCopy, toast as t } from "../copy/ru";
-import { classifyAllowError } from "../../features/alert/alertState";
+import { toast as t } from "../copy/ru";
+import { allowErrorText, classifyAllowError } from "../../features/alert/alertState";
 import type { ShowToast } from "./useToasts";
 
 interface Options {
@@ -32,10 +32,7 @@ export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }
       runFullAudit(false);
     } catch (err) {
       // Бэкенд отказал: баннер остаётся, запросы остановлены.
-      const kind = classifyAllowError(err);
-      setAllowError(
-        kind === "stale" ? alertCopy.allowErrorStale : kind === "pending" ? alertCopy.allowErrorPending : alertCopy.allowErrorGeneric,
-      );
+      setAllowError(allowErrorText(classifyAllowError(err)));
     }
   }, [interceptPayload, runFullAudit, showToast]);
 

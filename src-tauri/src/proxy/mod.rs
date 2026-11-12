@@ -1,3 +1,4 @@
+pub mod allow_error;
 pub mod coverage;
 pub mod guard;
 pub mod hold_queue;
@@ -9,6 +10,7 @@ pub mod transit;
 pub mod upstream;
 
 use std::sync::Arc;
+pub use allow_error::{AllowError, AllowErrorCode};
 pub use coverage::{
     classify_process_name, lookup_process_name_by_port, AppCoverageItem, CoverageSnapshot,
     CoverageTracker,

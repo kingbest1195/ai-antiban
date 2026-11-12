@@ -71,6 +71,33 @@ export function sinceLastSeen(app: AppCoverageItem, now: number): number | null 
   return app.last_seen_ms == null ? null : Math.max(0, now - app.last_seen_ms);
 }
 
+/**
+ * Установленное ИИ-приложение, которое защита не покрывает: статус `off` у ИИ-клиента (десктопные Claude/ChatGPT,
+ * Claude Code, Gemini CLI) или IDE. Браузеры, обычные терминальные программы («Напрямую — по режиму терминала»),
+ * `not_installed` и `unknown` не считаются: у `unknown` проверить нечем, и пользователю там нечего исправить.
+ */
+export function uncoveredAiApps(snapshot: Pick<CoverageSnapshot, "apps" | "cli_mode"> | null | undefined): AppCoverageItem[] {
+  if (!snapshot) return [];
+  return snapshot.apps.filter((app) => {
+    if (!app.installed || app.status !== "off") return false;
+    if (isDirectByMode(app, snapshot.cli_mode)) return false;
+    if (app.category === "desktop" || app.category === "ide") return true;
+    return app.category === "cli" && AI_CLI_IDS.has(app.id);
+  });
+}
+
+/**
+ * Замечание для жёлтой точки на «Обзоре»: есть неохваченное ИИ-приложение либо системный PAC не действует из-за VPN
+ * (`system_proxy_effective === false`, пока защита включена). Красные состояния учитывает вызывающий: они приоритетнее.
+ */
+export function coverageNeedsAttention(
+  snapshot: Pick<CoverageSnapshot, "apps" | "cli_mode" | "sysproxy_enabled" | "system_proxy_effective"> | null | undefined,
+): boolean {
+  if (!snapshot) return false;
+  if (snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false) return true;
+  return uncoveredAiApps(snapshot).length > 0;
+}
+
 /** Что сказать о подключённых VPN-службах: имена и перебивает ли VPN наш системный PAC. null — подключённых нет. */
 export interface VpnNotice {
   names: string;

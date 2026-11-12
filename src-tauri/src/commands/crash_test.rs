@@ -11,7 +11,6 @@ pub struct CrashTestStepResult {
     pub latency_ms: f64,
     pub current_ip: String,
     pub current_country: String,
-    pub leaked_packets: u32,
     pub status_text: String,
 }
 
@@ -59,7 +58,6 @@ pub async fn run_vpn_crash_test_step(
                     latency_ms,
                     current_ip,
                     current_country,
-                    leaked_packets: 0,
                     status_text: format!("Защищено · Маршрут чист ({:.1} мс)", latency_ms),
                 })
             } else {
@@ -69,7 +67,6 @@ pub async fn run_vpn_crash_test_step(
                     latency_ms,
                     current_ip,
                     current_country,
-                    leaked_packets: 0,
                     status_text: format!("Мгновенно перехвачено Kill-Switch ({:.1} мс)", latency_ms),
                 })
             }
@@ -82,7 +79,6 @@ pub async fn run_vpn_crash_test_step(
                 latency_ms,
                 current_ip,
                 current_country,
-                leaked_packets: 0,
                 status_text: format!("Перехвачено на уровне сокета ({:.1} мс)", latency_ms),
             })
         }
@@ -93,7 +89,6 @@ pub async fn run_vpn_crash_test_step(
                 latency_ms: 800.0,
                 current_ip,
                 current_country,
-                leaked_packets: 0,
                 // Not a count of anything: the test only sees that the gateway gave no answer in time.
                 status_text: "Таймаут сокета · Запрос не прошёл через шлюз".to_string(),
             })
@@ -115,4 +110,37 @@ pub async fn reset_crash_test_drop(
 ) -> Result<(), String> {
     proxy_manager.guard.accept_current().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The interface (`CrashTestStepResult` in `src/types/index.ts`, `crashTestModel.test.ts`) reads exactly
+    /// these keys: a change here must change both.
+    #[test]
+    fn the_answer_has_exactly_the_keys_the_interface_reads() {
+        let v = serde_json::to_value(CrashTestStepResult {
+            passed_through: true,
+            intercepted_by_killswitch: false,
+            latency_ms: 0.5,
+            current_ip: "203.0.113.7".into(),
+            current_country: "NL".into(),
+            status_text: "x".into(),
+        })
+        .unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "current_country",
+                "current_ip",
+                "intercepted_by_killswitch",
+                "latency_ms",
+                "passed_through",
+                "status_text"
+            ]
+        );
+    }
 }

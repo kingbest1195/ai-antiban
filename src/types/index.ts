@@ -347,14 +347,17 @@ export interface ProfileSwitchResult {
   message: string;
 }
 
+/** Ответ `run_vpn_crash_test_step` ровно как у Rust (`CrashTestStepResult` в commands/crash_test.rs). */
 export interface CrashTestStepResult {
-  timestamp: number;
-  target_host: string;
+  /** Тестовый запрос прошёл через шлюз штатно. */
+  passed_through: boolean;
+  /** Шлюз остановил тестовый запрос (отказ, закрытое соединение или нет ответа за 800 мс). */
   intercepted_by_killswitch: boolean;
-  http_status: number;
   latency_ms: number;
-  status_code: string;
-  message: string;
+  current_ip: string;
+  current_country: string;
+  /** Короткий итог шага по-русски, от шлюза. */
+  status_text: string;
 }
 
 // ---- Подсистема маршрутов (routes) ----

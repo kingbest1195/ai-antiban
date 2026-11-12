@@ -15,6 +15,7 @@ export const alertDialog = {
   allowRefused: "Не удалось разрешить",
   allowErrorStale: "Сеть уже изменилась — решите по новому предупреждению.",
   allowErrorPending: "Проверка ещё идёт — попробуйте разрешить после результата.",
+  allowErrorKillswitch: "Включён ручной Kill-Switch. Отключите его, чтобы разрешить запросы.",
   allowErrorGeneric: "Не удалось разрешить. Запросы остановлены.",
   allowRefusedText: "Бэкенд отказал: проверка устарела или не завершена. Запросы остановлены.",
   unknownCountry: "Не определена",

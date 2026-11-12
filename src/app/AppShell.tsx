@@ -6,6 +6,7 @@ import type { MenuEntry, TabItem } from "../ui";
 import { overview as overviewCopy, shell as copy, tabs as tabCopy } from "../shared/copy/ru";
 import { APP_VERSION } from "../shared/version";
 import { tabBadges, useOverviewModel } from "../features/overview/useOverviewModel";
+import { coverageNeedsAttention } from "../features/coverage/coverageModel";
 import {
   useClaudeBackup,
   useGatewayState,
@@ -112,9 +113,11 @@ export function AppShell() {
     refreshing: gw.refreshing,
     startupPending: gw.startupPending,
   });
+  // Жёлтая точка: защита включена и запуск закончен, но часть ИИ-приложений не покрыта (красное её перекрывает).
+  const coverageNotice = !gw.startupPending && gw.sysproxyActive && coverageNeedsAttention(gw.coverageSnapshot);
   const tabItems = useMemo(
-    () => withBadges(tabBadges(overviewModel.banner, gw.reports, gw.state)),
-    [overviewModel.banner, gw.reports, gw.state],
+    () => withBadges(tabBadges(overviewModel.banner, gw.reports, gw.state, coverageNotice)),
+    [overviewModel.banner, gw.reports, gw.state, coverageNotice],
   );
   const mock = useMockScenario(runFullAudit);
 
@@ -319,6 +322,7 @@ export function AppShell() {
               value={nav.tab}
               onChange={(id) => nav.goTab(id)}
               badgeLabel={tabCopy.badgeLabel}
+              warnBadgeLabel={tabCopy.badgeLabelWarn}
               idPrefix={TAB_PREFIX}
               aria-label={tabCopy.label}
             />

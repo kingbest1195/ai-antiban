@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppCoverageItem, AppCoverageStatus, CliProtectionReport } from "../../types";
-import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, enableResult, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, resolveWaiting, sinceLastSeen, startWaiting, viewOf, vpnNotice } from "./coverageModel";
+import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, enableResult, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, resolveWaiting, sinceLastSeen, startWaiting, uncoveredAiApps, coverageNeedsAttention, viewOf, vpnNotice } from "./coverageModel";
 import { disableCliProtection, enableCliProtection, checkCliProtectionStatus } from "../../utils/api";
 import { coverage as copy } from "../../shared/copy/ru";
 
@@ -101,6 +101,49 @@ describe("sinceLastSeen", () => {
   it("давность в мс или null", () => {
     expect(sinceLastSeen(app("a", "confirmed", { last_seen_ms: 1000 }), 4000)).toBe(3000);
     expect(sinceLastSeen(app("a", "configured"), 4000)).toBeNull();
+  });
+});
+
+describe("uncoveredAiApps и coverageNeedsAttention: основание жёлтой точки", () => {
+  const snap = (apps: AppCoverageItem[], over: Partial<Parameters<typeof coverageNeedsAttention>[0] & object> = {}) => ({
+    apps,
+    cli_mode: "ai_only" as const,
+    sysproxy_enabled: true,
+    system_proxy_effective: true as boolean | null,
+    ...over,
+  });
+
+  it("установленное ИИ-приложение со статусом off не покрыто", () => {
+    expect(uncoveredAiApps(snap([app("cursor", "off")])).map((a) => a.id)).toEqual(["cursor"]);
+    expect(uncoveredAiApps(snap([app("claude-desktop", "off", { category: "desktop" })])).map((a) => a.id)).toEqual(["claude-desktop"]);
+    expect(uncoveredAiApps(snap([app("claude-code", "off", { category: "cli" })])).map((a) => a.id)).toEqual(["claude-code"]);
+  });
+  it("confirmed и configured покрыты, not_installed не считается", () => {
+    expect(coverageNeedsAttention(snap([app("a", "confirmed"), app("b", "configured"), app("c", "not_installed")]))).toBe(false);
+  });
+  it("unknown (проверить нечем) точку не даёт ни у IDE, ни у ИИ-клиента, ни у CLI", () => {
+    expect(coverageNeedsAttention(snap([app("jetbrains", "unknown")]))).toBe(false);
+    expect(coverageNeedsAttention(snap([app("claude-desktop", "unknown", { category: "desktop" })]))).toBe(false);
+    expect(coverageNeedsAttention(snap([app("claude-code", "unknown", { category: "cli" })]))).toBe(false);
+    expect(uncoveredAiApps(snap([app("jetbrains", "unknown")]))).toEqual([]);
+  });
+  it("«Напрямую — по режиму терминала» не считается, а в глобальном режиме терминал считается только ИИ-клиентский", () => {
+    const node = app("node", "off", { category: "cli" });
+    expect(coverageNeedsAttention(snap([node]))).toBe(false);
+    expect(coverageNeedsAttention(snap([node], { cli_mode: "global_terminal" }))).toBe(false);
+    expect(coverageNeedsAttention(snap([app("gemini-cli", "off", { category: "cli" })], { cli_mode: "global_terminal" }))).toBe(true);
+  });
+  it("браузеры не считаются ИИ-приложениями", () => {
+    expect(coverageNeedsAttention(snap([app("browsers", "off", { category: "browser" })]))).toBe(false);
+  });
+  it("системный прокси не действует поверх VPN — замечание, даже если все приложения в порядке", () => {
+    expect(coverageNeedsAttention(snap([app("a", "confirmed")], { system_proxy_effective: false }))).toBe(true);
+    expect(coverageNeedsAttention(snap([app("a", "confirmed")], { system_proxy_effective: null }))).toBe(false);
+    expect(coverageNeedsAttention(snap([app("a", "confirmed")], { sysproxy_enabled: false, system_proxy_effective: false }))).toBe(false);
+  });
+  it("снимка нет — замечания нет", () => {
+    expect(coverageNeedsAttention(null)).toBe(false);
+    expect(uncoveredAiApps(undefined)).toEqual([]);
   });
 });
 

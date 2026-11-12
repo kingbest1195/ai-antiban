@@ -1412,26 +1412,27 @@ export async function runVpnCrashTestStep(): Promise<CrashTestStepResult> {
   mockCrashTestStep++;
   const isDropped = mockCrashTestDropped || mockCrashTestStep >= 12;
 
+  // Ровно форма ответа Rust (`CrashTestStepResult`): без полей, которых шлюз не отдаёт.
   if (isDropped) {
+    const latency_ms = 0.28;
     return {
-      timestamp: Math.floor(Date.now() / 1000),
-      target_host: "canary-test.anthropic.zastava.local",
+      passed_through: false,
       intercepted_by_killswitch: true,
-      http_status: 503,
-      latency_ms: 0.28,
-      status_code: "INTERCEPTED_BY_KILLSWITCH",
-      message: "Сбой маршрута мгновенно перехвачен Kill-Switch за 0.3 мс. Ни единого байта не ушло во внешнюю сеть.",
+      latency_ms,
+      current_ip: mockState.pinned_ip ?? "185.212.102.40",
+      current_country: "NL",
+      status_text: `Мгновенно перехвачено Kill-Switch (${latency_ms.toFixed(1)} мс)`,
     };
   }
 
+  const latency_ms = 0.32 + Math.random() * 0.2;
   return {
-    timestamp: Math.floor(Date.now() / 1000),
-    target_host: "canary-test.anthropic.zastava.local",
+    passed_through: true,
     intercepted_by_killswitch: false,
-    http_status: 200,
-    latency_ms: 0.32 + Math.random() * 0.2,
-    status_code: "PROTECTED",
-    message: "Пакет проверен ядром за <0.5 мс и подтвержден.",
+    latency_ms,
+    current_ip: mockState.pinned_ip ?? "185.212.102.40",
+    current_country: "NL",
+    status_text: `Защищено · Маршрут чист (${latency_ms.toFixed(1)} мс)`,
   };
 }
 
