@@ -270,6 +270,35 @@ async fn http_connect_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let (code, status_line) = http_connect_exchange(stream, entry, target_host, target_port).await?;
+    match code.as_str() {
+        "200" => Ok(()),
+        "407" => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy authentication required (407): check the key credentials",
+        )),
+        "403" => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("proxy refused the tunnel (403): {status_line}"),
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            format!("HTTP CONNECT proxy returned status {code}: {status_line}"),
+        )),
+    }
+}
+
+/// Sends `CONNECT` and reads the proxy's answer head: `(status code, status line)`. An `Err` is a
+/// transport failure (nothing, or no complete answer, came back); an answer of any status is `Ok`.
+async fn http_connect_exchange<S>(
+    stream: &mut S,
+    entry: &Entry,
+    target_host: &str,
+    target_port: u16,
+) -> io::Result<(String, String)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let target = authority(target_host, target_port);
     let mut req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
     if let Some(ref u) = entry.username {
@@ -308,22 +337,8 @@ where
 
     let resp = String::from_utf8_lossy(&header);
     let status_line: String = resp.lines().next().unwrap_or("").chars().take(120).collect();
-    let code = status_line.split_whitespace().nth(1).unwrap_or("");
-    match code {
-        "200" => Ok(()),
-        "407" => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "proxy authentication required (407): check the key credentials",
-        )),
-        "403" => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("proxy refused the tunnel (403): {status_line}"),
-        )),
-        _ => Err(io::Error::new(
-            io::ErrorKind::ConnectionRefused,
-            format!("HTTP CONNECT proxy returned status {code}: {status_line}"),
-        )),
-    }
+    let code = status_line.split_whitespace().nth(1).unwrap_or("").to_string();
+    Ok((code, status_line))
 }
 
 async fn connect_entry_with(
@@ -424,6 +439,88 @@ pub async fn connect_via_route(
 ) -> io::Result<UpstreamStream> {
     let tls = production_tls_config()?;
     connect_via_route_with(route, target_host, target_port, per_entry_timeout, &tls, gateway_port).await
+}
+
+/// Why a connection through the chained (system) proxy failed.
+#[derive(Debug)]
+pub enum ChainedError {
+    /// No answer from the proxy: refused / unreachable / timed out / broken handshake. The caller
+    /// may fall back to a direct connection.
+    Unreachable(io::Error),
+    /// The proxy answered the `CONNECT` with a non-2xx status. That is its decision: no fallback.
+    Refused { status: String },
+}
+
+impl std::fmt::Display for ChainedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChainedError::Unreachable(e) => write!(f, "chained proxy unreachable: {e}"),
+            ChainedError::Refused { status } => write!(f, "chained proxy refused the tunnel (status {status})"),
+        }
+    }
+}
+
+/// Splits the chained proxy string (`host:port`, no scheme, no credentials) into an entry.
+fn chained_entry(chained: &str) -> io::Result<Entry> {
+    let bad = || io::Error::new(io::ErrorKind::InvalidInput, "invalid chained proxy address");
+    let (host, port) = chained.trim().rsplit_once(':').ok_or_else(bad)?;
+    let port: u16 = port.parse().map_err(|_| bad())?;
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() || port == 0 {
+        return Err(bad());
+    }
+    Ok(Entry {
+        proto: EntryProto::Http,
+        host: host.to_string(),
+        port,
+        username: None,
+        password: None,
+        sni: None,
+    })
+}
+
+/// Plain TCP connection to the chained HTTP proxy (the user's own proxy: loopback / private
+/// addresses are fine, the gateway itself is refused).
+pub async fn connect_chained_tcp(
+    chained: &str,
+    timeout: Duration,
+    gateway_port: u16,
+) -> io::Result<TcpStream> {
+    let entry = chained_entry(chained)?;
+    tokio::time::timeout(timeout, tcp_connect(&entry, true, gateway_port))
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "chained proxy connect timed out"))?
+}
+
+/// `CONNECT target` through the chained HTTP proxy.
+pub async fn connect_via_chained_proxy(
+    chained: &str,
+    target_host: &str,
+    target_port: u16,
+    timeout: Duration,
+    gateway_port: u16,
+) -> Result<UpstreamStream, ChainedError> {
+    let entry = chained_entry(chained).map_err(ChainedError::Unreachable)?;
+    let fut = async {
+        let mut s = tcp_connect(&entry, true, gateway_port)
+            .await
+            .map_err(ChainedError::Unreachable)?;
+        let (code, _line) = http_connect_exchange(&mut s, &entry, target_host, target_port)
+            .await
+            .map_err(ChainedError::Unreachable)?;
+        if code.starts_with('2') {
+            Ok(UpstreamStream::Plain(s))
+        } else {
+            Err(ChainedError::Refused { status: code })
+        }
+    };
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(res) => res,
+        Err(_) => Err(ChainedError::Unreachable(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "chained proxy handshake timed out",
+        ))),
+    }
 }
 
 /// Legacy entry point: connects through a single v1.3.x upstream config.
