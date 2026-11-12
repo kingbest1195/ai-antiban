@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::auditor::geo_matrix::{CheckResult, UnknownReason};
+use crate::auditor::ip_type::TorListCache;
 use crate::auditor::probes::whoami::{GeoInfo, ResolverView};
 
 /// DNSBL answer per exit IP.
@@ -130,6 +131,9 @@ pub struct CheckCache {
     pub geo: TtlCache<Result<GeoInfo, UnknownReason>>,
     /// STUN verdict per HTTP exit address.
     pub udp: TtlCache<CheckResult>,
+    /// The Tor exit list (one entry, 6 h). Not cleared when the network changes: it does not
+    /// depend on the network, and a refetch on every switch would only add requests.
+    pub tor: TorListCache,
 }
 
 impl CheckCache {

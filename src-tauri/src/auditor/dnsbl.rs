@@ -53,7 +53,8 @@ impl DnsblReport {
             return None;
         }
         if self.unsupported_ip {
-            return Some(UnknownReason::NoData);
+            // The zones list IPv4 only: for an IPv6 exit the check does not apply.
+            return Some(UnknownReason::NotApplicable);
         }
         if self.total_checked > 0 && self.answered() >= MIN_ANSWERING_ZONES.min(self.total_checked) {
             return None;
@@ -228,7 +229,7 @@ pub async fn check_all_dnsbl_with(
             return DnsblReport {
                 total_checked: total,
                 hits: Vec::new(),
-                summary_label: format!("Не проверено: IP {ip} не IPv4"),
+                summary_label: "Не применимо к IPv6".to_string(),
                 failures: vec![UnknownReason::NoData; total],
                 unsupported_ip: true,
             };
@@ -281,7 +282,7 @@ pub fn evaluate_dnsbl_report(report: &DnsblReport) -> CheckResult {
         if report.unsupported_ip {
             return CheckResult::unknown(
                 "DNSBL_IPV6_UNSUPPORTED",
-                "Проверка DNSBL не выполнена: выходной адрес не IPv4, а спам-базы проверяют только IPv4.",
+                "Не применимо к IPv6: спам-базы DNSBL проверяют только адреса IPv4, а ваш выходной адрес IPv6. Это не значит, что адрес плохой.",
                 reason,
             );
         }
@@ -325,75 +326,6 @@ pub fn evaluate_dnsbl_report(report: &DnsblReport) -> CheckResult {
         CheckResult::warning("DNSBL_LISTED_WARNING", msg, Some(GUIDE_PERSONAL_VPN.to_string()))
     }
 }
-
-/// Evaluates ASN and Network reputation.
-pub fn evaluate_asn_reputation(
-    asn: Option<u32>,
-    isp: Option<&str>,
-    org: Option<&str>,
-    dangerous_asns: &DangerousAsns,
-    is_pinned: bool,
-) -> CheckResult {
-    // 1. Check if ISP/Org name indicates Russian domestic telecom
-    let isp_str = isp.unwrap_or_default();
-    let org_str = org.unwrap_or_default();
-
-    if let Some(matched_isp) = dangerous_asns.matches_russian_isp(isp_str).or_else(|| dangerous_asns.matches_russian_isp(org_str)) {
-        return CheckResult::critical(
-            "RUSSIAN_ISP_DETECTED",
-            format!("Обнаружен домашний провайдер РФ ({matched_isp}). Прямой выход без VPN приведет к мгновенному бану аккаунта."),
-            Some(GUIDE_PERSONAL_VPN.to_string()),
-        );
-    }
-
-    // 2. If user already pinned this IP as their personal dedicated VPS, datacenter ASN warnings are bypassed!
-    if is_pinned {
-        return CheckResult::ok(
-            "ASN_VERIFIED_PINNED",
-            "IP подтвержден и закреплен как ваш личный выделенный VPS.",
-        );
-    }
-
-    // 3. Check for commercial mass-VPN / shared datacenter ASN
-    if let Some(asn_num) = asn {
-        if let Some(high_risk) = dangerous_asns.is_high_risk_asn(asn_num) {
-            return CheckResult::warning(
-                "HIGH_RISK_MASS_VPN_ASN",
-                format!(
-                    "Подсеть массового хостинга/VPN «{}» (AS{}). {} Если это ваш личный VPS — нажмите «Закрепить IP», чтобы убрать предупреждение.",
-                    high_risk.name,
-                    high_risk.asn,
-                    high_risk.reason
-                ),
-                Some(GUIDE_PERSONAL_VPN.to_string()),
-            );
-        }
-    }
-
-    // Nothing to judge: the geolocation source gave neither ASN nor ISP/org.
-    if asn.is_none() && isp_str.trim().is_empty() && org_str.trim().is_empty() {
-        return CheckResult::unknown(
-            "ASN_NO_DATA",
-            "Репутация ASN не проверена: источник геолокации не передал ASN, провайдера и организацию.",
-            UnknownReason::NoData,
-        );
-    }
-
-    let who = match (asn, [isp_str.trim(), org_str.trim()].into_iter().find(|t| !t.is_empty())) {
-        (Some(n), Some(name)) => format!("AS{n} ({name})"),
-        (Some(n), None) => format!("AS{n}"),
-        (None, Some(name)) => name.to_string(),
-        (None, None) => unreachable!("handled above: no ASN and no name is Unknown"),
-    };
-    CheckResult::ok(
-        "ASN_CLEAN",
-        format!(
-            "{who} не найден среди {} известных сетей массовых VPN/хостинга и домашних провайдеров РФ из встроенного списка.",
-            dangerous_asns.high_risk_asns.len() + dangerous_asns.russian_isp_keywords.len()
-        ),
-    )
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -551,7 +483,8 @@ mod tests {
         let rep = check_all_dnsbl_with(dns.clone(), "2606:4700::1111", &asns).await;
         let res = evaluate_dnsbl_report(&rep);
         assert_eq!(res.status, CheckStatus::Unknown);
-        assert_eq!(res.reason, Some(UnknownReason::NoData));
+        assert_eq!(res.reason, Some(UnknownReason::NotApplicable));
+        assert!(res.is_not_applicable());
         assert_eq!(res.code, "DNSBL_IPV6_UNSUPPORTED");
         assert_eq!(dns.calls.load(Ordering::SeqCst), 0);
     }
@@ -664,37 +597,5 @@ mod tests {
         let r = evaluate_dnsbl_report(&listed);
         assert_eq!((r.status, r.code.as_str()), (CheckStatus::Critical, "DNSBL_LISTED_CRITICAL"));
         assert!(r.message.contains("Spamhaus ZEN"));
-    }
-
-    #[test]
-    fn test_asn_matching_and_pinning_bypass() {
-        let asns = DangerousAsns::load_bundled().unwrap();
-
-        let res_unpinned = evaluate_asn_reputation(Some(9009), Some("M247"), None, &asns, false);
-        assert_eq!(res_unpinned.status, CheckStatus::Warning);
-        assert_eq!(res_unpinned.code, "HIGH_RISK_MASS_VPN_ASN");
-
-        let res_pinned = evaluate_asn_reputation(Some(9009), Some("M247"), None, &asns, true);
-        assert_eq!(res_pinned.status, CheckStatus::Ok);
-        assert_eq!(res_pinned.code, "ASN_VERIFIED_PINNED");
-
-        let res_ru = evaluate_asn_reputation(Some(12389), Some("PJSC Rostelecom"), None, &asns, false);
-        assert_eq!(res_ru.status, CheckStatus::Critical);
-        assert_eq!(res_ru.code, "RUSSIAN_ISP_DETECTED");
-    }
-
-    #[test]
-    fn test_asn_without_any_data_is_unknown() {
-        let asns = DangerousAsns::load_bundled().unwrap();
-        let res = evaluate_asn_reputation(None, None, None, &asns, false);
-        assert_eq!(res.status, CheckStatus::Unknown);
-        assert_eq!(res.reason, Some(UnknownReason::NoData));
-        // Blank strings are no data either.
-        let res = evaluate_asn_reputation(None, Some("  "), Some(""), &asns, false);
-        assert_eq!(res.status, CheckStatus::Unknown);
-        // A known (clean) ASN is still a verdict, and the text names what was compared.
-        let res = evaluate_asn_reputation(Some(64500), Some("Example Net"), None, &asns, false);
-        assert_eq!(res.status, CheckStatus::Ok);
-        assert!(res.message.contains("AS64500"), "{}", res.message);
     }
 }

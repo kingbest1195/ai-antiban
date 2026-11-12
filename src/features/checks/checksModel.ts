@@ -1,4 +1,4 @@
-import type { AppStateData, CheckResult, NetworkTelemetry, PartialAudit, ProviderId, RiskReport } from "../../types";
+import type { AppStateData, CheckResult, IpType, NetworkTelemetry, PartialAudit, ProviderId, RiskReport } from "../../types";
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckGroupId, CheckId } from "../../shared/copy/ru";
 
@@ -159,10 +159,13 @@ function dataFor(id: CheckId, report: RiskReport, state: AppStateData | null): C
       add(d.country, t.country_code, true);
       add(d.ip, t.ip, true);
       break;
-    case "asn":
+    case "asn": {
+      const type = ipTypeOf(report.asn_result);
+      add(d.ipType, type ? copy.ipType.names[type] : null, false);
       add(d.asn, t.asn ? `AS${t.asn}` : null, true);
       add(d.provider, t.isp || t.org, false);
       break;
+    }
     case "dnsbl":
       add(d.result, report.dnsbl_clean_count, false);
       add(d.answeredZones, answeredZones(report), false);
@@ -198,8 +201,28 @@ function actionFor(id: string, result: CheckResult, cls: CheckClass): CheckActio
   return result.guide_ref ? "guide" : null;
 }
 
-function adviceFor(id: CheckId, cls: CheckClass): string | null {
-  const text = (copy.advice as Partial<Record<CheckId, { warn: string; unknown: string }>>)[id];
+/** Тип адреса из проверки репутации адреса (структурное поле, а не разбор текста). */
+export function ipTypeOf(result: CheckResult | null | undefined): IpType | null {
+  const t = result?.detail?.ip_type;
+  return t && t in copy.ipType.names ? t : null;
+}
+
+/** Подпись под названием проверки: у «Провайдера адреса» добавляется тип, если он известен. */
+function whatFor(id: string, base: string, result: CheckResult, missing: boolean): string {
+  if (id !== "asn" || missing) return base;
+  const type = ipTypeOf(result);
+  return type && type !== "unknown" ? `${base} ${copy.ipType.line(copy.ipType.short[type])}` : base;
+}
+
+function adviceFor(id: CheckId, cls: CheckClass, result: CheckResult): string | null {
+  if (id === "asn") {
+    if (cls === "warn" || cls === "crit") {
+      const type = ipTypeOf(result);
+      return type === "tor" ? copy.advice.asn.tor : type === "vpn" ? copy.advice.asn.vpn : null;
+    }
+    return cls === "unknown" && result.code === "TOR_LIST_UNAVAILABLE" ? copy.advice.asn.listUnavailable : null;
+  }
+  const text = (copy.advice as Partial<Record<Exclude<CheckId, "asn">, { warn: string; unknown: string }>>)[id];
   if (!text) return null;
   if (cls === "warn" || cls === "crit") return text.warn;
   if (cls === "unknown") return text.unknown;
@@ -241,14 +264,14 @@ export function buildChecks(report: RiskReport, state: AppStateData | null): Bui
       id,
       group,
       title: known ? copy.items[id as CheckId].title : copy.extra.title,
-      what: known ? copy.items[id as CheckId].what : copy.extra.what,
+      what: known ? whatFor(id, copy.items[id as CheckId].what, result, missing) : copy.extra.what,
       result,
       cls,
       ok: cls === "ok",
       missing,
       data: known ? dataFor(id as CheckId, report, state) : [],
       action: actionFor(id, result, cls),
-      advice: known ? adviceFor(id as CheckId, cls) : null,
+      advice: known ? adviceFor(id as CheckId, cls, result) : null,
       pending: false,
       help: known ? helpFor(id, result, cls) : null,
     });

@@ -4,6 +4,7 @@ pub mod claude_exporter;
 pub mod dnsbl;
 pub mod geo_matrix;
 pub mod history;
+pub mod ip_type;
 pub mod leaks;
 pub mod network;
 pub mod os_env;
@@ -25,7 +26,8 @@ use probes::stun;
 use run_check::{blocking_check, run_check};
 
 pub use cache_cleaner::clean_ai_app_cache;
-pub use dnsbl::{check_all_dnsbl, check_all_dnsbl_with, evaluate_asn_reputation, evaluate_dnsbl_report};
+pub use dnsbl::{check_all_dnsbl, check_all_dnsbl_with, evaluate_dnsbl_report};
+pub use ip_type::{ExitIdentity, IpType, TorLookup, evaluate_ip_reputation, lookup_tor};
 pub use geo_matrix::{CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo};
 pub use history::{evaluate_impossible_travel, evaluate_ip_pinning};
 pub use leaks::{
@@ -72,6 +74,10 @@ pub struct RiskReport {
     pub asn_result: CheckResult,
     pub ipv6_result: CheckResult,
     pub timezone_result: CheckResult,
+    /// The exit address is IPv6: the spam-list and Tor checks do not apply to it (shown as
+    /// "not applicable", the interface explains why).
+    #[serde(default)]
+    pub ipv6_exit: bool,
     pub checks: Vec<CheckResult>,
     /// Checks that could not be performed (`Unknown`), not counting the not-applicable ones.
     #[serde(default)]
@@ -396,6 +402,11 @@ impl Auditor {
         let synced_key = synced_tz.clone().unwrap_or_default();
         let country = telemetry.country_code.clone();
         let dnsbl_label = Arc::new(Mutex::new("Не проверено".to_string()));
+        let ipv6_exit = telemetry
+            .ip
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|a| a.is_ipv6());
 
         // Every check runs isolated (own task, own time limit): a slow or panicking check ends
         // as `Unknown` and the others still finish.
@@ -440,14 +451,21 @@ impl Auditor {
                 result
             }
         }));
-        let asn = tracked(&sink, 4, run_check("ASN Reputation", CHECK_LIMIT_LOCAL, {
-            let (asns, tel) = (dangerous_asns.clone(), telemetry.clone());
+        let asn = tracked(&sink, 4, run_check("Address Reputation", CHECK_LIMIT_IO, {
+            let (cache, asns, tel, env) =
+                (cache.clone(), dangerous_asns.clone(), telemetry.clone(), env.clone());
             async move {
-                evaluate_asn_reputation(
-                    tel.asn,
-                    tel.isp.as_deref(),
-                    tel.org.as_deref(),
+                let tor = lookup_tor(&cache.tor, &*env.probe, &tel.ip).await;
+                evaluate_ip_reputation(
+                    &ExitIdentity {
+                        ip: &tel.ip,
+                        country_code: &tel.country_code,
+                        asn: tel.asn,
+                        isp: tel.isp.as_deref(),
+                        org: tel.org.as_deref(),
+                    },
                     &asns,
+                    tor,
                     is_pinned,
                 )
             }
@@ -624,6 +642,7 @@ impl Auditor {
             asn_result,
             ipv6_result,
             timezone_result,
+            ipv6_exit,
             checks,
             unknown_count: verdict.unknown_count,
             applicable_count: verdict.applicable_count,
@@ -833,6 +852,7 @@ mod tests {
             asn_result: ok(),
             ipv6_result: ok(),
             timezone_result: ok(),
+            ipv6_exit: false,
             checks: vec![ok()],
             unknown_count: 0,
             applicable_count: 13,
@@ -915,11 +935,22 @@ mod tests {
 
     /// The geo services place every address in `country`; the IPv6 probe reports NL.
     fn probe_locating(country: &str) -> FakeProbe {
-        FakeProbe::body(200, "loc=NL\n").with_route(
+        with_tor_list(FakeProbe::body(200, "loc=NL\n")).with_route(
             "ipwho.is",
             HttpProbeOutcome::Response {
                 status: 200,
                 body: format!("{{\"success\":true,\"country_code\":\"{country}\"}}"),
+            },
+        )
+    }
+
+    /// The Tor exit list answers (the audited address 203.0.113.9 is not in it).
+    fn with_tor_list(probe: FakeProbe) -> FakeProbe {
+        probe.with_route(
+            "torbulkexitlist",
+            HttpProbeOutcome::Response {
+                status: 200,
+                body: "198.51.100.1\n198.51.100.2\n".into(),
             },
         )
     }
@@ -1221,7 +1252,7 @@ mod tests {
     /// counted, not penalised), so the report is complete and Green-100.
     #[tokio::test]
     async fn evaluate_all_public_resolver_is_ok_and_its_country_not_applicable() {
-        let probe = FakeProbe::body(200, "loc=NL\n").with_route(
+        let probe = with_tor_list(FakeProbe::body(200, "loc=NL\n")).with_route(
             "ipwho.is",
             HttpProbeOutcome::Response {
                 status: 200,
@@ -1244,5 +1275,101 @@ mod tests {
         assert_eq!((report.unknown_count, report.applicable_count), (0, 9));
         assert!(!report.incomplete);
         assert_eq!((report.trust_score, report.overall_status), (100, OverallStatus::Green));
+    }
+    /// The Tor list is downloaded once, not once per audit (three services share the cache).
+    #[tokio::test]
+    async fn evaluate_all_downloads_the_tor_list_once() {
+        let probe = Arc::new(probe_locating("NL"));
+        let env = AuditEnv {
+            dns: Arc::new(with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9")),
+            probe: probe.clone(),
+            udp: Arc::new(udp_exiting_as("203.0.113.9")),
+            system: Arc::new(FakeSystem { global_ipv6: Some(true), ..FakeSystem::healthy() }),
+        };
+        let auditor = Auditor::with_env(env).unwrap();
+        auditor.resolver.set_cached(rich_telemetry()).await;
+        let state = AppState::new_in_memory();
+        let first = auditor.evaluate_all(ProviderId::Anthropic, &state, false).await.unwrap();
+        assert!(!first.asn_result.is_unknown(), "{:?}", first.asn_result);
+        let calls_after_first = probe.calls();
+        for provider in [ProviderId::Openai, ProviderId::Gemini] {
+            let r = auditor.evaluate_all(provider, &state, false).await.unwrap();
+            assert_eq!(r.asn_result, first.asn_result);
+        }
+        assert_eq!(probe.calls(), calls_after_first, "every later audit reuses the cached answers");
+    }
+
+    /// An exit over IPv6: the report says so, the spam-list and Tor checks are "not applicable"
+    /// (neither a pass nor a failure) and the Tor list is not downloaded for them.
+    #[tokio::test]
+    async fn evaluate_all_ipv6_exit_marks_the_report_and_the_two_checks_not_applicable() {
+        let probe = Arc::new(FakeProbe::new(HttpProbeOutcome::Timeout));
+        let env = AuditEnv {
+            dns: Arc::new(with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9")),
+            probe: probe.clone(),
+            udp: Arc::new(FakeUdp::new()),
+            system: Arc::new(FakeSystem { global_ipv6: Some(true), ..FakeSystem::healthy() }),
+        };
+        let auditor = Auditor::with_env(env).unwrap();
+        let tel = NetworkTelemetry { ip: "2001:db8::9".into(), ..rich_telemetry() };
+        auditor.resolver.set_cached(tel).await;
+        let report = auditor
+            .evaluate_all(ProviderId::Anthropic, &AppState::new_in_memory(), false)
+            .await
+            .unwrap();
+        assert!(report.ipv6_exit);
+        assert_eq!(report.checks.len(), 13);
+        assert!(report.dnsbl_result.is_not_applicable(), "{:?}", report.dnsbl_result);
+        assert_eq!(report.dnsbl_result.code, "DNSBL_IPV6_UNSUPPORTED");
+        assert!(report.asn_result.is_not_applicable(), "{:?}", report.asn_result);
+        assert_eq!(report.asn_result.code, "IP_TYPE_IPV6_NOT_APPLICABLE");
+        // The probe times out for everything: had the Tor list been asked for, the check would
+        // be a real Unknown (TOR_LIST_UNAVAILABLE), not "not applicable".
+        assert_ne!(report.asn_result.code, "TOR_LIST_UNAVAILABLE");
+    }
+
+    /// The exit is a Tor exit: a Warning in the address check, nothing blocks on its own.
+    #[tokio::test]
+    async fn evaluate_all_tor_exit_is_a_warning() {
+        let probe = FakeProbe::body(200, "loc=NL\n").with_route(
+            "torbulkexitlist",
+            HttpProbeOutcome::Response { status: 200, body: "203.0.113.9\n".into() },
+        );
+        let env = env_of(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9"),
+            probe,
+            FakeSystem { global_ipv6: Some(true), ..FakeSystem::healthy() },
+        );
+        let report = audit(env, rich_telemetry()).await;
+        assert_eq!((report.asn_result.status, report.asn_result.code.as_str()), (CheckStatus::Warning, "IP_TYPE_TOR"));
+        assert_eq!(report.overall_status, OverallStatus::Yellow);
+    }
+
+    /// The Tor list is unreachable: the address check is a real Unknown (not "Ok", not a block):
+    /// only the core checks (0 and 2) stop the gateway.
+    #[tokio::test]
+    async fn evaluate_all_tor_list_unreachable_is_unknown_and_not_a_core_check() {
+        let probe = FakeProbe::body(200, "loc=NL\n")
+            .with_route("torbulkexitlist", HttpProbeOutcome::Timeout);
+        let env = env_of(
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9"),
+            probe,
+            FakeSystem { global_ipv6: Some(true), ..FakeSystem::healthy() },
+        );
+        let report = audit(env, rich_telemetry()).await;
+        let c = &report.asn_result;
+        assert_eq!((c.status, c.reason), (CheckStatus::Unknown, Some(UnknownReason::Timeout)));
+        assert_eq!(c.code, "TOR_LIST_UNAVAILABLE");
+        assert!(!CORE_CHECKS.contains(&4));
+        assert!(report.incomplete);
+    }
+
+    #[tokio::test]
+    async fn evaluate_all_ipv4_exit_is_not_marked_ipv6() {
+        let report = audit(healthy_env(), rich_telemetry()).await;
+        assert!(!report.ipv6_exit);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["ipv6_exit"], false);
+        assert_eq!(json["asn_result"]["detail"]["ip_type"], "unknown");
     }
 }

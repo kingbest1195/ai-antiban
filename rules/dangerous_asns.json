@@ -1,6 +1,6 @@
 {
-  "version": "1.1.0",
-  "description": "Известные заспамленные коммерческие VPN-сети, бесплатные прокси-пулы и DNSBL спам-базы (аналог 2ip.io). Если IP принадлежит этим ASN или числится в DNSBL и НЕ закреплен пользователем как личный VPS (Pinned IP), выводится предупреждение.",
+  "version": "1.2.0",
+  "description": "Справочник типов адресов выхода (хостинг / массовый VPN), спам-базы DNSBL и ключевые слова домашних провайдеров РФ. Тип «vpn» даёт замечание (пул, который делят многие люди); тип «hosting» не штрафуется: личный VPS — нормальный сценарий. У каждой записи типа в поле source указан источник и лицензия: записи без источника не включаются.",
   "dnsbl_zones": [
     {
       "zone": "zen.spamhaus.org",
@@ -33,36 +33,155 @@
       "reason": "IP числится в списке UCEPROTECT уровня 1 (отдельные адреса со спам-активностью)."
     }
   ],
-  "high_risk_asns": [
+  "asns": [
     {
       "asn": 9009,
       "name": "M247 Europe SRL",
-      "reason": "Крупнейший пул массовых коммерческих и бесплатных VPN (ProtonVPN Free, Nord, Surfshark). Сотни пользователей на одном IP — частая причина бана в Claude."
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Крупнейший пул массовых коммерческих и бесплатных VPN (ProtonVPN Free, Nord, Surfshark). Сотни пользователей на одном IP: при таком адресе чаще попадают под блокировку из-за соседей."
     },
     {
       "asn": 212238,
       "name": "Datacamp Limited (CDN77)",
-      "reason": "Массовый VPN-хостинг. Если это общий коммерческий VPN, высок риск получить бан из-за соседей по IP."
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Массовый VPN-хостинг. Если это общий коммерческий VPN, велик риск попасть под блокировку из-за соседей по адресу."
     },
     {
       "asn": 60068,
       "name": "Datacamp Limited",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
       "reason": "Используется в массовых коммерческих VPN-сервисах."
     },
     {
       "asn": 20473,
       "name": "The Constant Company (Vultr / Choopa)",
-      "reason": "Облачный дата-центр. Безопасно, только если это ваш личный выделенный VPS (нажмите «Закрепить IP»)."
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
     },
     {
       "asn": 24940,
       "name": "Hetzner Online GmbH",
-      "reason": "Популярный дата-центр. Безопасно, если это ваш личный VPS с индивидуальным IP. Опасно, если это бесплатный публичный прокси."
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
     },
     {
       "asn": 14061,
       "name": "DigitalOcean, LLC",
-      "reason": "Подсети DigitalOcean часто блокируются Cloudflare при использовании общих VPN. Если это ваш личный сервер — закрепите IP."
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 16509,
+      "name": "Amazon.com, Inc. (AWS)",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 14618,
+      "name": "Amazon.com, Inc. (AWS)",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 396982,
+      "name": "Google LLC (Google Cloud)",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 8075,
+      "name": "Microsoft Corporation (Azure)",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 16276,
+      "name": "OVH SAS",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 63949,
+      "name": "Linode, LLC (Akamai Connected Cloud)",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 51167,
+      "name": "Contabo GmbH",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 12876,
+      "name": "Scaleway S.A.S.",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 197540,
+      "name": "netcup GmbH",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 60781,
+      "name": "LeaseWeb Netherlands B.V.",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 31898,
+      "name": "Oracle Corporation (Oracle Cloud)",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 8560,
+      "name": "IONOS SE",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 47583,
+      "name": "Hostinger International Limited",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    }
+  ],
+  "isp_keyword_groups": [
+    {
+      "type": "hosting",
+      "keywords": [
+        "hosting",
+        "data center",
+        "datacenter",
+        "datacentre",
+        "cloud",
+        "vps",
+        "colocation",
+        "dedicated"
+      ],
+      "source": "Zastava editorial assessment (project's own classification); generic words in ISP/organisation names; license: MIT (this repository)"
+    },
+    {
+      "type": "residential",
+      "keywords": [
+        "telecom",
+        "telekom",
+        "broadband",
+        "cable",
+        "fiber",
+        "fibre",
+        "dsl",
+        "wireless",
+        "mobile",
+        "communications"
+      ],
+      "source": "Zastava editorial assessment (project's own classification); generic words in ISP/organisation names; license: MIT (this repository)"
     }
   ],
   "russian_isp_keywords": [
