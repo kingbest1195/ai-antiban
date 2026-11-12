@@ -35,7 +35,7 @@ pub async fn toggle_sysproxy(
         let _ = sysproxy::enable_cli_and_ide_protection_with_tz(&pac_url, tz.as_deref());
         Ok(true)
     } else {
-        sysproxy::disable_all_sysproxy();
+        sysproxy::cleanup_all_persistent_settings();
         Ok(false)
     }
 }
@@ -123,5 +123,13 @@ pub fn get_sysproxy_status() -> Result<bool, String> {
 
 #[tauri::command]
 pub fn force_clean_os_proxy_cmd() -> Result<Vec<String>, String> {
-    Ok(sysproxy::force_clean_all_os_proxy_traces())
+    let report = sysproxy::cleanup_all_persistent_settings();
+    if report.has_failures() {
+        // Nothing is lost: what could not be restored stays recorded and is finished later.
+        return Err("Часть системных настроек сейчас восстановить нельзя (например, активный VPN \
+держит временные настройки DNS, или журнал занят). Они сохранены и будут восстановлены при \
+следующем запуске Заставы или после отключения VPN."
+            .to_string());
+    }
+    Ok(sysproxy::cleaned_components())
 }

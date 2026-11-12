@@ -1,9 +1,12 @@
 //! System proxy and CLI/IDE protection.
 //!
-//! Layout: `macos` / `windows` (platform PAC plumbing), `shell_rc` (zsh/bash/PowerShell blocks),
-//! `ide` (editor settings.json), `ai_cli` (Claude Code / Gemini CLI settings),
-//! `cli_protection` (enable/disable/status orchestration), `cleanup` (exit guard, signals, force clean).
-//! Every previously public name is re-exported here, so external paths are unchanged.
+//! Layout: `platform` (the only code that talks to `networksetup` / `launchctl` / `reg` / `scutil`),
+//! `journal` + `fs` (ownership journal: what Zastava changed and what was there before),
+//! `macos` / `windows` (PAC, chained proxy and WinINet through the journal), `shell_rc`
+//! (zsh/bash/PowerShell blocks), `ide` (editor settings.json), `ai_cli` (Claude Code / Gemini CLI
+//! settings), `cli_protection` (enable/disable/status orchestration), `cleanup` (exit guard,
+//! signals, restore of the journal, one-time legacy migration).
+//! Zastava restores only what it changed itself: every system setting goes through the journal.
 
 mod ai_cli;
 mod cleanup;
@@ -11,11 +14,9 @@ mod cli_protection;
 pub mod fs;
 mod ide;
 pub mod journal;
-#[cfg(target_os = "macos")]
 mod macos;
 pub mod platform;
 mod shell_rc;
-#[cfg(target_os = "windows")]
 mod windows;
 
 pub use ai_cli::{
@@ -24,9 +25,8 @@ pub use ai_cli::{
     cleanup_gemini_cli_settings_file,
 };
 pub use cleanup::{
-    cleanup_all_persistent_settings, cleanup_legacy_user_env_with, cleanup_legacy_windows_user_env,
-    force_clean_all_os_proxy_traces, legacy_env_plan, legacy_env_plan_with_gateway,
-    parse_reg_query_environment, register_clean_exit_guard, spawn_signal_cleanup_watcher, WinEnv,
+    cleaned_components, cleanup_all_persistent_settings, force_clean_all_os_proxy_traces, legacy_env_plan,
+    legacy_env_plan_with_gateway, register_clean_exit_guard, spawn_signal_cleanup_watcher,
 };
 pub use cli_protection::{
     disable_cli_and_ide_runtime_settings, disable_cli_protection, enable_cli_and_ide_protection,
@@ -42,8 +42,6 @@ pub use shell_rc::{
     sanitize_timezone, upsert_powershell_profile_content_with_tz, upsert_shell_rc_content,
     upsert_shell_rc_content_with_tz,
 };
-#[cfg(target_os = "windows")]
-pub use self::windows::{broadcast_windows_env_change, delete_windows_user_env_var, set_windows_user_env_var};
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -341,29 +339,122 @@ pub fn default_app_data_dir() -> Option<PathBuf> {
     base.map(|b| b.join(APP_IDENTIFIER))
 }
 
+/// What the platform side of an enable reports back.
+#[derive(Debug, Default)]
+pub(crate) struct EnableReport {
+    /// Display names of the services (or the Windows store) that now carry the PAC.
+    pub configured: Vec<String>,
+    /// Something was written (not just verified).
+    pub changed: bool,
+}
+
+/// Outcome of a journal-backed operation against the real OS.
+pub(crate) enum Run<T> {
+    /// OS dry-run mode: nothing was examined or written.
+    Blocked,
+    Done(T),
+    /// The journal could not be opened (locked, corrupt, unknown schema, no data directory).
+    /// Fail closed: the OS was not touched.
+    Failed(journal::JournalError),
+}
+
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// Serialises journal-backed operations inside this process (the journal lock is per process).
+static OS_OPS: Mutex<()> = Mutex::new(());
+
+/// Pins the app data directory the journal lives in (the one Tauri resolved at start).
+pub fn set_data_dir(dir: PathBuf) {
+    let _ = DATA_DIR.set(dir);
+}
+
+fn data_dir() -> Option<PathBuf> {
+    DATA_DIR.get().cloned().or_else(default_app_data_dir)
+}
+
+/// Runs `f` on the journal in `dir` with the real OS behind it. The one place where the journal
+/// meets the real file system and the real platform; dry-run is checked first.
+fn with_journal_in<T>(
+    dir: &std::path::Path,
+    what: &str,
+    f: impl FnOnce(&mut journal::Journal, &dyn platform::Platform) -> T,
+) -> Run<T> {
+    if !os_effects_enabled() {
+        note_dry_run_blocked(what);
+        return Run::Blocked;
+    }
+    let _guard = OS_OPS.lock().unwrap_or_else(|e| e.into_inner());
+    match journal::Journal::open(std::sync::Arc::new(fs::RealFs), dir) {
+        Ok(mut j) => Run::Done(f(&mut j, &platform::RealPlatform)),
+        Err(e) => Run::Failed(e),
+    }
+}
+
+pub(crate) fn with_journal<T>(
+    what: &str,
+    f: impl FnOnce(&mut journal::Journal, &dyn platform::Platform) -> T,
+) -> Run<T> {
+    if !os_effects_enabled() {
+        note_dry_run_blocked(what);
+        return Run::Blocked;
+    }
+    match data_dir() {
+        Some(dir) => with_journal_in(&dir, what, f),
+        None => Run::Failed(journal::JournalError::Io(
+            "data_dir",
+            std::io::ErrorKind::NotFound,
+        )),
+    }
+}
+
+/// A user environment value read through the real platform (Windows registry), `None` in dry-run.
+#[cfg(target_os = "windows")]
+pub(super) fn real_user_env(name: &str) -> Option<String> {
+    use platform::Platform;
+    if !os_effects_enabled() {
+        note_dry_run_blocked("user_env:get");
+        return None;
+    }
+    platform::RealPlatform.get_user_env(name).ok().flatten()
+}
+
+/// Russian text for the toast when the journal blocks an enable. Contains no values.
+fn journal_failure_text(e: &journal::JournalError) -> String {
+    let why = match e {
+        journal::JournalError::Locked => "журнал настроек занят другим экземпляром Заставы",
+        journal::JournalError::Corrupt | journal::JournalError::UnknownSchema(_) => {
+            "журнал настроек повреждён или создан более новой версией Заставы"
+        }
+        journal::JournalError::Io(..) | journal::JournalError::Platform(_) => {
+            "не удалось открыть журнал настроек"
+        }
+        journal::JournalError::KindMismatch => "внутренняя ошибка журнала настроек",
+    };
+    format!("Защита не включена: {why}. Системные настройки не менялись.")
+}
+
 /// Recovery pass of the ownership journal: puts back what Zastava changed in a previous run and
-/// nothing else. Runs before protection is enabled and from `--cleanup`.
+/// nothing else, then runs the one-time legacy migration. Runs before protection is enabled and
+/// from `--cleanup`.
 /// Fail closed: a corrupt/unknown journal or a lock held by another process is an `Err` and no
 /// OS call is made. In OS dry-run mode nothing is examined.
 pub fn recover_ownership_on_start(
     data_dir: &std::path::Path,
 ) -> Result<journal::RecoveryReport, journal::JournalError> {
-    if !os_effects_enabled() {
-        note_dry_run_blocked("ownership_recovery");
-        return Ok(journal::RecoveryReport { skipped_dry_run: true, ..Default::default() });
+    match with_journal_in(data_dir, "ownership_recovery", cleanup::restore_and_migrate) {
+        Run::Blocked => Ok(journal::RecoveryReport {
+            skipped_dry_run: true,
+            ..Default::default()
+        }),
+        Run::Done(report) => Ok(report),
+        Run::Failed(e) => Err(e),
     }
-    journal::recover_with(
-        std::sync::Arc::new(fs::RealFs),
-        &platform::RealPlatform,
-        data_dir,
-    )
 }
 
-/// `--cleanup`: journal recovery first. If the journal is unusable (corrupt, unknown schema,
-/// locked by another instance) the legacy blanket cleanup is NOT run: no guessing. Exit codes:
-/// 0 ok, 1 some resources could not be restored (kept for retry), 2 fail-closed.
+/// `--cleanup`: journal recovery, then the IDE/shell files. If the journal is unusable (corrupt,
+/// unknown schema, locked by another instance) nothing is guessed and nothing is changed. Exit
+/// codes: 0 ok, 1 some resources could not be restored (kept for retry), 2 fail-closed.
 pub fn run_cleanup_cli() -> i32 {
-    let Some(dir) = default_app_data_dir() else {
+    let Some(dir) = data_dir() else {
         eprintln!("Zastava --cleanup: data directory is unknown; nothing was changed");
         return 2;
     };
@@ -374,9 +465,7 @@ pub fn run_cleanup_cli() -> i32 {
         }
         Ok(report) => {
             eprintln!("Zastava --cleanup: {}", report.summary());
-            // Legacy (1.3.x / 2.0) traces have no journal yet; replaced by the signature-based
-            // migration in the next work package.
-            cleanup_all_persistent_settings();
+            cleanup::cleanup_cli_files();
             i32::from(report.has_failures())
         }
     }
@@ -426,45 +515,26 @@ pub struct CliProtectionReport {
     pub shell_command: String,
 }
 
-/// Disables systemic PAC proxy on all network services across macOS and Windows,
-/// and thoroughly cleans up CLI, IDE, and OS environment proxy traces.
+/// Restores everything Zastava changed in the system (PAC, chained proxy, WinINet, user
+/// environment) from the ownership journal and cleans the CLI/IDE files. Kept under its
+/// historical name for existing callers; it is [`cleanup_all_persistent_settings`].
 pub fn disable_all_sysproxy() {
-    #[cfg(target_os = "macos")]
-    {
-        macos::disable_system_proxy();
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows::disable_system_proxy();
-    }
-
-    // Always clean up CLI, shell, PowerShell, IDE settings, and OS environment
-    disable_cli_protection();
-    cleanup_legacy_windows_user_env();
-
-    SYS_PROXY_ACTIVE.store(false, Ordering::SeqCst);
-    if let Ok(mut g) = LAST_PAC_URL.lock() {
-        *g = None;
-    }
-    set_chained_proxy(None);
+    let _ = cleanup_all_persistent_settings();
 }
 
 /// Enables systemic PAC proxy with the given PAC URL (e.g. "http://127.0.0.1:8899/proxy.pac").
+/// Every touched setting is recorded in the journal first; a refusal (temporary VPN DNS,
+/// incompatible upstream, unusable journal) happens before any system write and returns the
+/// Russian text for the user.
 pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
     register_clean_exit_guard();
-    let mut configured = Vec::new();
 
-
-    #[cfg(target_os = "macos")]
-    {
-        macos::enable_system_proxy(pac_url, &mut configured)?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows::enable_system_proxy(pac_url, &mut configured);
-    }
+    let configured =
+        match with_journal("enable_sysproxy", |j, p| enable_system_proxy(j, p, pac_url)) {
+            Run::Blocked => Vec::new(),
+            Run::Failed(e) => return Err(journal_failure_text(&e)),
+            Run::Done(r) => r?.configured,
+        };
 
     SYS_PROXY_ACTIVE.store(true, Ordering::SeqCst);
     if let Ok(mut g) = LAST_PAC_URL.lock() {
@@ -478,6 +548,20 @@ pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
     })
 }
 
+fn enable_system_proxy(
+    j: &mut journal::Journal,
+    p: &dyn platform::Platform,
+    pac_url: &str,
+) -> Result<EnableReport, String> {
+    if cfg!(target_os = "macos") {
+        macos::enable_pac(j, p, pac_url)
+    } else if cfg!(target_os = "windows") {
+        windows::enable_inet(j, p, pac_url)
+    } else {
+        Ok(EnableReport::default())
+    }
+}
+
 /// Returns whether systemic PAC proxy is currently active.
 pub fn is_sysproxy_active() -> bool {
     SYS_PROXY_ACTIVE.load(Ordering::SeqCst)
@@ -485,27 +569,26 @@ pub fn is_sysproxy_active() -> bool {
 
 /// Re-applies the PAC configuration when a new network service appeared (e.g. a VPN client
 /// added its own service) or when an external network tool / OS sleep-wake cycle disabled
-/// or overwrote the PAC URL on the primary interface (Self-Healing).
-/// Returns `true` when the configuration was re-applied.
+/// or overwrote the PAC on a service (self-healing). A foreign value found there is adopted as
+/// the baseline to restore, never lost. Returns `true` when something was re-applied.
 pub fn refresh_if_services_changed() -> bool {
     if !is_sysproxy_active() {
         return false;
     }
-
-
-    #[cfg(target_os = "macos")]
-    {
-        macos::refresh_if_changed()
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows::refresh_if_changed()
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        false
+    let Some(pac) = LAST_PAC_URL.lock().ok().and_then(|g| g.clone()) else {
+        return false;
+    };
+    match with_journal("refresh_sysproxy", |j, p| enable_system_proxy(j, p, &pac)) {
+        Run::Done(Ok(report)) => report.changed,
+        Run::Done(Err(e)) => {
+            // Same refusal as at enable (e.g. temporary VPN DNS): nothing was written. Say it once.
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::SeqCst) {
+                eprintln!("Застава: {e}");
+            }
+            false
+        }
+        Run::Failed(_) | Run::Blocked => false,
     }
 }
 
@@ -517,7 +600,7 @@ impl SysProxy {
     }
 
     pub fn disable() {
-        disable_all_sysproxy();
+        let _ = cleanup_all_persistent_settings();
     }
 
     pub fn is_active() -> bool {
@@ -601,6 +684,34 @@ mod tests {
         assert!(r.skipped_dry_run && r.items.is_empty());
         assert!(!dir.exists(), "dry-run recovery must not even create the directory");
         assert!(dry_run_blocked_calls() > before);
+    }
+
+    #[test]
+    fn enable_in_dry_run_changes_no_system_setting_and_reports_no_service() {
+        let before = dry_run_blocked_calls();
+        let st = enable_sysproxy("http://127.0.0.1:8899/proxy.pac").unwrap();
+        assert!(st.enabled && st.services_configured.is_empty());
+        assert!(is_sysproxy_active());
+        assert!(!refresh_if_services_changed(), "nothing to heal in dry-run");
+        assert!(dry_run_blocked_calls() > before);
+        let _ = cleanup_all_persistent_settings();
+        assert!(!is_sysproxy_active());
+    }
+
+    #[test]
+    fn journal_failure_texts_are_russian_and_carry_no_values() {
+        use journal::JournalError as E;
+        for e in [
+            E::Locked,
+            E::Corrupt,
+            E::UnknownSchema(7),
+            E::Io("write", std::io::ErrorKind::PermissionDenied),
+            E::KindMismatch,
+        ] {
+            let t = journal_failure_text(&e);
+            assert!(t.starts_with("Защита не включена"), "{t}");
+            assert!(t.contains("Системные настройки не менялись"));
+        }
     }
 
     #[test]

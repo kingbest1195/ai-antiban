@@ -32,15 +32,18 @@ pub fn run() {
             sysproxy::register_clean_exit_guard();
             sysproxy::spawn_signal_cleanup_watcher();
             // Ownership recovery pass BEFORE protection is enabled: restores only what the journal
-            // says Zastava changed in a previous run. Fail closed (logged, nothing is guessed).
+            // says Zastava changed in a previous run, then the one-time 1.3.x signature cleanup.
+            // Fail closed (logged, nothing is guessed).
             match app.path().app_data_dir() {
-                Ok(dir) => match sysproxy::recover_ownership_on_start(&dir) {
-                    Ok(report) => eprintln!("Застава: {}", report.summary()),
-                    Err(e) => eprintln!("Застава: восстановление отложено, {e}"),
-                },
+                Ok(dir) => {
+                    sysproxy::set_data_dir(dir.clone());
+                    match sysproxy::recover_ownership_on_start(&dir) {
+                        Ok(report) => eprintln!("Застава: {}", report.summary()),
+                        Err(e) => eprintln!("Застава: восстановление отложено, {e}"),
+                    }
+                }
                 Err(_) => eprintln!("Застава: каталог данных недоступен, восстановление отложено"),
             }
-            sysproxy::cleanup_legacy_windows_user_env();
 
             init_alert_popup(app);
 
@@ -165,7 +168,7 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-                sysproxy::disable_all_sysproxy();
+                let _ = sysproxy::cleanup_all_persistent_settings();
             }
             _ => {}
         });
