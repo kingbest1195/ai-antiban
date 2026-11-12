@@ -4,7 +4,10 @@
 //! * Before the first OS write of a resource, an intent with the exact `baseline` (the value that
 //!   was there before us, including "no value" and the type) is written durably
 //!   (temp file -> fsync -> rename -> fsync dir). If that write fails, nothing is written to the OS.
-//! * A repeated `apply` never replaces the baseline.
+//! * A repeated `apply` never replaces the baseline, with one exception: when somebody else changed
+//!   the resource after us, that foreign value becomes the new baseline (what we will restore) and
+//!   our value is written on top. Zastava's protection is never silently switched off by a
+//!   foreign change, and the foreign value is never lost.
 //! * Restore: current == what we wrote (`expected`, or the in-flight `pending`) -> write baseline back
 //!   (or delete when baseline was "no value"); anything else is an external change that is left
 //!   alone and the record is released with a mark.
@@ -100,6 +103,14 @@ pub struct Entry {
     #[serde(default)]
     pub pending: Option<Value>,
     pub state: EntryState,
+    /// The OS write landed but the best-effort change notification (WinINet refresh, environment
+    /// broadcast) failed; it is repeated by the next pass.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub notify_pending: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Serialize, Deserialize)]
@@ -107,6 +118,10 @@ pub struct Entry {
 struct FileData {
     schema_version: u32,
     entries: Vec<Entry>,
+    /// One-shot markers (e.g. a finished legacy migration). Live under the same lock and are
+    /// written atomically together with the entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    marks: Vec<String>,
 }
 
 /// Why a journal operation did not happen. Carries no values.
@@ -154,8 +169,9 @@ pub enum ApplyOutcome {
     Applied,
     /// The resource already holds exactly our value.
     Unchanged,
-    /// Somebody else changed the resource after us; nothing was written, the record is kept.
-    ExternalChange,
+    /// Somebody else changed the resource after us: the foreign value became the new baseline and
+    /// our value was written on top of it.
+    Rebased,
 }
 
 /// Result of restoring one resource.
@@ -246,7 +262,31 @@ fn read_value(platform: &dyn Platform, res: &Resource) -> PResult<Value> {
     })
 }
 
-fn write_value(platform: &dyn Platform, res: &Resource, v: &Value) -> PResult<()> {
+/// Result of a best-effort change notification.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Notified {
+    Yes,
+    /// The notification failed; the written value stays, the notification is repeated later.
+    Failed,
+}
+
+/// Tells the OS about a change (WinINet refresh / environment broadcast). `Unsupported` means
+/// "nothing to notify on this OS".
+fn notify(platform: &dyn Platform, res: &Resource) -> Notified {
+    let r = match res {
+        Resource::Inet { .. } => platform.notify_inet_refresh(),
+        Resource::UserEnv { .. } => platform.broadcast_env_change(),
+        Resource::Pac { .. } | Resource::Chain { .. } => Ok(()),
+    };
+    match r {
+        Ok(()) | Err(PlatformError::Unsupported(_)) => Notified::Yes,
+        Err(_) => Notified::Failed,
+    }
+}
+
+/// Writes `v` into the OS. An `Err` means the write failed; a failed notification is reported
+/// separately because the value did land.
+fn write_value(platform: &dyn Platform, res: &Resource, v: &Value) -> PResult<Notified> {
     match (res, v) {
         (Resource::Pac { service }, Value::Pac(p)) => {
             // An absent URL is restored by clearing it (networksetup has no "unset").
@@ -254,31 +294,16 @@ fn write_value(platform: &dyn Platform, res: &Resource, v: &Value) -> PResult<()
                 url: Some(p.url.clone().unwrap_or_default()),
                 enabled: p.enabled,
             };
-            platform.set_pac(service, &pac)
+            platform.set_pac(service, &pac)?;
         }
-        (Resource::Chain { service }, Value::Chain(c)) => platform.set_chain(service, c),
-        (Resource::UserEnv { name }, Value::Env(Some(s))) => {
-            platform.set_user_env(name, s)?;
-            let _ = platform.broadcast_env_change();
-            Ok(())
-        }
-        (Resource::UserEnv { name }, Value::Env(None)) => {
-            platform.unset_user_env(name)?;
-            let _ = platform.broadcast_env_change();
-            Ok(())
-        }
-        (Resource::Inet { name }, Value::Reg(Some(r))) => {
-            platform.set_inet(name, r)?;
-            let _ = platform.notify_inet_refresh();
-            Ok(())
-        }
-        (Resource::Inet { name }, Value::Reg(None)) => {
-            platform.delete_inet(name)?;
-            let _ = platform.notify_inet_refresh();
-            Ok(())
-        }
-        _ => Err(PlatformError::Unsupported("kind_mismatch")),
+        (Resource::Chain { service }, Value::Chain(c)) => platform.set_chain(service, c)?,
+        (Resource::UserEnv { name }, Value::Env(Some(s))) => platform.set_user_env(name, s)?,
+        (Resource::UserEnv { name }, Value::Env(None)) => platform.unset_user_env(name)?,
+        (Resource::Inet { name }, Value::Reg(Some(r))) => platform.set_inet(name, r)?,
+        (Resource::Inet { name }, Value::Reg(None)) => platform.delete_inet(name)?,
+        _ => return Err(PlatformError::Unsupported("kind_mismatch")),
     }
+    Ok(notify(platform, res))
 }
 
 /// The ownership journal. Holds the inter-process lock for as long as it lives.
@@ -286,6 +311,7 @@ pub struct Journal {
     fs: Arc<dyn Fs>,
     root: PathBuf,
     entries: Vec<Entry>,
+    marks: Vec<String>,
     backup_excluded: bool,
     _lock: FsLock,
 }
@@ -309,24 +335,25 @@ impl Journal {
             LockError::Io(k) => JournalError::Io("lock", k),
         })?;
         let path = root.join(JOURNAL_FILE);
-        let entries = match fs
+        let (entries, marks) = match fs
             .read(&path)
             .map_err(|e| JournalError::Io("read", e.kind()))?
         {
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
             Some(bytes) => {
-                let entries = parse(&bytes)?;
+                let parsed = parse(&bytes)?;
                 // An older build or a manual copy may have left loose permissions.
                 if matches!(fs.mode(&path), Ok(Some(m)) if m & 0o077 != 0) {
                     let _ = fs.set_mode(&path, 0o600);
                 }
-                entries
+                parsed
             }
         };
         Ok(Journal {
             fs,
             root,
             entries,
+            marks,
             backup_excluded: false,
             _lock: lock,
         })
@@ -357,6 +384,7 @@ impl Journal {
         let data = FileData {
             schema_version: SCHEMA_VERSION,
             entries: self.entries.clone(),
+            marks: self.marks.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&data).map_err(|_| JournalError::Corrupt)?;
         self.fs
@@ -372,6 +400,10 @@ impl Journal {
     ///
     /// Order: read current -> durable intent (with baseline) -> OS write -> durable "applied".
     /// If the intent cannot be made durable, the OS is not touched.
+    ///
+    /// If the resource holds neither our value nor the baseline, somebody else changed it after
+    /// us: that value becomes the new baseline (durably, before the write) and `new` is written
+    /// on top ([`ApplyOutcome::Rebased`]).
     pub fn apply(
         &mut self,
         platform: &dyn Platform,
@@ -386,6 +418,7 @@ impl Journal {
         // `before` = the record as it was on disk, for an exact in-memory rollback.
         let previous = cur.clone();
         let before = self.entry(res).cloned();
+        let mut outcome = ApplyOutcome::Applied;
         match self.index_of(res) {
             None => {
                 self.entries.push(Entry {
@@ -394,20 +427,35 @@ impl Journal {
                     expected: None,
                     pending: Some(new.clone()),
                     state: EntryState::Pending,
+                    notify_pending: false,
                 });
             }
             Some(i) => {
                 let e = &mut self.entries[i];
                 if e.state == EntryState::Applied && e.expected.as_ref() == Some(&new) && cur == new
                 {
+                    if e.notify_pending {
+                        // The value is in place; only the earlier notification is still owed.
+                        if notify(platform, res) == Notified::Yes {
+                            e.notify_pending = false;
+                            self.persist(platform)?;
+                        }
+                    }
                     return Ok(ApplyOutcome::Unchanged);
                 }
                 let ours = e.expected.as_ref() == Some(&cur) || e.pending.as_ref() == Some(&cur);
-                if !ours && cur != e.baseline {
-                    return Ok(ApplyOutcome::ExternalChange);
+                if !ours && cur != e.baseline && cur != new {
+                    // A foreign change after us: it becomes the baseline. Names only in the log.
+                    eprintln!(
+                        "Застава: внешнее изменение {} принято как исходное",
+                        res.id()
+                    );
+                    e.baseline = cur;
+                    e.expected = None;
+                    outcome = ApplyOutcome::Rebased;
                 }
-                // The baseline stays as it is. The previous `expected` stays too, so a crash in
-                // the middle of the update can still be recognised and restored.
+                // Otherwise the baseline stays as it is, and so does the previous `expected`, so
+                // a crash in the middle of the update can still be recognised and restored.
                 e.pending = Some(new.clone());
                 e.state = EntryState::Pending;
             }
@@ -417,17 +465,21 @@ impl Journal {
             self.put_back(res, before);
             return Err(err);
         }
-        if let Err(werr) = write_value(platform, res, &new) {
-            self.settle_failed_write(platform, res, &previous, before);
-            return Err(werr.into());
-        }
+        let notified = match write_value(platform, res, &new) {
+            Ok(n) => n,
+            Err(werr) => {
+                self.settle_failed_write(platform, res, &previous, before);
+                return Err(werr.into());
+            }
+        };
         let i = self.index_of(res).ok_or(JournalError::Corrupt)?;
         let e = &mut self.entries[i];
         e.expected = Some(new);
         e.pending = None;
         e.state = EntryState::Applied;
+        e.notify_pending = notified == Notified::Failed;
         self.persist(platform)?;
-        Ok(ApplyOutcome::Applied)
+        Ok(outcome)
     }
 
     /// Puts the in-memory record back to `before` (`None` = no record).
@@ -467,7 +519,21 @@ impl Journal {
     /// Restores every recorded resource. A failure of one never blocks the others; repeating the
     /// pass is safe. Returns a report with resource names and outcomes only.
     pub fn restore_all(&mut self, platform: &dyn Platform) -> RecoveryReport {
-        let ids: Vec<Resource> = self.entries.iter().map(|e| e.resource.clone()).collect();
+        self.restore_where(platform, |_| true)
+    }
+
+    /// Restores the recorded resources selected by `select`; the others stay untouched.
+    pub fn restore_where(
+        &mut self,
+        platform: &dyn Platform,
+        select: impl Fn(&Resource) -> bool,
+    ) -> RecoveryReport {
+        let ids: Vec<Resource> = self
+            .entries
+            .iter()
+            .map(|e| e.resource.clone())
+            .filter(|r| select(r))
+            .collect();
         let mut report = RecoveryReport::default();
         for res in ids {
             let outcome = self.restore_one_inner(platform, &res, &mut report);
@@ -507,6 +573,10 @@ impl Journal {
                 let ours =
                     entry.expected.as_ref() == Some(&cur) || entry.pending.as_ref() == Some(&cur);
                 if cur == entry.baseline {
+                    // A notification that failed earlier is repeated before the record goes.
+                    if entry.notify_pending && notify(platform, res) == Notified::Failed {
+                        return Outcome::Failed("notify");
+                    }
                     Outcome::AlreadyRestored
                 } else if !ours {
                     Outcome::ExternalChange
@@ -520,13 +590,47 @@ impl Journal {
                         Err(_) => return Outcome::Failed("read"),
                     }
                     match write_value(platform, res, &entry.baseline) {
-                        Ok(()) => Outcome::Restored,
+                        Ok(Notified::Yes) => Outcome::Restored,
+                        Ok(Notified::Failed) => {
+                            // The baseline is back; keep the record so the notification is retried.
+                            self.entries[i].notify_pending = true;
+                            if self.persist(platform).is_err() {
+                                report.journal_write_failed = true;
+                            }
+                            return Outcome::Failed("notify");
+                        }
                         Err(_) => return Outcome::Failed("write"),
                     }
                 }
             }
         };
         self.release(platform, res, outcome, report)
+    }
+
+    /// Whether the resource currently holds a value Zastava wrote itself (`cur` equals the last
+    /// confirmed or the in-flight value of its record). `false` without a record.
+    pub fn owns(&self, res: &Resource, cur: &Value) -> bool {
+        self.entry(res)
+            .is_some_and(|e| e.expected.as_ref() == Some(cur) || e.pending.as_ref() == Some(cur))
+    }
+
+    /// Whether the one-shot marker `name` is set.
+    pub fn has_mark(&self, name: &str) -> bool {
+        self.marks.iter().any(|m| m == name)
+    }
+
+    /// Sets a one-shot marker durably (same file, same lock, atomic replace). If the write fails
+    /// the marker is not set.
+    pub fn set_mark(&mut self, platform: &dyn Platform, name: &str) -> Result<(), JournalError> {
+        if self.has_mark(name) {
+            return Ok(());
+        }
+        self.marks.push(name.to_string());
+        if let Err(e) = self.persist(platform) {
+            self.marks.retain(|m| m != name);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Drops the record and persists. If persisting fails the record stays on disk and the next
@@ -548,7 +652,7 @@ impl Journal {
     }
 }
 
-fn parse(bytes: &[u8]) -> Result<Vec<Entry>, JournalError> {
+fn parse(bytes: &[u8]) -> Result<(Vec<Entry>, Vec<String>), JournalError> {
     let raw: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| JournalError::Corrupt)?;
     let version = raw
@@ -574,7 +678,7 @@ fn parse(bytes: &[u8]) -> Result<Vec<Entry>, JournalError> {
             return Err(JournalError::Corrupt);
         }
     }
-    Ok(data.entries)
+    Ok((data.entries, data.marks))
 }
 
 /// Opens the journal and restores everything it owns. Fail closed on any journal-level error.
@@ -744,11 +848,13 @@ mod tests {
             enabled: Some(true),
             server: Some("h1".into()),
             port: Some(1080),
+            ..Default::default()
         };
         let https = ProxyEndpoint {
             enabled: Some(true),
             server: Some("h2".into()),
             port: Some(2080),
+            ..Default::default()
         };
         p.seed_chain(
             &wifi(),
@@ -869,20 +975,106 @@ mod tests {
     }
 
     #[test]
-    fn apply_over_external_change_writes_nothing() {
+    fn apply_over_external_change_rebases_the_baseline() {
         let (fs, p) = setup();
         p.seed_env("A", "orig");
         let mut j = open(&fs).unwrap();
         j.apply(&p, &env("A"), ev("ours")).unwrap();
         p.seed_env("A", "other");
-        let writes = p.os_writes();
         assert_eq!(
             j.apply(&p, &env("A"), ev("ours")).unwrap(),
-            ApplyOutcome::ExternalChange
+            ApplyOutcome::Rebased
+        );
+        // Protection is back on, and the foreign value is what will be restored.
+        assert_eq!(p.env_of("A"), Some("ours".into()));
+        assert_eq!(j.entry(&env("A")).unwrap().baseline, ev("other"));
+        j.restore_all(&p);
+        assert_eq!(p.env_of("A"), Some("other".into()));
+    }
+
+    #[test]
+    fn external_change_after_a_rebase_is_still_not_rolled_back() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &env("A"), ev("ours")).unwrap();
+        p.seed_env("A", "other");
+        j.apply(&p, &env("A"), ev("ours")).unwrap();
+        p.seed_env("A", "latest-foreign");
+        let writes = p.os_writes();
+        let r = j.restore_all(&p);
+        assert_eq!(r.external(), 1);
+        assert_eq!(p.env_of("A"), Some("latest-foreign".into()));
+        assert_eq!(p.os_writes(), writes);
+    }
+
+    #[test]
+    fn crash_between_intent_and_write_after_a_rebase_keeps_the_foreign_value() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        {
+            let mut j = open(&fs).unwrap();
+            j.apply(&p, &env("A"), ev("ours")).unwrap();
+            p.seed_env("A", "other");
+            // The rebase intent is durable, the OS write never lands.
+            p.fail_next(PlatOp::SetEnv);
+            assert!(j.apply(&p, &env("A"), ev("ours")).is_err());
+        }
+        let writes = p.os_writes();
+        let r = recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
+        assert_eq!(
+            p.env_of("A"),
+            Some("other".into()),
+            "foreign value untouched"
         );
         assert_eq!(p.os_writes(), writes);
+        assert_eq!(r.failed(), 0);
+    }
+
+    #[test]
+    fn crash_after_a_rebase_write_before_the_applied_mark_restores_the_foreign_value() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        {
+            let mut j = open(&fs).unwrap();
+            j.apply(&p, &env("A"), ev("ours")).unwrap();
+            p.seed_env("A", "other");
+            fs.fail_after(FsOp::WriteAtomic, 1); // intent lands, the "applied" mark is lost
+            assert!(j.apply(&p, &env("A"), ev("ours")).is_err());
+        }
+        assert_eq!(p.env_of("A"), Some("ours".into()));
+        recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
         assert_eq!(p.env_of("A"), Some("other".into()));
-        assert_eq!(j.entry(&env("A")).unwrap().baseline, ev("orig"));
+    }
+
+    #[test]
+    fn a_foreign_value_equal_to_ours_does_not_replace_the_baseline() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &env("A"), ev("ours")).unwrap();
+        p.seed_env("A", "other");
+        j.apply(&p, &env("A"), ev("v2")).unwrap(); // rebase onto "other"
+        p.seed_env("A", "v3"); // somebody writes exactly the value we are about to apply
+        assert_eq!(
+            j.apply(&p, &env("A"), ev("v3")).unwrap(),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(j.entry(&env("A")).unwrap().baseline, ev("other"));
+    }
+
+    #[test]
+    fn rebase_is_logged_without_values_and_writes_the_journal_before_the_os() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &env("A"), ev("ours")).unwrap();
+        p.seed_env("A", "secret-foreign-value");
+        let writes_before = fs.write_count();
+        j.apply(&p, &env("A"), ev("ours")).unwrap();
+        assert!(fs.write_count() >= writes_before + 2, "intent and applied");
+        let calls = p.calls().join(" ");
+        assert!(!calls.contains("secret-foreign-value"));
     }
 
     // --- crashes ---------------------------------------------------------------------------
@@ -1389,5 +1581,102 @@ mod tests {
         let r = recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
         assert_eq!(r.restored(), 2);
         assert_eq!((p.env_of("A"), p.env_of("B")), (Some("a0".into()), None));
+    }
+
+    // --- marks, notifications, selective restore ---------------------------------------------
+
+    #[test]
+    fn marker_is_durable_and_does_not_need_any_entry() {
+        let (fs, p) = setup();
+        {
+            let mut j = open(&fs).unwrap();
+            assert!(!j.has_mark("m"));
+            j.set_mark(&p, "m").unwrap();
+            j.set_mark(&p, "m").unwrap(); // idempotent
+        }
+        let j = open(&fs).unwrap();
+        assert!(j.has_mark("m"));
+        assert!(j.is_empty());
+    }
+
+    #[test]
+    fn marker_is_not_set_when_it_cannot_be_written() {
+        let (fs, p) = setup();
+        let mut j = open(&fs).unwrap();
+        fs.fail_next(FsOp::WriteAtomic);
+        assert!(j.set_mark(&p, "m").is_err());
+        assert!(!j.has_mark("m"));
+        drop(j);
+        assert!(!open(&fs).unwrap().has_mark("m"));
+    }
+
+    #[test]
+    fn journal_without_marks_from_an_older_file_still_opens() {
+        let (fs, _p) = setup();
+        fs.put(&jpath(), br#"{"schema_version":1,"entries":[]}"#, 0o600);
+        assert!(open(&fs).is_ok());
+    }
+
+    #[test]
+    fn broadcast_failure_keeps_the_record_and_the_next_pass_repeats_it() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &env("A"), ev("ours")).unwrap();
+        p.fail_next(PlatOp::BroadcastEnv);
+        let r = j.restore_all(&p);
+        assert_eq!(r.failed(), 1);
+        assert_eq!(p.env_of("A"), Some("orig".into()), "the value is back");
+        assert!(!j.is_empty());
+        let writes = p.os_writes();
+        let r = j.restore_all(&p);
+        assert_eq!(r.failed(), 0);
+        assert_eq!(
+            p.os_writes(),
+            writes,
+            "only the notification is repeated, no second write"
+        );
+        assert!(j.is_empty());
+    }
+
+    #[test]
+    fn no_broadcast_when_nothing_really_changed() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &env("A"), ev("ours")).unwrap();
+        p.seed_env("A", "foreign");
+        p.clear_calls();
+        j.restore_all(&p);
+        assert!(
+            !p.calls()
+                .iter()
+                .any(|c| c.starts_with("broadcast_env_change"))
+        );
+    }
+
+    #[test]
+    fn restore_where_leaves_other_resources_alone() {
+        let (fs, p) = setup();
+        p.add_service(wifi());
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &env("A"), ev("x")).unwrap();
+        let pac = Resource::Pac { service: wifi() };
+        j.apply(&p, &pac, pac_value("http://127.0.0.1:8899/proxy.pac", true))
+            .unwrap();
+        let r = j.restore_where(&p, |res| matches!(res, Resource::UserEnv { .. }));
+        assert_eq!(r.restored(), 1);
+        assert!(j.entry(&pac).is_some());
+        assert_eq!(p.pac_of(&wifi()).enabled, Some(true));
+    }
+
+    #[test]
+    fn owns_recognises_the_confirmed_and_the_in_flight_value_only() {
+        let (fs, p) = setup();
+        let mut j = open(&fs).unwrap();
+        assert!(!j.owns(&env("A"), &ev("x")));
+        j.apply(&p, &env("A"), ev("x")).unwrap();
+        assert!(j.owns(&env("A"), &ev("x")));
+        assert!(!j.owns(&env("A"), &ev("other")));
     }
 }

@@ -1,277 +1,286 @@
-//! Windows-specific system proxy plumbing: WinINet registry values (PAC URL), the
-//! WinINet refresh notification, and `HKCU\Environment` helpers.
-//! Compiled only on `target_os = "windows"` (see `sysproxy/mod.rs`).
+//! WinINet system proxy settings of the current user (Windows): `AutoConfigURL` (the PAC) and
+//! `ProxyEnable`.
+//!
+//! Everything goes through the ownership journal and `Platform`: the exact previous value (type
+//! and data, or "no value") is recorded before the first write and only Zastava's own writes are
+//! reverted. `ProxyServer` and `ProxyOverride` are never written, so they are never touched; the
+//! third-party explicit proxy is chained through the PAC and survives in the registry.
+//! The logic only talks to `Platform`, so it is tested with `FakePlatform` on every OS; the
+//! registry access and the WinINet notification live in `RealPlatform`.
 
+use super::journal::{ApplyOutcome, Journal, Resource, Value};
+use super::platform::{PResult, Platform, RegKind, RegValue};
 use super::{
-    enable_sysproxy, get_chained_proxy, parse_gateway_port_from_pac_url, parse_reg_dword,
-    parse_reg_sz, parse_windows_proxy_server, set_chained_proxy, silent_command, LAST_PAC_URL,
+    EnableReport, parse_gateway_port_from_pac_url, parse_windows_proxy_server, set_chained_proxy,
 };
 
-/// Reads `ProxyEnable` and `ProxyServer` from Windows Internet Settings.
-/// If an active third-party proxy is found, saves it to `CHAINED_PROXY`.
-pub(super) fn detect_and_save_windows_chained_proxy(gateway_port: Option<u16>) -> Option<String> {
-    let enable_output = silent_command("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "ProxyEnable",
-        ])
-        .output()
-        .ok()?;
-    let enable_stdout = String::from_utf8_lossy(&enable_output.stdout);
-    let proxy_enable = parse_reg_dword(&enable_stdout, "ProxyEnable").unwrap_or(0);
+pub(super) const AUTO_CONFIG_URL: &str = "AutoConfigURL";
+pub(super) const PROXY_ENABLE: &str = "ProxyEnable";
+const PROXY_SERVER: &str = "ProxyServer";
 
-    if proxy_enable == 1 {
-        let server_output = silent_command("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyServer",
-            ])
-            .output()
-            .ok()?;
-        let server_stdout = String::from_utf8_lossy(&server_output.stdout);
-        if let Some(raw_server) = parse_reg_sz(&server_stdout, "ProxyServer") {
-            if let Some(target) = parse_windows_proxy_server(&raw_server, gateway_port) {
-                set_chained_proxy(Some(target.clone()));
-                return Some(target);
-            }
-        }
+fn inet(name: &str) -> Resource {
+    Resource::Inet {
+        name: name.to_string(),
     }
-    None
 }
 
-/// Removes the PAC URL and disables or restores third-party chained proxy in the WinINet registry values.
-pub(super) fn disable_system_proxy() {
-    let chained = get_chained_proxy();
-
-    // On Windows remove HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\AutoConfigURL
-    let _ = silent_command("reg")
-        .args([
-            "delete",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "AutoConfigURL",
-            "/f",
-        ])
-        .output();
-
-    if let Some(chained_target) = chained {
-        let _ = silent_command("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyServer",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &chained_target,
-                "/f",
-            ])
-            .output();
-        let _ = silent_command("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyEnable",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "1",
-                "/f",
-            ])
-            .output();
-    } else {
-        let _ = silent_command("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyEnable",
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
-    }
-    notify_windows_inet_refresh();
+/// `ProxyEnable` is an explicit "on" when it is a non-zero DWORD.
+fn is_enabled_dword(v: &Option<RegValue>) -> bool {
+    matches!(v, Some(RegValue { kind: RegKind::Dword, data }) if data != "0")
 }
 
-/// Writes the PAC URL into the WinINet registry values and records it in `configured`.
-pub(super) fn enable_system_proxy(pac_url: &str, configured: &mut Vec<String>) {
+/// Reads the third-party explicit proxy (when switched on) so the PAC can chain through it.
+/// Read-only; `ProxyServer` itself is never rewritten.
+fn detect_chained(p: &dyn Platform, gateway_port: Option<u16>) -> PResult<Option<String>> {
+    if !is_enabled_dword(&p.get_inet(PROXY_ENABLE)?) {
+        return Ok(None);
+    }
+    Ok(match p.get_inet(PROXY_SERVER)? {
+        Some(RegValue {
+            kind: RegKind::Sz,
+            data,
+        }) => parse_windows_proxy_server(&data, gateway_port),
+        _ => None,
+    })
+}
+
+/// Writes the PAC URL and switches the explicit proxy off so the PAC decides. Used for the first
+/// enable and for self-healing; a repeated call changes nothing that is already in place.
+pub(super) fn enable_inet(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+) -> Result<EnableReport, String> {
     let gateway_port = parse_gateway_port_from_pac_url(pac_url);
-
-    // 1. Detect third-party proxy before overriding, chain it
-    detect_and_save_windows_chained_proxy(gateway_port);
-
-    // 2. Write AutoConfigURL
-    let output = silent_command("reg")
-        .args([
-            "add",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "AutoConfigURL",
-            "/t",
-            "REG_SZ",
-            "/d",
-            pac_url,
-            "/f",
-        ])
-        .output();
-
-    // 3. Set ProxyEnable = 0 so WinINet routes via AutoConfigURL (PAC)
-    let _ = silent_command("reg")
-        .args([
-            "add",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            "ProxyEnable",
-            "/t",
-            "REG_DWORD",
-            "/d",
-            "0",
-            "/f",
-        ])
-        .output();
-
-    if output.is_ok() {
-        configured.push("Windows Internet Settings (WinINet)".to_string());
+    let chained = detect_chained(p, gateway_port)
+        .map_err(|_| "Не удалось прочитать системные настройки прокси.".to_string())?;
+    // Chained before the explicit proxy is switched off, so the PAC already routes through it.
+    if let Some(target) = chained {
+        set_chained_proxy(Some(target));
     }
-    notify_windows_inet_refresh();
+
+    let mut report = EnableReport::default();
+    let mut note = |o: ApplyOutcome| {
+        if o != ApplyOutcome::Unchanged {
+            report.changed = true;
+        }
+    };
+
+    // PAC first: the explicit proxy is switched off only when the PAC is in place.
+    match j.apply(
+        p,
+        &inet(AUTO_CONFIG_URL),
+        Value::Reg(Some(RegValue::sz(pac_url))),
+    ) {
+        Ok(o) => note(o),
+        Err(e) => {
+            eprintln!("Застава: {} не включён: {e}", inet(AUTO_CONFIG_URL).id());
+            return Err("Не удалось включить защиту в настройках Windows.".to_string());
+        }
+    }
+
+    // A value that is absent or already 0 needs no change, so it gets no record either. An
+    // existing record is always kept in step (it may have been rebased onto a foreign value).
+    let has_record = j.entry(&inet(PROXY_ENABLE)).is_some();
+    let cur = p
+        .get_inet(PROXY_ENABLE)
+        .map_err(|_| "Не удалось прочитать системные настройки прокси.".to_string())?;
+    if has_record || is_enabled_dword(&cur) {
+        match j.apply(p, &inet(PROXY_ENABLE), Value::Reg(Some(RegValue::dword(0)))) {
+            Ok(o) => note(o),
+            Err(e) => eprintln!("Застава: {} не изменён: {e}", inet(PROXY_ENABLE).id()),
+        }
+    }
+    report
+        .configured
+        .push("Windows Internet Settings (WinINet)".to_string());
+    Ok(report)
 }
 
-/// Windows branch of `refresh_if_services_changed`: re-applies the PAC URL when the registry value drifted
-/// or when a third-party VPN client enabled an explicit ProxyServer.
-pub(super) fn refresh_if_changed() -> bool {
-    let pac = LAST_PAC_URL.lock().ok().and_then(|g| g.clone());
-    if let Some(pac) = pac {
-        let gateway_port = parse_gateway_port_from_pac_url(&pac);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sysproxy::fs::FakeFs;
+    use crate::sysproxy::journal::{Journal, Outcome, recover_with};
+    use crate::sysproxy::platform::{FakePlatform, PlatOp};
+    use std::path::Path;
+    use std::sync::Arc;
 
-        // Check if an external tool turned ProxyEnable back on
-        if detect_and_save_windows_chained_proxy(gateway_port).is_some() {
-            return enable_sysproxy(&pac).is_ok();
-        }
+    const DIR: &str = "/data";
+    const PAC: &str = "http://127.0.0.1:8899/proxy.pac";
 
-        if let Ok(output) = silent_command("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "AutoConfigURL",
-            ])
-            .output()
+    fn open(fs: &FakeFs) -> Journal {
+        Journal::open(Arc::new(fs.clone()), Path::new(DIR)).unwrap()
+    }
+
+    #[test]
+    fn enable_and_restore_return_exact_types_and_absence() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        p.seed_inet(PROXY_SERVER, RegValue::sz("corp.example:3128"));
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz(PAC)));
+        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(0)));
+        j.restore_all(&p);
+        assert_eq!(
+            p.inet_of(AUTO_CONFIG_URL),
+            None,
+            "absent is deleted, not blanked"
+        );
+        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(1)));
+        assert_eq!(
+            p.inet_of(PROXY_SERVER),
+            Some(RegValue::sz("corp.example:3128")),
+            "ProxyServer is never rewritten"
+        );
+    }
+
+    #[test]
+    fn third_party_pac_url_with_expand_type_comes_back_exactly() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_inet(AUTO_CONFIG_URL, RegValue::expand_sz("%CORP%/p.pac"));
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        j.restore_all(&p);
+        assert_eq!(
+            p.inet_of(AUTO_CONFIG_URL),
+            Some(RegValue::expand_sz("%CORP%/p.pac"))
+        );
+    }
+
+    #[test]
+    fn proxy_enable_that_is_already_off_gets_no_record() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        assert!(j.entry(&inet(PROXY_ENABLE)).is_none());
+        assert_eq!(
+            p.inet_of(PROXY_ENABLE),
+            None,
+            "no value is not turned into 0"
+        );
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(0));
+        enable_inet(&mut j, &p, PAC).unwrap();
+        assert!(j.entry(&inet(PROXY_ENABLE)).is_none());
+    }
+
+    #[test]
+    fn external_pac_change_does_not_switch_off_a_foreign_proxy_enable() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        // The user's own PAC replaces ours; the user also turns the explicit proxy on again.
+        p.seed_inet(AUTO_CONFIG_URL, RegValue::sz("http://mine/p.pac"));
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        let rep = j.restore_all(&p);
+        let pac_item = rep
+            .items
+            .iter()
+            .find(|i| i.resource == "inet:AutoConfigURL")
+            .unwrap();
+        assert_eq!(pac_item.outcome, Outcome::ExternalChange);
+        assert_eq!(
+            p.inet_of(AUTO_CONFIG_URL),
+            Some(RegValue::sz("http://mine/p.pac"))
+        );
+        assert_eq!(
+            p.inet_of(PROXY_ENABLE),
+            Some(RegValue::dword(1)),
+            "only our own 0 is ever reverted, the foreign 1 stays"
+        );
+    }
+
+    #[test]
+    fn the_two_values_are_independent() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        // A foreign change of ProxyEnable must not stop the PAC value from being restored.
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(2));
+        let rep = j.restore_all(&p);
+        assert_eq!(rep.restored(), 1);
+        assert_eq!(rep.external(), 1);
+        assert_eq!(p.inet_of(AUTO_CONFIG_URL), None);
+    }
+
+    #[test]
+    fn notification_failure_keeps_the_record_and_the_restore_retries_it() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        // The value is restored but WinINet could not be told: the record stays for a retry.
+        p.fail_next(PlatOp::NotifyInet);
+        let rep = j.restore_all(&p);
+        assert_eq!(rep.failed(), 1);
+        assert_eq!(p.inet_of(AUTO_CONFIG_URL), None);
+        assert!(!j.is_empty());
+        p.clear_calls();
+        let rep = j.restore_all(&p);
+        assert_eq!(rep.failed(), 0);
+        assert!(j.is_empty());
+        assert!(
+            p.calls()
+                .iter()
+                .any(|c| c.starts_with("notify_inet_refresh"))
+        );
+    }
+
+    #[test]
+    fn notification_failure_while_enabling_keeps_the_record_and_is_repeated() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        p.fail_next(PlatOp::NotifyInet);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        assert!(j.entry(&inet(AUTO_CONFIG_URL)).unwrap().notify_pending);
+        p.clear_calls();
+        let r = enable_inet(&mut j, &p, PAC).unwrap();
+        assert!(!r.changed);
+        assert!(!j.entry(&inet(AUTO_CONFIG_URL)).unwrap().notify_pending);
+        assert!(
+            p.calls()
+                .iter()
+                .any(|c| c.starts_with("notify_inet_refresh"))
+        );
+    }
+
+    #[test]
+    fn crash_between_intent_and_write_loses_nothing() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_inet(AUTO_CONFIG_URL, RegValue::sz("http://corp/p.pac"));
         {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !output.status.success() || !stdout.contains(&pac) {
-                return enable_sysproxy(&pac).is_ok();
-            }
+            let mut j = open(&fs);
+            p.fail_next(PlatOp::SetInet);
+            assert!(enable_inet(&mut j, &p, PAC).is_err());
         }
-    }
-    false
-}
-
-pub(super) fn notify_windows_inet_refresh() {
-    if !super::os_effects_enabled() {
-        super::note_dry_run_blocked("InternetSetOptionW");
-        return;
-    }
-    #[link(name = "wininet")]
-    unsafe extern "system" {
-        fn InternetSetOptionW(
-            hInternet: *mut core::ffi::c_void,
-            dwOption: u32,
-            lpBuffer: *mut core::ffi::c_void,
-            dwBufferLength: u32,
-        ) -> i32;
-    }
-    const INTERNET_OPTION_SETTINGS_CHANGED: u32 = 39;
-    const INTERNET_OPTION_REFRESH: u32 = 37;
-    unsafe {
-        let _ = InternetSetOptionW(
-            core::ptr::null_mut(),
-            INTERNET_OPTION_SETTINGS_CHANGED,
-            core::ptr::null_mut(),
-            0,
-        );
-        let _ = InternetSetOptionW(
-            core::ptr::null_mut(),
-            INTERNET_OPTION_REFRESH,
-            core::ptr::null_mut(),
-            0,
+        recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
+        assert_eq!(
+            p.inet_of(AUTO_CONFIG_URL),
+            Some(RegValue::sz("http://corp/p.pac"))
         );
     }
-}
 
-pub fn set_windows_user_env_var(name: &str, value: &str) -> std::io::Result<()> {
-    silent_command("reg")
-        .args(["add", r"HKCU\Environment", "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
-        .output()?;
-    Ok(())
-}
-
-pub fn delete_windows_user_env_var(name: &str) -> std::io::Result<()> {
-    let _ = silent_command("reg")
-        .args(["delete", r"HKCU\Environment", "/v", name, "/f"])
-        .output();
-    Ok(())
-}
-
-pub fn broadcast_windows_env_change() {
-    if !super::os_effects_enabled() {
-        super::note_dry_run_blocked("SendMessageTimeoutW");
-        return;
-    }
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn SendMessageTimeoutW(
-            hWnd: *mut core::ffi::c_void,
-            Msg: u32,
-            wParam: usize,
-            lParam: *const u16,
-            fuFlags: u32,
-            uTimeout: u32,
-            lpdwResult: *mut usize,
-        ) -> isize;
-        fn SendMessageTimeoutA(
-            hWnd: *mut core::ffi::c_void,
-            Msg: u32,
-            wParam: usize,
-            lParam: *const u8,
-            fuFlags: u32,
-            uTimeout: u32,
-            lpdwResult: *mut usize,
-        ) -> isize;
-    }
-    const HWND_BROADCAST: *mut core::ffi::c_void = 0xffff as *mut core::ffi::c_void;
-    const WM_SETTINGCHANGE: u32 = 0x001A;
-    const SMTO_ABORTIFHUNG: u32 = 0x0002;
-    let env_wide: Vec<u16> = "Environment\0".encode_utf16().collect();
-    let env_ansi: &[u8] = b"Environment\0";
-    let mut dw_result: usize = 0;
-    unsafe {
-        let _ = SendMessageTimeoutW(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            env_wide.as_ptr(),
-            SMTO_ABORTIFHUNG,
-            2000,
-            &mut dw_result,
+    #[test]
+    fn explicit_proxy_is_detected_for_the_chain_but_never_rewritten() {
+        let p = FakePlatform::new();
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        p.seed_inet(
+            PROXY_SERVER,
+            RegValue::sz("http=127.0.0.1:2080;https=127.0.0.1:2080"),
         );
-        let _ = SendMessageTimeoutA(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0,
-            env_ansi.as_ptr(),
-            SMTO_ABORTIFHUNG,
-            2000,
-            &mut dw_result,
+        assert_eq!(
+            detect_chained(&p, Some(8899)).unwrap().as_deref(),
+            Some("127.0.0.1:2080")
         );
+        p.seed_inet(PROXY_SERVER, RegValue::sz("127.0.0.1:8899"));
+        assert_eq!(
+            detect_chained(&p, Some(8899)).unwrap(),
+            None,
+            "our own gateway is no upstream"
+        );
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(0));
+        assert_eq!(detect_chained(&p, None).unwrap(), None);
     }
 }

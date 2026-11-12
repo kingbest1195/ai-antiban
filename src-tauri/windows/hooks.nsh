@@ -5,8 +5,8 @@
 
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} ${FileExists} "$PLUGINSDIR\zastava-cleanup.exe"
-    ; The cleanup removes only what Zastava itself wrote (HKCU\Environment values are matched by
-    ; the Zastava gateway signature), so a user's own TZ / LANG / *_PROXY variables survive.
+    ; The cleanup restores only what Zastava itself changed (from the ownership journal; legacy
+    ; leftovers by the Zastava gateway signature), so a user's own settings survive.
     Push $0
     ExecWait '"$PLUGINSDIR\zastava-cleanup.exe" --cleanup' $0
     ${If} $0 <> 0
@@ -15,9 +15,8 @@
     Pop $0
     Delete "$PLUGINSDIR\zastava-cleanup.exe"
   ${EndIf}
-  ; WinINet PAC settings are Zastava's own: remove the PAC URL and switch the proxy off
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "AutoConfigURL"
-  WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Internet Settings" "ProxyEnable" 0
+  ; No unconditional WinINet reset here: AutoConfigURL / ProxyEnable are restored by --cleanup
+  ; from the ownership journal, and only if Zastava changed them (a user's own PAC survives).
   ; Broadcast WM_SETTINGCHANGE ("Environment") so explorer.exe reloads environment immediately without reboot
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=2000
 !macroend

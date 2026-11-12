@@ -85,6 +85,10 @@ pub struct ProxyEndpoint {
     pub enabled: Option<bool>,
     pub server: Option<String>,
     pub port: Option<u16>,
+    /// `Authenticated Proxy Enabled` as reported by the OS. Read-only: Zastava never writes
+    /// credentials and a restore never touches this flag.
+    #[serde(default)]
+    pub authenticated: Option<bool>,
 }
 
 impl fmt::Debug for ProxyEndpoint {
@@ -188,6 +192,9 @@ pub trait Platform: Send + Sync {
     fn get_user_env(&self, key: &str) -> PResult<Option<String>>;
     fn set_user_env(&self, key: &str, value: &str) -> PResult<()>;
     fn unset_user_env(&self, key: &str) -> PResult<()>;
+    /// Names of all user environment variables where the OS can list them (`HKCU\Environment`);
+    /// `Unsupported` where it cannot (launchd has no listing).
+    fn list_user_env_names(&self) -> PResult<Vec<String>>;
     /// WinINet values under `HKCU\...\Internet Settings`.
     fn get_inet(&self, name: &str) -> PResult<Option<RegValue>>;
     fn set_inet(&self, name: &str, value: &RegValue) -> PResult<()>;
@@ -234,6 +241,9 @@ pub fn parse_webproxy(output: &str) -> ProxyEndpoint {
                 "enabled" => ep.enabled = Some(v.eq_ignore_ascii_case("yes") || v == "1"),
                 "server" => ep.server = Some(v.to_string()),
                 "port" => ep.port = v.parse::<u16>().ok(),
+                "authenticated proxy enabled" => {
+                    ep.authenticated = Some(v.eq_ignore_ascii_case("yes") || v == "1")
+                }
                 _ => {}
             }
         }
@@ -318,6 +328,27 @@ pub fn parse_reg_query_value(output: &str, name: &str) -> Option<RegValue> {
         }
     }
     None
+}
+
+/// `reg query <key>` (all values) -> value names, whatever their type.
+pub fn parse_reg_query_names(output: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in output.lines() {
+        let line = line.trim_end_matches(['\r', '\n']);
+        // Value lines are indented; key lines (`HKEY_...`) are not.
+        if !line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let t = line.trim_start();
+        let mut it = t.split_whitespace();
+        let (Some(name), Some(tag)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if tag.starts_with("REG_") {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// Parsed `scutil` dictionary of `Setup:/Network/Service/<id>/DNS`.
@@ -523,20 +554,35 @@ impl Platform for RealPlatform {
             return Ok(());
         }
         let name = self.current_name(svc, "set_chain")?;
-        for (ep, set, state) in [
-            (&chain.http, "-setwebproxy", "-setwebproxystate"),
+        for (ep, set, get, state) in [
+            (
+                &chain.http,
+                "-setwebproxy",
+                "-getwebproxy",
+                "-setwebproxystate",
+            ),
             (
                 &chain.https,
                 "-setsecurewebproxy",
+                "-getsecurewebproxy",
                 "-setsecurewebproxystate",
             ),
         ] {
             if let (Some(host), Some(port)) = (&ep.server, ep.port) {
-                run_ok(
-                    "networksetup",
-                    &[set, &name, host, &port.to_string()],
-                    "set_chain",
-                )?;
+                // `-setwebproxy` also switches the proxy on and resets its authentication, so it
+                // runs only when the address really differs from what the service holds now.
+                let (ok, text) = run("networksetup", &[get, &name], "set_chain")?;
+                let same = ok && {
+                    let cur = parse_webproxy(&text);
+                    cur.server.as_deref() == Some(host.as_str()) && cur.port == Some(port)
+                };
+                if !same {
+                    run_ok(
+                        "networksetup",
+                        &[set, &name, host, &port.to_string()],
+                        "set_chain",
+                    )?;
+                }
             }
             if let Some(on) = ep.enabled {
                 run_ok(
@@ -680,6 +726,13 @@ impl Platform for RealPlatform {
         } else {
             Err(PlatformError::Unsupported("unset_user_env"))
         }
+    }
+
+    fn list_user_env_names(&self) -> PResult<Vec<String>> {
+        Self::require_windows("list_user_env_names")?;
+        dry_run_gate("reg:query-env")?;
+        let (_, text) = run("reg", &["query", ENV_KEY], "list_user_env_names")?;
+        Ok(parse_reg_query_names(&text))
     }
 
     fn get_inet(&self, name: &str) -> PResult<Option<RegValue>> {
@@ -876,6 +929,7 @@ mod fake {
         GetEnv,
         SetEnv,
         UnsetEnv,
+        ListEnv,
         GetInet,
         SetInet,
         DeleteInet,
@@ -1118,6 +1172,11 @@ mod fake {
             Ok(())
         }
 
+        fn list_user_env_names(&self) -> PResult<Vec<String>> {
+            self.enter(PlatOp::ListEnv, "list_user_env_names", "", false)?;
+            Ok(self.st.lock().unwrap().env.keys().cloned().collect())
+        }
+
         fn get_inet(&self, name: &str) -> PResult<Option<RegValue>> {
             self.enter(PlatOp::GetInet, "get_inet", name, false)?;
             Ok(self.inet_of(name))
@@ -1180,6 +1239,7 @@ mod tests {
             enabled: Some(true),
             server: Some("hunter2.example".into()),
             port: Some(1),
+            authenticated: None,
         };
         let reg = RegValue::sz(secret);
         let all = format!(
@@ -1265,6 +1325,28 @@ mod tests {
         assert_eq!(
             parse_reg_query_value("    AutoConfigURLX    REG_SZ    a\n", "AutoConfigURL"),
             None
+        );
+    }
+
+    #[test]
+    fn webproxy_reports_the_authentication_flag() {
+        let ep = parse_webproxy(
+            "Enabled: Yes\nServer: 10.0.0.1\nPort: 3128\nAuthenticated Proxy Enabled: 1\n",
+        );
+        assert_eq!(ep.authenticated, Some(true));
+        let ep = parse_webproxy(
+            "Enabled: Yes\nServer: 10.0.0.1\nPort: 3128\nAuthenticated Proxy Enabled: 0\n",
+        );
+        assert_eq!(ep.authenticated, Some(false));
+        assert_eq!(parse_webproxy("Enabled: No\n").authenticated, None);
+    }
+
+    #[test]
+    fn reg_query_names_lists_values_of_any_type_and_skips_key_lines() {
+        let out = "\r\nHKEY_CURRENT_USER\\Environment\r\n    HTTPS_PROXY    REG_SZ    http://x\r\n    TEMP    REG_EXPAND_SZ    %X%\r\n    Flags    REG_DWORD    0x1\r\n";
+        assert_eq!(
+            parse_reg_query_names(out),
+            vec!["HTTPS_PROXY", "TEMP", "Flags"]
         );
     }
 

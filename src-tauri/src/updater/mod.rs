@@ -353,7 +353,7 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
                     cli: crate::sysproxy::is_cli_protection_enabled(),
                 });
             }
-            crate::sysproxy::disable_all_sysproxy();
+            crate::sysproxy::cleanup_all_persistent_settings();
             let total = total_off.load(std::sync::atomic::Ordering::Relaxed);
             emit_progress(
                 &app_off,
@@ -384,7 +384,7 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        crate::sysproxy::disable_all_sysproxy();
+        crate::sysproxy::cleanup_all_persistent_settings();
         app_clone.restart();
     });
 
