@@ -8,7 +8,7 @@ import type { ShowToast } from "../../shared/hooks";
 const copy = subscription.warmup;
 const list = subscription.checklist;
 
-/** Целевое время прогрева, часы: 4 дня по исследованию 1 693 кейсов. */
+/** Рекомендуемый срок прогрева, часы (4 дня): совет, а не гарантия; источника статистики нет. */
 export const WARMUP_TARGET_HOURS = 96;
 
 /** Состояние прогрева по времени старта. Формулы те же, что были в BinCheckerTab. */

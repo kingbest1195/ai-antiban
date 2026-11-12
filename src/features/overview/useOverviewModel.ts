@@ -169,14 +169,20 @@ export function useOverviewModel({
   }, [reports, activeReport, state, currentIp, sysproxyActive, killswitchFrozen, updateInfo, refreshing, startupPending]);
 }
 
-/** Бейджи вкладок: красная точка на «Обзоре» только когда трафик не идёт (stopped, frozen); на «Проверках» число непройденных проверок худшего отчёта, ноль — без бейджа. */
+/**
+ * Бейджи вкладок. «Обзор»: красная точка, когда трафик не идёт (stopped, frozen); иначе жёлтая, если `overviewNotice`
+ * (защита включена, но есть замечание по покрытию); красная приоритетнее жёлтой. «Проверки»: число непройденных
+ * проверок худшего отчёта, ноль — без бейджа.
+ */
 export function tabBadges(
   banner: BannerKind | null,
   reports: Partial<Record<ProviderId, RiskReport>>,
   state: AppStateData | null,
+  overviewNotice = false,
 ): { overview?: TabItem["badge"]; checks?: TabItem["badge"] } {
   const out: { overview?: TabItem["badge"]; checks?: TabItem["badge"] } = {};
   if (banner === "stopped" || banner === "frozen") out.overview = "danger";
+  else if (overviewNotice) out.overview = "warn";
   const worst = pickWorstReport(reports);
   const n = worst ? failedChecks(worst.report, state).length : 0;
   if (n > 0) out.checks = n;

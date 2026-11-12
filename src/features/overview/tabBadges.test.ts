@@ -83,6 +83,18 @@ describe("tabBadges", () => {
       expect(tabBadges(b, clean, null).overview).toBeUndefined();
     }
   });
+  it("жёлтая точка на «Обзоре» при замечании по покрытию, если красной нет", () => {
+    expect(tabBadges(null, clean, null, true).overview).toBe("warn");
+    for (const b of ["leak", "timezone", "review", "incomplete", "update"] as const) {
+      expect(tabBadges(b, clean, null, true).overview).toBe("warn");
+    }
+    expect(tabBadges(null, clean, null, false).overview).toBeUndefined();
+    expect(tabBadges(null, clean, null).overview).toBeUndefined();
+  });
+  it("красная точка приоритетнее жёлтой", () => {
+    expect(tabBadges("stopped", clean, null, true).overview).toBe("danger");
+    expect(tabBadges("frozen", clean, null, true).overview).toBe("danger");
+  });
   it("число на «Проверках» считает warning, critical и unknown, но не «не применимо»", () => {
     const reports = { anthropic: rep("anthropic", "red", [crit(), warn(), unknown(), na()]) };
     expect(tabBadges(null, reports, null).checks).toBe(3);

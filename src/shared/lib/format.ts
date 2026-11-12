@@ -7,7 +7,7 @@ export function formatNumber(value: number): string {
   }
 }
 
-/** «из 12 проверок», «из 1 проверки»: форма слова после «из» (родительный падеж). */
+/** «из 13 проверок», «из 1 проверки»: форма слова после «из» (родительный падеж). */
 export function checksWord(total: number): string {
   const mod10 = total % 10;
   const mod100 = total % 100;

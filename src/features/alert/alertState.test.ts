@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { EnrichedPayload, RiskInterceptPayload } from "../../types";
-import { alertReducer, canAllow, classifyAllowError, initialAlertState, isFailed } from "./alertState";
+import { alertDialog } from "../../shared/copy/ru";
+import { alertReducer, allowErrorText, canAllow, classifyAllowError, initialAlertState, isFailed } from "./alertState";
 
 function detecting(id = "a1"): RiskInterceptPayload {
   return {
@@ -91,13 +92,32 @@ describe("alertReducer", () => {
 
 describe("classifyAllowError", () => {
   it("устаревший алерт", () => {
-    expect(classifyAllowError("this alert is no longer current")).toBe("stale");
+    expect(classifyAllowError({ code: "alert_stale", message: "x" })).toBe("stale");
   });
   it("аудит не завершён", () => {
-    expect(classifyAllowError(new Error("the network audit is not finished"))).toBe("pending");
+    expect(classifyAllowError({ code: "audit_pending", message: "x" })).toBe("pending");
   });
-  it("прочие ошибки", () => {
-    expect(classifyAllowError("manual kill-switch is engaged")).toBe("generic");
+  it("ручной Kill-Switch", () => {
+    expect(classifyAllowError({ code: "blocked_by_manual_killswitch", message: "x" })).toBe("killswitch");
+  });
+  it("прочие коды и незнакомые значения", () => {
+    expect(classifyAllowError({ code: "internal", message: "x" })).toBe("generic");
+    expect(classifyAllowError({ code: "guard_not_running", message: "x" })).toBe("generic");
+    expect(classifyAllowError({ code: "constructor", message: "x" })).toBe("generic");
     expect(classifyAllowError(undefined)).toBe("generic");
+    expect(classifyAllowError(null)).toBe("generic");
+  });
+  it("текст сообщения больше не разбирается", () => {
+    expect(classifyAllowError("this alert is no longer current")).toBe("generic");
+    expect(classifyAllowError(new Error("the network audit is not finished"))).toBe("generic");
+    expect(classifyAllowError({ code: "internal", message: "this alert is no longer current" })).toBe("generic");
+  });
+});
+
+describe("allowErrorText", () => {
+  it("у каждого вида свой текст из copy/ru", () => {
+    const texts = (["stale", "pending", "killswitch", "generic"] as const).map(allowErrorText);
+    expect(new Set(texts).size).toBe(4);
+    expect(allowErrorText("killswitch")).toBe(alertDialog.allowErrorKillswitch);
   });
 });

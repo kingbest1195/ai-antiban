@@ -29,6 +29,7 @@ use uuid::Uuid;
 use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::{Auditor, NetworkTelemetry, OverallStatus, RiskReport};
 use crate::popup::log_timing;
+use crate::proxy::allow_error::{AllowError, AllowErrorCode};
 use crate::proxy::hold_queue::{
     DEFAULT_HOLD_TTL_SECS, EnrichedPayload, HoldQueue, HoldResolution, NetworkChange,
     PHASE_DETECTING, PHASE_FAILED, PHASE_READY, RiskInterceptPayload,
@@ -1362,18 +1363,27 @@ impl NetworkGuard {
         self: &Arc<Self>,
         id: &str,
         providers: &[String],
-    ) -> Result<(), String> {
-        let env = self.env.get().ok_or("network guard is not running")?;
+    ) -> Result<(), AllowError> {
+        let env = self.env.get().ok_or_else(|| AllowError::new(AllowErrorCode::GuardNotRunning, "network guard is not running"))?;
         if self.is_manual_killswitch() {
-            return Err("manual kill-switch is engaged".to_string());
+            return Err(AllowError::new(
+                AllowErrorCode::BlockedByManualKillswitch,
+                "manual kill-switch is engaged",
+            ));
         }
         let mut inner = self.inner.lock().await;
         let epoch = inner.epoch;
         if !inner.is_current(id, epoch) {
-            return Err("this alert is no longer current".to_string());
+            return Err(AllowError::new(
+                AllowErrorCode::AlertStale,
+                "this alert is no longer current",
+            ));
         }
         let Some(tel) = inner.pending.as_ref().and_then(|p| p.tel.clone()) else {
-            return Err("the network audit is not finished".to_string());
+            return Err(AllowError::new(
+                AllowErrorCode::AuditPending,
+                "the network audit is not finished",
+            ));
         };
         if let Some(clear) = inner
             .pending
@@ -1386,7 +1396,7 @@ impl NetworkGuard {
             env.state
                 .allow_provider_for_session(p)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| AllowError::new(AllowErrorCode::Internal, e.to_string()))?;
         }
         let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
         self.accept_locked(env, &mut inner, &ip, &tel).await;
@@ -2262,7 +2272,7 @@ mod tests {
         // A new change C arrives; the user's allow for alert 1 reaches the guard afterwards.
         h.change("8.8.8.8").await;
         let err = h.guard.allow_network_alert(&id1, &all_providers()).await;
-        assert!(err.is_err());
+        assert_eq!(err.map_err(|e| e.code), Err(AllowErrorCode::AlertStale));
         assert_eq!(h.guard.gate(), Gate::Pending);
         let inner = h.guard.inner.lock().await;
         assert_eq!(
@@ -2295,11 +2305,12 @@ mod tests {
         .await;
         h.change("9.9.9.9").await;
         let id = alert_id(&h.io.first("interceptor://risk-detected").unwrap());
-        assert!(
+        assert_eq!(
             h.guard
                 .allow_network_alert(&id, &all_providers())
                 .await
-                .is_err()
+                .map_err(|e| e.code),
+            Err(AllowErrorCode::AuditPending)
         );
         assert_eq!(h.guard.gate(), Gate::Pending);
         assert!(h.env.hold_queue.current_alert().is_some());
@@ -2327,11 +2338,12 @@ mod tests {
             Some("9.9.9.9")
         );
         // The same allow again (stale id) is refused.
-        assert!(
+        assert_eq!(
             h.guard
                 .allow_network_alert(&id, &all_providers())
                 .await
-                .is_err()
+                .map_err(|e| e.code),
+            Err(AllowErrorCode::AlertStale)
         );
 
         // failed: refused as well, window and gate stay.
@@ -2344,14 +2356,25 @@ mod tests {
                 .expect("failed");
         assert_eq!(ev.0["phase"], "failed");
         let id = ev.0["id"].as_str().unwrap().to_string();
-        assert!(
+        assert_eq!(
             h.guard
                 .allow_network_alert(&id, &all_providers())
                 .await
-                .is_err()
+                .map_err(|e| e.code),
+            Err(AllowErrorCode::AuditPending)
         );
         assert_eq!(h.guard.gate(), Gate::Pending);
         assert!(h.env.hold_queue.current_alert().is_some());
+
+        // The manual kill-switch outranks everything: refused with its own code.
+        h.guard.set_manual_killswitch(true, &h.state).await;
+        assert_eq!(
+            h.guard
+                .allow_network_alert(&id, &all_providers())
+                .await
+                .map_err(|e| e.code),
+            Err(AllowErrorCode::BlockedByManualKillswitch)
+        );
     }
 
     #[tokio::test(start_paused = true)]

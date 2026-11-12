@@ -487,6 +487,32 @@ impl<'a> Doc<'a> {
         i
     }
 
+    /// End of the comment that trails the comma at `from` on the same line, `from` when there is
+    /// none. Unlike `end_of_trailing_comment` it also takes a block comment that spans lines as
+    /// long as the line ends right after it.
+    fn end_of_comment_after_comma(&self, from: usize) -> usize {
+        let end = self.end_of_trailing_comment(from);
+        if end != from {
+            return end;
+        }
+        let rest = &self.text[from..];
+        let blanks = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let Some(body) = rest[blanks..].strip_prefix("/*") else {
+            return from;
+        };
+        let Some(e) = body.find("*/") else {
+            return from;
+        };
+        let close = from + blanks + 2 + e + 2;
+        let tail = &self.text[close..];
+        let line_rest = tail.split(['\n', '\r']).next().unwrap_or("");
+        if line_rest.trim_matches([' ', '\t']).is_empty() {
+            close
+        } else {
+            from
+        }
+    }
+
     fn insert_member(&self, parent: &Obj, key: &str, raw: &str) -> Vec<(usize, usize, String)> {
         let member = format!("{}: {}", quote(key), raw);
         let eol = self.eol();
@@ -516,14 +542,13 @@ impl<'a> Doc<'a> {
             String::new()
         };
         match last.comma {
-            Some(cp) => {
-                let text = if multiline {
-                    format!("{eol}{indent}{member},")
-                } else {
-                    format!(" {member},")
-                };
-                vec![(cp + 1, cp + 1, text)]
+            Some(cp) if multiline => {
+                // A comment after the last member's comma belongs to that member: our line goes
+                // after it, so removing our line gives the original bytes back.
+                let at = self.end_of_comment_after_comma(cp + 1);
+                vec![(at, at, format!("{eol}{indent}{member},"))]
             }
+            Some(cp) => vec![(cp + 1, cp + 1, format!(" {member},"))],
             None if multiline => {
                 let p2 = self.end_of_trailing_comment(last.val_end);
                 if p2 == last.val_end {
@@ -783,6 +808,34 @@ mod tests {
         assert_eq!(raw(&out, &["x"]), Some("1"));
         assert_eq!(raw(&out, &["k"]), Some("2"));
         assert_eq!(remove(&out, &["k"]).unwrap(), t);
+    }
+
+    #[test]
+    fn a_comment_after_the_last_comma_stays_with_its_member_and_the_bytes_come_back() {
+        // Each fixture: the last member has a trailing comma followed by a comment.
+        let fixtures = [
+            "{\n  \"a\": 1, // note\n}\n",
+            "{\n  \"a\": 1, /* note */\n}\n",
+            "{\n  \"a\": 1,   // note\n}\n",
+            "{\n  \"a\": 1, /* two\n  lines */\n}\n",
+            "{\r\n  \"a\": 1, // note\r\n}\r\n",
+            "{\n  \"b\": 0,\n  \"a\": 1, // note\n  // after\n}",
+            "\u{feff}{\n\t\"a\": 1, // note\n}\n",
+        ];
+        for t in fixtures {
+            let out = set(t, &["k"], "true").unwrap();
+            validate(&out).unwrap();
+            assert_eq!(raw(&out, &["k"]), Some("true"), "{t:?}");
+            // The comment is still on the line of "a".
+            let a_line = out.lines().find(|l| l.contains("\"a\"")).unwrap();
+            assert!(a_line.contains("note") || a_line.contains("/* two"), "{out:?}");
+            assert_eq!(remove(&out, &["k"]).unwrap(), t, "{t:?}");
+        }
+        // Nested object.
+        let t = "{\n  \"env\": {\n    \"X\": \"1\", // why\n  }\n}\n";
+        let out = set(t, &["env", "Y"], "\"2\"").unwrap();
+        validate(&out).unwrap();
+        assert_eq!(remove(&out, &["env", "Y"]).unwrap(), t);
     }
 
     #[test]

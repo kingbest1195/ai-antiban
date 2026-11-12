@@ -178,14 +178,20 @@ pub(super) fn upsert_block(text: &str, block: &str) -> Result<String, BlockAmbig
         return Ok(format!("{}{}{}", &text[..r.start], block, &text[r.end..]));
     }
     let mut out = text.to_string();
+    // A profile whose last line has no line end keeps it that way: our block becomes the last
+    // line without one, which is how `remove_block` knows to take the separator away again.
+    let mut last_line_open = false;
     if !text.trim_start_matches('\u{feff}').is_empty() {
         if !out.ends_with('\n') {
             out.push_str(eol);
+            last_line_open = true;
         }
         out.push_str(eol); // the blank line that separates our block from the user's text
     }
     out.push_str(&block);
-    out.push_str(eol);
+    if !last_line_open {
+        out.push_str(eol);
+    }
     Ok(out)
 }
 
@@ -196,6 +202,9 @@ pub(super) fn remove_block(text: &str) -> Result<String, BlockAmbiguous> {
         return Ok(text.to_string());
     };
     let (mut start, mut end) = (r.start, r.end);
+    // The block is the last line of the file and has no line end: `upsert_block` wrote it so
+    // after a profile that did not end with a line end, and that line end goes with it.
+    let open_last_line = end == text.len();
     if text[end..].starts_with("\r\n") {
         end += 2;
     } else if text[end..].starts_with('\n') {
@@ -204,9 +213,9 @@ pub(super) fn remove_block(text: &str) -> Result<String, BlockAmbiguous> {
     let before = &text[..start];
     let content_before = before.trim_start_matches('\u{feff}');
     if content_before.ends_with("\r\n\r\n") {
-        start -= 2;
+        start -= if open_last_line { 4 } else { 2 };
     } else if content_before.ends_with("\n\n") {
-        start -= 1;
+        start -= if open_last_line { 2 } else { 1 };
     }
     Ok(format!("{}{}", &text[..start], &text[end..]))
 }
@@ -500,6 +509,64 @@ mod tests {
             format!("{user}alias g=git\n")
         );
         assert_eq!(remove_block(user).unwrap(), user);
+    }
+
+    fn guard(port: u16) -> String {
+        build_shell_rc_guard_block_with_tz(&format!("http://127.0.0.1:{port}"), port, None)
+    }
+
+    #[test]
+    fn a_profile_without_a_final_line_end_comes_back_byte_for_byte() {
+        for user in [
+            "alias g=git",
+            "alias g=git\nexport A=1",
+            "alias g=git\r\nexport A=1",
+            "alias g=git  ",
+            "\u{feff}alias g=git",
+            " ",
+        ] {
+            let once = upsert_block(user, &guard(8899)).unwrap();
+            assert!(once.starts_with(user));
+            assert!(find_block(&once).unwrap().is_some());
+            assert_eq!(remove_block(&once).unwrap(), user, "{user:?}");
+            // A second upsert replaces the block in place and keeps the open last line.
+            let twice = upsert_block(&once, &guard(8900)).unwrap();
+            assert_eq!(twice.matches(ZASTAVA_RC_START).count(), 1);
+            assert!(!twice.ends_with('\n'), "{twice:?}");
+            assert_eq!(remove_block(&twice).unwrap(), user, "{user:?}");
+        }
+        // With and without the final line end are different files and stay different.
+        let with_eol = upsert_block("alias g=git\n", &guard(8899)).unwrap();
+        let without = upsert_block("alias g=git", &guard(8899)).unwrap();
+        assert_ne!(with_eol, without);
+        assert_eq!(remove_block(&with_eol).unwrap(), "alias g=git\n");
+    }
+
+    #[test]
+    fn every_small_profile_round_trips_with_either_kind_of_line_end() {
+        // All texts of up to 5 pieces; one kind of line end per file (the block follows it).
+        for nl in ["\n", "\r\n"] {
+            let pieces = ["a", " ", nl];
+            let mut texts = vec![String::new()];
+            let mut frontier = vec![String::new()];
+            for _ in 0..5 {
+                let mut next = Vec::new();
+                for t in &frontier {
+                    for p in pieces {
+                        next.push(format!("{t}{p}"));
+                    }
+                }
+                texts.extend(next.iter().cloned());
+                frontier = next;
+            }
+            for user in texts {
+                for bom in ["", "\u{feff}"] {
+                    let user = format!("{bom}{user}");
+                    let once = upsert_block(&user, &guard(8899)).unwrap();
+                    assert_eq!(remove_block(&once).unwrap(), user, "{user:?}");
+                }
+            }
+        }
     }
 
     #[test]

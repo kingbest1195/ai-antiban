@@ -1,4 +1,5 @@
 import type { EnrichedPayload, RiskInterceptPayload } from "../../types";
+import { alertDialog } from "../../shared/copy/ru";
 
 /** Состояние окна предупреждения. Пока событий не было, payload === null и окно ничего не рисует. */
 export interface AlertState {
@@ -74,12 +75,47 @@ export function isDetecting(state: AlertState): boolean {
   return state.payload?.phase === "detecting";
 }
 
-export type AllowErrorKind = "stale" | "pending" | "generic";
+export type AllowErrorKind = "stale" | "pending" | "killswitch" | "generic";
 
-/** Сводит текст отказа бэкенда на Allow к одному из известных видов (сам текст пользователю не показывается). */
+/** Код отказа бэкенда на Allow (`AllowErrorCode` в Rust, snake_case). Решение принимается только по нему, текст не разбирается. */
+export type AllowErrorCode =
+  | "guard_not_running"
+  | "blocked_by_manual_killswitch"
+  | "alert_stale"
+  | "audit_pending"
+  | "internal";
+
+/** Тело отказа: `invoke` отклоняется ровно этим объектом. `message` технический, пользователю не показывается. */
+export interface AllowError {
+  code: AllowErrorCode;
+  message: string;
+}
+
+/** Сводит отказ бэкенда на Allow к одному из известных видов по полю `code`. Всё незнакомое — generic. */
 export function classifyAllowError(err: unknown): AllowErrorKind {
-  const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
-  if (msg.includes("no longer current")) return "stale";
-  if (msg.includes("audit is not finished")) return "pending";
-  return "generic";
+  const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
+  switch (code) {
+    case "alert_stale":
+      return "stale";
+    case "audit_pending":
+      return "pending";
+    case "blocked_by_manual_killswitch":
+      return "killswitch";
+    default:
+      return "generic";
+  }
+}
+
+/** Текст для пользователя по виду отказа; единственное место, где вид превращается в слова. */
+export function allowErrorText(kind: AllowErrorKind): string {
+  switch (kind) {
+    case "stale":
+      return alertDialog.allowErrorStale;
+    case "pending":
+      return alertDialog.allowErrorPending;
+    case "killswitch":
+      return alertDialog.allowErrorKillswitch;
+    default:
+      return alertDialog.allowErrorGeneric;
+  }
 }

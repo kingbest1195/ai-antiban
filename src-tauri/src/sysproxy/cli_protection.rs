@@ -1079,6 +1079,19 @@ mod file_tests {
     }
 
     #[test]
+    fn a_trailing_comma_with_a_comment_round_trips_exactly() {
+        let original = "{\n  \"editor.fontSize\": 14, // keep\n}\n";
+        let e = env();
+        let ide = e.ide_with(original, 0o644);
+        e.enable(None);
+        let after = e.text(&ide);
+        assert!(after.contains("\"editor.fontSize\": 14, // keep"), "{after}");
+        jsonc::validate(&after).unwrap();
+        e.disable();
+        assert_eq!(e.text(&ide), original, "restored byte for byte");
+    }
+
+    #[test]
     fn an_empty_object_file_round_trips_exactly() {
         let e = env();
         let ide = e.ide_with("{}\n", 0o644);
@@ -1446,6 +1459,18 @@ mod file_tests {
         assert_eq!(e.fs.mode(&rc).unwrap(), Some(0o644));
         e.disable();
         assert_eq!(e.text(&rc), original);
+    }
+
+    #[test]
+    fn a_profile_without_a_final_line_end_is_restored_byte_for_byte() {
+        let e = env();
+        let rc = e.ctx.home.join(".zshrc");
+        let original = "export A=1\nalias ll='ls -l'";
+        e.fs.put(&rc, original.as_bytes(), 0o644);
+        apply_block(&e, &rc, &shell_block()).unwrap();
+        assert!(e.text(&rc).starts_with(original));
+        e.disable();
+        assert_eq!(e.text(&rc), original, "no line end added, none lost");
     }
 
     #[test]

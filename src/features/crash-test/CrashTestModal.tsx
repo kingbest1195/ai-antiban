@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { CrashTestStepResult } from "../../types";
 import { resetCrashTestDrop, runVpnCrashTestStep, triggerCrashTestDrop } from "../../utils/api";
 import { Badge, Banner, Button, Modal, Mono, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
 import type { StepItem } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { crashTest as copy } from "../../shared/copy/ru";
+import { toStreamEntry } from "./crashTestModel";
+import type { CrashStreamEntry } from "./crashTestModel";
 import "./crash-test.css";
 
 export interface CrashTestModalProps {
@@ -20,7 +21,7 @@ const errText = (err: unknown) => (err instanceof Error ? err.message : String(e
 
 /** Тест обрыва VPN: живой поток тестовых запросов, обрыв туннеля и реакция шлюза по шагам. */
 export function CrashTestModal({ open, onClose, onToast }: CrashTestModalProps) {
-  const [packets, setPackets] = useState<CrashTestStepResult[]>([]);
+  const [packets, setPackets] = useState<CrashStreamEntry[]>([]);
   const [sentCount, setSentCount] = useState(0);
   const [lastLatency, setLastLatency] = useState(0.28);
   const [isDropped, setIsDropped] = useState(false);
@@ -46,7 +47,7 @@ export function CrashTestModal({ open, onClose, onToast }: CrashTestModalProps) 
         if (!active) return;
         setSentCount((prev) => prev + 1);
         setLastLatency(step.latency_ms);
-        setPackets((prev) => [step, ...prev.slice(0, 8)]);
+        setPackets((prev) => [toStreamEntry(step, Date.now()), ...prev.slice(0, 8)]);
         if (step.intercepted_by_killswitch) {
           setIsDropped(true);
           setIntercepted(true);
@@ -167,11 +168,11 @@ export function CrashTestModal({ open, onClose, onToast }: CrashTestModalProps) 
               <Rows className="zs-crash__stream">
                 {packets.slice(0, STREAM_LIMIT).map((pkt, i) => (
                   <Row
-                    key={`${pkt.timestamp}-${i}`}
-                    title={<Mono className="zs-crash__host">{pkt.target_host}</Mono>}
-                    sub={copy.stream.latency(pkt.latency_ms)}
+                    key={`${pkt.at}-${i}`}
+                    title={<Mono className="zs-crash__host">{pkt.host}</Mono>}
+                    sub={copy.stream.latency(pkt.latencyMs)}
                     trail={
-                      pkt.intercepted_by_killswitch ? (
+                      pkt.intercepted ? (
                         <Badge tone="danger" icon="alert">
                           {copy.stream.blocked}
                         </Badge>

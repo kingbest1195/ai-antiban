@@ -19,7 +19,16 @@ export interface TabsProps<T extends string = string> {
   "aria-label"?: string;
   /** Дополнение к подписи вкладки с бейджем для скринридера, например «, есть проблема». */
   badgeLabel?: string;
+  /** То же для жёлтой точки (`badge: "warn"`), например «, есть замечание»; без него жёлтая точка получает `badgeLabel`. */
+  warnBadgeLabel?: string;
   className?: string;
+}
+
+/** Подпись вкладки для скринридера: с дополнением к бейджу или undefined, когда бейджа нет. */
+export function tabAriaLabel(item: Pick<TabItem, "label" | "badge">, badgeLabel?: string, warnBadgeLabel?: string): string | undefined {
+  if (item.badge === undefined) return undefined;
+  const suffix = item.badge === "warn" ? (warnBadgeLabel ?? badgeLabel) : badgeLabel;
+  return suffix ? `${item.label}${suffix}` : undefined;
 }
 
 const tabId = (prefix: string, id: string) => `${prefix}-tab-${id}`;
@@ -33,6 +42,7 @@ export function Tabs<T extends string = string>({
   idPrefix = "zs",
   className,
   badgeLabel,
+  warnBadgeLabel,
   ...rest
 }: TabsProps<T>) {
   const listRef = useRef<HTMLDivElement>(null);
@@ -73,7 +83,7 @@ export function Tabs<T extends string = string>({
             tabIndex={selected ? 0 : -1}
             disabled={item.disabled}
             className="zs-tab"
-            aria-label={item.badge !== undefined && badgeLabel ? `${item.label}${badgeLabel}` : undefined}
+            aria-label={tabAriaLabel(item, badgeLabel, warnBadgeLabel)}
             onClick={() => onChange(item.id)}
           >
             {item.label}
