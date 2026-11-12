@@ -106,19 +106,38 @@ export type InterceptionAction =
 export interface NetworkChange {
   old_ip?: string | null;
   old_country?: string | null;
-  new_ip: string;
-  new_country: string;
+  /** null, пока новый адрес ещё не определён. */
+  new_ip?: string | null;
+  /** null, пока страна нового адреса ещё не определена. */
+  new_country?: string | null;
 }
+
+/** detecting — окно показано до конца проверки; ready — данные полные; failed — проверка не удалась, запросы остановлены. */
+export type AlertPhase = "detecting" | "ready" | "failed";
 
 export interface RiskInterceptPayload {
   id: string;
   provider: ProviderId;
   host: string;
-  report: RiskReport;
+  /** null, пока phase === "detecting". */
+  report?: RiskReport | null;
   ttl_seconds: number;
   scope?: "provider" | "network" | string;
   network_change?: NetworkChange | null;
   is_simulation?: boolean;
+  /** Unix-время (мс), когда изменение сети обнаружено. */
+  detected_at_ms: number;
+  phase: AlertPhase;
+}
+
+/** interceptor://enriched: данные, пришедшие после показа окна. */
+export interface EnrichedPayload {
+  id: string;
+  /** Эпоха шлюза: устаревшие эпохи игнорируются. */
+  epoch: number;
+  phase: "ready" | "failed";
+  report?: RiskReport | null;
+  network_change: NetworkChange;
 }
 
 export interface UpdateCheckResult {

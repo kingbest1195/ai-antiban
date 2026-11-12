@@ -1,12 +1,15 @@
 import { useEffect, useRef } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
 import type {
+  EnrichedPayload,
   RiskInterceptPayload,
   UpdateCheckResult,
   UpdateProgressPayload,
   UpdateStatusPayload,
 } from "../../types";
+import { applyEnriched } from "../../features/alert/alertState";
 import { auditConnection, pinCurrentIp } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
@@ -26,7 +29,7 @@ export interface TrayEventHandlers {
   exportClaude: () => Promise<void>;
   openCrashTest: () => void;
   setKillswitchFrozen: (frozen: boolean) => void;
-  setInterceptPayload: (payload: RiskInterceptPayload | null) => void;
+  setInterceptPayload: Dispatch<SetStateAction<RiskInterceptPayload | null>>;
   applyUpdateProgress: (payload: UpdateProgressPayload) => void;
   applyUpdateAvailable: (payload: UpdateCheckResult) => void;
   applyUpdateStatus: (payload: UpdateStatusPayload) => void;
@@ -137,8 +140,22 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
       ref.current.runFullAudit(true);
     });
 
+    // Эпоха последнего enriched по текущему алерту: чужие и устаревшие события игнорируются.
+    let enrichedEpoch: number | null = null;
     on<RiskInterceptPayload>("interceptor://risk-detected", (payload) => {
-      ref.current.setInterceptPayload(payload);
+      enrichedEpoch = null;
+      ref.current.setInterceptPayload((prev) =>
+        prev && prev.id === payload.id && prev.phase !== "detecting" && payload.phase === "detecting" ? prev : payload,
+      );
+    });
+
+    on<EnrichedPayload>("interceptor://enriched", (enriched) => {
+      ref.current.setInterceptPayload((prev) => {
+        const applied = applyEnriched(prev, enrichedEpoch, enriched);
+        if (!applied) return prev;
+        enrichedEpoch = applied.epoch;
+        return applied.payload;
+      });
     });
 
     on("interceptor://resolved", () => {

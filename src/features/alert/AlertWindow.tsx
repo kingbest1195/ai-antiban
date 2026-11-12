@@ -1,84 +1,20 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useReducer, useState } from "react";
+import type { ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
-import type { InterceptionAction, RiskInterceptPayload } from "../../types";
-import { resolveInterception } from "../../utils/api";
-import { Dialog } from "../../ui";
+import type { EnrichedPayload, InterceptionAction, RiskInterceptPayload } from "../../types";
+import {
+  MOCK_ALERT_DETECTED_EVENT,
+  MOCK_ALERT_ENRICHED_EVENT,
+  resolveInterception,
+  takePendingAlert,
+} from "../../utils/api";
+import { Dialog, Skeleton } from "../../ui";
+import { alertReducer, canAllow, classifyAllowError, initialAlertState, isDetecting, isFailed } from "./alertState";
+import type { AlertState } from "./alertState";
 import { alertDialog as copy, providers as providerCopy } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import "./alert.css";
-
-const DEFAULT_PAYLOAD: RiskInterceptPayload = {
-  id: "sim-preview",
-  is_simulation: true,
-  provider: "anthropic",
-  host: "api.anthropic.com:443",
-  ttl_seconds: 60,
-  network_change: {
-    old_ip: "185.212.102.40",
-    old_country: "NL",
-    new_ip: "185.220.101.5",
-    new_country: "RU",
-  },
-  report: {
-    provider: "anthropic",
-    overall_status: "red",
-    trust_score: 28,
-    telemetry: {
-      ip: "185.220.101.5",
-      country_code: "RU",
-      asn: 9009,
-      isp: "M247 Europe SRL",
-      org: "M247 Europe SRL",
-      timezone: "Europe/Moscow",
-      resolved_at: Math.floor(Date.now() / 1000),
-    },
-    geo_result: {
-      status: "critical",
-      code: "GEO_HIGH_RISK_RU",
-      message: "Локация RU не поддерживается сервисом ИИ.",
-      guide_ref: "01-personal-vpn-15min",
-    },
-    pinning_result: {
-      status: "warning",
-      code: "PINNED_IP_NOT_CONFIGURED",
-      message: "Трафик идет НЕ через закрепленный VPS.",
-      guide_ref: "01-personal-vpn-15min",
-    },
-    travel_result: {
-      status: "ok",
-      code: "TRAVEL_NORMAL",
-      message: "Конфликтов перемещения за 12ч нет.",
-      guide_ref: null,
-    },
-    dnsbl_result: {
-      status: "ok",
-      code: "DNSBL_CLEAN",
-      message: "В спам-базах не числится.",
-      guide_ref: null,
-    },
-    dnsbl_clean_count: "4/4 Чисто",
-    asn_result: {
-      status: "ok",
-      code: "ASN_CLEAN",
-      message: "Чистая автономная система.",
-      guide_ref: null,
-    },
-    ipv6_result: {
-      status: "ok",
-      code: "IPV6_SAFE",
-      message: "Утечек IPv6 нет.",
-      guide_ref: null,
-    },
-    timezone_result: {
-      status: "ok",
-      code: "TIMEZONE_OK",
-      message: "Часовой пояс согласован.",
-      guide_ref: null,
-    },
-    checks: [],
-  },
-};
 
 export interface AlertWindowProps {
   initialPayload?: RiskInterceptPayload;
@@ -91,61 +27,83 @@ export interface AlertWindowProps {
  * Теперь порядок кнопок на экране совпадает с номерами.
  */
 export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
-  const [payload, setPayload] = useState<RiskInterceptPayload>(initialPayload || DEFAULT_PAYLOAD);
-  /** Меняется при каждом новом событии: Dialog пересоздаётся и таймер стартует заново. */
-  const [epoch, setEpoch] = useState<number>(0);
+  const [state, dispatch] = useReducer(
+    alertReducer,
+    initialPayload,
+    (initial): AlertState =>
+      initial ? alertReducer(initialAlertState, { type: "detected", payload: initial }) : initialAlertState,
+  );
   const [resolving, setResolving] = useState<boolean>(false);
   const [demoFeedback, setDemoFeedback] = useState<string | null>(null);
+  const [allowError, setAllowError] = useState<string | null>(null);
 
-  const isDemo = Boolean(payload.is_simulation || payload.id.startsWith("sim-"));
-  const ttl = payload.ttl_seconds || 60;
+  const { payload } = state;
+  const generation = state.generation;
 
   useEffect(() => {
-    let unlistenFn: (() => void) | undefined;
+    let unlistenFns: Array<() => void> = [];
     let cancelled = false;
+    const track = (p: Promise<() => void>) =>
+      p.then((unlisten) => {
+        if (cancelled) unlisten();
+        else unlistenFns.push(unlisten);
+      });
 
     if (isTauri()) {
-      listen<RiskInterceptPayload>("interceptor://risk-detected", (event) => {
-        setPayload(event.payload);
-        setEpoch((n) => n + 1);
-      }).then((unlisten) => {
-        if (cancelled) unlisten();
-        else unlistenFn = unlisten;
-      });
+      track(
+        listen<RiskInterceptPayload>("interceptor://risk-detected", (event) => {
+          dispatch({ type: "detected", payload: event.payload });
+        }),
+      );
+      track(
+        listen<EnrichedPayload>("interceptor://enriched", (event) => {
+          dispatch({ type: "enriched", payload: event.payload });
+        }),
+      );
     }
 
-    const handleCustomSim = (e: any) => {
-      if (e.detail) {
-        setPayload({
-          ...DEFAULT_PAYLOAD,
-          id: e.detail.id || "sim-" + Date.now(),
-          is_simulation: true,
-          provider: e.detail.provider || "anthropic",
-          host: e.detail.host || "api.anthropic.com:443",
-          network_change: {
-            old_ip: "185.212.102.40",
-            old_country: "NL",
-            new_ip: "185.220.101.5",
-            new_country: "RU",
-          },
-        });
-        setEpoch((n) => n + 1);
-        setDemoFeedback(null);
-      }
+    // Холодный старт окна: первое событие могло прийти до подписки, берём снимок у бэкенда.
+    takePendingAlert()
+      .then((snapshot) => {
+        if (!cancelled && snapshot) dispatch({ type: "detected", payload: snapshot });
+      })
+      .catch((err) => console.error("Failed to take pending alert:", err));
+
+    // Мок в браузере (без Tauri): те же события, что шлёт бэкенд.
+    const onMockDetected = (e: Event) => {
+      dispatch({ type: "detected", payload: (e as CustomEvent<RiskInterceptPayload>).detail });
     };
-    window.addEventListener("simulate-interceptor-event", handleCustomSim);
+    const onMockEnriched = (e: Event) => {
+      dispatch({ type: "enriched", payload: (e as CustomEvent<EnrichedPayload>).detail });
+    };
+    window.addEventListener(MOCK_ALERT_DETECTED_EVENT, onMockDetected);
+    window.addEventListener(MOCK_ALERT_ENRICHED_EVENT, onMockEnriched);
 
     return () => {
       cancelled = true;
-      if (unlistenFn) unlistenFn();
-      window.removeEventListener("simulate-interceptor-event", handleCustomSim);
+      unlistenFns.forEach((u) => u());
+      unlistenFns = [];
+      window.removeEventListener(MOCK_ALERT_DETECTED_EVENT, onMockDetected);
+      window.removeEventListener(MOCK_ALERT_ENRICHED_EVENT, onMockEnriched);
     };
   }, []);
 
+  // Новый алерт: сбрасываем ошибку и демо-подпись предыдущего.
+  useEffect(() => {
+    setAllowError(null);
+    setDemoFeedback(null);
+  }, [generation]);
+
+  const isDemo = Boolean(payload && (payload.is_simulation || payload.id.startsWith("sim-")));
+  const ttl = payload?.ttl_seconds || 60;
+  const allowEnabled = canAllow(state);
+
   const handleAction = useCallback(
     async (action: InterceptionAction, immediate: boolean = false) => {
-      if (resolving) return;
+      if (resolving || !payload) return;
+      if (action === "AllowSession" && !allowEnabled) return;
       setResolving(true);
+      setAllowError(null);
 
       if (isDemo) {
         if (immediate) {
@@ -177,16 +135,25 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
         if (onResolved) onResolved(action);
       } catch (err) {
         console.error("Failed to resolve interception:", err);
-        if (onResolved) onResolved(action);
+        if (action === "AllowSession") {
+          // Бэкенд отказал (алерт устарел или проверка не завершена): окно остаётся, запросы остановлены.
+          const kind = classifyAllowError(err);
+          setAllowError(
+            kind === "stale" ? copy.allowErrorStale : kind === "pending" ? copy.allowErrorPending : copy.allowErrorGeneric,
+          );
+        } else if (onResolved) {
+          onResolved(action);
+        }
       } finally {
         setResolving(false);
       }
     },
-    [resolving, isDemo, payload, onResolved],
+    [resolving, isDemo, payload, allowEnabled, onResolved],
   );
 
   // Таймер дошёл до нуля: блокируем до смены сети.
   const handleTimeout = useCallback(() => {
+    if (!payload) return;
     if (isDemo) {
       resolveInterception(payload.id, "BlockUntilNetworkChange", payload.provider, "simulation").catch(() => {});
       if (onResolved) onResolved("BlockUntilNetworkChange");
@@ -203,21 +170,34 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
   // Esc — то же, что закрытие окна. Клавиши 1, 2, 3 обрабатывает сам Dialog.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (resolving || e.key !== "Escape") return;
+      if (resolving || !payload || e.key !== "Escape") return;
       e.preventDefault();
       handleAction("BlockUntilNetworkChange", true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [resolving, handleAction]);
+  }, [resolving, payload, handleAction]);
+
+  // До первого события нечего показывать: ни демо-данных, ни пустого диалога.
+  if (!payload) return null;
 
   const { report, network_change } = payload;
-  const previousIp = network_change?.old_ip || (payload as any).previous_ip;
+  const detecting = isDetecting(state);
+  const failed = isFailed(state);
+  const previousIp = network_change?.old_ip;
   const currentIp = network_change?.new_ip || report?.telemetry?.ip || copy.unknownIp;
-  const currentCountryCode = network_change?.new_country || report?.telemetry?.country_code || "??";
+  const currentCountryCode = network_change?.new_country || report?.telemetry?.country_code || null;
   const service = providerCopy[payload.provider]?.name ?? payload.provider;
 
-  const explanation = isDemo
+  const countryNode: ReactNode = currentCountryCode ? (
+    countryName(currentCountryCode) || currentCountryCode
+  ) : detecting ? (
+    <Skeleton width={72} height={12} />
+  ) : (
+    copy.unknownCountry
+  );
+
+  const reason = isDemo
     ? copy.textDemo
     : previousIp
       ? copy.textDrop
@@ -225,16 +205,22 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
         ? copy.textRegion
         : copy.textRisk;
 
+  const text: ReactNode =
+    demoFeedback ??
+    allowError ??
+    (failed ? copy.failedText : detecting ? `${reason} ${copy.detectingHint}` : reason);
+
   const locked = resolving || Boolean(demoFeedback);
 
   return (
     <Dialog
-      key={`${payload.id}:${epoch}`}
+      key={`${payload.id}:${generation}`}
       title={copy.title}
-      text={demoFeedback ?? explanation}
+      text={text}
       service={service}
       ip={currentIp}
-      country={countryName(currentCountryCode) || currentCountryCode}
+      country={countryNode}
+      countryTone={detecting && !currentCountryCode ? "neutral" : failed ? "warn" : "danger"}
       demo={isDemo}
       seconds={ttl}
       onTimeout={handleTimeout}
@@ -242,7 +228,7 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
       closeLabel={copy.closeLabel}
       actions={[
         { label: copy.openGuide, icon: "zap", disabled: locked, onSelect: () => handleAction("OpenGuideAndBlock") },
-        { label: copy.allow, disabled: locked, onSelect: () => handleAction("AllowSession") },
+        { label: copy.allow, disabled: locked || !allowEnabled, onSelect: () => handleAction("AllowSession") },
         { label: copy.block, disabled: locked, onSelect: () => handleAction("BlockUntilNetworkChange") },
       ]}
     />
