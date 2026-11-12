@@ -45,6 +45,7 @@ pub async fn toggle_sysproxy(
     state: tauri::State<'_, state::AppState>,
     auditor: tauri::State<'_, auditor::Auditor>,
     proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+    app: tauri::AppHandle,
 ) -> Result<bool, String> {
     if enable {
         let pac_url = format!("http://{}/proxy.pac", proxy_manager.server.bound_addr);
@@ -58,6 +59,7 @@ pub async fn toggle_sysproxy(
         }
         Ok(true)
     } else {
+        crate::startup::note_user_off(&app);
         let report = sysproxy::cleanup_all_persistent_settings();
         if report.has_failures() {
             return Err(PARTIAL_RESTORE_TEXT.to_string());
@@ -85,9 +87,12 @@ pub async fn enable_cli_protection(
     Ok(report)
 }
 
+/// Reads shell profiles and IDE files: off the main thread, so a slow disk never stalls the window.
 #[tauri::command]
-pub fn check_cli_protection_status() -> Result<bool, String> {
-    Ok(sysproxy::is_cli_protection_enabled())
+pub async fn check_cli_protection_status() -> Result<bool, String> {
+    tokio::task::spawn_blocking(sysproxy::is_cli_protection_enabled)
+        .await
+        .map_err(|e| format!("cli status task failed: {e}"))
 }
 
 #[tauri::command]
@@ -222,12 +227,18 @@ pub fn open_os_datetime_settings_cmd() -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn open_os_network_settings_cmd() -> Result<(), String> {
+    sysproxy::open_os_network_settings()
+}
+
+#[tauri::command]
 pub fn get_sysproxy_status() -> Result<bool, String> {
     Ok(sysproxy::is_sysproxy_active())
 }
 
 #[tauri::command]
-pub fn force_clean_os_proxy_cmd() -> Result<Vec<String>, String> {
+pub fn force_clean_os_proxy_cmd(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    crate::startup::note_user_off(&app);
     let report = sysproxy::cleanup_all_persistent_settings();
     if report.has_failures() {
         // Nothing is lost: what could not be restored stays recorded and is finished later.

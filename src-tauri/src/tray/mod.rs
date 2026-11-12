@@ -84,6 +84,11 @@ const INCOMPLETE_HEADER: &str = "Проверено частично";
 /// Menu bar title prefix when no audit result is available at all.
 const NO_DATA_TITLE: &str = " Нет данных";
 const NO_DATA_HEADER: &str = "Нет данных";
+/// Menu bar title and menu header while the first audit has not finished: not "protected", not
+/// an error, just "not known yet".
+pub(crate) const CHECKING_TITLE: &str = " Проверяем…";
+pub(crate) const CHECKING_HEADER: &str = "Проверяем…";
+const CHECKING_TOOLTIP: &str = "проверяем сеть и защиту";
 const NO_DATA_TOOLTIP: &str = "не удалось выполнить проверку сети";
 const KS_UNFREEZE_TEXT: &str = "Снять СТОП СЕТИ — Возобновить работу ИИ";
 const KS_FREEZE_TEXT: &str = "СТОП СЕТИ — Заморозить трафик ИИ";
@@ -196,6 +201,21 @@ impl TrayView {
             title: Some(title),
             header: Some((
                 format!("Застава v{} — {NO_DATA_HEADER}", env!("CARGO_PKG_VERSION")),
+                TrayColor::Yellow,
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Nothing is known yet (the app has just started). Never green: a yellow icon with
+    /// "Проверяем…" until the first audit result arrives.
+    pub(crate) fn checking() -> Self {
+        TrayView {
+            icon: Some(TrayColor::Yellow),
+            title: Some(CHECKING_TITLE.to_string()),
+            tooltip: Some(format!("Застава · {CHECKING_TOOLTIP}")),
+            header: Some((
+                format!("Застава v{} — {CHECKING_HEADER}", env!("CARGO_PKG_VERSION")),
                 TrayColor::Yellow,
             )),
             ..Default::default()
@@ -348,6 +368,11 @@ pub fn update_tray_no_data(app: &tauri::AppHandle, last_checked: Option<&str>) {
     submit(app, TrayView::from_audit_error(last_checked));
 }
 
+/// "Проверяем…": the first audit is still running. Safe to call from any thread.
+pub fn update_tray_checking(app: &tauri::AppHandle) {
+    submit(app, TrayView::checking());
+}
+
 /// Updates the system tray icon, menu bar title (macOS), and tooltip with a simple color and status title.
 /// Unknown color names degrade to yellow, never green.
 pub fn update_tray_status(app: &tauri::AppHandle, color: &str, title_override: Option<&str>) {
@@ -404,6 +429,21 @@ mod tests {
         assert_eq!(v.title.as_deref(), Some(STOP_TITLE));
         assert_eq!(v.killswitch, Some((KS_UNFREEZE_TEXT, TrayColor::Green)));
         assert!(v.header.unwrap().0.ends_with("СТОП СЕТИ"));
+    }
+
+    #[test]
+    fn checking_state_is_never_green_and_never_an_error() {
+        let v = TrayView::checking();
+        assert_eq!(v.icon, Some(TrayColor::Yellow));
+        assert_eq!(v.title.as_deref(), Some(" Проверяем…"));
+        assert!(!v.title.as_deref().unwrap().contains("Нет данных"));
+        let header = v.header.unwrap();
+        assert!(header.0.ends_with("Проверяем…") && !header.0.contains("Шлюз активен"));
+        assert_eq!(header.1, TrayColor::Yellow);
+        // A later real state overrides it (merge keeps the newer fields).
+        let merged = TrayView::checking().merged_with(report_view(S::Green, false, false));
+        assert_eq!(merged.icon, Some(TrayColor::Green));
+        assert_eq!(merged.title.as_deref(), Some(" Защита · NL"));
     }
 
     #[test]

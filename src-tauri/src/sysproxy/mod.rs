@@ -1095,6 +1095,33 @@ pub fn open_os_datetime_settings() -> Result<(), String> {
     }
 }
 
+/// Opens the network page of the system settings (where DNS servers are set). macOS 13+ pane id and
+/// the Windows `ms-settings` URI; other systems have no reliable link, so nothing is opened.
+pub fn open_os_network_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        silent_command("open")
+            .arg("x-apple.systempreferences:com.apple.Network-Settings.extension")
+            .spawn()
+            .map_err(|e| format!("Failed to open macOS network settings: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        silent_command("cmd")
+            .args(["/C", "start", "ms-settings:network"])
+            .spawn()
+            .map_err(|e| format!("Failed to open Windows network settings: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

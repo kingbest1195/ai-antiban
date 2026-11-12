@@ -1,6 +1,14 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import type { AppStateData, CoverageSnapshot, GatewayStatsSnapshot, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
+import type {
+  AppStateData,
+  CoverageSnapshot,
+  GatewayStatsSnapshot,
+  PartialAudit,
+  ProviderId,
+  RiskReport,
+  UpdateCheckResult,
+} from "../../types";
 import {
   Badge,
   Banner,
@@ -13,7 +21,7 @@ import {
   Row,
   Rows,
   Section,
-  Skeleton,
+  Spinner,
   Stat,
   Stats,
   StatusHero,
@@ -25,7 +33,7 @@ import { countryName } from "../../shared/lib/country";
 import { formatNumber } from "../../shared/lib/format";
 import type { ShowToast } from "../../shared/hooks";
 import { CoverageSection } from "../coverage/CoverageSection";
-import { failedChecks } from "../checks/checksModel";
+import { buildPendingChecks, failedChecks, progressOf } from "../checks/checksModel";
 import { needsForceConfirm, useOverviewModel } from "./useOverviewModel";
 import type { ServiceModel } from "./useOverviewModel";
 
@@ -35,6 +43,10 @@ export interface OverviewScreenProps {
   state: AppStateData | null;
   refreshing: boolean;
   auditError: string | null;
+  /** Шлюз ещё запускается в фоне: защита не включена, состояние не известно. */
+  startupPending?: boolean;
+  /** Что уже готово в первом аудите, пока отчёта нет. */
+  partial?: PartialAudit | null;
   currentIp: string;
   trustScore: number;
   gatewayStats: GatewayStatsSnapshot | null;
@@ -68,6 +80,9 @@ export interface OverviewScreenProps {
   onOpenCrashTest: () => void;
 }
 
+/** Цифры дня, пока данных нет: прочерк, а не «0» (ноль — это уже известный ответ). */
+const EMPTY_STAT = "—";
+
 /** Экран «Обзор»: вердикт, сервисы ИИ, что под защитой, цифры за день, два действия. */
 export function OverviewScreen(props: OverviewScreenProps) {
   const {
@@ -76,6 +91,8 @@ export function OverviewScreen(props: OverviewScreenProps) {
     state,
     refreshing,
     auditError,
+    startupPending = false,
+    partial,
     currentIp,
     trustScore,
     gatewayStats,
@@ -86,6 +103,10 @@ export function OverviewScreen(props: OverviewScreenProps) {
     killswitchFrozen,
   } = props;
 
+  // Ожидание данных: отчёта ещё нет (и это не окончательная ошибка) либо шлюз ещё запускается.
+  const loading = (!activeReport && (!auditError || startupPending)) || (startupPending && !killswitchFrozen);
+  const failed = !loading && !activeReport && Boolean(auditError);
+
   const model = useOverviewModel({
     reports,
     activeReport,
@@ -94,7 +115,8 @@ export function OverviewScreen(props: OverviewScreenProps) {
     sysproxyActive,
     killswitchFrozen,
     updateInfo,
-    refreshing,
+    refreshing: refreshing || loading,
+    startupPending,
   });
 
   // Подтверждение «Разрешить принудительно»: только для красных сервисов и адреса из РФ.
@@ -109,15 +131,14 @@ export function OverviewScreen(props: OverviewScreenProps) {
     else runAllow(service.id, blockedByUser);
   };
 
-  const loading = !activeReport && !auditError;
-  const failed = !activeReport && Boolean(auditError);
+  const progress = progressOf(buildPendingChecks(partial ?? null, state));
 
   return (
     <>
       {!loading && !failed && <ProblemBanner kind={model.banner} {...props} />}
 
       {loading ? (
-        <HeroSkeleton />
+        <HeroChecking startup={startupPending} done={progress.done} total={progress.total} />
       ) : failed ? (
         <Card>
           <EmptyState
@@ -145,7 +166,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
             as="div"
             className="zs-hero__switch"
             title={copy.guard.title}
-            sub={sysproxyActive ? copy.guard.onText : copy.guard.offText}
+            sub={startupPending ? copy.guard.startingText : sysproxyActive ? copy.guard.onText : copy.guard.offText}
             trail={<Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.guard.label} />}
           />
         </StatusHero>
@@ -154,23 +175,19 @@ export function OverviewScreen(props: OverviewScreenProps) {
       {!failed && (
         <Section title={copy.sectionServices}>
           <Card>
-            {loading ? (
-              <ServicesSkeleton />
-            ) : (
-              <Rows>
-                {model.services.map((service) => (
-                  <ServiceRow
-                    key={service.id}
-                    service={service}
-                    report={reports[service.id]}
-                    state={state}
-                    onFix={props.onFixService}
-                    onAllow={requestAllow}
-                    blockedByUser={Boolean(state?.blocked_providers?.includes(service.id))}
-                  />
-                ))}
-              </Rows>
-            )}
+            <Rows>
+              {model.services.map((service) => (
+                <ServiceRow
+                  key={service.id}
+                  service={service}
+                  report={reports[service.id]}
+                  state={state}
+                  onFix={props.onFixService}
+                  onAllow={requestAllow}
+                  blockedByUser={Boolean(state?.blocked_providers?.includes(service.id))}
+                />
+              ))}
+            </Rows>
           </Card>
         </Section>
       )}
@@ -195,19 +212,19 @@ export function OverviewScreen(props: OverviewScreenProps) {
               icon="globe"
               title={copy.browsers.title}
               sub={copy.browsers.sub}
-              trail={<Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.browsers.title} />}
+              trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.browsers.title} />}
             />
             <Row
               icon="shield"
               title={copy.desktopApps.title}
               sub={copy.desktopApps.sub}
-              trail={<Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.desktopApps.title} />}
+              trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.desktopApps.title} />}
             />
             <Row
               icon="term"
               title={copy.editors.title}
               sub={copy.editors.sub}
-              trail={<Switch checked={cliProtected} onChange={props.onToggleCli} aria-label={copy.editors.title} />}
+              trail={startupPending ? <PendingBadge /> : <Switch checked={cliProtected} onChange={props.onToggleCli} aria-label={copy.editors.title} />}
             />
           </Rows>
         </Card>
@@ -216,6 +233,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
       <CoverageSection
         variant="overview"
         initialSnapshot={coverageSnapshot}
+        pending={startupPending}
         onToggleSysproxy={props.onToggleSysproxy}
         onToggleCli={props.onToggleCli}
         onToast={props.onToast}
@@ -223,14 +241,14 @@ export function OverviewScreen(props: OverviewScreenProps) {
 
       <Section title={copy.sectionToday}>
         <Stats>
-          <Stat layer={1} value={formatNumber(gatewayStats?.protected_ai_requests ?? 0)} label={copy.stats.requests} />
+          <Stat layer={1} value={gatewayStats ? formatNumber(gatewayStats.protected_ai_requests) : EMPTY_STAT} label={copy.stats.requests} />
           <Stat
             layer={1}
             tone={(gatewayStats?.intercepted_leaks ?? 0) > 0 ? "danger" : "neutral"}
-            value={formatNumber(gatewayStats?.intercepted_leaks ?? 0)}
+            value={gatewayStats ? formatNumber(gatewayStats.intercepted_leaks) : EMPTY_STAT}
             label={copy.stats.leaks}
           />
-          <Stat layer={1} value={formatNumber(gatewayStats?.direct_bypassed_requests ?? 0)} label={copy.stats.direct} />
+          <Stat layer={1} value={gatewayStats ? formatNumber(gatewayStats.direct_bypassed_requests) : EMPTY_STAT} label={copy.stats.direct} />
         </Stats>
       </Section>
 
@@ -436,7 +454,7 @@ function ServiceRow({
       tone = "danger";
       break;
     case "checking":
-      badge = <Badge>{copy.service.checking}</Badge>;
+      badge = <Badge busy>{copy.service.checking}</Badge>;
       tone = "neutral";
       break;
     case "missing":
@@ -502,35 +520,23 @@ function ServiceRow({
 
 /* ---------- Загрузка ---------- */
 
-function HeroSkeleton() {
+/** Герой, пока данных нет: не «Опасно» и не «Защищены», а ожидание с прогрессом проверок. */
+function HeroChecking({ startup, done, total }: { startup: boolean; done: number; total: number }) {
   return (
-    <Card aria-label="Загрузка">
-      <div className="zs-hero">
-        <Skeleton variant="circle" width={64} />
+    <Card aria-label={copy.checking.title}>
+      <div className="zs-hero" role="status" aria-busy="true">
+        <Spinner size={40} />
         <div className="zs-hero__body">
-          <Skeleton width="70%" height={22} />
-          <Skeleton width="50%" className="mt-2" />
+          <h2 className="zs-hero__title">{startup ? copy.checking.startingTitle : copy.checking.title}</h2>
+          <p className="zs-hero__meta">{startup ? copy.checking.startingText : copy.checking.text}</p>
+          {done > 0 && <p className="zs-hero__meta">{copy.checking.progress(done, total)}</p>}
         </div>
       </div>
-      <Skeleton variant="block" height={24} className="mt-3" />
-      <Skeleton variant="block" height={40} className="mt-4" />
     </Card>
   );
 }
 
-function ServicesSkeleton() {
-  return (
-    <Rows>
-      {[0, 1, 2].map((i) => (
-        <li key={i} className="zs-row">
-          <Skeleton variant="circle" width={32} />
-          <div className="zs-row__body">
-            <Skeleton width="40%" />
-            <Skeleton width="70%" className="mt-1" />
-          </div>
-          <Skeleton width={72} height={24} />
-        </li>
-      ))}
-    </Rows>
-  );
+/** Вместо тумблера, пока защита запускается: состояние ещё не известно. */
+function PendingBadge() {
+  return <Badge busy>{copy.service.checking}</Badge>;
 }

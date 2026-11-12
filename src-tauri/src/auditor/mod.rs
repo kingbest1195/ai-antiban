@@ -84,6 +84,35 @@ pub struct RiskReport {
     pub incomplete: bool,
 }
 
+/// A piece of an audit as soon as it is ready: the interface shows each check when it finishes
+/// instead of waiting for the slowest one.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuditProgress {
+    /// The exit address is known (IP, country, provider).
+    Telemetry { telemetry: NetworkTelemetry },
+    /// Check number `index` of `RiskReport::checks` is done.
+    Check { index: usize, result: CheckResult },
+}
+
+/// Receiver of [`AuditProgress`]; must not block.
+pub type ProgressSink = Arc<dyn Fn(AuditProgress) + Send + Sync>;
+
+/// Runs a check future and reports its result to the sink (if any) when it completes.
+async fn tracked<F>(sink: &Option<ProgressSink>, index: usize, check: F) -> CheckResult
+where
+    F: std::future::Future<Output = CheckResult>,
+{
+    let result = check.await;
+    if let Some(sink) = sink {
+        sink(AuditProgress::Check {
+            index,
+            result: result.clone(),
+        });
+    }
+    result
+}
+
 /// Time limit of a check that only computes (no I/O of its own).
 const CHECK_LIMIT_LOCAL: Duration = Duration::from_secs(2);
 /// Time limit of a check that talks to the network or runs a child process.
@@ -308,6 +337,20 @@ impl Auditor {
             .await
     }
 
+    /// [`Self::evaluate_all`] that also reports the exit address and every check to `sink` as
+    /// soon as it is ready (the final report is the return value, as always).
+    pub async fn evaluate_all_progress(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        force_refresh_telemetry: bool,
+        sink: Option<ProgressSink>,
+    ) -> Result<RiskReport, String> {
+        let selection = state.route_selection(provider.as_str()).await;
+        self.evaluate_all_inner(provider, state, &selection, force_refresh_telemetry, sink)
+            .await
+    }
+
     /// [`Self::evaluate_all`] on an already taken route snapshot (see [`Self::resolve_for_selection`]).
     pub async fn evaluate_all_with(
         &self,
@@ -316,9 +359,26 @@ impl Auditor {
         selection: &RouteSelection,
         force_refresh_telemetry: bool,
     ) -> Result<RiskReport, String> {
+        self.evaluate_all_inner(provider, state, selection, force_refresh_telemetry, None)
+            .await
+    }
+
+    async fn evaluate_all_inner(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        selection: &RouteSelection,
+        force_refresh_telemetry: bool,
+        sink: Option<ProgressSink>,
+    ) -> Result<RiskReport, String> {
         let telemetry = self
             .resolve_for_selection(provider, state, selection, force_refresh_telemetry)
             .await?;
+        if let Some(sink) = &sink {
+            sink(AuditProgress::Telemetry {
+                telemetry: telemetry.clone(),
+            });
+        }
 
         let matrix = Arc::new(self.rules.provider_matrix.read().await.clone());
         let dangerous_asns = Arc::new(self.rules.dangerous_asns.read().await.clone());
@@ -339,19 +399,19 @@ impl Auditor {
 
         // Every check runs isolated (own task, own time limit): a slow or panicking check ends
         // as `Unknown` and the others still finish.
-        let geo = run_check("Geo Matrix", CHECK_LIMIT_LOCAL, {
+        let geo = tracked(&sink, 0, run_check("Geo Matrix", CHECK_LIMIT_LOCAL, {
             let (matrix, country) = (matrix.clone(), country.clone());
             async move { evaluate_provider_geo(&matrix, provider, &country) }
-        });
-        let pinning = run_check("IP Pinning", CHECK_LIMIT_LOCAL, {
+        }));
+        let pinning = tracked(&sink, 1, run_check("IP Pinning", CHECK_LIMIT_LOCAL, {
             let (pinned, strict, ip) = (
                 state_data.pinned_ip.clone(),
                 state_data.strict_pinning_enabled,
                 telemetry.ip.clone(),
             );
             async move { evaluate_ip_pinning(pinned.as_deref(), strict, &ip) }
-        });
-        let travel = run_check("Impossible Travel", CHECK_LIMIT_LOCAL, {
+        }));
+        let travel = tracked(&sink, 2, run_check("Impossible Travel", CHECK_LIMIT_LOCAL, {
             let history = state_data
                 .ip_history
                 .get(provider.as_str())
@@ -359,8 +419,8 @@ impl Auditor {
                 .unwrap_or_default();
             let (country, resolved_at) = (country.clone(), telemetry.resolved_at);
             async move { evaluate_impossible_travel(&history, &country, resolved_at, provider) }
-        });
-        let dnsbl = run_check("DNSBL", CHECK_LIMIT_IO, {
+        }));
+        let dnsbl = tracked(&sink, 3, run_check("DNSBL", CHECK_LIMIT_IO, {
             let (cache, asns, ip, label, dns) = (
                 cache.clone(),
                 dangerous_asns.clone(),
@@ -379,8 +439,8 @@ impl Auditor {
                 *label.lock().unwrap_or_else(|e| e.into_inner()) = summary;
                 result
             }
-        });
-        let asn = run_check("ASN Reputation", CHECK_LIMIT_LOCAL, {
+        }));
+        let asn = tracked(&sink, 4, run_check("ASN Reputation", CHECK_LIMIT_LOCAL, {
             let (asns, tel) = (dangerous_asns.clone(), telemetry.clone());
             async move {
                 evaluate_asn_reputation(
@@ -391,8 +451,8 @@ impl Auditor {
                     is_pinned,
                 )
             }
-        });
-        let ipv6 = run_check("IPv6 Leak", CHECK_LIMIT_IO, {
+        }));
+        let ipv6 = tracked(&sink, 5, run_check("IPv6 Leak", CHECK_LIMIT_IO, {
             let (cache, matrix, country, env) =
                 (cache.clone(), matrix.clone(), country.clone(), env.clone());
             async move {
@@ -409,8 +469,8 @@ impl Auditor {
                 })
                 .await
             }
-        });
-        let dns = run_check("DNS Resolver", CHECK_LIMIT_IO, {
+        }));
+        let dns = tracked(&sink, 6, run_check("DNS Resolver", CHECK_LIMIT_IO, {
             let (cache, asns, country, env) =
                 (cache.clone(), dangerous_asns.clone(), country.clone(), env.clone());
             async move {
@@ -426,8 +486,8 @@ impl Auditor {
                 let (config, view) = tokio::join!(os_config, resolver_view(&env, &cache));
                 evaluate_dns_resolver(config, &view, &country)
             }
-        });
-        let timezone = run_check("Timezone", CHECK_LIMIT_IO, {
+        }));
+        let timezone = tracked(&sink, 7, run_check("Timezone", CHECK_LIMIT_IO, {
             let (cache, ip_tz, synced, env) = (
                 cache.clone(),
                 telemetry.timezone.clone(),
@@ -449,8 +509,8 @@ impl Auditor {
                 })
                 .await
             }
-        });
-        let location = run_check("OS Location", CHECK_LIMIT_IO, {
+        }));
+        let location = tracked(&sink, 8, run_check("OS Location", CHECK_LIMIT_IO, {
             let (cache, env) = (cache.clone(), env.clone());
             async move {
                 cached_check(&cache.os, "location", OS_TTL, async {
@@ -459,20 +519,20 @@ impl Auditor {
                 })
                 .await
             }
-        });
-        let reverse_dns = run_check("Reverse DNS", CHECK_LIMIT_LOCAL, {
+        }));
+        let reverse_dns = tracked(&sink, 9, run_check("Reverse DNS", CHECK_LIMIT_LOCAL, {
             let tel = telemetry.clone();
             async move { evaluate_reverse_dns_ptr(&tel) }
-        });
+        }));
         // Country of the resolver that sees the requests (whoami) against the exit country.
-        let dns_country = run_check("DNS Country", CHECK_LIMIT_IO, {
+        let dns_country = tracked(&sink, 10, run_check("DNS Country", CHECK_LIMIT_IO, {
             let (cache, country, env) = (cache.clone(), country.clone(), env.clone());
             async move {
                 let view = resolver_view(&env, &cache).await;
                 evaluate_dns_country(&view, &country)
             }
-        });
-        let locale = run_check("Locale", CHECK_LIMIT_IO, {
+        }));
+        let locale = tracked(&sink, 11, run_check("Locale", CHECK_LIMIT_IO, {
             let (cache, env) = (cache.clone(), env.clone());
             async move {
                 cached_check(&cache.os, &format!("locale:{synced_key}"), OS_TTL, async {
@@ -484,10 +544,10 @@ impl Auditor {
                 })
                 .await
             }
-        });
+        }));
 
         // UDP leaves through the same address as HTTP? (STUN, per exit address, rare requests)
-        let udp_stun = run_check("UDP STUN", CHECK_LIMIT_IO, {
+        let udp_stun = tracked(&sink, 12, run_check("UDP STUN", CHECK_LIMIT_IO, {
             let (cache, env, ip) = (cache.clone(), env.clone(), telemetry.ip.trim().to_string());
             async move {
                 cached_check(&cache.udp, &ip, UDP_TTL, async {
@@ -496,7 +556,7 @@ impl Auditor {
                 })
                 .await
             }
-        });
+        }));
 
         let (
             geo_result,
@@ -875,7 +935,7 @@ mod tests {
     /// Every real source answers and everything is consistent (resolver and UDP exit in NL).
     fn healthy_env() -> AuditEnv {
         env_with_udp(
-            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"),
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9"),
             probe_locating("NL"),
             FakeSystem {
                 global_ipv6: Some(true),
@@ -984,6 +1044,42 @@ mod tests {
         assert!(report.incomplete);
     }
 
+    /// The progress sink gets the exit address first and every one of the 13 checks exactly once,
+    /// with the very result that ends up in the final report.
+    #[tokio::test]
+    async fn evaluate_all_progress_reports_telemetry_and_each_check_once() {
+        let auditor = Auditor::with_env(healthy_env()).unwrap();
+        auditor.resolver.set_cached(rich_telemetry()).await;
+        let seen: Arc<Mutex<Vec<AuditProgress>>> = Arc::default();
+        let sink: ProgressSink = {
+            let seen = seen.clone();
+            Arc::new(move |p| seen.lock().unwrap().push(p))
+        };
+        let report = auditor
+            .evaluate_all_progress(
+                ProviderId::Anthropic,
+                &AppState::new_in_memory(),
+                false,
+                Some(sink),
+            )
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert!(matches!(seen.first(), Some(AuditProgress::Telemetry { .. })));
+        let mut indexes: Vec<usize> = Vec::new();
+        for p in seen.iter() {
+            if let AuditProgress::Check { index, result } = p {
+                assert_eq!(result, &report.checks[*index], "check {index}");
+                indexes.push(*index);
+            }
+        }
+        indexes.sort_unstable();
+        assert_eq!(indexes, (0..CHECK_COUNT).collect::<Vec<_>>());
+        // The wire shape the interface reads.
+        let json = serde_json::to_value(&seen[1]).unwrap();
+        assert_eq!(json["kind"], "check");
+    }
+
     /// With every source answering, the Ok texts claim only what was verified.
     #[tokio::test]
     async fn evaluate_all_healthy_sources_state_verified_facts() {
@@ -1062,7 +1158,7 @@ mod tests {
     #[tokio::test]
     async fn evaluate_all_udp_through_another_address_is_a_warning() {
         let env = env_with_udp(
-            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"),
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9"),
             probe_locating("NL"),
             FakeSystem {
                 global_ipv6: Some(true),
@@ -1081,7 +1177,7 @@ mod tests {
     #[tokio::test]
     async fn evaluate_all_silent_udp_is_unknown_and_keeps_the_admit() {
         let env = env_with_udp(
-            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"),
+            with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9"),
             probe_locating("NL"),
             FakeSystem {
                 global_ipv6: Some(true),
@@ -1102,7 +1198,7 @@ mod tests {
     #[tokio::test]
     async fn evaluate_all_repeated_audits_reuse_the_probes() {
         let udp = Arc::new(udp_exiting_as("203.0.113.9"));
-        let dns = Arc::new(with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "9.9.9.9"));
+        let dns = Arc::new(with_whoami(zones_answering(FakeDns::new(LookupOutcome::Timeout)), "203.0.113.9"));
         let env = AuditEnv {
             dns: dns.clone(),
             probe: Arc::new(probe_locating("NL")),

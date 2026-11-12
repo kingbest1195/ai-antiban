@@ -84,6 +84,7 @@ export function AppShell() {
     sysproxyActive: gw.sysproxyActive,
     setSysproxyActive: gw.setSysproxyActive,
     showToast,
+    startupPending: gw.startupPending,
   });
   const pinning = usePinning({
     state: gw.state,
@@ -109,6 +110,7 @@ export function AppShell() {
     killswitchFrozen: toggles.killswitchFrozen,
     updateInfo: updater.updateInfo,
     refreshing: gw.refreshing,
+    startupPending: gw.startupPending,
   });
   const tabItems = useMemo(
     () => withBadges(tabBadges(overviewModel.banner, gw.reports, gw.state)),
@@ -291,7 +293,7 @@ export function AppShell() {
   return (
     <div className="zs-root zs-shell-page">
       <div className="zs-app zs-shell">
-        <AppHeader ping={copy.pingLabel(gw.scanLatencyMs)} menuItems={menuItems} menuLabel={copy.menuLabel} />
+        <AppHeader ping={gw.activeReport ? copy.pingLabel(gw.scanLatencyMs) : undefined} menuItems={menuItems} menuLabel={copy.menuLabel} />
 
         {nav.subscriptionOpen ? (
           <div className="zs-stack">
@@ -370,6 +372,8 @@ export function AppShell() {
                 state={gw.state}
                 refreshing={gw.refreshing}
                 auditError={gw.auditError}
+                startupPending={gw.startupPending}
+                partial={gw.partialAudit}
                 currentIp={gw.currentIp}
                 trustScore={gw.trustScore}
                 gatewayStats={stats.gatewayStats}
@@ -415,6 +419,9 @@ export function AppShell() {
             <TabPanel idPrefix={TAB_PREFIX} id="checks" selected={nav.tab === "checks"}>
               <ChecksScreen
                 report={(nav.checksProvider && gw.reports[nav.checksProvider]) || gw.checksReport}
+                partial={gw.partialAudit}
+                auditError={gw.auditError}
+                startupPending={gw.startupPending}
                 provider={nav.checksProvider && gw.reports[nav.checksProvider] ? nav.checksProvider : undefined}
                 state={gw.state}
                 coverageSnapshot={gw.coverageSnapshot}

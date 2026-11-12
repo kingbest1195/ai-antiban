@@ -56,6 +56,8 @@ interface Input {
   updateInfo: UpdateCheckResult | null;
   /** Идёт аудит: у сервиса без отчёта показываем «Проверяем», а не «Нужна проверка». */
   refreshing: boolean;
+  /** Шлюз ещё запускается в фоне: защита не включена, не объявляем ни «защищены», ни «выключена». */
+  startupPending?: boolean;
 }
 
 /** Вывод показателей «Обзора» из сырых данных: вердикт, бейджи, баннер и статусы сервисов. Тут нет побочных эффектов. */
@@ -68,6 +70,7 @@ export function useOverviewModel({
   killswitchFrozen,
   updateInfo,
   refreshing,
+  startupPending = false,
 }: Input): OverviewModel {
   return useMemo(() => {
     const anyRed = PROVIDER_IDS.some((id) => reports[id]?.overall_status === "red");
@@ -93,6 +96,10 @@ export function useOverviewModel({
     if (killswitchFrozen) {
       verdict = copy.verdict.frozen;
       tone = "danger";
+    } else if (startupPending) {
+      // До конца запуска вывода нет: ни «Вы защищены», ни «Защита выключена».
+      verdict = copy.verdict.starting;
+      tone = "warn";
     } else if (anyRed) {
       verdict = copy.verdict.stopped;
       tone = "danger";
@@ -109,6 +116,7 @@ export function useOverviewModel({
 
     let banner: BannerKind | null = null;
     if (killswitchFrozen) banner = "frozen";
+    else if (startupPending) banner = null;
     else if (anyRed) banner = "stopped";
     else if (ipv6Leak) banner = "leak";
     else if (tzMismatch) banner = "timezone";
@@ -136,6 +144,7 @@ export function useOverviewModel({
       let status: ServiceStatus = "ok";
       if (isBlocked) status = "critical";
       else if (isAllowed) status = "allowed";
+      else if (startupPending) status = "checking";
       else if (!report) status = refreshing ? "checking" : "missing";
       else if (report.overall_status === "red" || hasCritical) status = "critical";
       else if ((report.overall_status === "yellow" && !isYellowOnlyUnknown(report, list)) || hasWarning) status = "warn";
@@ -157,7 +166,7 @@ export function useOverviewModel({
       banner,
       services,
     };
-  }, [reports, activeReport, state, currentIp, sysproxyActive, killswitchFrozen, updateInfo, refreshing]);
+  }, [reports, activeReport, state, currentIp, sysproxyActive, killswitchFrozen, updateInfo, refreshing, startupPending]);
 }
 
 /** Бейджи вкладок: красная точка на «Обзоре» только когда трафик не идёт (stopped, frozen); на «Проверках» число непройденных проверок худшего отчёта, ноль — без бейджа. */

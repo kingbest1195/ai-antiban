@@ -45,6 +45,8 @@ export type { SegmentedProps, SegmentedOption } from "./Segmented";
 export { Progress } from "./Progress";
 export type { ProgressProps } from "./Progress";
 export { Skeleton } from "./Skeleton";
+export { Spinner } from "./Spinner";
+export type { SpinnerProps } from "./Spinner";
 export type { SkeletonProps } from "./Skeleton";
 export { EmptyState } from "./EmptyState";
 export type { EmptyStateProps } from "./EmptyState";

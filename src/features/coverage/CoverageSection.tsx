@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AppCoverageItem, CoverageSnapshot } from "../../types";
-import { Badge, Banner, Button, Card, CopyBlock, ExpandRow, Row, Rows, Section, Skeleton, Steps } from "../../ui";
+import { Badge, Banner, Button, Card, CopyBlock, ExpandRow, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
 import type { BadgeTone, IconName, RowTone } from "../../ui";
 import { common, coverage as copy } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
@@ -16,6 +16,8 @@ export interface CoverageSectionProps {
   variant: "overview" | "checks";
   /** Снимок, который экран уже знает: показывается, пока не пришёл свежий. */
   initialSnapshot?: CoverageSnapshot | null;
+  /** Застава ещё запускается в фоне: статусы приложений пока не определены, вместо них «Проверяем…». */
+  pending?: boolean;
   /** Переключатели защиты со вкладки «Обзор»; без них кнопка «Включить защиту» не показывается. */
   onToggleSysproxy?: () => void | Promise<void>;
   onToggleCli?: () => void | Promise<void>;
@@ -43,11 +45,18 @@ const ICONS: Record<AppCoverageItem["category"], IconName> = { browser: "globe",
 const rowTone = (view: CoverageView): RowTone => (view === "confirmed" ? "ok" : view === "off" ? "warn" : "neutral");
 
 /** Секция «Покрытие приложений»: одна реализация для «Обзора» и «Проверок». */
-export function CoverageSection({ variant, initialSnapshot, onToggleSysproxy, onToggleCli, onToast }: CoverageSectionProps) {
+export function CoverageSection({ variant, initialSnapshot, pending, onToggleSysproxy, onToggleCli, onToast }: CoverageSectionProps) {
   const { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup } = useCoverage(initialSnapshot);
   const { copiedId, copy: copyText } = useCopy(onToast);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [enabling, setEnabling] = useState<string | null>(null);
+
+  // Как только запуск закончился, читаем состояние заново: снимок до этого описывал выключенную защиту.
+  useEffect(() => {
+    if (!pending) void refresh();
+  }, [pending, refresh]);
+
+  const showPending = pending || (!snapshot && !failed);
 
   const apps = useMemo(() => (snapshot?.apps ?? []).filter((a) => isListed(a, variant)), [snapshot, variant]);
   const vpn = useMemo(() => (snapshot ? vpnNotice(snapshot) : null), [snapshot]);
@@ -69,18 +78,21 @@ export function CoverageSection({ variant, initialSnapshot, onToggleSysproxy, on
       <Card>
         <div className="zs-cov__head">
           <p className="zs-cov__lead">{copy.lead}</p>
-          <Button size="sm" icon="refresh" onClick={() => void recheck()} disabled={checking}>
+          <Button size="sm" icon="refresh" onClick={() => void recheck()} disabled={checking || showPending}>
             {checking ? copy.rechecking : copy.recheck}
           </Button>
         </div>
-        {!snapshot ? (
-          failed ? (
-            <p className="zs-cov__empty" role="status">
-              {copy.loadFailed}
+        {showPending ? (
+          <div role="status" aria-busy="true">
+            <p className="zs-cov__pending">
+              <Spinner /> {copy.checking}
             </p>
-          ) : (
-            <Skeleton variant="text" lines={3} />
-          )
+            <Skeleton variant="text" lines={2} />
+          </div>
+        ) : !snapshot ? (
+          <p className="zs-cov__empty" role="status">
+            {copy.loadFailed}
+          </p>
         ) : (
           <>
           {vpn?.overridden && (
