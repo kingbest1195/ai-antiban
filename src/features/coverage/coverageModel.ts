@@ -1,4 +1,4 @@
-import type { AppCoverageItem, AppCoverageStatus, CliMode } from "../../types";
+import type { AppCoverageItem, AppCoverageStatus, CliMode, CoverageSnapshot } from "../../types";
 
 /** Опрос при наличии неподтверждённых приложений и без них. */
 export const POLL_FAST_MS = 5_000;
@@ -68,4 +68,17 @@ export function viewOf(app: AppCoverageItem, waiting: WaitingMap, now: number, c
 /** Давность последнего запроса в мс; null, если запросов не было. */
 export function sinceLastSeen(app: AppCoverageItem, now: number): number | null {
   return app.last_seen_ms == null ? null : Math.max(0, now - app.last_seen_ms);
+}
+
+/** Что сказать о подключённых VPN-службах: имена и перебивает ли VPN наш системный PAC. null — подключённых нет. */
+export interface VpnNotice {
+  names: string;
+  /** Системный PAC записан на физических службах, но глобально не действует. */
+  overridden: boolean;
+}
+
+export function vpnNotice(snapshot: Pick<CoverageSnapshot, "sysproxy_enabled" | "system_proxy_effective" | "vpn_connected">): VpnNotice | null {
+  const names = (snapshot.vpn_connected ?? []).filter((n) => n.trim() !== "");
+  if (names.length === 0) return null;
+  return { names: names.join(", "), overridden: snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false };
 }

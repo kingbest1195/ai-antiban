@@ -5,9 +5,14 @@
 //! only what Zastava itself wrote. The logic is platform-neutral (it only talks to `Platform`),
 //! so it is tested with `FakePlatform` on every OS; `RealPlatform` implements `networksetup`.
 
-use super::journal::{ApplyOutcome, Journal, Resource, Value};
-use super::platform::{ChainState, PacState, Platform, ProxyEndpoint, ServiceId};
+use super::journal::{ApplyOutcome, EntryState, Journal, Resource, Value};
+use super::platform::{
+    ChainState, PacState, Platform, ProxyEndpoint, ServiceId, ServiceKind, classify_services,
+};
 use super::{EnableReport, is_gateway_target, parse_gateway_port_from_pac_url, set_chained_proxy};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Shown when an active VPN keeps temporary DNS settings: applying proxy settings could reset
 /// them. Contains no DNS values.
@@ -90,6 +95,106 @@ struct Plan {
     upstream: Option<Upstream>,
 }
 
+/// Shown when every enabled network service is a VPN: nothing is written into those.
+pub(super) const MSG_ONLY_VPN: &str = "Защита не включена: все активные сетевые службы - VPN, а \
+Застава не меняет настройки VPN-служб (подключённый VPN мог бы разорваться). Включите Wi-Fi или \
+Ethernet либо настройте системный прокси в самом VPN-клиенте. Системные настройки не менялись.";
+
+/// The type of the services could not be established, so nothing is written (a VPN service could
+/// be among them).
+pub(super) const MSG_KIND_UNKNOWN: &str = "Защита не включена: не удалось определить тип сетевых \
+служб (список VPN-подключений недоступен), а менять VPN-службы нельзя. Системные настройки не \
+менялись.";
+
+/// How far back a foreign rewrite still counts for the self-heal.
+pub(super) const HEAL_WINDOW: Duration = Duration::from_secs(120);
+/// Foreign rewrites of one service within [`HEAL_WINDOW`] after which the self-heal leaves it.
+pub(super) const HEAL_MAX_REWRITES: usize = 3;
+
+/// Keeps the self-heal from fighting a VPN client (or any tool) that keeps rewriting the PAC of a
+/// service: after [`HEAL_MAX_REWRITES`] foreign rewrites within [`HEAL_WINDOW`] that service is
+/// left alone until the set of services changes or the protection is switched on again.
+pub(super) struct HealGuard {
+    st: Mutex<HealState>,
+}
+
+struct HealState {
+    seen: BTreeMap<String, Vec<Instant>>,
+    suspended: BTreeSet<String>,
+    /// Keys of the services the last pass looked at: a change means another network.
+    fingerprint: Vec<String>,
+}
+
+impl HealGuard {
+    pub(super) const fn new() -> Self {
+        Self {
+            st: Mutex::new(HealState {
+                seen: BTreeMap::new(),
+                suspended: BTreeSet::new(),
+                fingerprint: Vec::new(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HealState> {
+        self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Forgets everything (the protection was switched on explicitly).
+    pub(super) fn reset(&self) {
+        let mut st = self.lock();
+        st.seen.clear();
+        st.suspended.clear();
+        st.fingerprint.clear();
+    }
+
+    fn is_suspended(&self, key: &str) -> bool {
+        self.lock().suspended.contains(key)
+    }
+
+    /// A different set of services is another network: start over.
+    fn network(&self, fingerprint: Vec<String>) {
+        let mut st = self.lock();
+        if st.fingerprint != fingerprint {
+            st.seen.clear();
+            st.suspended.clear();
+            st.fingerprint = fingerprint;
+        }
+    }
+
+    /// Records a foreign rewrite; `true` when this one makes the service suspended.
+    fn note_rewrite(&self, key: &str, now: Instant) -> bool {
+        let mut st = self.lock();
+        let list = st.seen.entry(key.to_string()).or_default();
+        list.retain(|t| now.saturating_duration_since(*t) < HEAL_WINDOW);
+        list.push(now);
+        if list.len() >= HEAL_MAX_REWRITES {
+            return st.suspended.insert(key.to_string());
+        }
+        false
+    }
+}
+
+/// The last set of VPN names that was announced, so the log line is not repeated every pass.
+static LAST_VPN_NOTE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn note_untouched_vpn(names: &[String]) {
+    if names.is_empty() {
+        return;
+    }
+    let mut last = LAST_VPN_NOTE.lock().unwrap_or_else(|e| e.into_inner());
+    if *last != names {
+        eprintln!("Застава: {}", vpn_untouched_line(names));
+        *last = names.to_vec();
+    }
+}
+
+/// The one line the log and the coverage screen show when a connected VPN service was skipped.
+/// Names of services only, no values.
+pub(crate) fn vpn_untouched_line(names: &[String]) -> String {
+    format!("VPN-службы не изменялись: {}", names.join(", "))
+}
+
 fn note_changed(outcome: ApplyOutcome, changed: &mut bool) {
     if outcome != ApplyOutcome::Unchanged {
         *changed = true;
@@ -108,17 +213,67 @@ pub(super) fn enable_pac(
     p: &dyn Platform,
     pac_url: &str,
 ) -> Result<EnableReport, String> {
+    apply_pac(j, p, pac_url, None)
+}
+
+/// The self-heal pass: the same as [`enable_pac`], but a service that something else keeps
+/// rewriting is given up on (see [`HealGuard`]).
+pub(super) fn refresh_pac(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    heal: &HealGuard,
+    now: Instant,
+) -> Result<EnableReport, String> {
+    apply_pac(j, p, pac_url, Some((heal, now)))
+}
+
+fn apply_pac(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    heal: Option<(&HealGuard, Instant)>,
+) -> Result<EnableReport, String> {
     match p.temp_dns_overrides() {
         Ok(false) => {}
         Ok(true) => return Err(MSG_TEMP_DNS.to_string()),
         Err(_) => return Err(MSG_DNS_UNKNOWN.to_string()),
     }
-    let services: Vec<ServiceId> = p
+    let enabled: Vec<ServiceId> = p
         .list_services()
         .map_err(|_| "Не удалось получить список сетевых служб.".to_string())?
         .into_iter()
         .filter(|s| s.enabled)
         .collect();
+    // Only physical services are written (or even read for a write). A VPN service, connected or
+    // not, is left alone: the system reconfigures it on any write and a connected tunnel can drop.
+    let mut services: Vec<ServiceId> = Vec::new();
+    let mut vpn_untouched: Vec<String> = Vec::new();
+    let mut unclassified = false;
+    for (svc, kind) in classify_services(p, &enabled) {
+        match kind {
+            ServiceKind::Physical => services.push(svc),
+            ServiceKind::Vpn { connected: false } => {}
+            ServiceKind::Vpn { connected: true } => vpn_untouched.push(svc.name),
+            ServiceKind::Unknown => {
+                unclassified = true;
+                vpn_untouched.push(svc.name);
+            }
+        }
+    }
+    note_untouched_vpn(&vpn_untouched);
+    if services.is_empty() && !enabled.is_empty() {
+        return Err(if unclassified {
+            MSG_KIND_UNKNOWN
+        } else {
+            MSG_ONLY_VPN
+        }
+        .to_string());
+    }
+    if let Some((guard, _)) = heal {
+        guard.network(services.iter().map(ServiceId::key).collect());
+        services.retain(|s| !guard.is_suspended(&s.key()));
+    }
     let gateway_port = parse_gateway_port_from_pac_url(pac_url);
 
     // Phase 1: read and validate everything. Nothing is written yet.
@@ -163,16 +318,34 @@ pub(super) fn enable_pac(
         url: Some(pac_url.to_string()),
         enabled: Some(true),
     });
-    let mut report = EnableReport::default();
+    let mut report = EnableReport {
+        skipped_vpn: vpn_untouched,
+        ..EnableReport::default()
+    };
     let mut failed = 0usize;
     for plan in &plans {
         let pac_res = Resource::Pac {
             service: plan.svc.clone(),
         };
+        // A service we already had in place that needs a write again was rewritten by somebody.
+        let was_in_place = j
+            .entry(&pac_res)
+            .is_some_and(|e| e.state == EntryState::Applied);
         match j.apply(p, &pac_res, want.clone()) {
             Ok(o) => {
                 note_changed(o, &mut report.changed);
                 report.configured.push(plan.svc.name.clone());
+                if let Some((guard, now)) = heal
+                    && was_in_place
+                    && o != ApplyOutcome::Unchanged
+                    && guard.note_rewrite(&plan.svc.key(), now)
+                {
+                    // Names only, no values.
+                    eprintln!(
+                        "Застава: настройки службы «{}» постоянно переписывает другое приложение; самолечение для неё остановлено до смены сети или перезапуска защиты",
+                        plan.svc.name
+                    );
+                }
             }
             Err(e) => {
                 failed += 1;
@@ -735,5 +908,288 @@ mod tests {
         enable_pac(&mut j, &p, PAC).unwrap();
         assert_eq!(p.chain_of(&wifi()).http.enabled, Some(false));
         assert!(j.entry(&Resource::Bypass { service: wifi() }).is_none());
+    }
+
+    // --- WP-28: VPN services are never written; no pointless writes; no ping-pong ------------
+
+    fn leftover() -> PacState {
+        pac(Some(PAC), Some(true))
+    }
+    fn touched(p: &FakePlatform, svc: &ServiceId) -> bool {
+        let key = svc.key();
+        p.calls().iter().any(|c| c.contains(&key))
+    }
+
+    #[test]
+    fn a_connected_vpn_service_is_neither_read_nor_written() {
+        let (fs, p) = setup();
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        p.seed_pac(&vpn, leftover());
+        let mut j = open(&fs);
+        let r = enable_pac(&mut j, &p, PAC).unwrap();
+        assert_eq!(r.configured, vec!["Wi-Fi".to_string()]);
+        assert_eq!(r.skipped_vpn, vec!["Alpha VPN".to_string()]);
+        assert!(!touched(&p, &vpn), "calls: {:?}", p.calls());
+        assert_eq!(p.pac_of(&vpn), leftover());
+        assert!(j.entry(&Resource::Pac { service: vpn }).is_none());
+        assert_eq!(
+            vpn_untouched_line(&r.skipped_vpn),
+            "VPN-службы не изменялись: Alpha VPN"
+        );
+    }
+
+    #[test]
+    fn a_disconnected_vpn_service_gets_no_pac_either() {
+        let (fs, p) = setup();
+        let vpn = p.add_vpn_service("Alpha VPN", false);
+        let mut j = open(&fs);
+        let r = enable_pac(&mut j, &p, PAC).unwrap();
+        assert!(r.skipped_vpn.is_empty(), "only connected ones are announced");
+        assert!(!touched(&p, &vpn));
+        assert_eq!(p.pac_of(&vpn), PacState::default());
+    }
+
+    #[test]
+    fn a_vpn_service_never_gets_the_chain_or_bypass_either() {
+        let (fs, p) = setup();
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        let both = ChainState {
+            http: ep(true, "127.0.0.1", 2080),
+            https: ep(true, "127.0.0.1", 2080),
+        };
+        p.seed_chain(&vpn, both.clone());
+        p.seed_bypass(&vpn, &["vpn.local"]);
+        p.seed_chain(&wifi(), both);
+        let mut j = open(&fs);
+        enable_pac(&mut j, &p, PAC).unwrap();
+        assert!(!touched(&p, &vpn));
+        assert_eq!(p.chain_of(&vpn).http.enabled, Some(true));
+        assert_eq!(p.bypass_of(&vpn), vec!["vpn.local"]);
+        assert_eq!(p.chain_of(&wifi()).http.enabled, Some(false));
+    }
+
+    #[test]
+    fn with_only_vpn_services_nothing_is_written_and_the_user_is_told() {
+        let p = FakePlatform::new();
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        let mut j = open(&FakeFs::new());
+        let err = enable_pac(&mut j, &p, PAC).unwrap_err();
+        assert_eq!(err, MSG_ONLY_VPN);
+        assert_eq!(p.os_writes(), 0);
+        assert!(!touched(&p, &vpn));
+        assert!(!err.contains("://"));
+    }
+
+    #[test]
+    fn when_the_connection_list_is_unreadable_nothing_is_written() {
+        let (fs, p) = setup();
+        p.fail_next(PlatOp::VpnList);
+        let mut j = open(&fs);
+        // Wi-Fi has a device but cannot be vouched for: fail closed, say so.
+        assert_eq!(enable_pac(&mut j, &p, PAC).unwrap_err(), MSG_KIND_UNKNOWN);
+        assert_eq!(p.os_writes(), 0);
+        assert!(j.is_empty());
+    }
+
+    #[test]
+    fn a_service_without_a_device_is_a_vpn_even_if_scutil_does_not_list_it() {
+        let (fs, p) = setup();
+        let odd = ServiceId::new("", "com.example.tunnel", "Odd Tunnel");
+        p.add_service(odd.clone());
+        let mut j = open(&fs);
+        let r = enable_pac(&mut j, &p, PAC).unwrap();
+        assert_eq!(r.configured, vec!["Wi-Fi".to_string()]);
+        assert!(!touched(&p, &odd));
+    }
+
+    #[test]
+    fn repeated_self_heal_on_a_physical_service_writes_nothing() {
+        let (fs, p) = setup();
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        let mut j = open(&fs);
+        let guard = HealGuard::new();
+        let t0 = Instant::now();
+        refresh_pac(&mut j, &p, PAC, &guard, t0).unwrap();
+        let writes = p.os_writes();
+        for i in 1..5 {
+            let r = refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(5 * i)).unwrap();
+            assert!(!r.changed);
+        }
+        assert_eq!(p.os_writes(), writes);
+        assert!(!touched(&p, &vpn));
+    }
+
+    #[test]
+    fn a_vpn_client_that_keeps_rewriting_the_pac_does_not_start_a_ping_pong() {
+        let (fs, p) = setup();
+        let mut j = open(&fs);
+        let guard = HealGuard::new();
+        let t0 = Instant::now();
+        refresh_pac(&mut j, &p, PAC, &guard, t0).unwrap();
+        let mut healed = 0;
+        for i in 1..=8u64 {
+            // The VPN client puts its own PAC back, every pass.
+            p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+            let before = p.os_writes();
+            refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(5 * i)).unwrap();
+            if p.os_writes() > before {
+                healed += 1;
+            }
+        }
+        assert_eq!(healed, HEAL_MAX_REWRITES, "healed three times, then stopped");
+        assert_eq!(
+            p.pac_of(&wifi()),
+            pac(Some("http://vpn.example/p.pac"), Some(true)),
+            "the foreign value is left as it is"
+        );
+        // An explicit enable starts a fresh account.
+        guard.reset();
+        refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(60)).unwrap();
+        assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)));
+    }
+
+    #[test]
+    fn rewrites_far_apart_are_not_a_ping_pong_and_a_new_network_resumes_the_heal() {
+        let (fs, p) = setup();
+        let mut j = open(&fs);
+        let guard = HealGuard::new();
+        let t0 = Instant::now();
+        refresh_pac(&mut j, &p, PAC, &guard, t0).unwrap();
+        // Rewrites a window apart: each one is healed, none ever suspends the service.
+        for i in 1..=5u64 {
+            p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+            refresh_pac(&mut j, &p, PAC, &guard, t0 + (HEAL_WINDOW + Duration::from_secs(1)) * i as u32)
+                .unwrap();
+            assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)), "pass {i}");
+        }
+        // Now a burst suspends it ...
+        let base = t0 + HEAL_WINDOW * 10;
+        for i in 0..HEAL_MAX_REWRITES as u64 {
+            p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+            refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(i)).unwrap();
+        }
+        p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+        refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(10)).unwrap();
+        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some("http://vpn.example/p.pac"));
+        // ... until the set of services changes (another network).
+        p.add_service(usb());
+        refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(20)).unwrap();
+        assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)));
+    }
+
+    #[test]
+    fn a_suspended_service_does_not_stop_the_healing_of_the_others() {
+        let (fs, p) = setup();
+        p.add_service(usb());
+        let mut j = open(&fs);
+        let guard = HealGuard::new();
+        let t0 = Instant::now();
+        refresh_pac(&mut j, &p, PAC, &guard, t0).unwrap();
+        for i in 1..=4u64 {
+            p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+            refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(i)).unwrap();
+        }
+        // USB loses its PAC for once: it is healed although Wi-Fi is given up on.
+        p.seed_pac(&usb(), pac(None, Some(false)));
+        refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(10)).unwrap();
+        assert_eq!(p.pac_of(&usb()), pac(Some(PAC), Some(true)));
+        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some("http://vpn.example/p.pac"));
+    }
+
+    // --- first start after 2.0.0: no "off, then on" pair on one service ------------------------
+
+    fn start_like_the_app(fs: &FakeFs, p: &FakePlatform) -> Journal {
+        let mut j = open(fs);
+        crate::sysproxy::cleanup::restore_and_migrate_with(&mut j, p, true);
+        enable_pac(&mut j, p, PAC).unwrap();
+        j
+    }
+
+    #[test]
+    fn first_start_after_2_0_0_leaves_a_physical_service_with_our_pac_untouched() {
+        let (fs, p) = setup();
+        p.seed_pac(&wifi(), leftover()); // what 2.0.0 left
+        let j = start_like_the_app(&fs, &p);
+        assert_eq!(p.os_writes(), 0, "calls: {:?}", p.calls());
+        assert_eq!(p.pac_of(&wifi()), leftover());
+        // The state "before Zastava" is off: that is what the restore brings back.
+        let mut j = j;
+        j.restore_all(&p);
+        assert_eq!(p.pac_of(&wifi()), pac(None, Some(false)));
+    }
+
+    #[test]
+    fn first_start_with_an_old_port_leftover_is_one_write_not_two() {
+        let (fs, p) = setup();
+        p.seed_pac(&wifi(), pac(Some("http://127.0.0.1:8900/proxy.pac"), Some(true)));
+        start_like_the_app(&fs, &p);
+        assert_eq!(p.os_writes(), 1, "calls: {:?}", p.calls());
+        assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)));
+    }
+
+    #[test]
+    fn the_cleanup_pass_without_the_start_flag_still_clears_a_physical_leftover() {
+        let (fs, p) = setup();
+        p.seed_pac(&wifi(), leftover());
+        let mut j = open(&fs);
+        crate::sysproxy::cleanup::restore_and_migrate_with(&mut j, &p, false);
+        assert_eq!(p.pac_of(&wifi()), pac(None, Some(false)));
+    }
+
+    #[test]
+    fn a_physical_leftover_is_not_given_a_mark_until_the_enable_pass_has_taken_it() {
+        let (fs, p) = setup();
+        p.seed_pac(&wifi(), leftover());
+        let mut j = open(&fs);
+        crate::sysproxy::cleanup::restore_and_migrate_with(&mut j, &p, true);
+        assert!(!j.has_mark(crate::sysproxy::cleanup::LEGACY_MIGRATION_MARK));
+        enable_pac(&mut j, &p, PAC).unwrap();
+        drop(j); // the journal is locked while it is open
+        // Next start: the service is in the journal, nothing is deferred, the mark is set.
+        let mut next = open(&fs);
+        crate::sysproxy::cleanup::restore_and_migrate_with(&mut next, &p, true);
+        assert!(next.has_mark(crate::sysproxy::cleanup::LEGACY_MIGRATION_MARK));
+    }
+
+    #[test]
+    fn the_owners_first_start_with_one_connected_vpn_among_six() {
+        let (fs, p) = setup();
+        let bridge = ServiceId::new("bridge0", "Thunderbolt Bridge", "Thunderbolt Bridge");
+        let phone = ServiceId::new("en5", "iPhone USB", "iPhone USB");
+        p.add_service(bridge.clone());
+        p.add_service(phone.clone());
+        let mut vpns = Vec::new();
+        for (name, up) in [
+            ("Alpha", false),
+            ("Beta Proxy", false),
+            ("Gamma", false),
+            ("Delta Pro", true),
+            ("Epsilon", false),
+            ("Zeta", false),
+        ] {
+            vpns.push((p.add_vpn_service(name, up), up));
+        }
+        // 2.0.0 wrote its PAC into all nine services.
+        for svc in [wifi(), bridge.clone(), phone.clone()] {
+            p.seed_pac(&svc, leftover());
+        }
+        for (svc, _) in &vpns {
+            p.seed_pac(svc, leftover());
+        }
+        start_like_the_app(&fs, &p);
+        // Physical services: our PAC stays, no write. Connected VPN: not touched at all.
+        for svc in [wifi(), bridge, phone] {
+            assert_eq!(p.pac_of(&svc), leftover());
+        }
+        for (svc, up) in &vpns {
+            if *up {
+                assert!(!touched(&p, svc), "a connected VPN was touched");
+                assert_eq!(p.pac_of(svc), leftover());
+            } else {
+                // The one-time cleanup of 2.0.0's leftover: one write, only while disconnected.
+                assert_eq!(p.pac_of(svc), pac(None, Some(false)));
+            }
+        }
+        assert_eq!(p.os_writes(), 5, "five idle VPN services, one clear each");
     }
 }

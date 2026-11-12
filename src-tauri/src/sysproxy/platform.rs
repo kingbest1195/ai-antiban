@@ -104,6 +104,61 @@ pub struct ChainState {
     pub https: ProxyEndpoint,
 }
 
+/// What a network service is, for the one rule that matters here: Zastava writes proxy settings
+/// into physical services only. A VPN service (a NetworkExtension / PPP / IPSec connection) is
+/// reconfigured by the system when anybody writes into it, and a connected tunnel can drop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ServiceKind {
+    /// Wi-Fi, Ethernet, a USB or Thunderbolt adapter: has a device and is not a connection service.
+    Physical,
+    /// A VPN connection service. `connected` is `false` only when the system says "Disconnected";
+    /// every other state (and an unknown one) counts as connected.
+    Vpn { connected: bool },
+    /// The type could not be established (the connection list is unreadable). Treated as a VPN.
+    Unknown,
+}
+
+impl ServiceKind {
+    /// The only kind Zastava writes into.
+    pub fn is_physical(self) -> bool {
+        self == ServiceKind::Physical
+    }
+
+    /// A VPN service that is surely not connected: the one case where an old Zastava leftover may
+    /// be cleared without risk to a tunnel.
+    pub fn is_idle_vpn(self) -> bool {
+        self == ServiceKind::Vpn { connected: false }
+    }
+}
+
+/// One entry of `scutil --nc list`: a connection service and whether it is up.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct VpnConnection {
+    /// The user-visible service name; the same string `networksetup` uses.
+    pub name: String,
+    /// `false` only for "Disconnected".
+    pub connected: bool,
+}
+
+/// The proxy the system actually hands to applications (`scutil --proxy`): the global dictionary
+/// that follows the primary service, so it shows whether a VPN overrides what is set on Wi-Fi.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct EffectiveProxy {
+    pub pac_enabled: Option<bool>,
+    pub pac_url: Option<String>,
+}
+
+impl fmt::Debug for EffectiveProxy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "EffectiveProxy(pac_enabled: {:?}, url: {})",
+            self.pac_enabled,
+            redact(self.pac_url.is_some())
+        )
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RegKind {
     Sz,
@@ -193,6 +248,15 @@ pub trait Platform: Send + Sync {
     fn set_proxy_bypass_domains(&self, svc: &ServiceId, domains: &[String]) -> PResult<()>;
     /// Read-only: does an active VPN keep temporary DNS settings that differ from the saved ones?
     fn temp_dns_overrides(&self) -> PResult<bool>;
+    /// Read-only: the connection services (`scutil --nc list`) with their state.
+    fn vpn_connections(&self) -> PResult<Vec<VpnConnection>>;
+    /// Read-only: the proxy the system effectively applies now (`scutil --proxy`).
+    fn effective_proxy(&self) -> PResult<EffectiveProxy>;
+    /// Classifies one service. See [`classify_service`] for the rule.
+    fn service_kind(&self, svc: &ServiceId) -> ServiceKind {
+        let nc = self.vpn_connections().ok();
+        classify_service(svc, nc.as_deref())
+    }
     /// User environment: `launchctl getenv` (macOS) / `HKCU\Environment` (Windows).
     fn get_user_env(&self, key: &str) -> PResult<Option<String>>;
     fn set_user_env(&self, key: &str, value: &str) -> PResult<()>;
@@ -299,6 +363,99 @@ pub fn parse_service_order(output: &str) -> Vec<ServiceId> {
         }
     }
     out
+}
+
+/// `scutil --nc list` -> connection services. A line looks like
+/// `* (Connected)      <UUID> VPN (<id>) "<name>"  [VPN:<id>]`; the leading `*` marks an enabled
+/// one. Only the state and the quoted name are read. Header and blank lines are skipped.
+pub fn parse_nc_list(output: &str) -> Vec<VpnConnection> {
+    let mut out = Vec::new();
+    for line in output.lines() {
+        let t = line.trim().trim_start_matches('*').trim_start();
+        let Some(rest) = t.strip_prefix('(') else {
+            continue;
+        };
+        let Some((state, tail)) = rest.split_once(')') else {
+            continue;
+        };
+        let (Some(first), Some(last)) = (tail.find('"'), tail.rfind('"')) else {
+            continue;
+        };
+        if last <= first {
+            continue;
+        }
+        let name = &tail[first + 1..last];
+        if state.trim().is_empty() || name.is_empty() {
+            continue;
+        }
+        out.push(VpnConnection {
+            name: name.to_string(),
+            connected: !state.trim().eq_ignore_ascii_case("disconnected"),
+        });
+    }
+    out
+}
+
+/// Decides what a service is. A VPN is a service listed by `scutil --nc list` (matched by name)
+/// or one without a device in `networksetup -listnetworkserviceorder`. When the connection list
+/// could not be read (`nc` is `None`) a service with a device cannot be vouched for and is
+/// `Unknown`; one without a device is a VPN whose state is not known, i.e. connected.
+pub fn classify_service(svc: &ServiceId, nc: Option<&[VpnConnection]>) -> ServiceKind {
+    let Some(list) = nc else {
+        return if svc.device.is_empty() {
+            ServiceKind::Vpn { connected: true }
+        } else {
+            ServiceKind::Unknown
+        };
+    };
+    let listed: Vec<&VpnConnection> = list.iter().filter(|c| c.name == svc.name).collect();
+    if !listed.is_empty() {
+        // Two entries with one name: the more careful reading wins.
+        return ServiceKind::Vpn {
+            connected: listed.iter().any(|c| c.connected),
+        };
+    }
+    if svc.device.is_empty() {
+        ServiceKind::Vpn { connected: true }
+    } else {
+        ServiceKind::Physical
+    }
+}
+
+/// Classifies every service from one read of the connection list.
+pub fn classify_services(p: &dyn Platform, services: &[ServiceId]) -> Vec<(ServiceId, ServiceKind)> {
+    let nc = p.vpn_connections().ok();
+    services
+        .iter()
+        .map(|s| (s.clone(), classify_service(s, nc.as_deref())))
+        .collect()
+}
+
+/// `scutil --proxy` -> the PAC part of the effective proxy. Only the two keys of the outermost
+/// dictionary are read: the `__SCOPED__` block below it repeats them per interface and is not
+/// what an application without an interface binding gets.
+pub fn parse_scutil_proxy(output: &str) -> EffectiveProxy {
+    let mut st = EffectiveProxy::default();
+    let mut depth = 0usize;
+    for line in output.lines() {
+        let t = line.trim();
+        if depth == 1
+            && let Some((k, v)) = t.split_once(" : ")
+        {
+            let v = v.trim();
+            match k.trim() {
+                "ProxyAutoConfigEnable" => st.pac_enabled = Some(v == "1"),
+                "ProxyAutoConfigURLString" if !v.is_empty() => st.pac_url = Some(v.to_string()),
+                _ => {}
+            }
+        }
+        if t.ends_with('{') {
+            depth += 1;
+        } else if t == "}" {
+            depth = depth.saturating_sub(1);
+        }
+    }
+    st
 }
 
 /// `reg query <key> /v <name>` -> value with exact type. `None` = no such value.
@@ -764,6 +921,26 @@ impl Platform for RealPlatform {
             args.extend(domains.iter().map(String::as_str));
         }
         run_ok("networksetup", &args, "set_proxy_bypass_domains")
+    }
+
+    fn vpn_connections(&self) -> PResult<Vec<VpnConnection>> {
+        Self::require_macos("vpn_connections")?;
+        dry_run_gate("scutil:nc-list")?;
+        let (ok, text) = run("scutil", &["--nc", "list"], "vpn_connections")?;
+        if !ok {
+            return Err(PlatformError::Failed("vpn_connections"));
+        }
+        Ok(parse_nc_list(&text))
+    }
+
+    fn effective_proxy(&self) -> PResult<EffectiveProxy> {
+        Self::require_macos("effective_proxy")?;
+        dry_run_gate("scutil:proxy")?;
+        let (ok, text) = run("scutil", &["--proxy"], "effective_proxy")?;
+        if !ok {
+            return Err(PlatformError::Failed("effective_proxy"));
+        }
+        Ok(parse_scutil_proxy(&text))
     }
 
     fn temp_dns_overrides(&self) -> PResult<bool> {
@@ -1272,6 +1449,8 @@ mod fake {
         GetBypass,
         SetBypass,
         TempDns,
+        VpnList,
+        EffectiveProxy,
         GetEnv,
         SetEnv,
         UnsetEnv,
@@ -1293,6 +1472,8 @@ mod fake {
         env: BTreeMap<String, String>,
         inet: BTreeMap<String, RegValue>,
         temp_dns: bool,
+        vpn: Vec<VpnConnection>,
+        effective: Option<EffectiveProxy>,
         calls: Vec<String>,
         os_writes: usize,
         fail: BTreeMap<PlatOp, usize>,
@@ -1363,6 +1544,35 @@ mod fake {
         pub fn remove_env_externally(&self, key: &str) {
             self.st.lock().unwrap().env.remove(key);
         }
+        /// Adds a VPN service: it is in the service list (without a device, like a real
+        /// NetworkExtension service) and in the connection list.
+        pub fn add_vpn_service(&self, name: &str, connected: bool) -> ServiceId {
+            let svc = ServiceId::new("", &format!("com.vpn.{}", name.replace(' ', "")), name);
+            self.add_service(svc.clone());
+            self.set_vpn_connection(name, connected);
+            svc
+        }
+
+        /// Sets (or adds) the state of a connection in the `scutil --nc list` of the fake.
+        pub fn set_vpn_connection(&self, name: &str, connected: bool) {
+            let mut s = self.st.lock().unwrap();
+            match s.vpn.iter_mut().find(|c| c.name == name) {
+                Some(c) => c.connected = connected,
+                None => s.vpn.push(VpnConnection {
+                    name: name.to_string(),
+                    connected,
+                }),
+            }
+        }
+
+        /// What `scutil --proxy` will show: the PAC of the global proxy dictionary.
+        pub fn set_effective_pac(&self, url: Option<&str>, enabled: bool) {
+            self.st.lock().unwrap().effective = Some(EffectiveProxy {
+                pac_enabled: Some(enabled),
+                pac_url: url.map(str::to_string),
+            });
+        }
+
         pub fn set_temp_dns(&self, on: bool) {
             self.st.lock().unwrap().temp_dns = on;
         }
@@ -1582,6 +1792,21 @@ mod fake {
                 .bypass
                 .insert(svc.key(), domains.to_vec());
             Ok(())
+        }
+
+        fn vpn_connections(&self) -> PResult<Vec<VpnConnection>> {
+            self.enter(PlatOp::VpnList, "vpn_connections", "", false)?;
+            Ok(self.st.lock().unwrap().vpn.clone())
+        }
+
+        fn effective_proxy(&self) -> PResult<EffectiveProxy> {
+            self.enter(PlatOp::EffectiveProxy, "effective_proxy", "", false)?;
+            self.st
+                .lock()
+                .unwrap()
+                .effective
+                .clone()
+                .ok_or(PlatformError::Unsupported("effective_proxy"))
         }
 
         fn temp_dns_overrides(&self) -> PResult<bool> {
@@ -1956,5 +2181,103 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!format!("{v:?}").contains("secret-path"));
+    }
+
+    // --- WP-28: service kind, connection list, effective proxy ------------------------------
+
+    /// The real shape of `scutil --nc list`, with invented names and identifiers.
+    const NC_LIST: &str = "Available network connection services in the current set (*=enabled):\n\
+* (Disconnected)   11111111-AAAA-4BBB-8CCC-000000000001 VPN (com.example.Alpha) \"Alpha VPN\"   [VPN:com.example.Alpha]\n\
+* (Connected)      11111111-AAAA-4BBB-8CCC-000000000002 VPN (com.example.Beta.Pro) \"Beta VPN Pro\"   [VPN:com.example.Beta.Pro]\n\
+  (Connecting)     11111111-AAAA-4BBB-8CCC-000000000003 VPN (com.example.Gamma) \"Gamma\"   [VPN:com.example.Gamma]\n\
+* (Disconnecting)  11111111-AAAA-4BBB-8CCC-000000000004 PPP --> en0 \"Office \\\"L2TP\\\"\"   [PPP:L2TP]\n\
+\n";
+
+    #[test]
+    fn nc_list_reads_state_and_the_quoted_name() {
+        let list = parse_nc_list(NC_LIST);
+        let seen: Vec<(&str, bool)> = list.iter().map(|c| (c.name.as_str(), c.connected)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("Alpha VPN", false),
+                ("Beta VPN Pro", true),
+                ("Gamma", true),
+                ("Office \\\"L2TP\\\"", true),
+            ],
+            "only \"Disconnected\" is not connected; the header line is skipped"
+        );
+        assert!(parse_nc_list("").is_empty());
+        assert!(parse_nc_list("No connection services are available.\n").is_empty());
+    }
+
+    fn svc(device: &str, name: &str) -> ServiceId {
+        ServiceId::new(device, name, name)
+    }
+
+    #[test]
+    fn a_service_is_physical_vpn_or_unknown_by_the_connection_list_and_the_device() {
+        let nc = parse_nc_list(NC_LIST);
+        let kind = |s: &ServiceId, nc: Option<&[VpnConnection]>| classify_service(s, nc);
+        // Listed: a VPN, whatever the device column says.
+        assert_eq!(kind(&svc("", "Beta VPN Pro"), Some(&nc)), ServiceKind::Vpn { connected: true });
+        assert_eq!(kind(&svc("", "Alpha VPN"), Some(&nc)), ServiceKind::Vpn { connected: false });
+        assert_eq!(kind(&svc("utun4", "Gamma"), Some(&nc)), ServiceKind::Vpn { connected: true });
+        // Not listed, no device: still a VPN (state unknown, so connected).
+        assert_eq!(kind(&svc("", "Mystery"), Some(&nc)), ServiceKind::Vpn { connected: true });
+        // Not listed, with a device: physical.
+        assert_eq!(kind(&svc("en0", "Wi-Fi"), Some(&nc)), ServiceKind::Physical);
+        assert_eq!(kind(&svc("bridge0", "Thunderbolt Bridge"), Some(&nc)), ServiceKind::Physical);
+        // The list could not be read: a device alone does not vouch for a service.
+        assert_eq!(kind(&svc("en0", "Wi-Fi"), None), ServiceKind::Unknown);
+        assert_eq!(kind(&svc("", "Alpha VPN"), None), ServiceKind::Vpn { connected: true });
+        assert!(ServiceKind::Physical.is_physical());
+        assert!(!ServiceKind::Unknown.is_physical());
+        assert!(ServiceKind::Vpn { connected: false }.is_idle_vpn());
+        assert!(!ServiceKind::Vpn { connected: true }.is_idle_vpn());
+        assert!(!ServiceKind::Unknown.is_idle_vpn());
+    }
+
+    #[test]
+    fn service_kind_of_the_platform_follows_the_fake_connection_list() {
+        let p = FakePlatform::new();
+        let wifi = svc("en0", "Wi-Fi");
+        p.add_service(wifi.clone());
+        let vpn = p.add_vpn_service("Alpha VPN", true);
+        assert_eq!(p.service_kind(&wifi), ServiceKind::Physical);
+        assert_eq!(p.service_kind(&vpn), ServiceKind::Vpn { connected: true });
+        p.set_vpn_connection("Alpha VPN", false);
+        assert_eq!(p.service_kind(&vpn), ServiceKind::Vpn { connected: false });
+        p.fail_next(PlatOp::VpnList);
+        assert_eq!(p.service_kind(&wifi), ServiceKind::Unknown);
+        assert_eq!(p.os_writes(), 0, "classification never writes");
+    }
+
+    #[test]
+    fn the_real_platform_reads_nothing_in_dry_run() {
+        // Unit tests are always in OS dry-run: the reads fail instead of starting `scutil`.
+        let before = crate::sysproxy::dry_run_blocked_calls();
+        if cfg!(target_os = "macos") {
+            assert_eq!(RealPlatform.vpn_connections(), Err(PlatformError::DryRun));
+            assert_eq!(RealPlatform.effective_proxy(), Err(PlatformError::DryRun));
+            assert!(crate::sysproxy::dry_run_blocked_calls() >= before + 2);
+        } else {
+            assert!(RealPlatform.vpn_connections().is_err());
+            assert!(RealPlatform.effective_proxy().is_err());
+        }
+    }
+
+    #[test]
+    fn scutil_proxy_gives_the_pac_part_only() {
+        let text = "<dictionary> {\n  ExceptionsList : <array> {\n    0 : *.local\n    1 : 169.254/16\n  }\n  ExcludeSimpleHostnames : 1\n  FTPPassive : 1\n  ProxyAutoConfigEnable : 1\n  ProxyAutoConfigURLString : http://127.0.0.1:8899/proxy.pac\n  __SCOPED__ : <dictionary> {\n    en0 : <dictionary> {\n      ProxyAutoConfigEnable : 0\n    }\n  }\n}\n";
+        let e = parse_scutil_proxy(text);
+        assert_eq!(e.pac_enabled, Some(true), "the scoped block does not override it");
+        assert_eq!(e.pac_url.as_deref(), Some("http://127.0.0.1:8899/proxy.pac"));
+        let off = parse_scutil_proxy("<dictionary> {\n  ProxyAutoConfigEnable : 0\n}\n");
+        assert_eq!(off.pac_enabled, Some(false));
+        assert_eq!(off.pac_url, None);
+        assert_eq!(parse_scutil_proxy("").pac_enabled, None);
+        let shown = format!("{e:?}");
+        assert!(!shown.contains("127.0.0.1"), "{shown}");
     }
 }

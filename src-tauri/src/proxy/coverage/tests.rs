@@ -1051,3 +1051,108 @@ fn installed_check_uses_only_the_given_file_system() {
     assert!(check_app_installed_in("browsers", &rig.ctx));
     assert!(!check_app_installed_in("no-such-app", &rig.ctx));
 }
+
+// ----- WP-28: VPN services and the effective system proxy --------------------------------------
+
+const OUR_PAC: &str = "http://127.0.0.1:8899/proxy.pac";
+
+fn snapshot_with_vpn(rig: &Rig) -> CoverageSnapshot {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    t.snapshot(&rig.env(PacSource::Services, false), true)
+}
+
+#[test]
+fn the_system_proxy_is_effective_when_scutil_shows_our_pac() {
+    let rig = Rig::new();
+    rig.seed_wifi_pac(OUR_PAC, true);
+    rig.platform.set_effective_pac(Some(OUR_PAC), true);
+    let snap = snapshot_with_vpn(&rig);
+    assert_eq!(snap.system_proxy_effective, Some(true));
+    assert!(snap.vpn_connected.is_empty());
+}
+
+#[test]
+fn a_vpn_that_takes_over_makes_the_pac_on_wifi_ineffective_and_is_named() {
+    let rig = Rig::new();
+    rig.seed_wifi_pac(OUR_PAC, true);
+    let vpn = rig.platform.add_vpn_service("Delta Pro", true);
+    rig.platform.add_vpn_service("Alpha VPN", false);
+    // The global dictionary follows the VPN, whose service has no PAC of ours.
+    rig.platform.set_effective_pac(None, false);
+    let snap = snapshot_with_vpn(&rig);
+    assert_eq!(snap.system_proxy_effective, Some(false));
+    assert_eq!(snap.vpn_connected, vec!["Delta Pro".to_string()]);
+    // Wi-Fi still carries our PAC, so the apps are "configured": the honest part is the notice.
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Configured);
+    assert_eq!(rig.platform.pac_of(&vpn), PacState::default());
+    assert_eq!(rig.platform.os_writes(), 0, "coverage only reads");
+    // Another PAC or a disabled flag is "not ours" too.
+    rig.platform.set_effective_pac(Some("http://vpn.example/p.pac"), true);
+    assert_eq!(snapshot_with_vpn(&rig).system_proxy_effective, Some(false));
+    rig.platform.set_effective_pac(Some(OUR_PAC), false);
+    assert_eq!(snapshot_with_vpn(&rig).system_proxy_effective, Some(false));
+}
+
+#[test]
+fn an_unreadable_effective_proxy_is_unknown_not_a_verdict() {
+    let rig = Rig::new();
+    rig.seed_wifi_pac(OUR_PAC, true);
+    // The fake has no `scutil --proxy` answer until it is given one.
+    assert_eq!(snapshot_with_vpn(&rig).system_proxy_effective, None);
+    rig.platform.set_effective_pac(Some(OUR_PAC), true);
+    rig.platform.fail_next(PlatOp::EffectiveProxy);
+    assert_eq!(snapshot_with_vpn(&rig).system_proxy_effective, None);
+}
+
+#[test]
+fn with_the_protection_off_there_is_nothing_to_call_ineffective() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    rig.seed_wifi_pac("http://other/p.pac", true);
+    rig.platform.set_effective_pac(None, false);
+    let mut env = rig.env(PacSource::Services, false);
+    env.sysproxy_enabled = false;
+    assert_eq!(t.snapshot(&env, true).system_proxy_effective, None);
+}
+
+#[test]
+fn windows_has_no_service_list_and_no_scutil() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    rig.platform.add_vpn_service("Alpha VPN", true);
+    rig.platform.set_effective_pac(None, false);
+    let snap = t.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert_eq!(snap.system_proxy_effective, None);
+    assert!(snap.vpn_connected.is_empty());
+}
+
+#[test]
+fn a_pac_in_a_vpn_service_is_not_a_verdict_for_the_apps() {
+    let rig = Rig::new();
+    // Only a VPN service carries our PAC (a leftover of 2.0.0); Wi-Fi has somebody else's.
+    rig.seed_wifi_pac("http://other/p.pac", true);
+    let vpn = rig.platform.add_vpn_service("Alpha VPN", false);
+    rig.platform.seed_pac(
+        &vpn,
+        PacState {
+            url: Some(OUR_PAC.to_string()),
+            enabled: Some(true),
+        },
+    );
+    let snap = snapshot_with_vpn(&rig);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Off);
+}
+
+#[test]
+fn the_snapshot_json_carries_the_new_fields() {
+    let rig = Rig::new();
+    rig.seed_wifi_pac(OUR_PAC, true);
+    rig.platform.add_vpn_service("Delta Pro", true);
+    rig.platform.set_effective_pac(None, false);
+    let json = serde_json::to_value(snapshot_with_vpn(&rig)).unwrap();
+    assert_eq!(json["system_proxy_effective"], serde_json::json!(false));
+    assert_eq!(json["vpn_connected"], serde_json::json!(["Delta Pro"]));
+}

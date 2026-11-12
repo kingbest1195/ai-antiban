@@ -57,6 +57,20 @@ let mockCliMode: CliMode = "ai_only";
 let mockSyncAiTz = true;
 /** Сколько раз нажали «Проверить снова»: мок продвигает статусы по шагам. */
 let mockCoverageStage = 0;
+/** Сценарий VPN в моке «Покрытия»: нет VPN, VPN перебивает системный PAC, VPN подключён, но PAC действует. */
+export type MockVpnScenario = "none" | "overrides" | "effective";
+let mockVpnScenario: MockVpnScenario = "none";
+
+export function setMockVpnScenario(scenario: MockVpnScenario): void {
+  mockVpnScenario = scenario;
+}
+
+/** Сценарий из мока или из адреса страницы (?mockVpn=overrides|effective) — только в браузере без Tauri. */
+function currentMockVpnScenario(): MockVpnScenario {
+  if (mockVpnScenario !== "none" || typeof window === "undefined") return mockVpnScenario;
+  const fromUrl = new URLSearchParams(window.location.search).get("mockVpn");
+  return fromUrl === "overrides" || fromUrl === "effective" ? fromUrl : "none";
+}
 
 let mockRoutesSnapshot: RoutesSnapshot = {
   routes: [],
@@ -1372,6 +1386,7 @@ function mockCoverageSnapshot(): CoverageSnapshot {
         }),
     app({ id: "windsurf", name: "Windsurf", category: "ide", status: "not_installed", detail: "Не установлено" }),
   ];
+  const vpn = currentMockVpnScenario();
   return {
     sysproxy_enabled: sys,
     cli_protection_enabled: cli,
@@ -1381,6 +1396,8 @@ function mockCoverageSnapshot(): CoverageSnapshot {
     generated_at_ms: now,
     cli_mode: mockCliMode,
     apps,
+    system_proxy_effective: sys ? vpn !== "overrides" : null,
+    vpn_connected: vpn === "none" ? [] : ["V2BOX Pro"],
   };
 }
 

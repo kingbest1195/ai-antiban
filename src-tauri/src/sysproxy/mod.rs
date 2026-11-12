@@ -503,6 +503,8 @@ pub(crate) struct EnableReport {
     pub configured: Vec<String>,
     /// Something was written (not just verified).
     pub changed: bool,
+    /// Connected (or unclassifiable) VPN services that were left alone, by display name.
+    pub skipped_vpn: Vec<String>,
 }
 
 /// Outcome of a journal-backed operation against the real OS.
@@ -701,13 +703,24 @@ pub fn recover_ownership_on_start(
     if os_effects_enabled() {
         hold_app_lock(&fs::RealFs, &journal_base_dir(data_dir))?;
     }
-    recover_in(data_dir)
+    // The app enables the protection right after this: a leftover PAC on a physical service is
+    // adopted by that pass instead of being cleared and written again.
+    recover_in_mode(data_dir, true)
 }
 
 fn recover_in(
     data_dir: &std::path::Path,
 ) -> Result<journal::RecoveryReport, journal::JournalError> {
-    match with_journal_in(data_dir, "ownership_recovery", cleanup::restore_and_migrate) {
+    recover_in_mode(data_dir, false)
+}
+
+fn recover_in_mode(
+    data_dir: &std::path::Path,
+    at_app_start: bool,
+) -> Result<journal::RecoveryReport, journal::JournalError> {
+    match with_journal_in(data_dir, "ownership_recovery", |j, p| {
+        cleanup::restore_and_migrate_with(j, p, at_app_start)
+    }) {
         Run::Blocked => Ok(journal::RecoveryReport {
             skipped_dry_run: true,
             ..Default::default()
@@ -840,6 +853,9 @@ pub struct SysproxyStatus {
     pub enabled: bool,
     pub pac_url: Option<String>,
     pub services_configured: Vec<String>,
+    /// Connected (or unclassifiable) VPN services that were deliberately not changed.
+    #[serde(default)]
+    pub vpn_untouched: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -871,22 +887,26 @@ pub fn disable_all_sysproxy() {
 pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
     register_clean_exit_guard();
 
-    let configured = match with_journal("enable_sysproxy", |j, p| {
+    let (configured, vpn_untouched) = match with_journal("enable_sysproxy", |j, p| {
         enable_with(state(), j, p, pac_url)
     }) {
         Run::Blocked => {
             // Dry-run: nothing was written, the flags still follow the call.
             mark_active(state(), pac_url);
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
         Run::Failed(e) => return Err(journal_failure_text(&e)),
-        Run::Done(r) => r?.configured,
+        Run::Done(r) => {
+            let r = r?;
+            (r.configured, r.skipped_vpn)
+        }
     };
 
     Ok(SysproxyStatus {
         enabled: true,
         pac_url: Some(pac_url.to_string()),
         services_configured: configured,
+        vpn_untouched,
     })
 }
 
@@ -904,7 +924,7 @@ fn enable_with(
     p: &dyn platform::Platform,
     pac_url: &str,
 ) -> Result<EnableReport, String> {
-    let report = enable_system_proxy(j, p, pac_url)?;
+    let report = enable_system_proxy(j, p, pac_url, false)?;
     mark_active(st, pac_url);
     Ok(report)
 }
@@ -922,7 +942,7 @@ fn refresh_with(
     let Some(pac) = st.last_pac_url() else {
         return Ok(EnableReport::default());
     };
-    enable_system_proxy(j, p, &pac)
+    enable_system_proxy(j, p, &pac, true)
 }
 
 /// Switch-off pass, run inside the `OS_OPS` lock: the flag goes down BEFORE anything is restored,
@@ -937,13 +957,22 @@ pub(crate) fn restore_pass(
     restore(j, p)
 }
 
+/// Self-heal bookkeeping of the macOS PAC (which service something else keeps rewriting).
+static HEAL: macos::HealGuard = macos::HealGuard::new();
+
 fn enable_system_proxy(
     j: &mut journal::Journal,
     p: &dyn platform::Platform,
     pac_url: &str,
+    self_heal: bool,
 ) -> Result<EnableReport, String> {
     if cfg!(target_os = "macos") {
-        macos::enable_pac(j, p, pac_url)
+        if self_heal {
+            macos::refresh_pac(j, p, pac_url, &HEAL, std::time::Instant::now())
+        } else {
+            HEAL.reset(); // an explicit enable starts a fresh account
+            macos::enable_pac(j, p, pac_url)
+        }
     } else if cfg!(target_os = "windows") {
         windows::enable_inet(j, p, pac_url)
     } else {

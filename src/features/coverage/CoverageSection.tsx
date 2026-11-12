@@ -6,7 +6,7 @@ import { common, coverage as copy } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 import { useCopy } from "../guides/useCopy";
 import { buildManualSetup } from "./manualSetup";
-import { isListed, sinceLastSeen, viewOf } from "./coverageModel";
+import { isListed, sinceLastSeen, viewOf, vpnNotice } from "./coverageModel";
 import type { CoverageView, WaitingMap } from "./coverageModel";
 import { useCoverage } from "./useCoverage";
 import "./coverage.css";
@@ -50,6 +50,7 @@ export function CoverageSection({ variant, initialSnapshot, onToggleSysproxy, on
   const [enabling, setEnabling] = useState<string | null>(null);
 
   const apps = useMemo(() => (snapshot?.apps ?? []).filter((a) => isListed(a, variant)), [snapshot, variant]);
+  const vpn = useMemo(() => (snapshot ? vpnNotice(snapshot) : null), [snapshot]);
 
   const enable = async (app: AppCoverageItem, kind: "sysproxy" | "cli") => {
     const toggle = kind === "sysproxy" ? onToggleSysproxy : onToggleCli;
@@ -81,6 +82,13 @@ export function CoverageSection({ variant, initialSnapshot, onToggleSysproxy, on
             <Skeleton variant="text" lines={3} />
           )
         ) : (
+          <>
+          {vpn?.overridden && (
+            <Banner tone="warn" title={copy.vpn.overridden.title(vpn.names)} className="zs-cov__vpn">
+              {copy.vpn.overridden.text}
+            </Banner>
+          )}
+          {vpn && <p className="zs-cov__hint zs-cov__vpn-line">{copy.vpn.untouched(vpn.names)}</p>}
           <Rows>
             {snapshot.chained_proxy && (
               <Row
@@ -111,6 +119,7 @@ export function CoverageSection({ variant, initialSnapshot, onToggleSysproxy, on
               />
             ))}
           </Rows>
+          </>
         )}
       </Card>
     </Section>

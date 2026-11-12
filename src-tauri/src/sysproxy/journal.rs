@@ -292,6 +292,15 @@ fn carries_zastava_signature(res: &Resource, cur: &Value, new: &Value) -> bool {
     pac_url_of(res, cur).is_some_and(|u| super::cleanup::is_zastava_pac_signature(u, port))
 }
 
+/// What a service's PAC is taken to have held before Zastava, when only its own leftover is
+/// found there: off, no address.
+fn neutral_pac_baseline() -> Value {
+    Value::Pac(PacState {
+        url: None,
+        enabled: Some(false),
+    })
+}
+
 impl Entry {
     /// Whether `cur` is a value this record accounts for: what we last wrote (`expected`), what
     /// an in-flight write was about to set (`pending`) - both up to the OS's normalisation of a
@@ -403,6 +412,9 @@ pub enum Outcome {
     TargetGone,
     /// The step failed; the record is kept for a safe retry. Operation name only.
     Failed(&'static str),
+    /// Deliberately not touched now (e.g. the service is a connected VPN); the record is kept and
+    /// a later pass finishes it. Not an error. Reason name only.
+    Skipped(&'static str),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -860,9 +872,30 @@ impl Journal {
         let mut outcome = ApplyOutcome::Applied;
         match self.index_of(res) {
             None => {
+                // A PAC with our own address and no record is a leftover of a build without a
+                // journal (2.0.0). It is never the baseline (a restore would put our PAC back);
+                // the state before Zastava is taken as "off", the same as the legacy cleanup does.
+                let leftover = matches!(res, Resource::Pac { .. })
+                    && carries_zastava_signature(res, &cur, &new);
+                if leftover && same_as_written(res, &cur, &new) {
+                    // Already what we want: adopt it without a single OS write.
+                    self.entries.push(Entry {
+                        resource: res.clone(),
+                        baseline: neutral_pac_baseline(),
+                        expected: Some(cur),
+                        pending: None,
+                        state: EntryState::Applied,
+                        notify_pending: false,
+                    });
+                    if let Err(err) = self.persist(platform) {
+                        self.put_back(res, before);
+                        return Err(err);
+                    }
+                    return Ok(ApplyOutcome::Unchanged);
+                }
                 self.entries.push(Entry {
                     resource: res.clone(),
-                    baseline: cur,
+                    baseline: if leftover { neutral_pac_baseline() } else { cur },
                     expected: None,
                     pending: Some(new.clone()),
                     state: EntryState::Pending,
