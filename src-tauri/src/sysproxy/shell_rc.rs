@@ -70,7 +70,7 @@ pub fn build_shell_rc_guard_block_with_tz(
 
 /// Builds the PowerShell profile block with proxy settings and optional timezone/locale.
 /// Wraps proxy assignments inside a zero-latency kernel TCP listener check so PowerShell never hangs
-/// or fails when Zastava is closed or uninstalled, and actively removes stale proxy variables.
+/// or fails when Zastava is closed or uninstalled. When Zastava is down the block sets nothing and removes nothing.
 pub fn build_powershell_guard_block_with_tz(
     proxy_url: &str,
     tz: Option<&str>,
@@ -82,7 +82,7 @@ pub fn build_powershell_guard_block_with_tz(
     }
 
     format!(
-        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}} else {{\n  Remove-Item Env:HTTP_PROXY,Env:HTTPS_PROXY,Env:ALL_PROXY,Env:http_proxy,Env:https_proxy,Env:all_proxy,Env:TZ,Env:LANG,Env:LC_TIME,Env:LC_ALL -ErrorAction SilentlyContinue\n}}\n{end}",
+        "{start}\n$__zastavaUp = $false\ntry {{\n  $__zastavaUp = [bool]([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object {{ $_.Port -eq {port} }})\n}} catch {{}}\nif ($__zastavaUp) {{\n  $env:HTTP_PROXY = \"{url}\"\n  $env:HTTPS_PROXY = \"{url}\"\n  $env:ALL_PROXY = \"{url}\"\n  $env:http_proxy = \"{url}\"\n  $env:https_proxy = \"{url}\"\n  $env:all_proxy = \"{url}\"\n  $env:NO_PROXY = \"{no_proxy}\"\n  $env:no_proxy = \"{no_proxy}\"\n  $env:LANG = \"en_US.UTF-8\"\n  $env:LC_TIME = \"en_US.UTF-8\"\n  $env:LC_ALL = \"en_US.UTF-8\"{tz_assignment}\n}}\n{end}",
         start = ZASTAVA_RC_START,
         port = port,
         url = url,
@@ -258,8 +258,9 @@ mod tests {
         assert!(updated.contains("$env:TZ = \"Europe/Warsaw\""));
         assert!(updated.contains("$env:LANG = \"en_US.UTF-8\""));
         assert!(updated.contains("$env:LC_TIME = \"en_US.UTF-8\""));
-        assert!(updated.contains("Remove-Item Env:HTTP_PROXY"));
-        assert!(updated.contains("Env:TZ,Env:LANG,Env:LC_TIME,Env:LC_ALL"));
+        // A closed Zastava must never wipe the user's own variables from the session.
+        assert!(!updated.contains("Remove-Item"));
+        assert!(!updated.contains("else"));
         assert!(updated.contains(ZASTAVA_RC_START));
         assert!(updated.contains(ZASTAVA_RC_END));
 

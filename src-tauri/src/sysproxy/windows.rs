@@ -177,6 +177,10 @@ pub(super) fn refresh_if_changed() -> bool {
 }
 
 pub(super) fn notify_windows_inet_refresh() {
+    if !super::os_effects_enabled() {
+        super::note_dry_run_blocked("InternetSetOptionW");
+        return;
+    }
     #[link(name = "wininet")]
     unsafe extern "system" {
         fn InternetSetOptionW(
@@ -219,6 +223,10 @@ pub fn delete_windows_user_env_var(name: &str) -> std::io::Result<()> {
 }
 
 pub fn broadcast_windows_env_change() {
+    if !super::os_effects_enabled() {
+        super::note_dry_run_blocked("SendMessageTimeoutW");
+        return;
+    }
     #[link(name = "user32")]
     unsafe extern "system" {
         fn SendMessageTimeoutW(

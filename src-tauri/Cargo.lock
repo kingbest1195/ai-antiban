@@ -5512,6 +5512,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
+ "zastava",
 ]
 
 [[package]]

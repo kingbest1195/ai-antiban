@@ -104,13 +104,10 @@ pub fn enable_cli_and_ide_protection_with_tz(
         // 3b. Windows User Environment & PowerShell Profiles
         #[cfg(target_os = "windows")]
         {
-            // Self-heal: NEVER write proxy vars or TZ / LANG / LC_TIME into global HKCU\Environment!
-            // Windows CRT (_tzset) and Qt/Electron desktop apps (such as Telegram Desktop) read
-            // HKCU\Environment\TZ, cannot parse IANA timezone strings ("Europe/Amsterdam"), and
-            // silently default to UTC+0 (-3h from Moscow time). Always purge stale vars from
-            // HKCU\Environment and broadcast WM_SETTINGCHANGE ("Environment") so explorer.exe
-            // immediately reloads a clean environment.
-            cleanup_legacy_windows_user_env();
+            // NEVER write proxy vars or TZ / LANG / LC_TIME into global HKCU\Environment: Windows CRT
+            // (_tzset) and Qt/Electron apps cannot parse IANA timezone strings and fall back to UTC+0.
+            // Enabling protection does not touch the registry; stale values written by old versions
+            // are removed only by the signature-based cleanup on disable/exit.
 
             let mut ps_configured = false;
             for ps_path in get_windows_powershell_profile_paths() {

@@ -34,7 +34,13 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
 
+[features]
+# Lets integration tests (`tests/*.rs`, which link the lib without cfg(test)) call
+# `sysproxy::force_os_dry_run()`. Enabled only through the self dev-dependency below.
+test-support = []
+
 [dev-dependencies]
+zastava = { path = ".", features = ["test-support"] }
 tempfile = "3"
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
 
