@@ -6,11 +6,19 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Права по умолчанию минимальные; каждая job при необходимости повышает их сама.
 permissions:
-  contents: write
+  contents: read
+
+# Один конвейер на тег; параллельный пуш того же тега не должен прерывать публикацию.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    permissions:
+      contents: write  # tauri-action создаёт черновик релиза и грузит ассеты
     strategy:
       fail-fast: false
       matrix:
@@ -93,5 +101,70 @@ jobs:
           releaseName: 'Zastava ${{ github.ref_name }}'
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
+
+  # Проверка черновика: набор ассетов, latest.json, minisign-подписи. Падение => релиз остаётся draft.
+  verify:
+    name: Verify release assets
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # черновик релиза виден только токену с правом записи
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+      # Необязательно: допустимые значения version через запятую, если версия в конфиге
+      # отличается от тега (например тег v2.1.0-rc.1, версия 2.1.0-1 из-за ограничения MSI).
+      VERIFY_VERSIONS: ${{ vars.RELEASE_VERIFY_VERSIONS }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Self-test of the verifier
+        run: node --test scripts/*.test.mjs
+
+      - name: Check draft / prerelease flags
+        run: |
+          set -euo pipefail
+          draft="$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft)"
+          pre="$(gh release view "$TAG" --repo "$REPO" --json isPrerelease --jq .isPrerelease)"
+          want=false
+          case "$TAG" in *-*) want=true ;; esac
+          [ "$draft" = "true" ] || { echo "release $TAG is not a draft"; exit 1; }
+          [ "$pre" = "$want" ] || { echo "isPrerelease=$pre, expected $want"; exit 1; }
+
+      - name: Download draft assets and verify
+        run: |
+          set -euo pipefail
+          args=(--repo "$REPO" --tag "$TAG" --dl-dir "$RUNNER_TEMP/release-assets")
+          if [ -n "${VERIFY_VERSIONS:-}" ]; then args+=(--version "$VERIFY_VERSIONS"); fi
+          node scripts/verify-release.mjs "${args[@]}"
+
+  # Публикация только после зелёного verify.
+  publish:
+    name: Publish release
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Publish (final tag becomes latest, RC stays prerelease)
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            *-*) gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease --latest=false ;;
+            *)   gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease=false --latest ;;
+          esac
