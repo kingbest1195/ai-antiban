@@ -344,6 +344,111 @@ export async function auditConnection(
   return report;
 }
 
+/**
+ * Сценарии типа адреса мока (`?iptype=`): hosting, residential, tor, vpn, unknown, unavailable
+ * (список Tor не загрузился) и ipv6 (выход по IPv6). Без параметра отчёт прежний.
+ */
+function mockIpTypeScenario(): {
+  asn: CheckResult;
+  dnsbl?: CheckResult;
+  ip?: string;
+  ipv6: boolean;
+  /** ASN и провайдер в телеметрии, чтобы пары в строке совпадали с текстом. */
+  net?: { asn: number; name: string };
+} | null {
+  const scenario = mockOption("iptype");
+  const typed = (type: NonNullable<CheckResult["detail"]>["ip_type"], r: Omit<CheckResult, "detail">): CheckResult => ({
+    ...r,
+    detail: { sources: [], ip_type: type },
+  });
+  switch (scenario) {
+    case "hosting":
+      return {
+        ipv6: false,
+        asn: typed("hosting", {
+          status: "ok",
+          code: "IP_TYPE_HOSTING",
+          message:
+            "Хостинг (ожидаемо для личного VPS): AS20473 (HostVDS Cloud NL). Это сервер, на котором работает ваш VPN; в списке выходов Tor и среди известных пулов массовых VPN адреса нет.",
+        }),
+      };
+    case "residential":
+      return {
+        ipv6: false,
+        net: { asn: 64500, name: "Example Broadband Ltd" },
+        asn: typed("residential", {
+          status: "ok",
+          code: "IP_TYPE_RESIDENTIAL",
+          message:
+            "Жилой или мобильный провайдер: AS64500 (Example Broadband Ltd) (определено по названию, это оценка). В списке выходов Tor и среди известных пулов массовых VPN адреса нет.",
+        }),
+      };
+    case "tor":
+      return {
+        ipv6: false,
+        asn: typed("tor", {
+          status: "warning",
+          code: "IP_TYPE_TOR",
+          message: "Адрес входит в список выходных узлов Tor. ИИ-сервисы часто блокируют такие адреса. Выберите свой сервер или другой VPN-адрес.",
+          guide_ref: "01-personal-vpn-15min",
+        }),
+      };
+    case "vpn":
+      return {
+        ipv6: false,
+        net: { asn: 9009, name: "M247 Europe SRL" },
+        asn: typed("vpn", {
+          status: "warning",
+          code: "HIGH_RISK_MASS_VPN_ASN",
+          message:
+            "Адрес из пула, который часто используют многие люди: «M247 Europe SRL» (AS9009). Сотни пользователей на одном IP. Если это ваш личный сервер, нажмите «Закрепить IP», чтобы убрать предупреждение.",
+          guide_ref: "01-personal-vpn-15min",
+        }),
+      };
+    case "unknown":
+      return {
+        ipv6: false,
+        net: { asn: 64500, name: "Example Net" },
+        asn: typed("unknown", {
+          status: "ok",
+          code: "ASN_CLEAN",
+          message: "AS64500 (Example Net): тип адреса определить не удалось. В списке выходов Tor и среди известных пулов массовых VPN адреса нет.",
+        }),
+      };
+    case "unavailable":
+      return {
+        ipv6: false,
+        asn: typed("hosting", {
+          status: "unknown",
+          code: "TOR_LIST_UNAVAILABLE",
+          message:
+            "Не удалось проверить, не выход ли это сети Tor: список выходных узлов не загрузился. Тип адреса по провайдеру AS20473 (HostVDS Cloud NL): хостинг.",
+          reason: "timeout",
+        }),
+      };
+    case "ipv6":
+      return {
+        ipv6: true,
+        ip: "2a01:4f8:c17:1::2",
+        dnsbl: {
+          status: "unknown",
+          code: "DNSBL_IPV6_UNSUPPORTED",
+          message: "Не применимо к IPv6: спам-базы DNSBL проверяют только адреса IPv4, а ваш выходной адрес IPv6. Это не значит, что адрес плохой.",
+          reason: "not_applicable",
+        },
+        asn: typed("hosting", {
+          status: "unknown",
+          code: "IP_TYPE_IPV6_NOT_APPLICABLE",
+          message:
+            "Не применимо к IPv6: список выходных узлов Tor содержит только адреса IPv4, поэтому про Tor сказать нельзя. Тип адреса по провайдеру AS20473 (HostVDS Cloud NL): хостинг.",
+          reason: "not_applicable",
+        }),
+      };
+    default:
+      return null;
+  }
+}
+
 function buildMockReport(provider: ProviderId): RiskReport {
   const hasUpstream = mockState.upstream_proxy?.enabled;
   const country = hasUpstream ? "NL" : mockCountryOverride || "NL";
@@ -395,7 +500,8 @@ function buildMockReport(provider: ProviderId): RiskReport {
     }
   }
 
-  const currentIp = isTurkey ? "185.220.101.5" : isRu ? "95.165.10.22" : mockState.pinned_ip || "185.212.102.40";
+  const ipMock = mockIpTypeScenario();
+  const currentIp = ipMock?.ip ?? (isTurkey ? "185.220.101.5" : isRu ? "95.165.10.22" : mockState.pinned_ip || "185.212.102.40");
   const isPinned = mockState.pinned_ip === currentIp;
 
   const pinningResult = {
@@ -415,7 +521,7 @@ function buildMockReport(provider: ProviderId): RiskReport {
     message: "География сессий стабильна (1 локация за 24ч, аномалий Impossible Travel нет).",
   };
 
-  const dnsblResult = {
+  const dnsblResult: CheckResult = ipMock?.dnsbl ?? {
     status: isTurkey ? ("warning" as const) : ("ok" as const),
     code: isTurkey ? "DNSBL_LISTED_WARNING" : "DNSBL_CLEAN",
     message: isTurkey
@@ -423,12 +529,13 @@ function buildMockReport(provider: ProviderId): RiskReport {
       : "Проверка DNSBL: ответили 4 из 4 спам-баз, совпадений нет.",
   };
 
-  const asnResult = {
+  const asnResult: CheckResult = ipMock?.asn ?? {
     status: isTurkey ? ("warning" as const) : ("ok" as const),
     code: isTurkey ? "HIGH_RISK_MASS_VPN_ASN" : "ASN_VERIFIED_PINNED",
     message: isTurkey
       ? "Подсеть массового VPN «M247 Europe SRL» (AS9009). Сотни пользователей на одном IP."
       : "AS20473 (HostVDS / Choopa LLC) подтвержден как выделенный личный сервер.",
+    detail: { sources: [], ip_type: isTurkey ? "vpn" : "hosting" },
   };
 
   // В турецком сценарии мок показывает все цвета сразу: ok, warning, critical и «не удалось проверить».
@@ -478,9 +585,9 @@ function buildMockReport(provider: ProviderId): RiskReport {
     telemetry: {
       ip: currentIp,
       country_code: country,
-      asn: isTurkey ? 9009 : 20473,
-      org: isTurkey ? "M247 Europe SRL" : "HostVDS / Choopa LLC",
-      isp: isTurkey ? "M247 Europe SRL" : "HostVDS Cloud NL",
+      asn: ipMock?.net?.asn ?? (isTurkey ? 9009 : 20473),
+      org: ipMock?.net?.name ?? (isTurkey ? "M247 Europe SRL" : "HostVDS / Choopa LLC"),
+      isp: ipMock?.net?.name ?? (isTurkey ? "M247 Europe SRL" : "HostVDS Cloud NL"),
       timezone: isTurkey ? "Europe/Istanbul" : "Europe/Amsterdam",
       resolved_at: Math.floor(Date.now() / 1000),
     },
@@ -492,6 +599,7 @@ function buildMockReport(provider: ProviderId): RiskReport {
     asn_result: asnResult,
     ipv6_result: ipv6Result,
     timezone_result: tzResult,
+    ipv6_exit: ipMock?.ipv6 ?? false,
     checks: [
       geoResult,
       pinningResult,

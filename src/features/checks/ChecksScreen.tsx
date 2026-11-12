@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { AppStateData, CoverageSnapshot, PartialAudit, ProviderId, RiskReport, SourceView } from "../../types";
-import { Badge, Button, Card, EmptyState, ExpandRow, Link, Mono, Row, Rows, Section } from "../../ui";
+import { Badge, Banner, Button, Card, EmptyState, ExpandRow, Link, Mono, Row, Rows, Section } from "../../ui";
 import type { IconName, Tone } from "../../ui";
 import { providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { checks as copy } from "../../shared/copy/ru";
@@ -151,6 +151,8 @@ export function ChecksScreen({
   const worst: Tone | "neutral" = counts.crit > 0 ? "danger" : failed > 0 ? "warn" : unknown > 0 ? "neutral" : "ok";
   const leak = items.some((i) => LEAK_CHECKS.includes(i.id) && i.cls === "crit");
   const ip = report?.telemetry.ip ?? partial?.telemetry?.ip ?? "";
+  // Пока отчёта нет, судим по адресу выхода из частичного аудита.
+  const ipv6Exit = report ? Boolean(report.ipv6_exit) : ip.includes(":");
 
   const runAction = (item: CheckItem) => {
     if (item.action === "pin") onPinCurrentIp(ip);
@@ -206,6 +208,12 @@ export function ChecksScreen({
           )}
         </div>
       </Card>
+
+      {ipv6Exit && (
+        <Banner tone="info" title={copy.ipv6Exit.title}>
+          {copy.ipv6Exit.text}
+        </Banner>
+      )}
 
       {groups.map((group) => (
         <Section key={group.id} title={group.title}>

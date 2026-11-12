@@ -458,6 +458,7 @@ fn sample_report(provider: zastava_lib::auditor::ProviderId) -> zastava_lib::aud
         asn_result: ok.clone(),
         ipv6_result: ok.clone(),
         timezone_result: ok.clone(),
+        ipv6_exit: false,
         checks: vec![ok],
         unknown_count: 0,
         applicable_count: 13,

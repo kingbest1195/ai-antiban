@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::auditor::ip_type::IpType;
 use crate::auditor::rules::ProviderMatrix;
 
 pub const GUIDE_PERSONAL_VPN: &str = "01-personal-vpn-15min";
@@ -293,7 +294,11 @@ pub struct SourceView {
 /// Structured facts behind a result (the text lives in `message`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct CheckDetail {
+    #[serde(default)]
     pub sources: Vec<SourceView>,
+    /// Kind of the exit address (only the address-reputation check fills it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_type: Option<IpType>,
 }
 
 impl CheckResult {
@@ -365,8 +370,15 @@ impl CheckResult {
         if !sources.is_empty() {
             self.detail = Some(CheckDetail {
                 sources: sources.to_vec(),
+                ..CheckDetail::default()
             });
         }
+        self
+    }
+
+    /// Attaches the kind of the exit address for the interface (`detail.ip_type`).
+    pub fn with_ip_type(mut self, ip_type: IpType) -> Self {
+        self.detail.get_or_insert_with(CheckDetail::default).ip_type = Some(ip_type);
         self
     }
 }

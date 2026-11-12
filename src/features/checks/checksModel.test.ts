@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { CheckResult, RiskReport } from "../../types";
+import type { CheckResult, IpType, RiskReport } from "../../types";
+import { checks as copy } from "../../shared/copy/ru";
 import { buildChecks, buildPendingChecks, classify, countChecks, isYellowOnlyUnknown, progressOf } from "./checksModel";
 import { applyProgress, dataAge, emptyPartial } from "../../shared/hooks/useGatewayState";
 import type { AuditProgressEvent, PartialAudit } from "../../types";
@@ -282,5 +283,102 @@ describe("DNS: источники и разбор", () => {
     expect(dns.ok).toBe(true);
     expect(dns.help).toBeNull();
     expect(dns.result.detail?.sources.map((s) => s.operator)).toEqual(["Cloudflare", "Cloudflare"]);
+  });
+});
+
+describe("тип адреса внутри проверки репутации адреса", () => {
+  const typed = (type: IpType | null, r: Partial<CheckResult> = {}): CheckResult => ({
+    status: "ok",
+    code: "IP_TYPE_HOSTING",
+    message: "m",
+    detail: type ? { sources: [], ip_type: type } : undefined,
+    ...r,
+  });
+  const asnItem = (r: CheckResult, extra: Partial<RiskReport> = {}) =>
+    buildChecks(report(withAsn(r), extra), null).items.find((i) => i.id === "asn")!;
+  const withAsn = (r: CheckResult) => thirteen({ 4: r });
+
+  it("число проверок не меняется: тип адреса не новая строка", () => {
+    const built = buildChecks(report(thirteen({ 4: typed("hosting") })), null);
+    expect(built.items.filter((i) => !i.id.startsWith("extra_"))).toHaveLength(13);
+    expect(built.items.filter((i) => i.id === "asn")).toHaveLength(1);
+  });
+
+  it("хостинг: «Чисто», тип в подписи и в парах, совета нет", () => {
+    const item = asnItem(typed("hosting"));
+    expect(item.cls).toBe("ok");
+    expect(item.what).toContain("Тип адреса: хостинг.");
+    expect(item.data[0]).toEqual({ label: "Тип адреса", value: "Хостинг (ожидаемо для личного VPS)", mono: false });
+    expect(item.advice).toBeNull();
+  });
+
+  it("Tor: замечание и совет про свой сервер", () => {
+    const item = asnItem(typed("tor", { status: "warning", code: "IP_TYPE_TOR" }));
+    expect(item.cls).toBe("warn");
+    expect(item.what).toContain("выход сети Tor");
+    expect(item.advice).toBe(copy.advice.asn.tor);
+  });
+
+  it("массовый VPN: замечание и свой совет", () => {
+    const item = asnItem(typed("vpn", { status: "warning", code: "HIGH_RISK_MASS_VPN_ASN" }));
+    expect(item.cls).toBe("warn");
+    expect(item.advice).toBe(copy.advice.asn.vpn);
+    expect(item.advice).not.toBe(copy.advice.asn.tor);
+  });
+
+  it("жилой — «Чисто»; тип «не определён» не добавляется в подпись, но показывается в парах", () => {
+    expect(asnItem(typed("residential", { code: "IP_TYPE_RESIDENTIAL" })).what).toContain("жилой или мобильный провайдер");
+    const unknownType = asnItem(typed("unknown", { code: "ASN_CLEAN" }));
+    expect(unknownType.cls).toBe("ok");
+    expect(unknownType.what).not.toContain("Тип адреса");
+    expect(unknownType.data[0].value).toBe("Не определён");
+  });
+
+  it("список Tor недоступен: «не удалось проверить» с советом повторить, не «Чисто»", () => {
+    const item = asnItem(typed("hosting", { status: "unknown", code: "TOR_LIST_UNAVAILABLE", reason: "timeout" }));
+    expect(item.cls).toBe("unknown");
+    expect(item.ok).toBe(false);
+    expect(item.advice).toBe(copy.advice.asn.listUnavailable);
+  });
+
+  it("нет данных о провайдере: «не удалось проверить» без совета про Tor", () => {
+    const item = asnItem(typed("unknown", { status: "unknown", code: "ASN_NO_DATA", reason: "no_data" }));
+    expect(item.cls).toBe("unknown");
+    expect(item.advice).toBeNull();
+  });
+
+  it("IPv6-выход: «не применимо», вне счёта, тип виден", () => {
+    const na = typed("hosting", { status: "unknown", code: "IP_TYPE_IPV6_NOT_APPLICABLE", reason: "not_applicable" });
+    const built = buildChecks(report(thirteen({ 4: na }), { ipv6_exit: true }), null);
+    const item = built.items.find((i) => i.id === "asn")!;
+    expect(item.cls).toBe("na");
+    expect(built.counts.na).toBe(1);
+    expect(built.counts.applicable).toBe(12);
+    expect(item.data[0].label).toBe("Тип адреса");
+  });
+
+  it("отчёт старого шлюза без detail.ip_type: ни подписи, ни пары про тип", () => {
+    const item = asnItem(typed(null));
+    expect(item.what).toBe(copy.items.asn.what);
+    expect(item.data.some((d) => d.label === "Тип адреса")).toBe(false);
+  });
+
+  it("незнакомый тип от более нового шлюза игнорируется", () => {
+    const item = asnItem({ status: "ok", code: "X", message: "m", detail: { sources: [], ip_type: "datacenter" as never } });
+    expect(item.what).toBe(copy.items.asn.what);
+  });
+
+  it("тексты без жаргона и покрывают все типы", () => {
+    const types: IpType[] = ["hosting", "residential", "tor", "vpn", "unknown"];
+    for (const t of types) {
+      expect(copy.ipType.names[t]).toBeTruthy();
+      expect(copy.ipType.short[t]).toBeTruthy();
+    }
+    const all = JSON.stringify([copy.ipType, copy.advice.asn, copy.ipv6Exit]);
+    expect(all).not.toMatch(/ASN|DNSBL|PTR|резолвер/i);
+  });
+
+  it("старый отчёт без ipv6_exit читается как IPv4", () => {
+    expect(report(thirteen()).ipv6_exit).toBeUndefined();
   });
 });

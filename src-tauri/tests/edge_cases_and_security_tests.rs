@@ -1,4 +1,5 @@
-use zastava_lib::auditor::dnsbl::{evaluate_asn_reputation, format_dnsbl_query, reverse_ipv4};
+use zastava_lib::auditor::dnsbl::{format_dnsbl_query, reverse_ipv4};
+use zastava_lib::auditor::ip_type::{evaluate_ip_reputation, ExitIdentity, TorLookup};
 use zastava_lib::auditor::geo_matrix::{evaluate_provider_geo, CheckStatus, ProviderId};
 use zastava_lib::auditor::history::{evaluate_impossible_travel, evaluate_ip_pinning};
 use zastava_lib::auditor::leaks::{is_russian_or_belarusian_timezone, RUSSIAN_TIMEZONES};
@@ -107,18 +108,27 @@ fn test_edge_case_bin_checker_strict_privacy_and_lengths() {
 fn test_edge_case_vps_pinning_and_russian_telecom() {
     let asns = DangerousAsns::load_bundled().expect("Failed to load bundled ASNs");
 
-    // Datacenter / Commercial ASN (DigitalOcean: AS14061)
-    // 1. Unpinned -> Warning
-    let res_unpinned = evaluate_asn_reputation(Some(14061), Some("DigitalOcean, LLC"), None, &asns, false);
+    let rep = |asn: u32, isp: &str, pinned: bool| {
+        let id = ExitIdentity { ip: "203.0.113.9", country_code: "NL", asn: Some(asn), isp: Some(isp), org: None };
+        evaluate_ip_reputation(&id, &asns, TorLookup::NotListed, pinned)
+    };
+
+    // Datacenter (DigitalOcean: AS14061): a personal VPS is a normal setup, not penalised.
+    let res_hosting = rep(14061, "DigitalOcean, LLC", false);
+    assert_eq!(res_hosting.status, CheckStatus::Ok);
+    assert_eq!(res_hosting.code, "IP_TYPE_HOSTING");
+
+    // Mass VPN pool (M247: AS9009): 1. Unpinned -> Warning
+    let res_unpinned = rep(9009, "M247 Europe SRL", false);
     assert_eq!(res_unpinned.status, CheckStatus::Warning);
 
     // 2. User pinned this IP as their personal dedicated VPS -> suppressed (Ok)
-    let res_pinned = evaluate_asn_reputation(Some(14061), Some("DigitalOcean, LLC"), None, &asns, true);
+    let res_pinned = rep(9009, "M247 Europe SRL", true);
     assert_eq!(res_pinned.status, CheckStatus::Ok);
     assert_eq!(res_pinned.code, "ASN_VERIFIED_PINNED");
 
     // 3. BUT Russian domestic telecom (Rostelecom, MTS, MegaFon) is NEVER suppressed by pinning!
-    let res_pinned_ru = evaluate_asn_reputation(Some(12389), Some("PJSC Rostelecom"), None, &asns, true);
+    let res_pinned_ru = rep(12389, "PJSC Rostelecom", true);
     assert_eq!(res_pinned_ru.status, CheckStatus::Critical);
     assert_eq!(res_pinned_ru.code, "RUSSIAN_ISP_DETECTED");
 

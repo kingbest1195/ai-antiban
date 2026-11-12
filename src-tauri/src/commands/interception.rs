@@ -156,13 +156,20 @@ pub async fn simulate_interception(
     let travel_result = auditor::CheckResult::ok("TRAVEL_NORMAL", "Конфликтов перемещения за 12ч нет.");
     let dnsbl_report = auditor::check_all_dnsbl(&telemetry.ip, &dangerous_asns).await;
     let dnsbl_result = auditor::evaluate_dnsbl_report(&dnsbl_report);
-    let asn_result = auditor::evaluate_asn_reputation(
-        telemetry.asn,
-        telemetry.isp.as_deref(),
-        telemetry.org.as_deref(),
+    // SIMULATION ONLY: the Tor list is not downloaded here; the demo address is a mass-VPN pool.
+    let asn_result = auditor::evaluate_ip_reputation(
+        &auditor::ExitIdentity {
+            ip: &telemetry.ip,
+            country_code: &telemetry.country_code,
+            asn: telemetry.asn,
+            isp: telemetry.isp.as_deref(),
+            org: telemetry.org.as_deref(),
+        },
         &dangerous_asns,
+        auditor::TorLookup::NotListed,
         false,
-    );
+    )
+    .with_measured_via(SIMULATED_VIA);
     // SIMULATION ONLY: these two verdicts are canned demo values, not the outcome of a probe.
     // They are marked (`measured_via = "simulation"`) so that they never pass for a real check.
     let ipv6_result =
@@ -215,6 +222,7 @@ pub async fn simulate_interception(
         asn_result,
         ipv6_result,
         timezone_result,
+        ipv6_exit: false,
         checks,
         unknown_count,
         applicable_count,

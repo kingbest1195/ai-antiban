@@ -47,8 +47,13 @@ export interface SourceView {
   country?: string | null;
 }
 
+/** Тип адреса выхода: хостинг, жилой, выход Tor, массовый VPN или не определён. */
+export type IpType = "hosting" | "residential" | "tor" | "vpn" | "unknown";
+
 export interface CheckDetail {
   sources: SourceView[];
+  /** Тип адреса (заполняет только проверка репутации адреса). */
+  ip_type?: IpType | null;
 }
 
 /** Этап запуска шлюза в фоне: пока `starting`, состояние защиты ещё не известно. */
@@ -99,6 +104,8 @@ export interface RiskReport {
   asn_result: CheckResult;
   ipv6_result: CheckResult;
   timezone_result: CheckResult;
+  /** Выход в сеть идёт по IPv6: спам-базы и список Tor его не проверяют («не применимо»). Старый отчёт поля не содержит. */
+  ipv6_exit?: boolean;
   checks: CheckResult[];
   /** Сколько проверок не удалось выполнить (без «не применимо»). Старый отчёт поля не содержит. */
   unknown_count?: number;
