@@ -257,7 +257,7 @@ pub fn candidate_ide_settings_paths() -> Vec<(&'static str, PathBuf)> {
     }
 
     #[cfg(target_os = "windows")]
-    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+    if let Some(appdata) = super::user_appdata_dir() {
         for (label, folder) in ides {
             let user_dir = appdata.join(folder).join("User");
             if user_dir.is_dir() {

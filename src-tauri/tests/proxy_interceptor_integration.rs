@@ -15,6 +15,7 @@ use zastava_lib::sysproxy::SysProxy;
 /// routing claude.ai, chatgpt.com, gemini.google.com through PROXY, and others DIRECT.
 #[tokio::test]
 async fn test_pac_file_generation() {
+    zastava_lib::sysproxy::force_os_dry_run();
     let auditor = Auditor::new().expect("Auditor initialization failed");
     let state = AppState::new_in_memory();
     let hold_queue = Arc::new(HoldQueue::new());
@@ -85,6 +86,7 @@ async fn test_pac_file_generation() {
 /// returns HTTP/1.1 403 Forbidden and closes connection.
 #[tokio::test]
 async fn test_connect_hold_and_block() {
+    zastava_lib::sysproxy::force_os_dry_run();
     let auditor = Auditor::new().expect("Auditor initialization failed");
 
     // Pre-populate telemetry with dangerous location: Turkey (TR)
@@ -175,6 +177,7 @@ async fn test_connect_hold_and_block() {
 /// HTTP/1.1 200 Connection Established and tunnel is established.
 #[tokio::test]
 async fn test_connect_hold_and_allow_session() {
+    zastava_lib::sysproxy::force_os_dry_run();
     // 1. Setup mock upstream target TCP echo server
     let mock_target = TcpListener::bind("127.0.0.1:0")
         .await
@@ -288,11 +291,26 @@ async fn test_connect_hold_and_allow_session() {
 /// and sets is_active() to false.
 #[test]
 fn test_graceful_proxy_cleanup() {
+    // This test links the lib without cfg(test): force OS dry-run before anything can touch
+    // networksetup / launchctl / the registry / the real $HOME.
+    zastava_lib::sysproxy::force_os_dry_run();
+    assert!(!zastava_lib::sysproxy::os_effects_enabled());
+    let before = zastava_lib::sysproxy::dry_run_blocked_calls();
+
     SysProxy::disable();
     assert!(
         !SysProxy::is_active(),
         "SysProxy must report inactive after disable"
     );
+
+    // On macOS/Windows the disable path issues OS commands; every one of them was a counted no-op.
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(
+            zastava_lib::sysproxy::dry_run_blocked_calls() > before,
+            "OS commands must have been blocked, got {:?}",
+            zastava_lib::sysproxy::dry_run_blocked_programs()
+        );
+    }
 }
 
 /// Integration Test 5: Upstream Gateway Selective Routing
@@ -301,6 +319,7 @@ fn test_graceful_proxy_cleanup() {
 #[tokio::test]
 async fn test_upstream_proxy_selective_routing() {
     use zastava_lib::state::UpstreamProxyConfig;
+    zastava_lib::sysproxy::force_os_dry_run();
 
     // 1. Start mock SOCKS5 upstream server
     let mock_socks = TcpListener::bind("127.0.0.1:0").await.unwrap();

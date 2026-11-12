@@ -649,6 +649,7 @@ impl AppState {
     pub fn load_or_default(storage_path: PathBuf) -> Self {
         let mut needs_save = false;
         let mut data = if storage_path.exists() {
+            Self::restrict_to_owner(&storage_path);
             match Self::read_state_lenient(&storage_path) {
                 Ok(mut loaded) => {
                     let now = crate::auditor::network::current_timestamp();
@@ -743,9 +744,43 @@ impl AppState {
         if backup.exists() {
             return;
         }
-        if let Err(e) = std::fs::copy(path, &backup) {
+        if let Err(e) = Self::copy_private(path, &backup) {
             eprintln!("Warning: could not back up the v1 state file: {e}");
         }
+    }
+
+    /// Creates (truncating) a file that only the owner can read: mode 0600 on unix, default ACLs
+    /// on Windows.
+    fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(path)
+    }
+
+    /// Tightens an existing file to 0600 on unix (no-op on Windows and on errors).
+    fn restrict_to_owner(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
+
+    /// Copies `src` to `dest` as an owner-only file (unlike `fs::copy`, which keeps the source mode).
+    fn copy_private(src: &Path, dest: &Path) -> std::io::Result<()> {
+        let mut input = std::fs::File::open(src)?;
+        let mut out = Self::create_private_file(dest)?;
+        // An existing destination keeps its old mode through `create`, so tighten it explicitly.
+        Self::restrict_to_owner(dest);
+        std::io::copy(&mut input, &mut out)?;
+        out.sync_all()
     }
 
     /// Copies an unreadable state file to `state.corrupt-<ts>.json` before it is replaced.
@@ -757,7 +792,7 @@ impl AppState {
             dest = path.with_file_name(format!("state.corrupt-{ts}-{n}.json"));
             n += 1;
         }
-        std::fs::copy(path, &dest).ok().map(|_| dest)
+        Self::copy_private(path, &dest).ok().map(|_| dest)
     }
 
     /// Saves `AppStateData` atomically: temp file + fsync + rename (+ fsync of the directory).
@@ -769,14 +804,15 @@ impl AppState {
         let json = serde_json::to_string_pretty(data)?;
         let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
         {
-            let mut f = std::fs::File::create(&tmp_path)?;
+            let mut f = Self::create_private_file(&tmp_path)?;
             f.write_all(json.as_bytes())?;
             f.sync_all()?;
         }
         if let Err(e) = std::fs::rename(&tmp_path, path) {
             let _ = std::fs::remove_file(&tmp_path);
             // Fallback to direct write if cross-device or Windows file lock prevents rename
-            let mut f = std::fs::File::create(path).map_err(|_| StateError::Io(e))?;
+            let mut f = Self::create_private_file(path).map_err(|_| StateError::Io(e))?;
+            Self::restrict_to_owner(path);
             f.write_all(json.as_bytes())?;
             f.sync_all()?;
         }
@@ -1926,5 +1962,44 @@ mod tests {
         let ui = serde_json::to_string(&data.redacted_for_ui().routes).unwrap();
         assert!(!ui.contains("s3cret"));
         assert!(!ui.contains("alice"));
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_json_and_copies_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+
+        // A fresh state.json is created 0600.
+        let state = AppState::load_or_default(path.clone());
+        state.set_pinned_ip(Some("95.217.1.1".to_string())).await.unwrap();
+        assert_eq!(mode_of(&path), 0o600, "new state.json");
+
+        // An existing world-readable v1 file is tightened on load, and its backup is 0600 too.
+        std::fs::write(&path, V131_STATE_JSON).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = AppState::load_or_default(path.clone());
+        assert_eq!(mode_of(&path), 0o600, "loaded state.json");
+        assert_eq!(mode_of(&dir.path().join(STATE_V1_BACKUP_NAME)), 0o600, "backup_v1");
+
+        // An unreadable file leaves a 0600 corrupt copy.
+        std::fs::write(&path, "{ not json").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = AppState::load_or_default(path.clone());
+        let corrupt: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("state.corrupt-"))
+            .collect();
+        assert_eq!(corrupt.len(), 1);
+        assert_eq!(mode_of(&corrupt[0].path()), 0o600, "state.corrupt copy");
+        assert_eq!(mode_of(&path), 0o600, "rewritten state.json");
     }
 }

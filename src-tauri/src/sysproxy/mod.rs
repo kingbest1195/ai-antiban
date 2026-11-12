@@ -21,8 +21,9 @@ pub use ai_cli::{
     cleanup_gemini_cli_settings_file,
 };
 pub use cleanup::{
-    cleanup_all_persistent_settings, cleanup_legacy_windows_user_env, force_clean_all_os_proxy_traces,
-    register_clean_exit_guard, spawn_signal_cleanup_watcher,
+    cleanup_all_persistent_settings, cleanup_legacy_user_env_with, cleanup_legacy_windows_user_env,
+    force_clean_all_os_proxy_traces, legacy_env_plan, legacy_env_plan_with_gateway,
+    parse_reg_query_environment, register_clean_exit_guard, spawn_signal_cleanup_watcher, WinEnv,
 };
 pub use cli_protection::{
     disable_cli_and_ide_runtime_settings, disable_cli_protection, enable_cli_and_ide_protection,
@@ -43,8 +44,8 @@ pub use self::windows::{broadcast_windows_env_change, delete_windows_user_env_va
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 static SYS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CLI_PROTECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -246,9 +247,96 @@ pub fn parse_reg_sz(output: &str, value_name: &str) -> Option<String> {
     None
 }
 
+/// Environment variable that switches every OS side effect off (`1` or `true`).
+pub const OS_DRY_RUN_ENV: &str = "ZASTAVA_OS_DRY_RUN";
+
+static FORCE_DRY_RUN: AtomicBool = AtomicBool::new(false);
+static DRY_RUN_BLOCKED: AtomicUsize = AtomicUsize::new(0);
+static DRY_RUN_PROGRAMS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static DRY_RUN_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// Whether this process may touch the operating system (network services, launchd, registry,
+/// the real home directory). Always `false` inside unit tests (`cfg!(test)`), after
+/// [`force_os_dry_run`], or when `ZASTAVA_OS_DRY_RUN` is `1`/`true`.
+pub fn os_effects_enabled() -> bool {
+    if cfg!(test) || FORCE_DRY_RUN.load(Ordering::SeqCst) {
+        return false;
+    }
+    !std::env::var(OS_DRY_RUN_ENV)
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
+}
+
+/// Switches the process into OS dry-run mode. Integration tests (`tests/*.rs`) link the library
+/// without `cfg(test)`, so each of them calls this first (feature `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn force_os_dry_run() {
+    FORCE_DRY_RUN.store(true, Ordering::SeqCst);
+}
+
+/// Number of OS-facing commands that were replaced by a no-op because of dry-run mode.
+pub fn dry_run_blocked_calls() -> usize {
+    DRY_RUN_BLOCKED.load(Ordering::SeqCst)
+}
+
+/// Program names of the commands blocked so far in dry-run mode (diagnostics for tests).
+pub fn dry_run_blocked_programs() -> Vec<String> {
+    DRY_RUN_PROGRAMS.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+pub(crate) fn note_dry_run_blocked(what: &str) {
+    DRY_RUN_BLOCKED.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut g) = DRY_RUN_PROGRAMS.lock()
+        && g.len() < 512
+    {
+        g.push(what.to_string());
+    }
+}
+
+/// Process-wide scratch directory that stands in for the user's home in dry-run mode.
+fn dry_run_home_dir() -> PathBuf {
+    DRY_RUN_HOME
+        .get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "zastava-dry-run-home-{}-{nanos}",
+                std::process::id()
+            ));
+            let _ = std::fs::create_dir_all(&dir);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            dir
+        })
+        .clone()
+}
+
 /// Spawns a Command configured on Windows with `CREATE_NO_WINDOW` (0x08000000)
 /// to completely prevent cmd.exe / PowerShell / Terminal console windows flashing.
+/// In dry-run mode (see [`os_effects_enabled`]) the real program is never started: the command
+/// becomes `true` (`cmd /c exit 0` on Windows) and the call is counted.
 pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    if !os_effects_enabled() {
+        note_dry_run_blocked(&program.as_ref().to_string_lossy());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/c", "exit", "0"]).creation_flags(CREATE_NO_WINDOW);
+            return cmd;
+        }
+        #[cfg(not(target_os = "windows"))]
+        return std::process::Command::new("true");
+    }
     #[allow(unused_mut)]
     let mut cmd = std::process::Command::new(program);
     #[cfg(target_os = "windows")]
@@ -383,6 +471,9 @@ fn is_zastava_local_proxy_val(val: &str) -> bool {
 }
 
 pub(super) fn user_home_dir() -> Option<PathBuf> {
+    if !os_effects_enabled() {
+        return Some(dry_run_home_dir());
+    }
     #[cfg(unix)]
     {
         std::env::var_os("HOME").map(PathBuf::from)
@@ -391,6 +482,15 @@ pub(super) fn user_home_dir() -> Option<PathBuf> {
     {
         std::env::var_os("USERPROFILE").map(PathBuf::from)
     }
+}
+
+/// `%APPDATA%`; inside the dry-run home in dry-run mode so tests never see real editor settings.
+#[cfg(target_os = "windows")]
+pub(super) fn user_appdata_dir() -> Option<PathBuf> {
+    if !os_effects_enabled() {
+        return Some(dry_run_home_dir().join("AppData").join("Roaming"));
+    }
+    std::env::var_os("APPDATA").map(PathBuf::from)
 }
 
 /// Spawns the native OS date and time settings panel.
@@ -423,6 +523,44 @@ pub fn open_os_datetime_settings() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn dry_run_is_always_on_in_unit_tests() {
+        assert!(!os_effects_enabled());
+    }
+
+    #[test]
+    fn dry_run_silent_command_never_starts_the_requested_program() {
+        let before = dry_run_blocked_calls();
+        let marker = "zastava-definitely-not-a-real-program";
+        // A real spawn of this name would fail with NotFound; the no-op replacement succeeds.
+        let status = silent_command(marker).arg("--whatever").status().expect("no-op spawn");
+        assert!(status.success());
+        assert!(dry_run_blocked_calls() > before);
+        assert!(dry_run_blocked_programs().iter().any(|p| p == marker));
+    }
+
+    #[test]
+    fn dry_run_home_is_a_scratch_dir_not_the_real_home() {
+        let home = user_home_dir().expect("dry-run home");
+        assert!(home.is_dir());
+        assert!(home.starts_with(std::env::temp_dir()));
+        assert_eq!(user_home_dir(), Some(home), "the dry-run home is stable per process");
+    }
+
+    #[test]
+    fn dry_run_cli_protection_writes_only_inside_the_scratch_home() {
+        let before = dry_run_blocked_calls();
+        let report = enable_cli_and_ide_protection("127.0.0.1:8899");
+        assert!(report.enabled);
+        let home = user_home_dir().unwrap();
+        assert!(home.join(".zshrc").is_file());
+        disable_cli_protection();
+        assert!(!is_cli_protection_enabled() || CLI_PROTECTION_ACTIVE.load(Ordering::SeqCst));
+        if cfg!(target_os = "macos") {
+            assert!(dry_run_blocked_calls() > before, "launchctl must have been blocked");
+        }
+    }
 
     #[test]
     fn test_ide_and_claude_settings_apply_and_cleanup() {
