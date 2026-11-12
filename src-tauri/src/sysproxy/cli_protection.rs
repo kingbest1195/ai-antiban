@@ -1270,8 +1270,11 @@ mod file_tests {
         assert!(!targets.is_empty());
         let after = e.text(zshrc);
         assert!(after.starts_with("# mine\n"));
-        assert!(after.contains(NO_PROXY_VALUE), "refreshed to the new value");
-        assert_eq!(after.matches(ZASTAVA_RC_START).count(), 1);
+        // zsh/bash profiles are only written on Unix; Windows has the PowerShell profile instead.
+        if cfg!(unix) {
+            assert!(after.contains(NO_PROXY_VALUE), "refreshed to the new value");
+            assert_eq!(after.matches(ZASTAVA_RC_START).count(), 1);
+        }
     }
 
     #[test]
