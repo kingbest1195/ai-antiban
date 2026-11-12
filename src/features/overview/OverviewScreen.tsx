@@ -23,7 +23,7 @@ import type { MenuEntry } from "../../ui";
 import { checks as checksCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import { formatNumber } from "../../shared/lib/format";
-import type { ShowToast } from "../../shared/hooks";
+import type { ProtectionActions, ShowToast } from "../../shared/hooks";
 import { CoverageSection } from "../coverage/CoverageSection";
 import { failedChecks } from "../checks/checksModel";
 import { needsForceConfirm, useOverviewModel } from "./useOverviewModel";
@@ -49,6 +49,8 @@ export interface OverviewScreenProps {
   onToggleSysproxy: () => void;
   onToggleCli: () => void;
   onToggleKillswitch: () => void;
+  /** Явные «включить» и «выключить» защиты для карточек «Покрытия» (кнопка не переключатель). */
+  protection?: ProtectionActions;
   /** Тосты секции покрытия (например, ошибка копирования адреса). */
   onToast?: ShowToast;
 
@@ -216,8 +218,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
       <CoverageSection
         variant="overview"
         initialSnapshot={coverageSnapshot}
-        onToggleSysproxy={props.onToggleSysproxy}
-        onToggleCli={props.onToggleCli}
+        protection={props.protection}
         onToast={props.onToast}
       />
 

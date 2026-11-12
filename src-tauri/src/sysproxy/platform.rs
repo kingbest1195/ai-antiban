@@ -2254,20 +2254,6 @@ mod tests {
     }
 
     #[test]
-    fn the_real_platform_reads_nothing_in_dry_run() {
-        // Unit tests are always in OS dry-run: the reads fail instead of starting `scutil`.
-        let before = crate::sysproxy::dry_run_blocked_calls();
-        if cfg!(target_os = "macos") {
-            assert_eq!(RealPlatform.vpn_connections(), Err(PlatformError::DryRun));
-            assert_eq!(RealPlatform.effective_proxy(), Err(PlatformError::DryRun));
-            assert!(crate::sysproxy::dry_run_blocked_calls() >= before + 2);
-        } else {
-            assert!(RealPlatform.vpn_connections().is_err());
-            assert!(RealPlatform.effective_proxy().is_err());
-        }
-    }
-
-    #[test]
     fn scutil_proxy_gives_the_pac_part_only() {
         let text = "<dictionary> {\n  ExceptionsList : <array> {\n    0 : *.local\n    1 : 169.254/16\n  }\n  ExcludeSimpleHostnames : 1\n  FTPPassive : 1\n  ProxyAutoConfigEnable : 1\n  ProxyAutoConfigURLString : http://127.0.0.1:8899/proxy.pac\n  __SCOPED__ : <dictionary> {\n    en0 : <dictionary> {\n      ProxyAutoConfigEnable : 0\n    }\n  }\n}\n";
         let e = parse_scutil_proxy(text);

@@ -72,6 +72,24 @@ function currentMockVpnScenario(): MockVpnScenario {
   return fromUrl === "overrides" || fromUrl === "effective" ? fromUrl : "none";
 }
 
+/**
+ * Сценарий Antigravity 2.x в моке «Покрытия»: нет приложения, не покрыто, запущено без трафика через шлюз
+ * («идут мимо»), подтверждено трафиком после запуска с переменными окружения.
+ */
+export type MockAntigravityScenario = "none" | "uncovered" | "bypass" | "confirmed";
+let mockAntigravityScenario: MockAntigravityScenario = "none";
+
+export function setMockAntigravityScenario(scenario: MockAntigravityScenario): void {
+  mockAntigravityScenario = scenario;
+}
+
+/** Сценарий из мока или из адреса страницы (?mockAntigravity=uncovered|bypass|confirmed) — только в браузере без Tauri. */
+function currentMockAntigravityScenario(): MockAntigravityScenario {
+  if (mockAntigravityScenario !== "none" || typeof window === "undefined") return mockAntigravityScenario;
+  const fromUrl = new URLSearchParams(window.location.search).get("mockAntigravity");
+  return fromUrl === "uncovered" || fromUrl === "bypass" || fromUrl === "confirmed" ? fromUrl : "none";
+}
+
 let mockRoutesSnapshot: RoutesSnapshot = {
   routes: [],
   provider_routes: {},
@@ -1371,7 +1389,10 @@ function mockCoverageSnapshot(): CoverageSnapshot {
     cli
       ? app({ id: "claude-code", name: "Claude Code", category: "cli", status: stage >= 2 ? "confirmed" : "configured", ai: stage >= 2 ? 1 : 0, ago: 5_000, detail: "Прокси записан в settings.json", steps: stage >= 2 ? [] : ["reopen_terminal"] })
       : app({ id: "claude-code", name: "Claude Code", category: "cli", status: "off", detail: "Защита CLI выключена", steps: ["enable_protection", "set_env_proxy"] }),
-    cli
+    // Сценарий владельца: защита включена, а настройки Gemini CLI Застава не записала (каталога нет).
+    cli && currentMockAntigravityScenario() !== "none"
+      ? app({ id: "gemini-cli", name: "Gemini CLI", category: "cli", status: "off", detail: "В settings.json нет прокси Заставы", steps: ["enable_protection", "set_env_proxy"] })
+      : cli
       ? app({ id: "gemini-cli", name: "Gemini CLI", category: "cli", status: "configured", detail: "Прокси записан в настройки", steps: ["reopen_terminal"] })
       : app({ id: "gemini-cli", name: "Gemini CLI", category: "cli", status: "off", detail: "Защита CLI выключена", steps: ["enable_protection", "set_env_proxy"] }),
     cli && globalMode
@@ -1386,6 +1407,27 @@ function mockCoverageSnapshot(): CoverageSnapshot {
         }),
     app({ id: "windsurf", name: "Windsurf", category: "ide", status: "not_installed", detail: "Не установлено" }),
   ];
+  const antigravity = currentMockAntigravityScenario();
+  if (antigravity !== "none") {
+    const base = { id: "antigravity", name: "Antigravity", category: "ide" as const };
+    // Как у шлюза: системный PAC действует — «настроено» без кнопки защиты; иначе «не настроено».
+    const steps: ManualStepKey[] = sys ? ["launch_with_env"] : ["enable_system_proxy", "launch_with_env"];
+    const status = sys ? "configured" : "off";
+    const item =
+      antigravity === "confirmed"
+        ? app({ ...base, status: "confirmed", ai: 9, ago: 20_000, detail: "Подтверждено трафиком (9 запр.)" })
+        : antigravity === "bypass"
+          ? { ...app({ ...base, status: "off", detail: "Запросы Antigravity, похоже, идут мимо Заставы", steps }), bypass_suspected: true }
+          : app({
+              ...base,
+              status,
+              detail: sys
+                ? "Интерфейс следует системному PAC, а агент нет: запустите приложение с переменными прокси"
+                : "Antigravity не использует прокси Заставы: агент может ходить напрямую",
+              steps,
+            });
+    apps.splice(3, 0, item);
+  }
   const vpn = currentMockVpnScenario();
   return {
     sysproxy_enabled: sys,

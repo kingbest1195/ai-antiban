@@ -381,6 +381,7 @@ export function AppShell() {
                 killswitchFrozen={toggles.killswitchFrozen}
                 onToggleSysproxy={toggles.handleToggleSysproxy}
                 onToggleCli={toggles.handleToggleCliProtection}
+                protection={toggles.protection}
                 onToggleKillswitch={toggles.handleToggleKillswitch}
                 onToast={showToast}
                 onCopyIp={pinning.handleCopyIp}
@@ -418,8 +419,7 @@ export function AppShell() {
                 provider={nav.checksProvider && gw.reports[nav.checksProvider] ? nav.checksProvider : undefined}
                 state={gw.state}
                 coverageSnapshot={gw.coverageSnapshot}
-                onToggleSysproxy={toggles.handleToggleSysproxy}
-                onToggleCli={toggles.handleToggleCliProtection}
+                protection={toggles.protection}
                 onToast={showToast}
                 onNavigateToGuide={nav.openGuide}
                 onSimulate={intercept.handleSimulate}

@@ -36,6 +36,8 @@ const LOOKUP_RATE_WINDOW_MS: u64 = 1_000;
 const LOOKUP_RATE_MAX: usize = 8;
 /// Upper bound of remembered ports (cache never grows without limit).
 const LOOKUP_CACHE_MAX: usize = 1024;
+/// The "is Antigravity running" answer is reused for this long: one process listing, never a loop.
+const PROCESS_CHECK_TTL_MS: u64 = 15_000;
 
 /// Whether the format of the JetBrains `options/proxy.settings.xml` has been confirmed on a real
 /// machine. While `false`, JetBrains is always `unknown` with manual steps.
@@ -57,6 +59,12 @@ pub mod steps {
     pub const REOPEN_TERMINAL: &str = "reopen_terminal";
     /// Open Settings -> HTTP Proxy in a JetBrains IDE.
     pub const JETBRAINS_PROXY_SETTINGS: &str = "jetbrains_proxy_settings";
+    /// Quit the app completely and start it again with `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`
+    /// in its environment (Antigravity 2.x: its agent ignores the system PAC).
+    pub const LAUNCH_WITH_ENV: &str = "launch_with_env";
+    /// Turn the system proxy on with the switch on the overview (text only, no button: it does
+    /// not cover the whole app by itself).
+    pub const ENABLE_SYSTEM_PROXY: &str = "enable_system_proxy";
 }
 
 /// Protection status of an application.
@@ -89,6 +97,10 @@ pub struct AppCoverageItem {
     /// Keys of manual steps (see [`steps`]); empty when nothing has to be done.
     pub manual_steps: Vec<String>,
     pub detail: String,
+    /// The app is running but nothing of it reached the gateway: its requests probably go
+    /// around Zastava (only Antigravity 2.x is checked this way).
+    #[serde(default)]
+    pub bypass_suspected: bool,
 }
 
 /// Comprehensive snapshot of application protection coverage and proxy chaining.
@@ -213,6 +225,8 @@ pub struct CoverageTracker {
     facts: Mutex<Option<(u64, ConfigFacts)>>,
     /// The CLI mode the facts are computed for (see [`CoverageSnapshot::cli_mode`]).
     cli_mode: Mutex<CliMode>,
+    /// Is Antigravity running: `(time of the answer, answer)`, see [`PROCESS_CHECK_TTL_MS`].
+    running: Mutex<Option<(u64, bool)>>,
     clock: Clock,
     probe: Arc<dyn SystemProbe>,
     os: Os,
@@ -243,6 +257,7 @@ impl CoverageTracker {
             gateway: Mutex::new(None),
             facts: Mutex::new(None),
             cli_mode: Mutex::new(CliMode::default()),
+            running: Mutex::new(None),
             clock,
             probe,
             os,
@@ -455,6 +470,26 @@ impl CoverageTracker {
         }
     }
 
+    /// Does a process of Antigravity run now? One process listing (names only) at most every
+    /// [`PROCESS_CHECK_TTL_MS`]; a failed listing counts as "not running" (no false alarm).
+    fn app_is_running(&self, now: u64) -> bool {
+        if let Ok(g) = self.running.lock()
+            && let Some((at, answer)) = *g
+            && now.saturating_sub(at) < PROCESS_CHECK_TTL_MS
+        {
+            return answer;
+        }
+        let listing = match self.os {
+            Os::Windows => self.probe.run("tasklist", &["/FO", "CSV", "/NH"]),
+            _ => self.probe.run("ps", &["-axo", "comm="]),
+        };
+        let answer = listing.is_some_and(|t| listing_has_antigravity(&t));
+        if let Ok(mut g) = self.running.lock() {
+            *g = Some((now, answer));
+        }
+        answer
+    }
+
     /// Builds the snapshot. `force` ignores the cache of configuration facts (re-reads the OS
     /// and the files right now).
     pub(crate) fn snapshot(&self, env: &CoverageEnv<'_>, force: bool) -> CoverageSnapshot {
@@ -479,13 +514,41 @@ impl CoverageTracker {
         let stats_map = self.stats.lock().map(|l| l.clone()).unwrap_or_default();
         let mut apps = Vec::new();
 
+        // The agent of Antigravity 2.x talks to the gateway under its own process name. It is
+        // counted for Antigravity unless Windsurf (same `language_server*` binary) is installed.
+        let windsurf_installed = facts.apps.get("windsurf").is_some_and(|f| f.installed);
+        let antigravity_app = facts.apps.get("antigravity").is_some_and(|f| f.watch_bypass);
+        let merge_agent = antigravity_app && !windsurf_installed;
+        let antigravity_traffic = merge_agent.then(|| {
+            let mut sum = AppTrafficStats {
+                ai_requests: 0,
+                pac_fetches: 0,
+                last_seen_ms: 0,
+                detected_name: String::new(),
+                category: String::new(),
+            };
+            for (id, t) in &stats_map {
+                if id == "antigravity" || is_antigravity_agent_id(id) {
+                    sum.ai_requests = sum.ai_requests.saturating_add(t.ai_requests);
+                    sum.pac_fetches = sum.pac_fetches.saturating_add(t.pac_fetches);
+                    if t.ai_requests > 0 {
+                        sum.last_seen_ms = sum.last_seen_ms.max(t.last_seen_ms);
+                    }
+                }
+            }
+            sum
+        });
+
         for app_id in KNOWN_IDS {
             let info = get_known_app_info(app_id).unwrap_or(KnownAppInfo {
                 id: app_id,
                 name: app_id,
                 category: "desktop",
             });
-            let traffic = stats_map.get(app_id);
+            let traffic = match (&antigravity_traffic, app_id) {
+                (Some(sum), "antigravity") => Some(sum),
+                _ => stats_map.get(app_id),
+            };
             let ai_requests = traffic.map(|t| t.ai_requests).unwrap_or(0);
             let pac_fetches = traffic.map(|t| t.pac_fetches).unwrap_or(0);
             let last_seen_ms = traffic
@@ -495,6 +558,7 @@ impl CoverageTracker {
             let installed = fact.map(|f| f.installed).unwrap_or(false) || ai_requests > 0;
             let fresh = last_seen_ms.is_some_and(|t| now.saturating_sub(t) < CONFIRM_TTL_MS);
 
+            let mut bypass_suspected = false;
             let (status, manual_steps, detail) = if fresh {
                 (
                     CoverageStatus::Confirmed,
@@ -508,7 +572,15 @@ impl CoverageTracker {
                     "Не установлено".to_string(),
                 )
             } else if let Some(f) = fact.filter(|f| f.installed) {
-                (f.status, f.manual_steps.clone(), f.detail.clone())
+                let (mut status, mut detail) = (f.status, f.detail.clone());
+                if f.watch_bypass && self.app_is_running(now) {
+                    // A running app whose requests never reach the gateway is not covered, even
+                    // when the system PAC is ours: do not show "configured, waiting".
+                    bypass_suspected = true;
+                    status = CoverageStatus::Off;
+                    detail = ANTIGRAVITY_BYPASS_DETAIL.to_string();
+                }
+                (status, f.manual_steps.clone(), detail)
             } else {
                 // Seen on traffic earlier, but nothing to read now.
                 (
@@ -530,13 +602,18 @@ impl CoverageTracker {
                 last_seen_ms,
                 manual_steps,
                 detail,
+                bypass_suspected,
             });
         }
 
-        // Processes seen on AI traffic that are not in the catalog.
+        // Processes seen on AI traffic that are not in the catalog (the merged agent is not one).
         let mut dynamic: Vec<_> = stats_map
             .iter()
-            .filter(|(id, t)| !KNOWN_IDS.contains(&id.as_str()) && t.ai_requests > 0)
+            .filter(|(id, t)| {
+                !KNOWN_IDS.contains(&id.as_str())
+                    && t.ai_requests > 0
+                    && !(merge_agent && is_antigravity_agent_id(id))
+            })
             .collect();
         dynamic.sort_by(|a, b| a.0.cmp(b.0));
         for (id, t) in dynamic {
@@ -557,6 +634,7 @@ impl CoverageTracker {
                 last_seen_ms: Some(t.last_seen_ms),
                 manual_steps: Vec::new(),
                 detail: format!("Подтверждено трафиком ({} запр.)", t.ai_requests),
+                bypass_suspected: false,
             });
         }
 
@@ -659,6 +737,8 @@ pub(crate) struct AppFact {
     pub status: CoverageStatus,
     pub manual_steps: Vec<String>,
     pub detail: String,
+    /// Not confirmed by traffic and the app runs -> report a probable bypass of the gateway.
+    pub watch_bypass: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -719,10 +799,18 @@ fn compute_config_facts(
                     status: CoverageStatus::NotInstalled,
                     manual_steps: Vec::new(),
                     detail: "Не установлено".to_string(),
+                    watch_bypass: false,
                 },
             );
             continue;
         }
+
+        // Antigravity 2.x has no editor `User/settings.json`: the settings model does not apply.
+        let desktop_antigravity = id == "antigravity"
+            && env
+                .files
+                .and_then(antigravity_kind)
+                .is_some_and(|k| k != AntigravityKind::Editor);
 
         let (status, manual_steps, detail) = match info.category {
             "browser" | "desktop" => match pac_verdict {
@@ -742,6 +830,11 @@ fn compute_config_facts(
                     "Не удалось прочитать системный PAC".to_string(),
                 ),
             },
+            "ide" if desktop_antigravity && id == "antigravity" => antigravity_app_fact(
+                env.sysproxy_enabled,
+                facts.system_proxy_effective,
+                pac_verdict,
+            ),
             "ide" if id == "jetbrains" => {
                 jetbrains_fact(env.files, gateway, env.jetbrains_xml_confirmed)
             }
@@ -783,6 +876,7 @@ fn compute_config_facts(
                 status,
                 manual_steps,
                 detail,
+                watch_bypass: id == "antigravity" && desktop_antigravity,
             },
         );
     }
@@ -966,6 +1060,80 @@ fn read_os_pac(platform: &dyn Platform, source: PacSource, ours: &str) -> Verdic
             }
         }
     }
+}
+
+/// Which Antigravity this is. Version 1.x was a VS Code fork with `User/settings.json`; 2.x is an
+/// Electron app without `User/` whose agent (a separate Go binary) takes the proxy only from
+/// environment variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AntigravityKind {
+    /// Has `<root>/Antigravity/User`: `http.proxy` in `settings.json` is the model.
+    Editor,
+    /// The desktop app (bundle or data folder) without `User/`.
+    Desktop,
+    /// Only `~/.gemini/antigravity-cli`.
+    CliOnly,
+}
+
+pub(crate) fn antigravity_kind(ctx: &FileCtx) -> Option<AntigravityKind> {
+    let ex = |p: &Path| ctx.fs.exists(p);
+    if ctx
+        .ide_roots
+        .iter()
+        .any(|r| ex(&r.join("Antigravity").join("User")))
+    {
+        return Some(AntigravityKind::Editor);
+    }
+    if ex(Path::new("/Applications/Antigravity.app"))
+        || ex(&ctx.home.join("Applications").join("Antigravity.app"))
+        || ctx.ide_roots.iter().any(|r| ex(&r.join("Antigravity")))
+    {
+        return Some(AntigravityKind::Desktop);
+    }
+    ex(&ctx.home.join(".gemini").join("antigravity-cli")).then_some(AntigravityKind::CliOnly)
+}
+
+/// Status of Antigravity 2.x without traffic. The interface part (Chromium) follows the system
+/// PAC; the agent does not, so the PAC alone never makes the app covered: only traffic does.
+fn antigravity_app_fact(
+    sysproxy_enabled: bool,
+    effective: Option<bool>,
+    pac_verdict: Verdict,
+) -> (CoverageStatus, Vec<String>, String) {
+    let pac_applies = sysproxy_enabled
+        && match effective {
+            Some(v) => v,
+            None => pac_verdict == Verdict::Configured,
+        };
+    if pac_applies {
+        (
+            CoverageStatus::Configured,
+            steps_of(&[steps::LAUNCH_WITH_ENV]),
+            "Интерфейс следует системному PAC, а агент нет: запустите приложение с переменными прокси".to_string(),
+        )
+    } else {
+        (
+            CoverageStatus::Off,
+            steps_of(&[steps::ENABLE_SYSTEM_PROXY, steps::LAUNCH_WITH_ENV]),
+            "Antigravity не использует прокси Заставы: агент может ходить напрямую".to_string(),
+        )
+    }
+}
+
+/// Text when Antigravity runs but nothing of it reached the gateway.
+pub const ANTIGRAVITY_BYPASS_DETAIL: &str = "Запросы Antigravity, похоже, идут мимо Заставы";
+
+/// Does a process listing (`ps -axo comm=` paths or `tasklist` names) show Antigravity? Names
+/// only: the arguments of processes are never requested.
+fn listing_has_antigravity(text: &str) -> bool {
+    text.lines()
+        .any(|l| l.to_ascii_lowercase().contains("antigravity"))
+}
+
+/// Is a process of this application an agent of Antigravity? The agent is a separate
+/// `language_server*` binary; the id is the one `resolve_app_identity` builds from its name.
+fn is_antigravity_agent_id(id: &str) -> bool {
+    id.starts_with("language-server")
 }
 
 /// Folder names under the editors' per-user data root.
@@ -1343,11 +1511,7 @@ pub(crate) fn check_app_installed_in(id: &str, ctx: &FileCtx) -> bool {
                 || in_roots("ChatGPT")
                 || windows_local(&["Programs", "ChatGPT"])
         }
-        "antigravity" => {
-            has_ide_folder("Antigravity")
-                || ex(Path::new("/Applications/Antigravity.app"))
-                || ex(&ctx.home.join(".gemini").join("antigravity-cli"))
-        }
+        "antigravity" => antigravity_kind(ctx).is_some(),
         "cursor" => has_ide_folder("Cursor") || ex(Path::new("/Applications/Cursor.app")),
         "vscode" => {
             has_ide_folder("Code")

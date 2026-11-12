@@ -20,7 +20,7 @@ export interface ManualSetup {
   /** Не больше пяти: требование Steps из дизайн-системы. */
   steps: SetupStep[];
   blocks: SetupBlock[];
-  /** Предупреждение над шагами (JetBrains). */
+  /** Предупреждение над шагами (JetBrains, «запросы идут мимо» у Antigravity). */
   warning: { title: string; text: string } | null;
   hints: string[];
   /** Какой переключатель защиты включает кнопка «Включить защиту»; null — кнопка не нужна. */
@@ -35,6 +35,20 @@ export const MAX_STEPS = 5;
 const DIRECT_IN_AI_ONLY = ["node-cli", "python-cli", "curl"];
 
 export const isJetBrains = (app: Pick<AppCoverageItem, "id">) => app.id === "jetbrains";
+export const isAntigravity = (app: Pick<AppCoverageItem, "id">) => app.id === "antigravity";
+
+/** Локальные адреса не должны идти через прокси: иначе интерфейс не достучится до локального агента приложения. */
+export const LOCAL_NO_PROXY = "localhost,127.0.0.1,::1";
+
+/** Запуск Antigravity 2.x с прокси в окружении (агент игнорирует системный PAC). Адрес — из снимка шлюза. */
+export function antigravityLaunch(addr: string): { address: string; mac: string[]; powershell: string[] } {
+  const url = `http://${addr}`;
+  return {
+    address: url,
+    mac: [`open -a Antigravity --env HTTPS_PROXY=${url} --env HTTP_PROXY=${url} --env NO_PROXY=${LOCAL_NO_PROXY}`],
+    powershell: [`$env:HTTPS_PROXY="${url}"; $env:HTTP_PROXY=$env:HTTPS_PROXY; $env:NO_PROXY="${LOCAL_NO_PROXY}"`],
+  };
+}
 
 /** Команды для нового терминала с реальным адресом шлюза. Без `setx`: подпись Заставы совпадёт с её же миграцией. */
 export function envCommands(addr: string): { unix: string[]; powershell: string[] } {
@@ -45,7 +59,10 @@ export function envCommands(addr: string): { unix: string[]; powershell: string[
 }
 
 /** Строит инструкцию «Как настроить» по ключам manual_steps, приложению и режиму CLI. Адрес берётся из снимка шлюза, а не из константы. */
-export function buildManualSetup(app: AppCoverageItem, snapshot: Pick<CoverageSnapshot, "gateway_addr" | "pac_url" | "cli_mode">): ManualSetup {
+export function buildManualSetup(
+  app: AppCoverageItem,
+  snapshot: Pick<CoverageSnapshot, "gateway_addr" | "pac_url" | "cli_mode"> & Partial<Pick<CoverageSnapshot, "sysproxy_enabled" | "cli_protection_enabled">>,
+): ManualSetup {
   const addr = snapshot.gateway_addr;
   const pacUrl = snapshot.pac_url ?? (addr ? `http://${addr}/proxy.pac` : null);
   const keys = app.manual_steps as ManualStepKey[];
@@ -67,16 +84,31 @@ export function buildManualSetup(app: AppCoverageItem, snapshot: Pick<CoverageSn
   };
 
   if (has("enable_protection")) {
+    // Защита уже включена: шаг «включите» бессмыслен, остаётся состояние в карточке и остальные шаги.
     if (app.category === "browser" || app.category === "desktop") {
       protection = "sysproxy";
-      steps.push(copy.steps.enable.sysproxy);
+      if (!snapshot.sysproxy_enabled) steps.push(copy.steps.enable.sysproxy);
     } else {
       protection = "cli";
-      steps.push(app.category === "cli" && aiOnly ? copy.steps.cli.aiOnlyEnable : copy.steps.enable.cli);
+      if (!snapshot.cli_protection_enabled) steps.push(app.category === "cli" && aiOnly ? copy.steps.cli.aiOnlyEnable : copy.steps.enable.cli);
     }
   }
 
-  if (isJetBrains(app)) {
+  if (isAntigravity(app) && (has("launch_with_env") || has("enable_system_proxy"))) {
+    // Автоматической записи для этого приложения нет: кнопки «Включить защиту» тут не будет.
+    if (has("enable_system_proxy")) steps.push(copy.steps.antigravity.systemProxy);
+    if (has("launch_with_env")) {
+      steps.push(copy.steps.antigravity.launch);
+      needsAddress = true;
+      if (addr) {
+        const launch = antigravityLaunch(addr);
+        blocks.push({ id: "launch-mac", label: copy.steps.antigravity.launch.macLabel, lines: launch.mac, kind: "command" });
+        blocks.push({ id: "launch-ps", label: copy.steps.antigravity.launch.powershellLabel, lines: launch.powershell, kind: "command" });
+        blocks.push({ id: "addr", label: copy.steps.antigravity.launch.addressLabel, lines: [launch.address], kind: "address" });
+      }
+    }
+    hints.push(copy.hints.antigravityAgent);
+  } else if (isJetBrains(app)) {
     if (has("jetbrains_proxy_settings")) steps.push(copy.steps.jetbrains.open);
     if (has("set_pac_url")) {
       steps.push(copy.steps.jetbrains.auto);
@@ -120,11 +152,13 @@ export function buildManualSetup(app: AppCoverageItem, snapshot: Pick<CoverageSn
     "restart_app",
     "reopen_terminal",
     "jetbrains_proxy_settings",
+    "launch_with_env",
+    "enable_system_proxy",
   ];
   if (steps.length === 0 && keys.some((k) => !known.includes(k))) steps.push(copy.steps.generic);
 
   if (steps.length > 0) {
-    hints.push(copy.hints.effect);
+    hints.unshift(copy.hints.effect);
     if (app.category === "cli") {
       hints.push(copy.mode[snapshot.cli_mode]);
       if (!has("reopen_terminal")) hints.push(copy.hints.reopenTerminal);
@@ -134,9 +168,16 @@ export function buildManualSetup(app: AppCoverageItem, snapshot: Pick<CoverageSn
   return {
     steps: steps.slice(0, MAX_STEPS),
     blocks,
-    warning: isJetBrains(app) && steps.length > 0 ? copy.steps.jetbrains.warning : null,
+    warning: setupWarning(app, steps.length > 0),
     hints,
     protection,
     addressPending: needsAddress && !addr,
   };
+}
+
+function setupWarning(app: AppCoverageItem, hasSteps: boolean): ManualSetup["warning"] {
+  if (!hasSteps) return null;
+  if (isJetBrains(app)) return copy.steps.jetbrains.warning;
+  if (isAntigravity(app) && app.bypass_suspected) return copy.antigravity.bypass;
+  return null;
 }

@@ -109,3 +109,69 @@ describe("buildManualSetup: общее", () => {
     expect(s.steps).toHaveLength(1);
   });
 });
+
+describe("Antigravity 2.x: ручной запуск с переменными", () => {
+  const ag = (steps: ManualStepKey[], over: Partial<AppCoverageItem> = {}) => ({ ...app("antigravity", "ide", steps, "off"), ...over });
+
+  it("нет кнопки «Включить защиту»: защита не выбирается, шаги и значения остаются", () => {
+    const s = buildManualSetup(ag(["enable_system_proxy", "launch_with_env"]), snap());
+    expect(s.protection).toBeNull();
+    expect(s.steps.length).toBeGreaterThan(0);
+    expect(s.blocks.length).toBeGreaterThan(0);
+  });
+  it("адрес и порт берутся из снимка шлюза, 8899 нигде не зашит", () => {
+    const s = buildManualSetup(ag(["launch_with_env"]), snap("ai_only", "127.0.0.1:40111"));
+    const mac = s.blocks.find((b) => b.id === "launch-mac")!;
+    expect(mac.kind).toBe("command");
+    expect(mac.lines[0]).toBe("open -a Antigravity --env HTTPS_PROXY=http://127.0.0.1:40111 --env HTTP_PROXY=http://127.0.0.1:40111 --env NO_PROXY=localhost,127.0.0.1,::1");
+    expect(s.blocks.find((b) => b.kind === "address")!.lines).toEqual(["http://127.0.0.1:40111"]);
+    expect(allText(s)).not.toContain("8899");
+    const other = buildManualSetup(ag(["launch_with_env"]), snap("ai_only", "127.0.0.1:50222"));
+    expect(other.blocks.flatMap((b) => b.lines).join("\n")).not.toContain("40111");
+  });
+  it("локальные адреса идут мимо прокси: иначе интерфейс не достучится до локального агента", () => {
+    const s = buildManualSetup(ag(["launch_with_env"]), snap());
+    expect(s.blocks.filter((b) => b.kind === "command").every((b) => b.lines.join("").includes("NO_PROXY"))).toBe(true);
+  });
+  it("PowerShell-вариант без setx", () => {
+    const ps = buildManualSetup(ag(["launch_with_env"]), snap()).blocks.find((b) => b.id === "launch-ps")!;
+    expect(ps.lines[0]).toContain('$env:HTTPS_PROXY="http://127.0.0.1:40111"');
+    expect(ps.lines.join("")).not.toMatch(/setx/i);
+  });
+  it("пока адрес шлюза неизвестен — «определяется», без пустых команд", () => {
+    const s = buildManualSetup(ag(["launch_with_env"]), snap("ai_only", null));
+    expect(s.blocks).toEqual([]);
+    expect(s.addressPending).toBe(true);
+  });
+  it("«идут мимо Заставы» показывается предупреждением над шагами", () => {
+    const s = buildManualSetup(ag(["launch_with_env"], { bypass_suspected: true }), snap());
+    expect(s.warning?.title).toBe("Запросы Antigravity, похоже, идут мимо Заставы");
+    expect(buildManualSetup(ag(["launch_with_env"]), snap()).warning).toBeNull();
+  });
+  it("режим ai_only не лишает Antigravity шагов: это ИИ-клиент, а не npm/brew", () => {
+    const s = buildManualSetup(ag(["launch_with_env"]), snap("ai_only"));
+    expect(s.steps.map((x) => x.title)).toContain("Перезапустите Antigravity с прокси");
+    expect(s.steps.map((x) => x.title)).not.toContain("В этом режиме программа идёт напрямую");
+  });
+  it("старый редактор Antigravity (settings.json) по-прежнему получает кнопку защиты и http.proxy", () => {
+    const s = buildManualSetup(ag(["enable_protection", "set_http_proxy"]), snap());
+    expect(s.protection).toBe("cli");
+    expect(s.blocks.map((b) => b.lines[0])).toContain("http://127.0.0.1:40111");
+  });
+  it("текст про «В settings.json нет http.proxy» не появляется в шагах 2.x", () => {
+    const s = buildManualSetup(ag(["enable_system_proxy", "launch_with_env"]), snap());
+    expect([...s.steps.map((x) => x.text), ...s.hints].join(" ")).not.toContain("settings.json");
+  });
+});
+
+describe("шаг «включите защиту» не показывается, когда защита уже включена", () => {
+  const gemini = app("gemini-cli", "cli", ["enable_protection", "set_env_proxy"], "off");
+  it("выключена — шаг есть; включена — шага нет, но защита (состояние в карточке) остаётся", () => {
+    const off = buildManualSetup(gemini, { ...snap(), cli_protection_enabled: false });
+    expect(off.steps.map((s) => s.title)).toContain("Включите защиту CLI и IDE");
+    const on = buildManualSetup(gemini, { ...snap(), cli_protection_enabled: true });
+    expect(on.steps.map((s) => s.title)).not.toContain("Включите защиту CLI и IDE");
+    expect(on.protection).toBe("cli");
+    expect(on.steps.length).toBeGreaterThan(0);
+  });
+});

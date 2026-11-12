@@ -4,6 +4,7 @@ export { useGatewayStats } from "./useGatewayStats";
 export { useGatewayState } from "./useGatewayState";
 export type { GatewayState } from "./useGatewayState";
 export { useProtectionToggles } from "./useProtectionToggles";
+export type { ProtectionActions } from "./useProtectionToggles";
 export { usePinning } from "./usePinning";
 export { useTimezoneSync } from "./useTimezoneSync";
 export { useUpdater } from "./useUpdater";
