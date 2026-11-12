@@ -3,13 +3,9 @@
 
 use super::journal::{self, Journal, Outcome, RecoveryReport, ReportItem, Resource};
 use super::platform::{Platform, PlatformError, RegKind, RegValue};
-use super::{
-    CLI_PROTECTION_ACTIVE, LAST_PAC_URL, NO_PROXY_VALUE, Run, SYS_PROXY_ACTIVE,
-    parse_gateway_port_from_pac_url, set_chained_proxy, with_journal,
-};
+use super::{NO_PROXY_VALUE, Run, state, with_journal};
 use std::collections::BTreeMap;
 use std::sync::Once;
-use std::sync::atomic::Ordering;
 
 static CLEAN_HOOK_INIT: Once = Once::new();
 
@@ -103,11 +99,7 @@ fn is_zastava_env_signature(value: &str, gateway_port: Option<u16>) -> bool {
 /// carry the signature, `NO_PROXY` with Zastava's own value, `TZ`, `LANG` and `LC_*` are returned;
 /// otherwise nothing is: a user's own `HTTPS_PROXY=http://corp:3128` or `TZ=Europe/Berlin` stays.
 pub fn legacy_env_plan(env: &BTreeMap<String, String>) -> Vec<String> {
-    let gateway_port = LAST_PAC_URL
-        .lock()
-        .ok()
-        .and_then(|g| g.as_deref().and_then(parse_gateway_port_from_pac_url));
-    legacy_env_plan_with_gateway(env, gateway_port)
+    legacy_env_plan_with_gateway(env, state().gateway_port())
 }
 
 /// Same as [`legacy_env_plan`] with an explicit current gateway port.
@@ -169,10 +161,7 @@ const LEGACY_ENV_NAMES: [&str; 18] = [
 pub(super) const LEGACY_MIGRATION_MARK: &str = "legacy-1.3-signature-cleanup";
 
 fn gateway_port_now() -> Option<u16> {
-    LAST_PAC_URL
-        .lock()
-        .ok()
-        .and_then(|g| g.as_deref().and_then(parse_gateway_port_from_pac_url))
+    state().gateway_port()
 }
 
 /// One-time cleanup of what builds without a journal (1.3.x, 2.0) left behind. Without a journal
@@ -407,8 +396,8 @@ pub(super) fn restore_user_env() -> RecoveryReport {
     }
 }
 
-/// IDE / CLI settings files and shell profiles (the file side is handled separately, and is
-/// still as in 2.0 until it gets the same journal treatment).
+/// IDE / CLI settings files and shell profiles: the keys and blocks Zastava wrote are put back
+/// through the journal (see `cli_protection::disable_files`).
 pub(super) fn cleanup_cli_files() {
     super::cli_protection::disable_cli_files();
 }
@@ -430,12 +419,7 @@ pub fn cleanup_all_persistent_settings() -> RecoveryReport {
         },
     };
     cleanup_cli_files();
-    SYS_PROXY_ACTIVE.store(false, Ordering::SeqCst);
-    CLI_PROTECTION_ACTIVE.store(false, Ordering::SeqCst);
-    if let Ok(mut g) = LAST_PAC_URL.lock() {
-        *g = None;
-    }
-    set_chained_proxy(None);
+    state().reset();
     report
 }
 

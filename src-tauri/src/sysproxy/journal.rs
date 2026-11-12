@@ -18,9 +18,11 @@
 //! and the `Debug` output name resources, never values.
 
 use super::fs::{Fs, FsLock, LockError, WriteMode};
+use super::jsonc;
 use super::platform::{
     ChainState, PResult, PacState, Platform, PlatformError, RegValue, ServiceId,
 };
+use super::shell_rc;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -44,6 +46,22 @@ pub enum Resource {
     UserEnv { name: String },
     /// One WinINet value (`AutoConfigURL`, `ProxyEnable`, ...).
     Inet { name: String },
+    /// One key inside a JSONC settings file (`path` holds the exact key names, outermost first).
+    JsonKey { file: String, path: Vec<String> },
+    /// An object inside a JSONC settings file that Zastava may have created. Restoring a
+    /// baseline of "absent" removes it only while it is empty (no members, no comments).
+    JsonObject { file: String, path: Vec<String> },
+    /// The Zastava block (between its exact marker lines) inside a shell / PowerShell profile.
+    TextBlock { file: String },
+    /// A file Zastava may have created. Restoring a baseline of "absent" removes it only while
+    /// its content is still the bare `skeleton` it was created with.
+    File { file: String, skeleton: String },
+}
+
+/// Last path components, for logs: names a file without the user's home directory.
+fn file_label(file: &str) -> String {
+    let parts: Vec<&str> = file.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    parts[parts.len().saturating_sub(3)..].join("/")
 }
 
 impl Resource {
@@ -54,6 +72,35 @@ impl Resource {
             Resource::Chain { service } => format!("chain:{}", service.key()),
             Resource::UserEnv { name } => format!("env:{name}"),
             Resource::Inet { name } => format!("inet:{name}"),
+            Resource::JsonKey { file, path } => {
+                format!("json:{}:{}", file_label(file), path.join("/"))
+            }
+            Resource::JsonObject { file, path } => {
+                format!("jsonobj:{}:{}", file_label(file), path.join("/"))
+            }
+            Resource::TextBlock { file } => format!("block:{}", file_label(file)),
+            Resource::File { file, .. } => format!("file:{}", file_label(file)),
+        }
+    }
+
+    /// Whether the resource lives in a user file (as opposed to the OS settings).
+    pub fn is_file_resource(&self) -> bool {
+        matches!(
+            self,
+            Resource::JsonKey { .. }
+                | Resource::JsonObject { .. }
+                | Resource::TextBlock { .. }
+                | Resource::File { .. }
+        )
+    }
+
+    /// Order inside one restore pass: keys and blocks first, then the objects that held them,
+    /// then the files that held those. Stable for everything else.
+    fn restore_rank(&self) -> u8 {
+        match self {
+            Resource::JsonObject { .. } => 1,
+            Resource::File { .. } => 2,
+            _ => 0,
         }
     }
 }
@@ -66,6 +113,12 @@ pub enum Value {
     Chain(ChainState),
     Env(Option<String>),
     Reg(Option<RegValue>),
+    /// The exact JSON text of a value in a JSONC file; `None` = the key is absent.
+    Json(Option<String>),
+    /// Whether the object / file exists.
+    Present(bool),
+    /// The text of the Zastava block (line ends normalised to `\n`); `None` = no block.
+    Block(Option<String>),
 }
 
 impl Value {
@@ -76,6 +129,10 @@ impl Value {
                 | (Value::Chain(_), Resource::Chain { .. })
                 | (Value::Env(_), Resource::UserEnv { .. })
                 | (Value::Reg(_), Resource::Inet { .. })
+                | (Value::Json(_), Resource::JsonKey { .. })
+                | (Value::Present(_), Resource::JsonObject { .. })
+                | (Value::Present(_), Resource::File { .. })
+                | (Value::Block(_), Resource::TextBlock { .. })
         )
     }
 }
@@ -253,12 +310,16 @@ pub fn panic_flagged() -> bool {
     PANICKED.load(Ordering::SeqCst)
 }
 
-fn read_value(platform: &dyn Platform, res: &Resource) -> PResult<Value> {
+fn read_value(fs: &dyn Fs, platform: &dyn Platform, res: &Resource) -> PResult<Value> {
     Ok(match res {
         Resource::Pac { service } => Value::Pac(platform.get_pac(service)?),
         Resource::Chain { service } => Value::Chain(platform.get_chain(service)?),
         Resource::UserEnv { name } => Value::Env(platform.get_user_env(name)?),
         Resource::Inet { name } => Value::Reg(platform.get_inet(name)?),
+        Resource::JsonKey { .. }
+        | Resource::JsonObject { .. }
+        | Resource::TextBlock { .. }
+        | Resource::File { .. } => read_file_value(fs, res)?,
     })
 }
 
@@ -276,7 +337,12 @@ fn notify(platform: &dyn Platform, res: &Resource) -> Notified {
     let r = match res {
         Resource::Inet { .. } => platform.notify_inet_refresh(),
         Resource::UserEnv { .. } => platform.broadcast_env_change(),
-        Resource::Pac { .. } | Resource::Chain { .. } => Ok(()),
+        Resource::Pac { .. }
+        | Resource::Chain { .. }
+        | Resource::JsonKey { .. }
+        | Resource::JsonObject { .. }
+        | Resource::TextBlock { .. }
+        | Resource::File { .. } => Ok(()),
     };
     match r {
         Ok(()) | Err(PlatformError::Unsupported(_)) => Notified::Yes,
@@ -286,7 +352,16 @@ fn notify(platform: &dyn Platform, res: &Resource) -> Notified {
 
 /// Writes `v` into the OS. An `Err` means the write failed; a failed notification is reported
 /// separately because the value did land.
-fn write_value(platform: &dyn Platform, res: &Resource, v: &Value) -> PResult<Notified> {
+fn write_value(
+    fs: &dyn Fs,
+    platform: &dyn Platform,
+    res: &Resource,
+    v: &Value,
+) -> PResult<Notified> {
+    if res.is_file_resource() {
+        write_file_value(fs, res, v)?;
+        return Ok(Notified::Yes);
+    }
     match (res, v) {
         (Resource::Pac { service }, Value::Pac(p)) => {
             // An absent URL is restored by clearing it (networksetup has no "unset").
@@ -304,6 +379,167 @@ fn write_value(platform: &dyn Platform, res: &Resource, v: &Value) -> PResult<No
         _ => return Err(PlatformError::Unsupported("kind_mismatch")),
     }
     Ok(notify(platform, res))
+}
+
+// ---------------------------------------------------------------------------------------------
+// File resources: the value is read from / written to the user's file through `Fs`
+// ---------------------------------------------------------------------------------------------
+
+/// The file as text. `Ok(None)`: no such file. A file that is not UTF-8 is never edited.
+fn read_text(fs: &dyn Fs, file: &str) -> PResult<Option<String>> {
+    match fs.read(Path::new(file)) {
+        Ok(None) => Ok(None),
+        Ok(Some(bytes)) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| PlatformError::Failed("file_not_utf8")),
+        Err(_) => Err(PlatformError::Failed("file_read")),
+    }
+}
+
+fn key_path(path: &[String]) -> Vec<&str> {
+    path.iter().map(String::as_str).collect()
+}
+
+fn json_err(_: jsonc::JsoncError) -> PlatformError {
+    PlatformError::Failed("file_not_editable")
+}
+
+fn read_file_value(fs: &dyn Fs, res: &Resource) -> PResult<Value> {
+    match res {
+        Resource::File { file, .. } => Ok(Value::Present(fs.exists(Path::new(file)))),
+        Resource::JsonKey { file, path } => {
+            let Some(text) = read_text(fs, file)? else {
+                return Ok(Value::Json(None));
+            };
+            if jsonc::is_blank(&text) {
+                return Ok(Value::Json(None));
+            }
+            let found = jsonc::get(&text, &key_path(path)).map_err(json_err)?;
+            Ok(Value::Json(found.map(|f| f.raw.to_string())))
+        }
+        Resource::JsonObject { file, path } => {
+            let Some(text) = read_text(fs, file)? else {
+                return Ok(Value::Present(false));
+            };
+            if jsonc::is_blank(&text) {
+                return Ok(Value::Present(false));
+            }
+            match jsonc::get(&text, &key_path(path)).map_err(json_err)? {
+                None => Ok(Value::Present(false)),
+                Some(f) if f.is_object => Ok(Value::Present(true)),
+                Some(_) => Err(PlatformError::Failed("file_not_editable")),
+            }
+        }
+        Resource::TextBlock { file } => {
+            let Some(text) = read_text(fs, file)? else {
+                return Ok(Value::Block(None));
+            };
+            let range = shell_rc::find_block(&text)
+                .map_err(|_| PlatformError::Failed("file_not_editable"))?;
+            Ok(Value::Block(range.map(|r| text[r].replace("\r\n", "\n"))))
+        }
+        _ => Err(PlatformError::Unsupported("kind_mismatch")),
+    }
+}
+
+fn write_text(fs: &dyn Fs, file: &str, old: &str, new: String) -> PResult<()> {
+    if new == old {
+        return Ok(());
+    }
+    fs.write_atomic(Path::new(file), new.as_bytes(), WriteMode::KeepExisting)
+        .map_err(|_| PlatformError::Failed("file_write"))
+}
+
+fn write_file_value(fs: &dyn Fs, res: &Resource, v: &Value) -> PResult<()> {
+    match (res, v) {
+        (Resource::File { file, skeleton }, Value::Present(true)) => {
+            if fs.exists(Path::new(file)) {
+                return Ok(());
+            }
+            if let Some(dir) = Path::new(file)
+                .parent()
+                .filter(|d| !d.as_os_str().is_empty())
+                && !fs.exists(dir)
+            {
+                fs.create_private_dir_all(dir)
+                    .map_err(|_| PlatformError::Failed("file_write"))?;
+            }
+            fs.write_atomic(
+                Path::new(file),
+                skeleton.as_bytes(),
+                WriteMode::KeepExisting,
+            )
+            .map_err(|_| PlatformError::Failed("file_write"))
+        }
+        (Resource::File { file, skeleton }, Value::Present(false)) => {
+            let Some(text) = read_text(fs, file)? else {
+                return Ok(());
+            };
+            // Only the bare file Zastava created is removed; anything else in it is the user's.
+            let bare = |t: &str| t.trim_start_matches('\u{feff}').trim().to_string();
+            if bare(&text) == bare(skeleton) {
+                fs.remove_file(Path::new(file))
+                    .map_err(|_| PlatformError::Failed("file_write"))?;
+            }
+            Ok(())
+        }
+        (Resource::JsonKey { file, path }, Value::Json(want)) => {
+            let Some(text) = read_text(fs, file)? else {
+                return match want {
+                    None => Ok(()),
+                    Some(_) => Err(PlatformError::NotFound("file")),
+                };
+            };
+            let p = key_path(path);
+            let new = match want {
+                Some(raw) => jsonc::set(&text, &p, raw),
+                None if jsonc::is_blank(&text) => return Ok(()),
+                None => jsonc::remove(&text, &p),
+            }
+            .map_err(json_err)?;
+            write_text(fs, file, &text, new)
+        }
+        (Resource::JsonObject { file, path }, Value::Present(want)) => {
+            let Some(text) = read_text(fs, file)? else {
+                return match want {
+                    false => Ok(()),
+                    true => Err(PlatformError::NotFound("file")),
+                };
+            };
+            let p = key_path(path);
+            let existing = if jsonc::is_blank(&text) {
+                None
+            } else {
+                jsonc::get(&text, &p).map_err(json_err)?
+            };
+            let new = match (want, existing) {
+                (true, None) => jsonc::set(&text, &p, "{}").map_err(json_err)?,
+                (true, Some(f)) if f.is_object => return Ok(()),
+                // Removed only while it is empty: whatever the user put inside is not ours.
+                (false, Some(f)) if f.is_object && f.is_empty_object => {
+                    jsonc::remove(&text, &p).map_err(json_err)?
+                }
+                (false, _) => return Ok(()),
+                (true, Some(_)) => return Err(PlatformError::Failed("file_not_editable")),
+            };
+            write_text(fs, file, &text, new)
+        }
+        (Resource::TextBlock { file }, Value::Block(want)) => {
+            let Some(text) = read_text(fs, file)? else {
+                return match want {
+                    None => Ok(()),
+                    Some(_) => Err(PlatformError::NotFound("file")),
+                };
+            };
+            let new = match want {
+                Some(block) => shell_rc::upsert_block(&text, block),
+                None => shell_rc::remove_block(&text),
+            }
+            .map_err(|_| PlatformError::Failed("file_not_editable"))?;
+            write_text(fs, file, &text, new)
+        }
+        _ => Err(PlatformError::Unsupported("kind_mismatch")),
+    }
 }
 
 /// The ownership journal. Holds the inter-process lock for as long as it lives.
@@ -357,6 +593,11 @@ impl Journal {
             backup_excluded: false,
             _lock: lock,
         })
+    }
+
+    /// The file system the journal (and its file resources) works on.
+    pub fn fs(&self) -> Arc<dyn Fs> {
+        self.fs.clone()
     }
 
     pub fn journal_path(&self) -> PathBuf {
@@ -413,7 +654,7 @@ impl Journal {
         if !new.matches(res) {
             return Err(JournalError::KindMismatch);
         }
-        let cur = read_value(platform, res)?;
+        let cur = read_value(&*self.fs, platform, res)?;
         // `previous` = what the resource holds when nothing of this write has landed yet;
         // `before` = the record as it was on disk, for an exact in-memory rollback.
         let previous = cur.clone();
@@ -465,7 +706,7 @@ impl Journal {
             self.put_back(res, before);
             return Err(err);
         }
-        let notified = match write_value(platform, res, &new) {
+        let notified = match write_value(&*self.fs, platform, res, &new) {
             Ok(n) => n,
             Err(werr) => {
                 self.settle_failed_write(platform, res, &previous, before);
@@ -504,9 +745,9 @@ impl Journal {
         previous: &Value,
         before: Option<Entry>,
     ) {
-        let clean = match read_value(platform, res) {
+        let clean = match read_value(&*self.fs, platform, res) {
             Ok(v) if &v == previous => true,
-            Ok(_) => write_value(platform, res, previous).is_ok(),
+            Ok(_) => write_value(&*self.fs, platform, res, previous).is_ok(),
             Err(_) => false,
         };
         if clean {
@@ -528,12 +769,14 @@ impl Journal {
         platform: &dyn Platform,
         select: impl Fn(&Resource) -> bool,
     ) -> RecoveryReport {
-        let ids: Vec<Resource> = self
+        let mut ids: Vec<Resource> = self
             .entries
             .iter()
             .map(|e| e.resource.clone())
             .filter(|r| select(r))
             .collect();
+        // Keys before the objects that held them, objects before the files (stable otherwise).
+        ids.sort_by_key(Resource::restore_rank);
         let mut report = RecoveryReport::default();
         for res in ids {
             let outcome = self.restore_one_inner(platform, &res, &mut report);
@@ -566,7 +809,7 @@ impl Journal {
             return Outcome::AlreadyRestored;
         };
         let entry = self.entries[i].clone();
-        let outcome = match read_value(platform, res) {
+        let outcome = match read_value(&*self.fs, platform, res) {
             Err(PlatformError::NotFound(_)) => Outcome::TargetGone,
             Err(_) => return Outcome::Failed("read"),
             Ok(cur) => {
@@ -582,14 +825,14 @@ impl Journal {
                     Outcome::ExternalChange
                 } else {
                     // Narrow the window for a concurrent change: read once more right before writing.
-                    match read_value(platform, res) {
+                    match read_value(&*self.fs, platform, res) {
                         Ok(again) if again == cur => {}
                         Ok(_) => {
                             return self.release(platform, res, Outcome::ExternalChange, report);
                         }
                         Err(_) => return Outcome::Failed("read"),
                     }
-                    match write_value(platform, res, &entry.baseline) {
+                    match write_value(&*self.fs, platform, res, &entry.baseline) {
                         Ok(Notified::Yes) => Outcome::Restored,
                         Ok(Notified::Failed) => {
                             // The baseline is back; keep the record so the notification is retried.
@@ -1678,5 +1921,162 @@ mod tests {
         j.apply(&p, &env("A"), ev("x")).unwrap();
         assert!(j.owns(&env("A"), &ev("x")));
         assert!(!j.owns(&env("A"), &ev("other")));
+    }
+
+    // --- file resources ----------------------------------------------------------------------
+
+    fn jkey(file: &str, path: &[&str]) -> Resource {
+        Resource::JsonKey {
+            file: file.into(),
+            path: path.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+    fn jv(s: &str) -> Value {
+        Value::Json(Some(s.into()))
+    }
+
+    #[test]
+    fn a_json_key_is_restored_to_its_baseline_and_a_missing_one_is_removed() {
+        let (fs, p) = setup();
+        let f = "/h/s.json";
+        let original = "{\n  // c\n  \"a\": 1,\n  \"k\": \"mine\"\n}\n";
+        fs.put(Path::new(f), original.as_bytes(), 0o644);
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &jkey(f, &["k"]), jv("\"ours\"")).unwrap();
+        j.apply(&p, &jkey(f, &["z"]), jv("1")).unwrap();
+        assert!(
+            String::from_utf8(fs.get(Path::new(f)).unwrap())
+                .unwrap()
+                .contains("\"z\": 1")
+        );
+        let r = j.restore_all(&p);
+        assert_eq!(r.restored(), 2);
+        assert_eq!(fs.get(Path::new(f)).unwrap(), original.as_bytes());
+        assert!(j.is_empty());
+    }
+
+    #[test]
+    fn a_json_key_written_by_the_user_after_us_is_not_rolled_back() {
+        let (fs, p) = setup();
+        let f = "/h/s.json";
+        fs.put(Path::new(f), b"{\n  \"a\": 1\n}\n", 0o644);
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &jkey(f, &["k"]), jv("\"ours\"")).unwrap();
+        fs.put(
+            Path::new(f),
+            b"{\n  \"a\": 1,\n  \"k\": \"theirs\"\n}\n",
+            0o644,
+        );
+        let r = j.restore_all(&p);
+        assert_eq!(r.external(), 1);
+        assert!(
+            String::from_utf8(fs.get(Path::new(f)).unwrap())
+                .unwrap()
+                .contains("theirs")
+        );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_as_json_fails_closed_for_apply_and_restore() {
+        let (fs, p) = setup();
+        let f = "/h/s.json";
+        let bad = b"{\"a\": 1,,}";
+        fs.put(Path::new(f), bad, 0o644);
+        let mut j = open(&fs).unwrap();
+        let e = j.apply(&p, &jkey(f, &["k"]), jv("1")).unwrap_err();
+        assert!(matches!(e, JournalError::Platform(_)));
+        assert!(
+            j.is_empty(),
+            "nothing is recorded for a file that is refused"
+        );
+        assert_eq!(fs.get(Path::new(f)).unwrap(), bad);
+        // A record that outlives a later corruption is kept for a retry, never "restored" by guessing.
+        fs.put(Path::new(f), b"{\"a\": 1}", 0o644);
+        j.apply(&p, &jkey(f, &["k"]), jv("1")).unwrap();
+        fs.put(Path::new(f), bad, 0o644);
+        let r = j.restore_all(&p);
+        assert_eq!(r.failed(), 1);
+        assert_eq!(j.entries().len(), 1);
+        assert_eq!(fs.get(Path::new(f)).unwrap(), bad);
+    }
+
+    #[test]
+    fn writing_a_key_into_a_missing_file_fails_and_leaves_no_record() {
+        let (fs, p) = setup();
+        let mut j = open(&fs).unwrap();
+        assert!(j.apply(&p, &jkey("/h/none.json", &["k"]), jv("1")).is_err());
+        assert!(j.is_empty());
+        assert!(fs.get(Path::new("/h/none.json")).is_none());
+    }
+
+    #[test]
+    fn objects_and_files_go_after_the_keys_that_live_in_them_and_only_while_bare() {
+        let (fs, p) = setup();
+        let f = "/h/dir/s.json";
+        let file = Resource::File {
+            file: f.into(),
+            skeleton: "{}\n".into(),
+        };
+        let obj = Resource::JsonObject {
+            file: f.into(),
+            path: vec!["env".into()],
+        };
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &file, Value::Present(true)).unwrap();
+        j.apply(&p, &obj, Value::Present(true)).unwrap();
+        j.apply(&p, &jkey(f, &["env", "K"]), jv("\"v\"")).unwrap();
+        let r = j.restore_all(&p);
+        assert_eq!(r.restored(), 3, "{}", r.summary());
+        assert!(
+            fs.get(Path::new(f)).is_none(),
+            "key, then object, then the file itself"
+        );
+        // A file the user filled meanwhile is theirs: it stays.
+        drop(j);
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &file, Value::Present(true)).unwrap();
+        fs.put(Path::new(f), b"{\"mine\": 1}\n", 0o644);
+        j.restore_all(&p);
+        assert_eq!(fs.get(Path::new(f)).unwrap(), b"{\"mine\": 1}\n");
+    }
+
+    #[test]
+    fn file_resources_survive_serialization_and_kind_mismatch_is_rejected() {
+        let (fs, p) = setup();
+        let f = "/h/s.json";
+        fs.put(Path::new(f), b"{}\n", 0o644);
+        {
+            let mut j = open(&fs).unwrap();
+            j.apply(&p, &jkey(f, &["a", "b"]).clone(), jv("1"))
+                .unwrap_err(); // parent missing
+            j.apply(&p, &jkey(f, &["k"]), jv("2")).unwrap();
+            assert!(matches!(
+                j.apply(&p, &jkey(f, &["k"]), Value::Present(true)),
+                Err(JournalError::KindMismatch)
+            ));
+        }
+        let j = open(&fs).unwrap();
+        assert_eq!(j.entries().len(), 1);
+        assert_eq!(j.entry(&jkey(f, &["k"])).unwrap().expected, Some(jv("2")));
+        assert!(
+            j.entry(&jkey(f, &["k"]))
+                .unwrap()
+                .resource
+                .is_file_resource()
+        );
+    }
+
+    #[test]
+    fn file_resource_ids_carry_no_home_directory_and_no_values() {
+        let id = jkey(
+            "/Users/someone/Library/Application Support/Code/User/settings.json",
+            &["http.proxy"],
+        )
+        .id();
+        assert_eq!(id, "json:Code/User/settings.json:http.proxy");
+        let b = Resource::TextBlock {
+            file: "C:\\Users\\someone\\Documents\\PowerShell\\profile.ps1".into(),
+        };
+        assert_eq!(b.id(), "block:Documents/PowerShell/profile.ps1");
     }
 }
