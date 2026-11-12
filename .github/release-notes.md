@@ -3,9 +3,9 @@
 Локальный сетевой экран для работы с **Claude**, **ChatGPT**, **Cursor**, **Antigravity**, **Gemini** и **CLI-агентами**. Перед запросами к ИИ он проверяет сеть и останавливает запросы, если VPN оборвался или IP и страна изменились.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/kingbest1195/ai-antiban/main/docs/screenshots/v2-overview.png" width="32%" alt="Обзор" />
-  <img src="https://raw.githubusercontent.com/kingbest1195/ai-antiban/main/docs/screenshots/v2-coverage.png" width="32%" alt="Покрытие приложений" />
-  <img src="https://raw.githubusercontent.com/kingbest1195/ai-antiban/main/docs/screenshots/v2-crash-test.png" width="32%" alt="Тест обрыва VPN" />
+  <img src="https://raw.githubusercontent.com/kingbest1195/ai-antiban/${VERSION}/docs/screenshots/v2-overview.png" width="32%" alt="Обзор" />
+  <img src="https://raw.githubusercontent.com/kingbest1195/ai-antiban/${VERSION}/docs/screenshots/v2-coverage.png" width="32%" alt="Покрытие приложений" />
+  <img src="https://raw.githubusercontent.com/kingbest1195/ai-antiban/${VERSION}/docs/screenshots/v2-crash-test.png" width="32%" alt="Тест обрыва VPN" />
 </p>
 
 ### Что нового в ${VERSION}
