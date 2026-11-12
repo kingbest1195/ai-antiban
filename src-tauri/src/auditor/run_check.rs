@@ -103,9 +103,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn panic_is_internal_error_and_the_other_eleven_finish() {
+    async fn panic_is_internal_error_and_the_other_twelve_finish() {
         let mut checks = Vec::new();
-        for i in 0..12usize {
+        for i in 0..13usize {
             checks.push(tokio::spawn(async move {
                 run_check("c", LIMIT, async move {
                     if i == 5 {
@@ -120,7 +120,7 @@ mod tests {
         for c in checks {
             results.push(c.await.expect("run_check itself never panics"));
         }
-        assert_eq!(results.len(), 12);
+        assert_eq!(results.len(), 13);
         assert_eq!(results[5].status, CheckStatus::Unknown);
         assert_eq!(results[5].reason, Some(UnknownReason::InternalError));
         let finished_ok = results
@@ -128,7 +128,7 @@ mod tests {
             .enumerate()
             .filter(|(i, r)| *i != 5 && r.status == CheckStatus::Ok)
             .count();
-        assert_eq!(finished_ok, 11);
+        assert_eq!(finished_ok, 12);
     }
 
     #[tokio::test]

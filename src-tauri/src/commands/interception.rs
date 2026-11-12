@@ -178,6 +178,12 @@ pub async fn simulate_interception(
     let reverse_dns_result = auditor::evaluate_reverse_dns_ptr(&telemetry);
     let dns_country_result = auditor::evaluate_dns_country_consistency(&telemetry, None);
     let locale_result = auditor::evaluate_locale_env_hygiene(None);
+    // SIMULATION ONLY: the 13th check (UDP/STUN) is a canned demo value as well.
+    let udp_stun_result = auditor::CheckResult::ok(
+        "UDP_STUN_MATCH",
+        "Внешний адрес по UDP совпадает с адресом HTTP-выхода.",
+    )
+    .with_measured_via(SIMULATED_VIA);
 
     let checks = vec![
         geo_result.clone(),
@@ -192,6 +198,7 @@ pub async fn simulate_interception(
         reverse_dns_result,
         dns_country_result,
         locale_result,
+        udp_stun_result,
     ];
 
     let (unknown_count, applicable_count) = auditor::count_checks(&checks);

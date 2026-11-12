@@ -1662,7 +1662,7 @@ mod tests {
             timezone_result: ok.clone(),
             checks: vec![ok],
             unknown_count: 0,
-            applicable_count: 12,
+            applicable_count: 13,
             incomplete: false,
         }
     }

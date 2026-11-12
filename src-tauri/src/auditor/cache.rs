@@ -12,7 +12,8 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use crate::auditor::geo_matrix::CheckResult;
+use crate::auditor::geo_matrix::{CheckResult, UnknownReason};
+use crate::auditor::probes::whoami::{GeoInfo, ResolverView};
 
 /// DNSBL answer per exit IP.
 pub const DNSBL_TTL: Duration = Duration::from_secs(600);
@@ -20,6 +21,12 @@ pub const DNSBL_TTL: Duration = Duration::from_secs(600);
 pub const IPV6_TTL: Duration = Duration::from_secs(60);
 /// `scutil`/time zone/locale/location checks.
 pub const OS_TTL: Duration = Duration::from_secs(45);
+/// Resolver seen by the whoami sources (shared by the DNS-resolver and DNS-country checks).
+pub const WHOAMI_TTL: Duration = Duration::from_secs(60);
+/// Country of a resolver address.
+pub const GEO_TTL: Duration = Duration::from_secs(600);
+/// STUN (UDP) probe: rare requests, per HTTP exit address.
+pub const UDP_TTL: Duration = Duration::from_secs(60);
 /// How long a failed (`Unknown`) outcome is reused.
 pub const UNKNOWN_TTL: Duration = Duration::from_secs(5);
 
@@ -117,6 +124,12 @@ pub struct CheckCache {
     pub ipv6: TtlCache<CheckResult>,
     /// `scutil`, time zone, locale and location checks (key = check + its inputs).
     pub os: TtlCache<CheckResult>,
+    /// The DNS resolver that sees the requests (whoami), under one key.
+    pub resolver: TtlCache<ResolverView>,
+    /// Per resolver address: its country (and ASN / organisation), or why it could not be found.
+    pub geo: TtlCache<Result<GeoInfo, UnknownReason>>,
+    /// STUN verdict per HTTP exit address.
+    pub udp: TtlCache<CheckResult>,
 }
 
 impl CheckCache {
@@ -125,6 +138,9 @@ impl CheckCache {
         self.dnsbl.clear().await;
         self.ipv6.clear().await;
         self.os.clear().await;
+        self.resolver.clear().await;
+        self.geo.clear().await;
+        self.udp.clear().await;
     }
 }
 
