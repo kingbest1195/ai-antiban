@@ -7,12 +7,12 @@
 ## 1. Структура веток и рабочий процесс
 
 * **`main`**: стабильная ветка с кодом последних опубликованных релизов.
-* **`release/x.x`**: ветки подготовки релизов (например, `release/2.0`).
+* **`release/x.x`**: ветки подготовки релизов (например, `release/2.1`).
 * **`feature/<name>`** или **`fix/<name>`**: рабочие ветки для добавления новой функциональности или исправления ошибок.
 
 ### Порядок работы:
 1. Сделайте форк официального репозитория `kingbest1195/ai-antiban`.
-2. Создайте тематическую ветку от актуальной рабочей ветки (`release/2.0` или `main`).
+2. Создайте тематическую ветку от актуальной рабочей ветки (`release/2.1` или `main`).
 3. Внесите изменения, соблюдая правила оформления кода.
 4. Выполните полный набор локальных тестов и проверок.
 5. Откройте Pull Request с подробным описанием решаемой задачи.
@@ -67,7 +67,19 @@ pnpm lint:hex
 
 # 3. Запуск всех тестов Rust-ядра
 cargo test --manifest-path src-tauri/Cargo.toml
+
+# 4. Тесты фронтенда (vitest)
+pnpm test
 ```
+
+### Тесты не должны менять системные настройки
+
+Тесты запускаются в обычном окружении разработчика, поэтому они не должны трогать прокси, PAC, `launchctl`, реестр или файлы редакторов. Команда `cargo test --manifest-path src-tauri/Cargo.toml` в таком виде безопасна, дополнительные аргументы `--skip` для этого не нужны.
+
+* Эффекты ОС отключены по умолчанию: `sysproxy::os_effects_enabled()` возвращает `false` в сборке `cfg(test)`, а также при `ZASTAVA_OS_DRY_RUN=1` и в интеграционных тестах, которые вызывают `force_os_dry_run()` (feature `test-support`, подключается через dev-зависимость).
+* Команды ОС для прокси и пользовательского окружения (`networksetup`, `launchctl`, `reg`, `scutil`) вызываются только через трейт `Platform` (`sysproxy/platform.rs`). В тестах используется `FakePlatform`.
+* Код тестов не должен ссылаться на `RealPlatform`. CI проверяет это: `src-tauri/tests/` и `#[cfg(test)]`-код не могут использовать `RealPlatform`.
+* Новый тест, который трогает ОС, пишите через фейк или через `force_os_dry_run()`, а не через реальные команды.
 
 ---
 
@@ -86,7 +98,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 feat(routing): add support for zastava v2 keys with multiple entry points
 fix(sysproxy): prevent console window flicker on Windows 11
-docs: update architecture overview for v2.0.0
+docs: update architecture overview for v2.1.0
 ```
 
 ---
