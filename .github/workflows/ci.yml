@@ -75,6 +75,11 @@ jobs:
       - name: Tray main-thread guard
         run: node scripts/check-tray-main-thread.mjs --self-test
 
+      # The updater accepts only the native signed path: no legacy downloader, no URL from the frontend.
+      - name: Updater legacy guard
+        shell: bash
+        run: "! grep -rnE 'download_and_install_legacy|validate_download_url|hdiutil|msiexec|zastava_autoupdate' src-tauri/src"
+
       - name: Cargo test (all)
         run: cargo test --manifest-path src-tauri/Cargo.toml
 

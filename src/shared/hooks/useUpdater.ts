@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
-import type { UpdateCheckResult, UpdateProgressPayload, UpdateStatusPayload } from "../../types";
+import type {
+  UpdateCheckResult,
+  UpdateFailureKind,
+  UpdateProgressPayload,
+  UpdateStatusPayload,
+} from "../../types";
 import { checkForUpdates, installUpdate, toggleAutoUpdate } from "../../utils/api";
-import { openExternal } from "../../utils/opener";
-import { toast as t } from "../copy/ru";
+import { toast as t, updates as copy } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
+
+const FAILURE_KINDS: readonly UpdateFailureKind[] = ["network", "signature", "no-release", "install", "install-restored"];
+
+/** Rust отдаёт ошибку как { kind, message? }; всё незнакомое считаем ошибкой установки. */
+function failureKind(err: unknown): UpdateFailureKind {
+  const kind = (err as { kind?: unknown } | null)?.kind;
+  return FAILURE_KINDS.find((k) => k === kind) ?? "install";
+}
 
 interface Options {
   showToast: ShowToast;
@@ -17,7 +29,13 @@ export function useUpdater({ showToast, setAutoUpdateEnabled }: Options) {
   const [installingUpdate, setInstallingUpdate] = useState<boolean>(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgressPayload | null>(null);
   const [updaterStatus, setUpdaterStatus] = useState<UpdateStatusPayload | null>(null);
-  const [showUpdateModal, setShowUpdateModal] = useState<boolean>(false);
+  const [showUpdateModal, setShowUpdateModalRaw] = useState<boolean>(false);
+
+  // При закрытии окна сбрасываем прошлую ошибку, чтобы она не всплыла при следующем открытии.
+  const setShowUpdateModal = useCallback((open: boolean) => {
+    if (!open) setUpdaterStatus((s) => (s?.stage === "failed" ? null : s));
+    setShowUpdateModalRaw(open);
+  }, []);
 
   const handleCheckUpdates = useCallback(
     async (silent: boolean = false) => {
@@ -32,9 +50,12 @@ export function useUpdater({ showToast, setAutoUpdateEnabled }: Options) {
           setShowUpdateModal(true);
           showToast(t.updates.none, t.updates.noneText(info.current_version), "success");
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const kind = failureKind(err);
+        // Тихая проверка (старт, трей): ошибка только в лог, без окна и тоста.
+        console.warn("[updater] check failed:", err);
         if (!silent) {
-          showToast(t.updates.checkError, err?.message || String(err), "error");
+          showToast(t.updates.checkError, copy.errors[kind], "error");
         }
       } finally {
         setCheckingUpdate(false);
@@ -44,34 +65,35 @@ export function useUpdater({ showToast, setAutoUpdateEnabled }: Options) {
   );
 
   const handleInstallUpdate = useCallback(async () => {
-    if (!updateInfo?.download_url || !updateInfo?.asset_name) {
-      if (updateInfo?.release_url) {
-        await openExternal(updateInfo.release_url);
-      }
-      return;
-    }
+    if (!updateInfo?.update_available) return;
 
     setInstallingUpdate(true);
+    setUpdaterStatus(null);
     setUpdateProgress({
       downloaded_bytes: 0,
-      total_bytes: updateInfo.asset_size || 0,
+      total_bytes: 0,
       percent: 0,
       phase: "starting",
     });
 
     try {
-      const res = await installUpdate(updateInfo.download_url, updateInfo.asset_name);
+      const res = await installUpdate();
       showToast(res.will_restart ? t.updates.installed : t.updates.ready, res.message, "success");
       if (!res.will_restart) {
         setShowUpdateModal(false);
       }
-    } catch (err: any) {
-      showToast(t.updates.installError, err?.message || String(err), "error");
+    } catch (err: unknown) {
+      // Никакого отката на другой источник: показываем причину в окне, пользователь повторяет или открывает релиз.
+      const kind = failureKind(err);
+      console.error("[updater] install failed:", err);
+      setUpdaterStatus({ stage: "failed", message: copy.errors[kind], error: kind });
+      setShowUpdateModalRaw(true);
+      showToast(t.updates.installError, copy.errors[kind], "error");
     } finally {
       setInstallingUpdate(false);
       setUpdateProgress(null);
     }
-  }, [updateInfo, showToast]);
+  }, [updateInfo, showToast, setShowUpdateModal]);
 
   const handleToggleAutoUpdate = useCallback(
     async (enabled: boolean) => {

@@ -3,17 +3,18 @@
 use crate::{state, updater};
 
 #[tauri::command]
-pub async fn check_for_updates(app: tauri::AppHandle) -> Result<updater::UpdateCheckResult, String> {
-    updater::check_for_updates(Some(&app)).await
+pub async fn check_for_updates(
+    app: tauri::AppHandle,
+) -> Result<updater::UpdateCheckResult, updater::UpdateFailure> {
+    updater::check_for_updates(&app).await
 }
 
+/// Installs the update announced by the pinned, signed endpoint. Takes nothing from the frontend.
 #[tauri::command]
 pub async fn install_update(
-    download_url: String,
-    asset_name: String,
     app: tauri::AppHandle,
-) -> Result<updater::InstallUpdateResult, String> {
-    updater::install_update(&app, &download_url, &asset_name).await
+) -> Result<updater::InstallUpdateResult, updater::UpdateFailure> {
+    updater::install_update(&app).await
 }
 
 #[tauri::command]

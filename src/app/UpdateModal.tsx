@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { UpdateCheckResult, UpdateProgressPayload, UpdateStatusPayload } from "../types";
-import { Badge, Button, Modal, Progress } from "../ui";
+import { Badge, Banner, Button, Modal, Progress } from "../ui";
 import { updates as copy } from "../shared/copy/ru";
 import { parseReleaseNotes } from "../shared/lib/releaseNotes";
 import { openExternal } from "../utils/opener";
@@ -22,6 +22,8 @@ export function UpdateModal({ open, onClose, info, installing, progress, status,
 
   const notes = info.release_notes || info.release_name || "";
   const phaseLabel = status?.message || progress?.phase || copy.installing;
+  // Ошибка установки приходит как status { stage: "failed", error }.
+  const failure = status?.stage === "failed" && status.error ? status.error : null;
 
   return (
     <Modal
@@ -39,7 +41,7 @@ export function UpdateModal({ open, onClose, info, installing, progress, status,
           </Button>
           {info.update_available ? (
             <Button variant="primary" disabled={installing} onClick={onInstall}>
-              {installing ? copy.installing : copy.install}
+              {installing ? copy.installing : failure ? copy.retry : copy.install}
             </Button>
           ) : (
             <Button onClick={onClose}>{copy.ok}</Button>
@@ -50,6 +52,12 @@ export function UpdateModal({ open, onClose, info, installing, progress, status,
       <p className="zs-modal-text">
         <Badge>{copy.versions(info.current_version, info.latest_version)}</Badge>
       </p>
+
+      {failure && (
+        <Banner tone="danger" role="alert" title={copy.errorTitle[failure]}>
+          {copy.errors[failure]}
+        </Banner>
+      )}
 
       {installing && (
         <Progress

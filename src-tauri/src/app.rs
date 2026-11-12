@@ -285,7 +285,7 @@ fn spawn_update_checker(app: &tauri::App, app_state: &state::AppState) {
         tokio::time::sleep(Duration::from_secs(20)).await;
         loop {
             if updater_state.get_data().await.auto_update_enabled {
-                if let Ok(res) = updater::check_for_updates(Some(&updater_app_handle)).await {
+                if let Ok(res) = updater::check_for_updates(&updater_app_handle).await {
                     if res.update_available {
                         let _ = updater_app_handle.emit("updater://available", &res);
                         crate::tray::update_tray_tooltip(

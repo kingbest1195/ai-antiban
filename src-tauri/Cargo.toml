@@ -40,6 +40,8 @@ tray-stress = []
 
 [dev-dependencies]
 tempfile = "3"
+# `tauri::test::mock_app`/MockRuntime for tests/updater_signature.rs (test builds only; no new crate).
+tauri = { version = "2", features = ["test"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
 
 [profile.release]
