@@ -271,7 +271,13 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         tray_builder = tray_builder.icon(initial_icon);
     }
 
-    let _tray = tray_builder.build(app)?;
+    let tray = tray_builder.build(app)?;
+    // build_tray runs on the main thread (setup): keep a clone so the last reference to the
+    // native status item is never dropped on a worker thread.
+    app.manage(super::TrayHolder(tray));
+
+    #[cfg(all(feature = "tray-stress", debug_assertions))]
+    super::stress::maybe_start(app.handle());
 
     Ok(())
 }

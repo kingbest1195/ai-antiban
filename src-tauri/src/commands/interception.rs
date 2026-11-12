@@ -2,9 +2,7 @@
 
 use super::AppContext;
 use crate::popup::show_and_position_alert_popup;
-use crate::tray::{TrayKillswitchMenuItem, TRAY_ICON_GREEN, TRAY_ICON_RED};
 use crate::{auditor, proxy, state};
-use tauri::image::Image;
 use tauri::{Emitter, Manager};
 
 #[tauri::command]
@@ -255,17 +253,7 @@ pub async fn toggle_network_killswitch_cmd(
 ) -> Result<bool, String> {
     let target_freeze = freeze.unwrap_or(!guard.is_gate_blocked());
     let now_frozen = guard.set_manual_killswitch(target_freeze, &state).await;
-    if let Some(item) = app.try_state::<TrayKillswitchMenuItem>() {
-        let (new_text, new_icon) = if now_frozen {
-            ("Снять СТОП СЕТИ — Возобновить работу ИИ", TRAY_ICON_GREEN)
-        } else {
-            ("СТОП СЕТИ — Заморозить трафик ИИ", TRAY_ICON_RED)
-        };
-        let _ = item.0.set_text(new_text);
-        if let Ok(img) = Image::from_bytes(new_icon) {
-            let _ = item.0.set_icon(Some(img));
-        }
-    }
+    crate::tray::update_tray_killswitch(&app, now_frozen);
     let _ = app.emit("tray://killswitch-toggled", now_frozen);
     Ok(now_frozen)
 }

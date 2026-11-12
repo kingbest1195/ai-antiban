@@ -1,6 +1,6 @@
 //! Application bootstrap: Tauri builder, setup sequence and background tasks.
 
-use crate::tray::{update_tray_from_report, MAIN_TRAY_ID};
+use crate::tray::update_tray_from_report;
 use crate::{auditor, bin_checker, commands, proxy, state, sysproxy, tray, updater};
 use std::sync::Arc;
 use std::time::Duration;
@@ -288,12 +288,10 @@ fn spawn_update_checker(app: &tauri::App, app_state: &state::AppState) {
                 if let Ok(res) = updater::check_for_updates(Some(&updater_app_handle)).await {
                     if res.update_available {
                         let _ = updater_app_handle.emit("updater://available", &res);
-                        if let Some(tray) = updater_app_handle.tray_by_id(MAIN_TRAY_ID) {
-                            let _ = tray.set_tooltip(Some(&format!(
-                                "Застава — Доступна новая версия v{}",
-                                res.latest_version
-                            )));
-                        }
+                        crate::tray::update_tray_tooltip(
+                            &updater_app_handle,
+                            format!("Застава — Доступна новая версия v{}", res.latest_version),
+                        );
                     }
                 }
             }

@@ -1,9 +1,8 @@
 //! Tray menu click handlers and tray icon click handler.
 
-use super::{update_tray_status, TRAY_ICON_GREEN, TRAY_ICON_RED};
+use super::{update_tray_killswitch, update_tray_status};
 use crate::{auditor, proxy, state, sysproxy};
 use tauri::{
-    image::Image,
     menu::IconMenuItem,
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
     Emitter, Manager,
@@ -14,7 +13,7 @@ use tauri_plugin_opener::OpenerExt;
 pub fn handle_menu_event(
     app: &tauri::AppHandle,
     id: &str,
-    killswitch_i_for_event: &IconMenuItem<tauri::Wry>,
+    _killswitch_i_for_event: &IconMenuItem<tauri::Wry>,
 ) {
     match id {
         "quit" => {
@@ -29,7 +28,6 @@ pub fn handle_menu_event(
         }
         "toggle_killswitch_tray" => {
             let app_handle = app.clone();
-            let killswitch_item = killswitch_i_for_event.clone();
             tauri::async_runtime::spawn(async move {
                 if let (Some(guard), Some(st)) = (
                     app_handle.try_state::<std::sync::Arc<proxy::NetworkGuard>>(),
@@ -37,15 +35,7 @@ pub fn handle_menu_event(
                 ) {
                     let target_freeze = !guard.is_gate_blocked();
                     let now_frozen = guard.set_manual_killswitch(target_freeze, &st).await;
-                    let (new_text, new_icon) = if now_frozen {
-                        ("Снять СТОП СЕТИ — Возобновить работу ИИ", TRAY_ICON_GREEN)
-                    } else {
-                        ("СТОП СЕТИ — Заморозить трафик ИИ", TRAY_ICON_RED)
-                    };
-                    let _ = killswitch_item.set_text(new_text);
-                    if let Ok(img) = Image::from_bytes(new_icon) {
-                        let _ = killswitch_item.set_icon(Some(img));
-                    }
+                    update_tray_killswitch(&app_handle, now_frozen);
                     let _ = app_handle.emit("tray://killswitch-toggled", now_frozen);
                 }
             });

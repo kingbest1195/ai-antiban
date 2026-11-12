@@ -68,6 +68,13 @@ jobs:
           mkdir -p dist
           [ -f dist/index.html ] || echo '<!doctype html><title>stub</title>' > dist/index.html
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Tray main-thread guard
+        run: node scripts/check-tray-main-thread.mjs --self-test
+
       - name: Cargo test (all)
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
