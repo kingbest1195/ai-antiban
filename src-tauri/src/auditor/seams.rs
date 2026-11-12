@@ -739,9 +739,16 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             format!("http://{}/", l.local_addr().unwrap())
         };
-        assert_eq!(
-            ReqwestProbe.get(&closed, Duration::from_secs(2)).await,
-            HttpProbeOutcome::ConnectFailed
-        );
+        let refused = ReqwestProbe.get(&closed, Duration::from_secs(2)).await;
+        if cfg!(windows) {
+            // Windows retries a refused loopback connect for about two seconds, so the short
+            // limit can expire first; either way the probe reports a failure, never a response.
+            assert!(
+                matches!(refused, HttpProbeOutcome::ConnectFailed | HttpProbeOutcome::Timeout),
+                "{refused:?}"
+            );
+        } else {
+            assert_eq!(refused, HttpProbeOutcome::ConnectFailed);
+        }
     }
 }
