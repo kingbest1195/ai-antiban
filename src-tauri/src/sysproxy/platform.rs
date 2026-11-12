@@ -302,6 +302,8 @@ pub fn parse_service_order(output: &str) -> Vec<ServiceId> {
 }
 
 /// `reg query <key> /v <name>` -> value with exact type. `None` = no such value.
+/// Not used by `RealPlatform` any more (it reads the registry through the API, see
+/// [`reg_read_outcome`]): `reg.exe` prints in the OEM code page.
 pub fn parse_reg_query_value(output: &str, name: &str) -> Option<RegValue> {
     for line in output.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -365,6 +367,96 @@ pub fn parse_reg_query_names(output: &str) -> Vec<String> {
         }
     }
     names
+}
+
+// Registry value types and status codes of the Windows API (winerror.h / winnt.h).
+const REG_SZ: u32 = 1;
+const REG_EXPAND_SZ: u32 = 2;
+const REG_DWORD: u32 = 4;
+const ERROR_SUCCESS: u32 = 0;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_PATH_NOT_FOUND: u32 = 3;
+
+/// UTF-16LE bytes -> text. `None` for an odd length or an unpaired surrogate: such a string cannot
+/// be written back unchanged, so it is never decoded lossily.
+fn utf16le_to_string(bytes: &[u8]) -> Option<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16(&units).ok()
+}
+
+/// Turns the raw answer of the registry API (`RegGetValueW`: status, value type, data) into a
+/// [`RegValue`] with its exact type. `Ok(None)` is "no such value" and only the two "not found"
+/// codes mean that; any other failure is an error, so a failed read is never taken for an absent
+/// value (a restore would delete what it should not). `REG_SZ` / `REG_EXPAND_SZ` / `REG_DWORD`
+/// are the types Zastava can write back unchanged; everything else (`REG_BINARY`, `REG_MULTI_SZ`,
+/// `REG_QWORD`, ...) is `Unsupported`.
+pub fn reg_read_outcome(
+    status: u32,
+    kind: u32,
+    data: &[u8],
+    op: &'static str,
+) -> PResult<Option<RegValue>> {
+    match status {
+        ERROR_SUCCESS => {}
+        ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => return Ok(None),
+        _ => return Err(PlatformError::Failed(op)),
+    }
+    match kind {
+        REG_SZ | REG_EXPAND_SZ => {
+            let text = utf16le_to_string(data).ok_or(PlatformError::Unsupported(op))?;
+            // The API terminates strings with NUL; a stored value may carry extra ones.
+            let text = text.trim_end_matches('\0').to_string();
+            Ok(Some(RegValue {
+                kind: if kind == REG_SZ {
+                    RegKind::Sz
+                } else {
+                    RegKind::ExpandSz
+                },
+                data: text,
+            }))
+        }
+        REG_DWORD => {
+            let bytes: [u8; 4] = data
+                .try_into()
+                .map_err(|_| PlatformError::Unsupported(op))?;
+            Ok(Some(RegValue::dword(u32::from_le_bytes(bytes))))
+        }
+        _ => Err(PlatformError::Unsupported(op)),
+    }
+}
+
+/// One value of `HKEY_CURRENT_USER\<subkey>`, read through the registry API.
+#[cfg(target_os = "windows")]
+fn registry_get(subkey: &str, name: &str, op: &'static str) -> PResult<Option<RegValue>> {
+    let r = ffi::reg_get_hkcu(subkey, name);
+    reg_read_outcome(r.status, r.kind, &r.data, op)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn registry_get(_subkey: &str, _name: &str, op: &'static str) -> PResult<Option<RegValue>> {
+    Err(PlatformError::Unsupported(op))
+}
+
+/// Names of all values of `HKEY_CURRENT_USER\<subkey>`, whatever their type. A name that is not
+/// valid UTF-16 is left out (it cannot be one of ours).
+#[cfg(target_os = "windows")]
+fn registry_names(subkey: &str, op: &'static str) -> PResult<Vec<String>> {
+    let names = ffi::reg_names_hkcu(subkey).map_err(|_| PlatformError::Failed(op))?;
+    Ok(names
+        .into_iter()
+        .filter_map(|n| String::from_utf16(&n).ok())
+        .collect())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn registry_names(_subkey: &str, op: &'static str) -> PResult<Vec<String>> {
+    Err(PlatformError::Unsupported(op))
 }
 
 /// Parsed `scutil` dictionary of `Setup:/Network/Service/<id>/DNS`.
@@ -432,8 +524,15 @@ pub fn parse_getdnsservers(output: &str) -> Vec<String> {
 // RealPlatform
 // ---------------------------------------------------------------------------------------------
 
+/// `reg add` / `reg delete` spelling of the keys (writes still go through `reg.exe`; its
+/// arguments are UTF-16 on the command line, so non-ASCII values survive).
 const INET_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 const ENV_KEY: &str = r"HKCU\Environment";
+/// The same keys below `HKEY_CURRENT_USER`, as the registry API wants them. Reads go through the
+/// API: `reg.exe` prints in the OEM code page (cp866 on a Russian Windows), which turns a profile
+/// path like `C:\Users\Иван` into garbage, and its exit code was never checked.
+const INET_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+const ENV_SUBKEY: &str = "Environment";
 
 /// Checks the process-wide OS dry-run switch at the entry of every real call.
 /// Returns `Err(DryRun)` (and counts the blocked call) when OS effects are off.
@@ -748,8 +847,7 @@ impl Platform for RealPlatform {
                 Some(v.to_string())
             })
         } else if cfg!(target_os = "windows") {
-            let (_, text) = run("reg", &["query", ENV_KEY, "/v", key], "get_user_env")?;
-            match parse_reg_query_value(&text, key) {
+            match registry_get(ENV_SUBKEY, key, "get_user_env")? {
                 None => Ok(None),
                 Some(RegValue {
                     kind: RegKind::Sz,
@@ -803,15 +901,13 @@ impl Platform for RealPlatform {
     fn list_user_env_names(&self) -> PResult<Vec<String>> {
         Self::require_windows("list_user_env_names")?;
         dry_run_gate("reg:query-env")?;
-        let (_, text) = run("reg", &["query", ENV_KEY], "list_user_env_names")?;
-        Ok(parse_reg_query_names(&text))
+        registry_names(ENV_SUBKEY, "list_user_env_names")
     }
 
     fn get_inet(&self, name: &str) -> PResult<Option<RegValue>> {
         Self::require_windows("get_inet")?;
         dry_run_gate("reg:query")?;
-        let (_, text) = run("reg", &["query", INET_KEY, "/v", name], "get_inet")?;
-        Ok(parse_reg_query_value(&text, name))
+        registry_get(INET_SUBKEY, name, "get_inet")
     }
 
     fn set_inet(&self, name: &str, value: &RegValue) -> PResult<()> {
@@ -892,10 +988,186 @@ impl Platform for RealPlatform {
     }
 }
 
-/// Windows FFI moved here unchanged from `sysproxy/windows.rs` (no new `unsafe`).
+/// Windows FFI: the WinINet refresh, the environment broadcast and the registry reads.
 /// Compiled and verified only by the Windows CI job.
 #[cfg(target_os = "windows")]
 mod ffi {
+    use core::ffi::c_void;
+
+    /// What `RegGetValueW` answered: its status code, the value type and the raw data.
+    pub struct RegRead {
+        pub status: u32,
+        pub kind: u32,
+        pub data: Vec<u8>,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegGetValueW(
+            hkey: *mut c_void,
+            lp_sub_key: *const u16,
+            lp_value: *const u16,
+            dw_flags: u32,
+            pdw_type: *mut u32,
+            pv_data: *mut c_void,
+            pcb_data: *mut u32,
+        ) -> i32;
+        fn RegOpenKeyExW(
+            hkey: *mut c_void,
+            lp_sub_key: *const u16,
+            ul_options: u32,
+            sam_desired: u32,
+            phk_result: *mut *mut c_void,
+        ) -> i32;
+        fn RegEnumValueW(
+            hkey: *mut c_void,
+            dw_index: u32,
+            lp_value_name: *mut u16,
+            lpcch_value_name: *mut u32,
+            lp_reserved: *mut u32,
+            lp_type: *mut u32,
+            lp_data: *mut u8,
+            lpcb_data: *mut u32,
+        ) -> i32;
+        fn RegCloseKey(hkey: *mut c_void) -> i32;
+    }
+
+    /// `HKEY_CURRENT_USER` (0x80000001, sign-extended like the SDK does).
+    const HKEY_CURRENT_USER: *mut c_void = (-2147483647_i32) as isize as *mut c_void;
+    /// `RRF_RT_ANY`: accept every value type. `RRF_NOEXPAND`: leave `REG_EXPAND_SZ` unexpanded
+    /// (the type stays visible and the text is the one that was stored).
+    const RRF_RT_ANY: u32 = 0x0000_ffff;
+    const RRF_NOEXPAND: u32 = 0x1000_0000;
+    const KEY_READ: u32 = 0x0002_0019;
+    const ERROR_MORE_DATA: u32 = 234;
+    const ERROR_NO_MORE_ITEMS: u32 = 259;
+    /// Longest value name the registry allows (16383 characters) plus the terminator.
+    const MAX_VALUE_NAME: usize = 16384;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Reads one value of `HKEY_CURRENT_USER\<subkey>` with its type. The status is the Win32
+    /// error code (`0` = success, `2` / `3` = not found).
+    pub fn reg_get_hkcu(subkey: &str, name: &str) -> RegRead {
+        let sub = wide(subkey);
+        let nm = wide(name);
+        let flags = RRF_RT_ANY | RRF_NOEXPAND;
+        let mut kind = 0u32;
+        let mut size = 0u32;
+        // SAFETY: both strings are NUL-terminated and outlive the call; a null data pointer asks
+        // for the size only.
+        let st = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                sub.as_ptr(),
+                nm.as_ptr(),
+                flags,
+                &mut kind,
+                core::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        if st != 0 {
+            return RegRead {
+                status: st as u32,
+                kind: 0,
+                data: Vec::new(),
+            };
+        }
+        // The value can grow between the two calls: retry a few times on ERROR_MORE_DATA.
+        for _ in 0..4 {
+            if size == 0 {
+                return RegRead {
+                    status: 0,
+                    kind,
+                    data: Vec::new(),
+                };
+            }
+            let mut buf = vec![0u8; size as usize];
+            let mut cb = size;
+            // SAFETY: `buf` holds `cb` writable bytes; the strings are NUL-terminated.
+            let st = unsafe {
+                RegGetValueW(
+                    HKEY_CURRENT_USER,
+                    sub.as_ptr(),
+                    nm.as_ptr(),
+                    flags,
+                    &mut kind,
+                    buf.as_mut_ptr().cast(),
+                    &mut cb,
+                )
+            };
+            match st as u32 {
+                0 => {
+                    buf.truncate(cb as usize);
+                    return RegRead {
+                        status: 0,
+                        kind,
+                        data: buf,
+                    };
+                }
+                ERROR_MORE_DATA => size = cb.max(size.saturating_add(2)),
+                other => {
+                    return RegRead {
+                        status: other,
+                        kind: 0,
+                        data: Vec::new(),
+                    };
+                }
+            }
+        }
+        RegRead {
+            status: ERROR_MORE_DATA,
+            kind: 0,
+            data: Vec::new(),
+        }
+    }
+
+    /// Names of all values of `HKEY_CURRENT_USER\<subkey>` (UTF-16, without the terminator).
+    pub fn reg_names_hkcu(subkey: &str) -> Result<Vec<Vec<u16>>, u32> {
+        let sub = wide(subkey);
+        let mut key: *mut c_void = core::ptr::null_mut();
+        // SAFETY: `sub` is NUL-terminated; `key` receives the handle.
+        let st = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut key) };
+        if st != 0 {
+            return Err(st as u32);
+        }
+        let mut names = Vec::new();
+        let mut buf = vec![0u16; MAX_VALUE_NAME];
+        let mut result = Ok(());
+        for index in 0u32.. {
+            let mut len = buf.len() as u32;
+            // SAFETY: `buf` has room for `len` UTF-16 units; the other outputs are not wanted.
+            let st = unsafe {
+                RegEnumValueW(
+                    key,
+                    index,
+                    buf.as_mut_ptr(),
+                    &mut len,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+            match st as u32 {
+                0 => names.push(buf[..len as usize].to_vec()),
+                ERROR_NO_MORE_ITEMS => break,
+                other => {
+                    result = Err(other);
+                    break;
+                }
+            }
+        }
+        // SAFETY: `key` was opened above and is closed exactly once.
+        unsafe {
+            RegCloseKey(key);
+        }
+        result.map(|()| names)
+    }
+
     pub fn inet_refresh() {
         #[link(name = "wininet")]
         unsafe extern "system" {
@@ -1025,7 +1297,14 @@ mod fake {
         os_writes: usize,
         fail: BTreeMap<PlatOp, usize>,
         excluded: Vec<PathBuf>,
+        /// The next `set_chain` writes the HTTP side only and then fails (a process killed
+        /// between the two commands).
+        tear_chain: bool,
+        /// How the "OS" rewrites a PAC URL it stores (case, default port, ...).
+        pac_normalizer: Option<PacNormalizer>,
     }
+
+    type PacNormalizer = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
     /// In-memory OS. `Clone` shares the state. The call log records operation names and resource
     /// ids only, never values.
@@ -1130,6 +1409,18 @@ mod fake {
             self.st.lock().unwrap().fail.insert(op, n);
         }
 
+        /// The next `set_chain` lands its HTTP side and fails before the HTTPS side, as if the
+        /// process had been killed between the two `networksetup` commands (the call after it
+        /// fails as well).
+        pub fn tear_next_set_chain(&self) {
+            self.st.lock().unwrap().tear_chain = true;
+        }
+
+        /// From now on the (fake) OS stores every PAC URL after passing it through `f`.
+        pub fn normalize_pac_urls_with(&self, f: impl Fn(&str) -> String + Send + Sync + 'static) {
+            self.st.lock().unwrap().pac_normalizer = Some(Arc::new(f));
+        }
+
         /// Number of writes of settings into the (fake) OS: set/unset/delete calls that succeeded.
         pub fn os_writes(&self) -> usize {
             self.st.lock().unwrap().os_writes
@@ -1198,10 +1489,15 @@ mod fake {
                 return Err(PlatformError::NotFound("set_pac"));
             }
             let mut s = self.st.lock().unwrap();
+            let norm = s.pac_normalizer.clone();
             let cur = s.pac.entry(svc.key()).or_default();
             if let Some(u) = &pac.url {
                 // networksetup cannot unset a URL: an empty string reads back as absent.
-                cur.url = if u.is_empty() { None } else { Some(u.clone()) };
+                cur.url = if u.is_empty() {
+                    None
+                } else {
+                    Some(norm.as_ref().map_or_else(|| u.clone(), |f| f(u)))
+                };
             }
             if let Some(e) = pac.enabled {
                 cur.enabled = Some(e);
@@ -1224,8 +1520,13 @@ mod fake {
                 return Err(PlatformError::NotFound("set_chain"));
             }
             let mut s = self.st.lock().unwrap();
+            let tear = std::mem::take(&mut s.tear_chain);
             let cur = s.chain.entry(svc.key()).or_default();
-            for (dst, src) in [(&mut cur.http, &chain.http), (&mut cur.https, &chain.https)] {
+            let sides = [(&mut cur.http, &chain.http), (&mut cur.https, &chain.https)];
+            for (n, (dst, src)) in sides.into_iter().enumerate() {
+                if tear && n == 1 {
+                    break; // only the HTTP side landed
+                }
                 if src.server.is_some() && src.port.is_some() {
                     dst.server = src.server.clone();
                     dst.port = src.port;
@@ -1233,6 +1534,11 @@ mod fake {
                 if src.enabled.is_some() {
                     dst.enabled = src.enabled;
                 }
+            }
+            if tear {
+                // The process is gone: the write-back that would follow fails too.
+                s.fail.insert(PlatOp::SetChain, 1);
+                return Err(PlatformError::Failed("set_chain"));
             }
             Ok(())
         }
@@ -1540,5 +1846,115 @@ mod tests {
         p.set_proxy_bypass_domains(&svc, &[]).unwrap();
         assert_eq!(p.os_writes(), 1);
         assert!(p.get_proxy_bypass_domains(&svc).unwrap().is_empty());
+    }
+
+    // --- WP-26: registry reads through the API (pure part, any OS) ---------------------------
+
+    fn utf16(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    fn utf16_nul(s: &str) -> Vec<u8> {
+        let mut b = utf16(s);
+        b.extend([0, 0]);
+        b
+    }
+
+    #[test]
+    fn registry_string_with_a_cyrillic_profile_path_survives_exactly() {
+        let path = "file:///C:/Users/Иван/AppData/Local/zastava/proxy.pac";
+        let got = reg_read_outcome(0, 1, &utf16_nul(path), "get_inet").unwrap();
+        assert_eq!(got, Some(RegValue::sz(path)));
+        // The same text, as the OEM-decoded `reg query` output would have damaged it.
+        assert!(!got.unwrap().data.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn registry_value_types_are_kept_and_unknown_ones_are_unsupported() {
+        let ok = |kind: u32, data: &[u8]| reg_read_outcome(0, kind, data, "get_inet");
+        assert_eq!(ok(1, &utf16_nul("a")).unwrap(), Some(RegValue::sz("a")));
+        assert_eq!(
+            ok(2, &utf16_nul("%USERPROFILE%\\x")).unwrap(),
+            Some(RegValue::expand_sz("%USERPROFILE%\\x")),
+            "REG_EXPAND_SZ stays unexpanded and keeps its type"
+        );
+        assert_eq!(
+            ok(4, &1u32.to_le_bytes()).unwrap(),
+            Some(RegValue::dword(1))
+        );
+        assert_eq!(
+            ok(4, &0xdead_beefu32.to_le_bytes()).unwrap(),
+            Some(RegValue::dword(0xdead_beef))
+        );
+        for (name, kind) in [
+            ("REG_BINARY", 3u32),
+            ("REG_DWORD_BIG_ENDIAN", 5),
+            ("REG_LINK", 6),
+            ("REG_MULTI_SZ", 7),
+            ("REG_QWORD", 11),
+            ("REG_NONE", 0),
+        ] {
+            assert_eq!(
+                ok(kind, &[1, 2, 3, 4]),
+                Err(PlatformError::Unsupported("get_inet")),
+                "{name} must be Unsupported, never `no value`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_registry_read_is_an_error_and_only_not_found_means_absent() {
+        let read = |status: u32| reg_read_outcome(status, 0, &[], "get_inet");
+        assert_eq!(read(2).unwrap(), None, "ERROR_FILE_NOT_FOUND");
+        assert_eq!(read(3).unwrap(), None, "ERROR_PATH_NOT_FOUND");
+        for status in [5u32, 1450, 234, 1] {
+            // ACCESS_DENIED, NO_SYSTEM_RESOURCES, MORE_DATA, INCORRECT_FUNCTION
+            assert_eq!(
+                read(status),
+                Err(PlatformError::Failed("get_inet")),
+                "status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_strings_that_cannot_round_trip_are_refused_not_repaired() {
+        // Unpaired surrogate, odd length, a DWORD of the wrong size.
+        let lone = [0x00, 0xD8, 0x41, 0x00];
+        assert_eq!(
+            reg_read_outcome(0, 1, &lone, "get_user_env"),
+            Err(PlatformError::Unsupported("get_user_env"))
+        );
+        assert_eq!(
+            reg_read_outcome(0, 1, &[0x41, 0x00, 0x42], "get_user_env"),
+            Err(PlatformError::Unsupported("get_user_env"))
+        );
+        assert_eq!(
+            reg_read_outcome(0, 4, &[1, 0, 0], "get_user_env"),
+            Err(PlatformError::Unsupported("get_user_env"))
+        );
+    }
+
+    #[test]
+    fn an_empty_registry_string_is_a_value_and_differs_from_a_missing_one() {
+        let empty = reg_read_outcome(0, 1, &utf16_nul(""), "get_inet").unwrap();
+        assert_eq!(empty, Some(RegValue::sz("")));
+        let no_terminator = reg_read_outcome(0, 1, &[], "get_inet").unwrap();
+        assert_eq!(no_terminator, Some(RegValue::sz("")));
+        assert_eq!(reg_read_outcome(2, 0, &[], "get_inet").unwrap(), None);
+        // Extra trailing NULs of a stored value are dropped, inner text is kept.
+        let two = [utf16("a"), vec![0, 0, 0, 0]].concat();
+        assert_eq!(
+            reg_read_outcome(0, 1, &two, "get_inet").unwrap(),
+            Some(RegValue::sz("a"))
+        );
+    }
+
+    #[test]
+    fn registry_debug_output_stays_redacted() {
+        let v = reg_read_outcome(0, 1, &utf16_nul("secret-path"), "get_inet")
+            .unwrap()
+            .unwrap();
+        assert!(!format!("{v:?}").contains("secret-path"));
     }
 }

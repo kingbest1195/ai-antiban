@@ -33,6 +33,17 @@ pub const SCHEMA_VERSION: u32 = 1;
 const SUBDIR: &str = "ownership";
 const JOURNAL_FILE: &str = "journal.json";
 const LOCK_FILE: &str = "journal.lock";
+const APP_LOCK_FILE: &str = "app.lock";
+
+/// The directory the journal and its locks live in.
+pub fn ownership_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join(SUBDIR)
+}
+
+/// The lock a running Zastava holds for its whole life (see `sysproxy::hold_app_lock`).
+pub fn app_lock_path(data_dir: &Path) -> PathBuf {
+    ownership_dir(data_dir).join(APP_LOCK_FILE)
+}
 
 /// A system setting Zastava may own.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -61,10 +72,16 @@ pub enum Resource {
     File { file: String, skeleton: String },
 }
 
-/// Last path components, for logs: names a file without the user's home directory.
+/// Last path components, for logs: names a file without the user's home directory. A path that
+/// goes through `Users/<name>` or `home/<name>` is cut right after the account name, so the name
+/// never reaches a log (`/Users/ivan/.zshrc` -> `.zshrc`).
 fn file_label(file: &str) -> String {
     let parts: Vec<&str> = file.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
-    parts[parts.len().saturating_sub(3)..].join("/")
+    let rest = parts
+        .iter()
+        .position(|p| p.eq_ignore_ascii_case("Users") || p.eq_ignore_ascii_case("home"))
+        .map_or(&parts[..], |i| &parts[(i + 2).min(parts.len())..]);
+    rest[rest.len().saturating_sub(3)..].join("/")
 }
 
 impl Resource {
@@ -110,7 +127,8 @@ impl Resource {
 }
 
 /// A typed snapshot of a resource. "No value" is part of the type, never an empty string.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// `Debug` names the variant and whether a value is there, never the value itself.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Value {
     Pac(PacState),
@@ -125,6 +143,25 @@ pub enum Value {
     Present(bool),
     /// The text of the Zastava block (line ends normalised to `\n`); `None` = no block.
     Block(Option<String>),
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn shown(present: bool) -> &'static str {
+            if present { "<redacted>" } else { "None" }
+        }
+        match self {
+            // `PacState`, `ChainState` and `RegValue` redact their own `Debug`.
+            Value::Pac(p) => write!(f, "Pac({p:?})"),
+            Value::Chain(c) => write!(f, "Chain({c:?})"),
+            Value::Reg(r) => write!(f, "Reg({r:?})"),
+            Value::Bypass(d) => write!(f, "Bypass(<{} entries>)", d.len()),
+            Value::Env(v) => write!(f, "Env({})", shown(v.is_some())),
+            Value::Json(v) => write!(f, "Json({})", shown(v.is_some())),
+            Value::Block(v) => write!(f, "Block({})", shown(v.is_some())),
+            Value::Present(b) => write!(f, "Present({b})"),
+        }
+    }
 }
 
 impl Value {
@@ -175,6 +212,121 @@ pub struct Entry {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Scheme and host in lower case, the default port dropped, an empty path read as `/`: the ways
+/// an OS may rewrite a URL it was given without changing where it points. `None` = not a URL.
+fn normalize_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://")?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    if scheme.is_empty() || authority.is_empty() {
+        return None;
+    }
+    let scheme = scheme.to_ascii_lowercase();
+    let mut authority = authority.to_ascii_lowercase();
+    let default_port = match scheme.as_str() {
+        "http" => ":80",
+        "https" => ":443",
+        _ => "",
+    };
+    if !default_port.is_empty() && authority.ends_with(default_port) {
+        authority.truncate(authority.len() - default_port.len());
+    }
+    let tail = if tail.is_empty() || tail.starts_with(['?', '#']) {
+        format!("/{tail}")
+    } else {
+        tail.to_string()
+    };
+    Some(format!("{scheme}://{authority}{tail}"))
+}
+
+fn urls_equivalent(a: &str, b: &str) -> bool {
+    a == b
+        || matches!(
+            (normalize_url(a), normalize_url(b)),
+            (Some(x), Some(y)) if x == y
+        )
+}
+
+/// Whether `known` (a value we wrote) and `cur` (what the OS holds now) are the same value up to
+/// the OS's own normalisation of a URL (case of the host, default port, empty path).
+fn same_as_written(res: &Resource, known: &Value, cur: &Value) -> bool {
+    if known == cur {
+        return true;
+    }
+    match (res, known, cur) {
+        (Resource::Pac { .. }, Value::Pac(a), Value::Pac(b)) => {
+            a.enabled == b.enabled
+                && match (&a.url, &b.url) {
+                    (Some(x), Some(y)) => urls_equivalent(x, y),
+                    (x, y) => x == y,
+                }
+        }
+        (Resource::Inet { name }, Value::Reg(Some(a)), Value::Reg(Some(b)))
+            if name == "AutoConfigURL" =>
+        {
+            a.kind == b.kind && urls_equivalent(&a.data, &b.data)
+        }
+        _ => false,
+    }
+}
+
+/// The PAC URL a value carries (`Pac` of a service, `AutoConfigURL` of WinINet), if any.
+fn pac_url_of<'a>(res: &Resource, v: &'a Value) -> Option<&'a str> {
+    match (res, v) {
+        (Resource::Pac { .. }, Value::Pac(p)) => p.url.as_deref(),
+        (Resource::Inet { name }, Value::Reg(Some(r))) if name == "AutoConfigURL" => {
+            Some(r.data.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `cur` is a PAC address of Zastava's own gateway. The gateway port is the one of the
+/// value being written (`new`). Such a value is never "somebody else's": it must not become the
+/// baseline, or a restore would put Zastava's own PAC back.
+fn carries_zastava_signature(res: &Resource, cur: &Value, new: &Value) -> bool {
+    let port = pac_url_of(res, new).and_then(super::parse_gateway_port_from_pac_url);
+    pac_url_of(res, cur).is_some_and(|u| super::cleanup::is_zastava_pac_signature(u, port))
+}
+
+impl Entry {
+    /// Whether `cur` is a value this record accounts for: what we last wrote (`expected`), what
+    /// an in-flight write was about to set (`pending`) - both up to the OS's normalisation of a
+    /// URL - or, for the explicit proxy of a service, a half-finished write. `set_chain` is two
+    /// commands (HTTP, then HTTPS); a process killed between them leaves each side at either the
+    /// old or the new value, and that mix is ours, not an external change.
+    fn is_ours(&self, cur: &Value) -> bool {
+        let written = |known: &Option<Value>| {
+            known
+                .as_ref()
+                .is_some_and(|k| same_as_written(&self.resource, k, cur))
+        };
+        written(&self.expected) || written(&self.pending) || self.is_half_written_chain(cur)
+    }
+
+    fn is_half_written_chain(&self, cur: &Value) -> bool {
+        let (Resource::Chain { .. }, Value::Chain(c), EntryState::Pending) =
+            (&self.resource, cur, self.state)
+        else {
+            return false;
+        };
+        let known: Vec<&ChainState> = [
+            Some(&self.baseline),
+            self.expected.as_ref(),
+            self.pending.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|v| match v {
+            Value::Chain(k) => Some(k),
+            _ => None,
+        })
+        .collect();
+        known.iter().any(|k| k.http == c.http) && known.iter().any(|k| k.https == c.https)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -284,6 +436,11 @@ impl RecoveryReport {
     }
     pub fn has_failures(&self) -> bool {
         self.failed() > 0 || self.journal_write_failed
+    }
+    /// A network setting (PAC / explicit proxy) was NOT restored because an active VPN keeps
+    /// temporary DNS settings: it stays in the journal and is put back at the next start.
+    pub fn restore_deferred_by_vpn_dns(&self) -> bool {
+        self.count(|o| matches!(o, Outcome::Failed("temp_dns"))) > 0
     }
     /// One line for logs: counts and resource names only.
     pub fn summary(&self) -> String {
@@ -576,18 +733,46 @@ impl Journal {
     /// Opens (or starts) the journal under `<data_dir>/ownership/`. Fails closed on a held lock,
     /// an unknown schema or a corrupt file, without touching the file.
     pub fn open(fs: Arc<dyn Fs>, data_dir: &Path) -> Result<Journal, JournalError> {
-        let root = data_dir.join(SUBDIR);
+        Self::open_migrating(fs, data_dir, None)
+    }
+
+    /// [`Journal::open`] for a journal that moved: when `data_dir` has no journal yet and
+    /// `legacy_dir` (the previous location) has one, it is carried over (written to the new place
+    /// first, then removed from the old one). A journal already in the new place always wins.
+    pub fn open_migrating(
+        fs: Arc<dyn Fs>,
+        data_dir: &Path,
+        legacy_dir: Option<&Path>,
+    ) -> Result<Journal, JournalError> {
+        let root = ownership_dir(data_dir);
         fs.create_private_dir_all(&root)
             .map_err(|e| JournalError::Io("create_dir", e.kind()))?;
         let lock = fs.try_lock(&root.join(LOCK_FILE)).map_err(|e| match e {
             LockError::Held => JournalError::Locked,
             LockError::Io(k) => JournalError::Io("lock", k),
         })?;
+        // We hold the lock: a temp file of an earlier, killed write is garbage now.
+        fs.sweep_stale_tmp(&root);
         let path = root.join(JOURNAL_FILE);
-        let (entries, marks) = match fs
+        let mut found = fs
             .read(&path)
-            .map_err(|e| JournalError::Io("read", e.kind()))?
+            .map_err(|e| JournalError::Io("read", e.kind()))?;
+        if found.is_none()
+            && let Some(old) = legacy_dir.filter(|d| *d != data_dir)
         {
+            let old_path = ownership_dir(old).join(JOURNAL_FILE);
+            if let Some(bytes) = fs
+                .read(&old_path)
+                .map_err(|e| JournalError::Io("read", e.kind()))?
+            {
+                fs.write_atomic(&path, &bytes, WriteMode::Private)
+                    .map_err(|e| JournalError::Io("write", e.kind()))?;
+                // The copy is durable; the old file must not be read again. Best effort.
+                let _ = fs.remove_file(&old_path);
+                found = Some(bytes);
+            }
+        }
+        let (entries, marks) = match found {
             None => (Vec::new(), Vec::new()),
             Some(bytes) => {
                 let parsed = parse(&bytes)?;
@@ -686,7 +871,11 @@ impl Journal {
             }
             Some(i) => {
                 let e = &mut self.entries[i];
-                if e.state == EntryState::Applied && e.expected.as_ref() == Some(&new) && cur == new
+                // Unchanged: the OS still holds what we wrote last, and that is `new` (the OS may
+                // have normalised the URL, so the stored value is the one that was read back).
+                if e.state == EntryState::Applied
+                    && e.expected.as_ref() == Some(&cur)
+                    && same_as_written(res, &cur, &new)
                 {
                     if e.notify_pending {
                         // The value is in place; only the earlier notification is still owed.
@@ -697,7 +886,7 @@ impl Journal {
                     }
                     return Ok(ApplyOutcome::Unchanged);
                 }
-                let ours = e.expected.as_ref() == Some(&cur) || e.pending.as_ref() == Some(&cur);
+                let ours = e.is_ours(&cur) || carries_zastava_signature(res, &cur, &new);
                 if !ours && cur != e.baseline && cur != new {
                     // A foreign change after us: it becomes the baseline. Names only in the log.
                     eprintln!(
@@ -727,8 +916,15 @@ impl Journal {
             }
         };
         let i = self.index_of(res).ok_or(JournalError::Corrupt)?;
+        // What the OS holds now is what restore will compare against: the OS may normalise a
+        // URL or a port, and the value we asked for would then never be found again. If the
+        // read fails, or shows the old baseline (the write is not visible yet), `new` stays.
+        let stored = match read_value(&*self.fs, platform, res) {
+            Ok(v) if v.matches(res) && v != self.entries[i].baseline => v,
+            _ => new,
+        };
         let e = &mut self.entries[i];
-        e.expected = Some(new);
+        e.expected = Some(stored);
         e.pending = None;
         e.state = EntryState::Applied;
         e.notify_pending = notified == Notified::Failed;
@@ -826,8 +1022,7 @@ impl Journal {
             Err(PlatformError::NotFound(_)) => Outcome::TargetGone,
             Err(_) => return Outcome::Failed("read"),
             Ok(cur) => {
-                let ours =
-                    entry.expected.as_ref() == Some(&cur) || entry.pending.as_ref() == Some(&cur);
+                let ours = entry.is_ours(&cur);
                 if cur == entry.baseline {
                     // A notification that failed earlier is repeated before the record goes.
                     if entry.notify_pending && notify(platform, res) == Notified::Failed {
@@ -866,8 +1061,7 @@ impl Journal {
     /// Whether the resource currently holds a value Zastava wrote itself (`cur` equals the last
     /// confirmed or the in-flight value of its record). `false` without a record.
     pub fn owns(&self, res: &Resource, cur: &Value) -> bool {
-        self.entry(res)
-            .is_some_and(|e| e.expected.as_ref() == Some(cur) || e.pending.as_ref() == Some(cur))
+        self.entry(res).is_some_and(|e| e.is_ours(cur))
     }
 
     /// Whether the one-shot marker `name` is set.
@@ -2091,5 +2285,414 @@ mod tests {
             file: "C:\\Users\\someone\\Documents\\PowerShell\\profile.ps1".into(),
         };
         assert_eq!(b.id(), "block:Documents/PowerShell/profile.ps1");
+    }
+
+    // --- WP-26: set_chain killed between its two commands ------------------------------------
+
+    fn upstream(host: &str, port: u16, on: bool) -> ProxyEndpoint {
+        ProxyEndpoint {
+            enabled: Some(on),
+            server: Some(host.into()),
+            port: Some(port),
+            ..Default::default()
+        }
+    }
+
+    /// Both sides point at their own upstream; `http_on` / `https_on` are the state flags.
+    fn two_sided(http_on: bool, https_on: bool) -> ChainState {
+        ChainState {
+            http: upstream("h1", 1080, http_on),
+            https: upstream("h2", 2080, https_on),
+        }
+    }
+
+    fn chain_res() -> Resource {
+        Resource::Chain { service: wifi() }
+    }
+
+    /// The process dies between `-setwebproxystate` and `-setsecurewebproxystate`: the journal
+    /// holds the intent, the service holds {http off, https on}.
+    fn kill_between_chain_commands(fs: &FakeFs, p: &FakePlatform) {
+        p.add_service(wifi());
+        p.seed_chain(&wifi(), two_sided(true, true));
+        let mut j = open(fs).unwrap();
+        p.tear_next_set_chain();
+        assert!(
+            j.apply(p, &chain_res(), Value::Chain(two_sided(false, false)))
+                .is_err()
+        );
+        assert_eq!(
+            p.chain_of(&wifi()),
+            two_sided(false, true),
+            "setup: exactly the half-written state"
+        );
+    }
+
+    #[test]
+    fn kill_between_the_chain_commands_is_ours_and_the_user_proxy_comes_back() {
+        let (fs, p) = setup();
+        kill_between_chain_commands(&fs, &p);
+        let r = recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
+        assert_eq!(
+            r.external(),
+            0,
+            "a half-written chain is not an external change"
+        );
+        assert_eq!(r.restored(), 1);
+        assert_eq!(p.chain_of(&wifi()), two_sided(true, true));
+    }
+
+    #[test]
+    fn kill_between_the_chain_commands_does_not_rebase_the_baseline() {
+        let (fs, p) = setup();
+        kill_between_chain_commands(&fs, &p);
+        let mut j = open(&fs).unwrap();
+        let outcome = j
+            .apply(&p, &chain_res(), Value::Chain(two_sided(false, false)))
+            .unwrap();
+        assert_eq!(outcome, ApplyOutcome::Applied, "not Rebased");
+        assert_eq!(
+            j.entry(&chain_res()).unwrap().baseline,
+            Value::Chain(two_sided(true, true)),
+            "the baseline stays what the user had, not the half state"
+        );
+        j.restore_all(&p);
+        assert_eq!(p.chain_of(&wifi()), two_sided(true, true));
+    }
+
+    #[test]
+    fn a_mixed_chain_after_a_completed_write_is_an_external_change() {
+        let (fs, p) = setup();
+        p.add_service(wifi());
+        p.seed_chain(&wifi(), two_sided(true, true));
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &chain_res(), Value::Chain(two_sided(false, false)))
+            .unwrap();
+        // The user switches only the HTTP proxy back on: that is theirs, not a half write.
+        p.seed_chain(&wifi(), two_sided(true, false));
+        let r = j.restore_all(&p);
+        assert_eq!(r.external(), 1);
+        assert_eq!(p.chain_of(&wifi()), two_sided(true, false));
+    }
+
+    #[test]
+    fn a_mix_with_a_value_nobody_wrote_is_external_even_while_a_write_is_in_flight() {
+        let (fs, p) = setup();
+        kill_between_chain_commands(&fs, &p);
+        // Somebody points the HTTP side somewhere else while the intent is still open.
+        p.seed_chain(
+            &wifi(),
+            ChainState {
+                http: upstream("elsewhere", 9, true),
+                https: upstream("h2", 2080, true),
+            },
+        );
+        let r = recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
+        assert_eq!(r.external(), 1);
+        assert_eq!(
+            p.chain_of(&wifi()).http.server.as_deref(),
+            Some("elsewhere")
+        );
+    }
+
+    // --- WP-26: read-back and the OS rewriting a URL -----------------------------------------
+
+    fn pac_res() -> Resource {
+        Resource::Pac { service: wifi() }
+    }
+
+    /// An OS that stores the host of a PAC URL in upper case.
+    fn shouting_os(p: &FakePlatform) {
+        p.add_service(wifi());
+        p.normalize_pac_urls_with(|u| u.replace("localhost", "LOCALHOST"));
+    }
+
+    const OURS: &str = "http://localhost:8899/proxy.pac";
+    const OURS_STORED: &str = "http://LOCALHOST:8899/proxy.pac";
+
+    #[test]
+    fn what_the_os_reads_back_is_stored_as_expected() {
+        let (fs, p) = setup();
+        shouting_os(&p);
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &pac_res(), pac_value(OURS, true)).unwrap();
+        assert_eq!(
+            j.entry(&pac_res()).unwrap().expected,
+            Some(pac_value(OURS_STORED, true)),
+            "expected is the normalised value, not the one we asked for"
+        );
+    }
+
+    #[test]
+    fn a_normalised_value_is_unchanged_on_the_next_apply() {
+        let (fs, p) = setup();
+        shouting_os(&p);
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &pac_res(), pac_value(OURS, true)).unwrap();
+        let writes = p.os_writes();
+        assert_eq!(
+            j.apply(&p, &pac_res(), pac_value(OURS, true)).unwrap(),
+            ApplyOutcome::Unchanged
+        );
+        assert_eq!(p.os_writes(), writes, "no rewrite on every refresh");
+        assert_eq!(j.entry(&pac_res()).unwrap().baseline, pac_value_absent());
+    }
+
+    fn pac_value_absent() -> Value {
+        Value::Pac(PacState::default())
+    }
+
+    #[test]
+    fn restore_after_the_os_normalised_the_url_puts_the_baseline_back() {
+        let (fs, p) = setup();
+        shouting_os(&p);
+        p.seed_pac(
+            &wifi(),
+            PacState {
+                url: Some("http://corp/p.pac".into()),
+                enabled: Some(false),
+            },
+        );
+        let mut j = open(&fs).unwrap();
+        j.apply(&p, &pac_res(), pac_value(OURS, true)).unwrap();
+        let r = j.restore_all(&p);
+        assert_eq!((r.restored(), r.external()), (1, 0));
+        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some("http://corp/p.pac"));
+        assert_eq!(p.pac_of(&wifi()).enabled, Some(false));
+    }
+
+    #[test]
+    fn crash_before_the_applied_mark_with_a_normalising_os_still_restores() {
+        let (fs, p) = setup();
+        shouting_os(&p);
+        {
+            let mut j = open(&fs).unwrap();
+            fs.fail_after(FsOp::WriteAtomic, 1); // intent lands, the "applied" write does not
+            assert!(j.apply(&p, &pac_res(), pac_value(OURS, true)).is_err());
+        }
+        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some(OURS_STORED));
+        let r = recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
+        assert_eq!(
+            (r.restored(), r.external()),
+            (1, 0),
+            "pending ~ stored value"
+        );
+        assert_eq!(p.pac_of(&wifi()).url, None);
+    }
+
+    #[test]
+    fn a_zastava_signed_pac_is_never_taken_for_a_foreign_baseline() {
+        let (fs, p) = setup();
+        p.add_service(wifi());
+        let mut j = open(&fs).unwrap();
+        j.apply(
+            &p,
+            &pac_res(),
+            pac_value("http://127.0.0.1:8899/proxy.pac", true),
+        )
+        .unwrap();
+        // The OS (or an older Zastava) leaves our own address, in a spelling we did not write.
+        p.seed_pac(
+            &wifi(),
+            PacState {
+                url: Some("http://localhost:8900/proxy.pac".into()),
+                enabled: Some(true),
+            },
+        );
+        let outcome = j
+            .apply(
+                &p,
+                &pac_res(),
+                pac_value("http://127.0.0.1:8899/proxy.pac", true),
+            )
+            .unwrap();
+        assert_eq!(outcome, ApplyOutcome::Applied, "no rebase onto our own PAC");
+        assert_eq!(j.entry(&pac_res()).unwrap().baseline, pac_value_absent());
+        j.restore_all(&p);
+        assert_eq!(
+            p.pac_of(&wifi()).url,
+            None,
+            "restore removes our PAC, not re-adds it"
+        );
+    }
+
+    #[test]
+    fn a_foreign_pac_still_becomes_the_baseline() {
+        let (fs, p) = setup();
+        p.add_service(wifi());
+        let mut j = open(&fs).unwrap();
+        j.apply(
+            &p,
+            &pac_res(),
+            pac_value("http://127.0.0.1:8899/proxy.pac", true),
+        )
+        .unwrap();
+        p.seed_pac(
+            &wifi(),
+            PacState {
+                url: Some("http://corp:8899/proxy.pac".into()),
+                enabled: Some(true),
+            },
+        );
+        let outcome = j
+            .apply(
+                &p,
+                &pac_res(),
+                pac_value("http://127.0.0.1:8899/proxy.pac", true),
+            )
+            .unwrap();
+        assert_eq!(outcome, ApplyOutcome::Rebased);
+    }
+
+    #[test]
+    fn urls_are_compared_up_to_case_default_port_and_empty_path() {
+        assert!(urls_equivalent("http://Host:80/x.pac", "HTTP://host/x.pac"));
+        assert!(urls_equivalent("https://h:443", "https://h/"));
+        assert!(!urls_equivalent("http://h:8080/x.pac", "http://h/x.pac"));
+        assert!(
+            !urls_equivalent("http://h/X.pac", "http://h/x.pac"),
+            "the path is case-sensitive"
+        );
+        assert!(!urls_equivalent("not a url", "http://h/"));
+        assert!(urls_equivalent("same", "same"));
+    }
+
+    // --- WP-26: no values in Debug, no account name in labels --------------------------------
+
+    #[test]
+    fn debug_of_a_value_never_shows_it() {
+        let secret = "hunter2";
+        let values = [
+            Value::Env(Some(secret.into())),
+            Value::Json(Some(format!("\"{secret}\""))),
+            Value::Block(Some(format!("export P={secret}"))),
+            Value::Bypass(vec![format!("{secret}.corp")]),
+            Value::Pac(PacState {
+                url: Some(format!("http://{secret}/p.pac")),
+                enabled: Some(true),
+            }),
+            Value::Chain(ChainState {
+                http: upstream(secret, 1, true),
+                https: upstream(secret, 2, true),
+            }),
+            Value::Reg(Some(RegValue::sz(secret))),
+        ];
+        for v in values {
+            let text = format!("{v:?}");
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert_eq!(format!("{:?}", Value::Env(None)), "Env(None)");
+        assert_eq!(format!("{:?}", Value::Present(true)), "Present(true)");
+    }
+
+    #[test]
+    fn file_labels_cut_the_account_name_off() {
+        for (path, want) in [
+            ("/Users/ivan/.zshrc", ".zshrc"),
+            ("/home/ivan/.claude/settings.json", ".claude/settings.json"),
+            ("C:\\Users\\Иван\\.zshrc", ".zshrc"),
+            (
+                "C:\\Users\\Иван\\AppData\\Roaming\\Code\\User\\settings.json",
+                "Code/User/settings.json",
+            ),
+            ("/Users/ivan", ""),
+            ("/opt/x/y/z/.profile", "y/z/.profile"),
+        ] {
+            let label = file_label(path);
+            assert_eq!(label, want, "{path}");
+            assert!(
+                !label.contains("ivan") && !label.contains("Иван"),
+                "{label}"
+            );
+        }
+    }
+
+    // --- WP-26: where the journal lives ------------------------------------------------------
+
+    fn legacy_journal(fs: &FakeFs, p: &FakePlatform, dir: &str) {
+        let mut j = Journal::open(Arc::new(fs.clone()), Path::new(dir)).unwrap();
+        j.apply(p, &env("A"), ev("ours")).unwrap();
+    }
+
+    #[test]
+    fn a_journal_in_the_old_place_is_carried_to_the_new_one() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        legacy_journal(&fs, &p, "/roaming");
+        let old = Path::new("/roaming").join(SUBDIR).join(JOURNAL_FILE);
+        let new = Path::new("/local").join(SUBDIR).join(JOURNAL_FILE);
+        assert!(fs.get(&old).is_some());
+        let j = Journal::open_migrating(
+            Arc::new(fs.clone()),
+            Path::new("/local"),
+            Some(Path::new("/roaming")),
+        )
+        .unwrap();
+        assert_eq!(j.entries().len(), 1, "the record came along");
+        assert!(fs.get(&new).is_some(), "written to the new place");
+        assert!(fs.get(&old).is_none(), "and gone from the old one");
+        assert_eq!(fs.mode(&new).unwrap(), Some(0o600));
+    }
+
+    #[test]
+    fn a_journal_in_the_new_place_wins_over_an_old_one() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        legacy_journal(&fs, &p, "/roaming");
+        let j = Journal::open_migrating(
+            Arc::new(fs.clone()),
+            Path::new("/local"),
+            Some(Path::new("/roaming")),
+        )
+        .unwrap();
+        drop(j);
+        // The new journal is now empty-handed on purpose: restore it, then bring a stale old one.
+        let mut j = Journal::open(Arc::new(fs.clone()), Path::new("/local")).unwrap();
+        j.restore_all(&p);
+        drop(j);
+        legacy_journal(&fs, &p, "/roaming");
+        let j = Journal::open_migrating(
+            Arc::new(fs.clone()),
+            Path::new("/local"),
+            Some(Path::new("/roaming")),
+        )
+        .unwrap();
+        assert!(j.is_empty(), "the old journal is not read again");
+        assert!(
+            fs.get(&Path::new("/roaming").join(SUBDIR).join(JOURNAL_FILE))
+                .is_some(),
+            "and not deleted either"
+        );
+    }
+
+    #[test]
+    fn a_failed_copy_to_the_new_place_leaves_the_old_journal_alone() {
+        let (fs, p) = setup();
+        p.seed_env("A", "orig");
+        legacy_journal(&fs, &p, "/roaming");
+        fs.fail_next(FsOp::WriteAtomic);
+        let r = Journal::open_migrating(
+            Arc::new(fs.clone()),
+            Path::new("/local"),
+            Some(Path::new("/roaming")),
+        );
+        assert!(matches!(r, Err(JournalError::Io("write", _))));
+        assert!(
+            fs.get(&Path::new("/roaming").join(SUBDIR).join(JOURNAL_FILE))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn temp_files_of_a_killed_write_are_swept_when_the_journal_opens() {
+        let (fs, _p) = setup();
+        let dir = Path::new(DIR).join(SUBDIR);
+        let stale = dir.join(".journal.json.zastava-tmp.4242.7");
+        let keep = dir.join("journal.json");
+        fs.put(&stale, b"half", 0o600);
+        fs.put(&keep, br#"{"schema_version":1,"entries":[]}"#, 0o600);
+        let _j = open(&fs).unwrap();
+        assert!(fs.get(&stale).is_none(), "the stale temp file is gone");
+        assert!(fs.get(&keep).is_some(), "the journal itself stays");
     }
 }

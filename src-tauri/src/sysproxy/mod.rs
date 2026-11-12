@@ -357,10 +357,12 @@ static DRY_RUN_PROGRAMS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static DRY_RUN_HOME: OnceLock<PathBuf> = OnceLock::new();
 
 /// Whether this process may touch the operating system (network services, launchd, registry,
-/// the real home directory). Always `false` inside unit tests (`cfg!(test)`), after
-/// [`force_os_dry_run`], or when `ZASTAVA_OS_DRY_RUN` is `1`/`true`.
+/// the real home directory). Default-deny in every test build: always `false` inside unit tests
+/// (`cfg!(test)`) and in integration tests (`tests/*.rs` link the library with the `test-support`
+/// feature), whether or not a test remembered to call [`force_os_dry_run`]. In a normal build it
+/// is `false` after [`force_os_dry_run`] or when `ZASTAVA_OS_DRY_RUN` is `1`/`true`.
 pub fn os_effects_enabled() -> bool {
-    if cfg!(test) || FORCE_DRY_RUN.load(Ordering::SeqCst) {
+    if cfg!(any(test, feature = "test-support")) || FORCE_DRY_RUN.load(Ordering::SeqCst) {
         return false;
     }
     !std::env::var(OS_DRY_RUN_ENV)
@@ -472,6 +474,36 @@ pub fn set_data_dir(dir: PathBuf) {
     let _ = DATA_DIR.set(dir);
 }
 
+/// Where the journal and its locks live. Windows: `%LOCALAPPDATA%\<identifier>`, not the roaming
+/// `%APPDATA%` (the journal holds values that must not follow the user to other machines, and
+/// the local profile is private by default). Everywhere else: the app data directory itself.
+/// A journal still in the old place is carried over on open ([`journal::Journal::open_migrating`]).
+pub(crate) fn journal_base_dir(app_data: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        local_journal_base(
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            app_data,
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        app_data.to_path_buf()
+    }
+}
+
+/// The Windows rule of [`journal_base_dir`] without the environment (testable on any OS).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn local_journal_base(
+    local_app_data: Option<PathBuf>,
+    app_data: &std::path::Path,
+) -> PathBuf {
+    match local_app_data.filter(|p| !p.as_os_str().is_empty()) {
+        Some(local) => local.join(APP_IDENTIFIER),
+        None => app_data.to_path_buf(),
+    }
+}
+
 fn data_dir() -> Option<PathBuf> {
     DATA_DIR.get().cloned().or_else(default_app_data_dir)
 }
@@ -488,7 +520,8 @@ fn with_journal_in<T>(
         return Run::Blocked;
     }
     let _guard = OS_OPS.lock().unwrap_or_else(|e| e.into_inner());
-    match journal::Journal::open(std::sync::Arc::new(fs::RealFs), dir) {
+    let base = journal_base_dir(dir);
+    match journal::Journal::open_migrating(std::sync::Arc::new(fs::RealFs), &base, Some(dir)) {
         Ok(mut j) => Run::Done(f(&mut j, &platform::RealPlatform)),
         Err(e) => Run::Failed(e),
     }
@@ -615,6 +648,15 @@ fn journal_failure_text(e: &journal::JournalError) -> String {
 pub fn recover_ownership_on_start(
     data_dir: &std::path::Path,
 ) -> Result<journal::RecoveryReport, journal::JournalError> {
+    if os_effects_enabled() {
+        hold_app_lock(&fs::RealFs, &journal_base_dir(data_dir))?;
+    }
+    recover_in(data_dir)
+}
+
+fn recover_in(
+    data_dir: &std::path::Path,
+) -> Result<journal::RecoveryReport, journal::JournalError> {
     match with_journal_in(data_dir, "ownership_recovery", cleanup::restore_and_migrate) {
         Run::Blocked => Ok(journal::RecoveryReport {
             skipped_dry_run: true,
@@ -625,15 +667,82 @@ pub fn recover_ownership_on_start(
     }
 }
 
+/// The app lock of this process (held until it exits; the OS drops it with the process).
+static APP_LOCK: Mutex<Option<fs::FsLock>> = Mutex::new(None);
+
+/// Takes the lock that marks "a Zastava is running on this data directory" and keeps it for the
+/// life of the process. Unlike the journal lock (held for one operation) it is long-lived, so a
+/// `--cleanup` started while the app runs can tell and leaves the app's PAC alone. A second call
+/// in the same process does nothing. `Locked` when another process holds it.
+pub(crate) fn hold_app_lock(
+    fs: &dyn fs::Fs,
+    data_dir: &std::path::Path,
+) -> Result<(), journal::JournalError> {
+    let mut slot = APP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return Ok(());
+    }
+    *slot = Some(take_app_lock(fs, data_dir)?);
+    Ok(())
+}
+
+fn take_app_lock(
+    fs: &dyn fs::Fs,
+    data_dir: &std::path::Path,
+) -> Result<fs::FsLock, journal::JournalError> {
+    fs.create_private_dir_all(&journal::ownership_dir(data_dir))
+        .map_err(|e| journal::JournalError::Io("create_dir", e.kind()))?;
+    fs.try_lock(&journal::app_lock_path(data_dir))
+        .map_err(|e| match e {
+            fs::LockError::Held => journal::JournalError::Locked,
+            fs::LockError::Io(k) => journal::JournalError::Io("app_lock", k),
+        })
+}
+
+/// What `--cleanup` may do on `data_dir`: `Ok(Some(lock))` - no app is running, go on (the lock
+/// keeps an app from starting in the middle of it); `Ok(None)` - a running app holds the app lock
+/// and restores its own settings, so nothing is touched.
+pub(crate) fn cleanup_cli_gate(
+    fs: &dyn fs::Fs,
+    data_dir: &std::path::Path,
+) -> Result<Option<fs::FsLock>, journal::JournalError> {
+    match take_app_lock(fs, data_dir) {
+        Ok(lock) => Ok(Some(lock)),
+        Err(journal::JournalError::Locked) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// `--cleanup`: journal recovery, then the IDE/shell files. If the journal is unusable (corrupt,
-/// unknown schema, locked by another instance) nothing is guessed and nothing is changed. Exit
-/// codes: 0 ok, 1 some resources could not be restored (kept for retry), 2 fail-closed.
+/// unknown schema, locked by another instance) nothing is guessed and nothing is changed. A
+/// running app (it holds the app lock) is left alone: exit 0, nothing written. Exit codes: 0 ok
+/// (or the app is running), 1 some resources could not be restored (kept for retry), 2
+/// fail-closed. The uninstaller repeats the call on a non-zero code for about ten seconds, so no
+/// retry loop lives here.
 pub fn run_cleanup_cli() -> i32 {
     let Some(dir) = data_dir() else {
         eprintln!("Zastava --cleanup: data directory is unknown; nothing was changed");
         return 2;
     };
-    match recover_ownership_on_start(&dir) {
+    // Held until this function returns.
+    let _app_guard = if os_effects_enabled() {
+        match cleanup_cli_gate(&fs::RealFs, &journal_base_dir(&dir)) {
+            Ok(guard) if guard.is_some() => guard,
+            Ok(_) => {
+                eprintln!(
+                    "Zastava --cleanup: the app is running and restores its own settings; nothing was changed"
+                );
+                return 0;
+            }
+            Err(e) => {
+                eprintln!("Zastava --cleanup: {e}; nothing was changed");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
+    match recover_in(&dir) {
         Err(e) => {
             eprintln!("Zastava --cleanup: {e}; nothing was changed");
             2
@@ -705,21 +814,70 @@ pub fn disable_all_sysproxy() {
 pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
     register_clean_exit_guard();
 
-    let configured =
-        match with_journal("enable_sysproxy", |j, p| enable_system_proxy(j, p, pac_url)) {
-            Run::Blocked => Vec::new(),
-            Run::Failed(e) => return Err(journal_failure_text(&e)),
-            Run::Done(r) => r?.configured,
-        };
-
-    state().set_sys_proxy_active(true);
-    state().set_last_pac_url(Some(pac_url.to_string()));
+    let configured = match with_journal("enable_sysproxy", |j, p| {
+        enable_with(state(), j, p, pac_url)
+    }) {
+        Run::Blocked => {
+            // Dry-run: nothing was written, the flags still follow the call.
+            mark_active(state(), pac_url);
+            Vec::new()
+        }
+        Run::Failed(e) => return Err(journal_failure_text(&e)),
+        Run::Done(r) => r?.configured,
+    };
 
     Ok(SysproxyStatus {
         enabled: true,
         pac_url: Some(pac_url.to_string()),
         services_configured: configured,
     })
+}
+
+fn mark_active(st: &SysState, pac_url: &str) {
+    st.set_sys_proxy_active(true);
+    st.set_last_pac_url(Some(pac_url.to_string()));
+}
+
+/// The enable pass, run inside the `OS_OPS` lock. The "PAC is on" flag is raised here, after the
+/// write and under the same lock, so a switch-off that runs next ([`restore_pass`]) cannot be
+/// overtaken by a late `set_sys_proxy_active(true)`.
+fn enable_with(
+    st: &SysState,
+    j: &mut journal::Journal,
+    p: &dyn platform::Platform,
+    pac_url: &str,
+) -> Result<EnableReport, String> {
+    let report = enable_system_proxy(j, p, pac_url)?;
+    mark_active(st, pac_url);
+    Ok(report)
+}
+
+/// The refresh pass, run inside the `OS_OPS` lock. The flag is read here, under the lock: a
+/// switch-off that already cleared it (before its restore) wins, and the PAC is not put back.
+fn refresh_with(
+    st: &SysState,
+    j: &mut journal::Journal,
+    p: &dyn platform::Platform,
+) -> Result<EnableReport, String> {
+    if !st.sys_proxy_active() {
+        return Ok(EnableReport::default());
+    }
+    let Some(pac) = st.last_pac_url() else {
+        return Ok(EnableReport::default());
+    };
+    enable_system_proxy(j, p, &pac)
+}
+
+/// Switch-off pass, run inside the `OS_OPS` lock: the flag goes down BEFORE anything is restored,
+/// so a refresh that was waiting for the lock sees "off" and leaves the PAC alone.
+pub(crate) fn restore_pass(
+    st: &SysState,
+    j: &mut journal::Journal,
+    p: &dyn platform::Platform,
+    restore: impl FnOnce(&mut journal::Journal, &dyn platform::Platform) -> journal::RecoveryReport,
+) -> journal::RecoveryReport {
+    st.set_sys_proxy_active(false);
+    restore(j, p)
 }
 
 fn enable_system_proxy(
@@ -736,6 +894,23 @@ fn enable_system_proxy(
     }
 }
 
+/// Shown when Quit could not put the PAC back because of a VPN with temporary DNS settings.
+/// No addresses, no values; no quotes either (it goes into an AppleScript string).
+pub const RESTORE_DEFERRED_TEXT: &str = "Застава закрыта, но адрес автонастройки прокси вернётся при следующем запуске: сейчас активен VPN с временными настройками DNS. Запустите Заставу или отключите VPN.";
+
+/// Tells the user that the restore was deferred (macOS: a dialog that disappears by itself after
+/// a minute, started detached so it outlives the quitting process; other systems have no such
+/// state). Goes through [`silent_command`], so dry-run mode starts nothing.
+pub fn notify_restore_deferred() {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display dialog \"{RESTORE_DEFERRED_TEXT}\" with title \"Застава\" buttons {{\"OK\"}} default button \"OK\" with icon caution giving up after 60"
+        );
+        let _ = silent_command("osascript").args(["-e", &script]).spawn();
+    }
+}
+
 /// Returns whether systemic PAC proxy is currently active.
 pub fn is_sysproxy_active() -> bool {
     state().sys_proxy_active()
@@ -746,13 +921,11 @@ pub fn is_sysproxy_active() -> bool {
 /// or overwrote the PAC on a service (self-healing). A foreign value found there is adopted as
 /// the baseline to restore, never lost. Returns `true` when something was re-applied.
 pub fn refresh_if_services_changed() -> bool {
+    // Cheap early exit; the real decision is taken again under the lock (`refresh_with`).
     if !is_sysproxy_active() {
         return false;
     }
-    let Some(pac) = state().last_pac_url() else {
-        return false;
-    };
-    match with_journal("refresh_sysproxy", |j, p| enable_system_proxy(j, p, &pac)) {
+    match with_journal("refresh_sysproxy", |j, p| refresh_with(state(), j, p)) {
         Run::Done(Ok(report)) => report.changed,
         Run::Done(Err(e)) => {
             // Same refusal as at enable (e.g. temporary VPN DNS): nothing was written. Say it once.
@@ -1125,5 +1298,223 @@ mod tests {
             parse_gateway_port_from_pac_url("127.0.0.1:8899"),
             Some(8899)
         );
+    }
+
+    // --- WP-26 ---------------------------------------------------------------------------------
+
+    use super::fs::{FakeFs, FsOp};
+    use super::journal::Journal;
+    use super::platform::{FakePlatform, PacState, ServiceId};
+    use std::path::Path;
+
+    const PAC: &str = "http://127.0.0.1:8899/proxy.pac";
+
+    fn wifi() -> ServiceId {
+        ServiceId::new("en0", "Wi-Fi", "Wi-Fi")
+    }
+
+    /// A service that had no PAC before Zastava: URL absent, switched off.
+    fn restored_pac() -> PacState {
+        PacState {
+            url: None,
+            enabled: Some(false),
+        }
+    }
+
+    fn fixture() -> (SysState, FakeFs, FakePlatform) {
+        let p = FakePlatform::new();
+        p.add_service(wifi());
+        (SysState::new(), FakeFs::new(), p)
+    }
+
+    fn journal(fs: &FakeFs) -> Journal {
+        Journal::open(Arc::new(fs.clone()), Path::new("/d")).unwrap()
+    }
+
+    #[test]
+    fn the_pac_flag_is_down_before_the_restore_starts() {
+        let (st, fs, p) = fixture();
+        let mut j = journal(&fs);
+        enable_with(&st, &mut j, &p, PAC).unwrap();
+        assert!(st.sys_proxy_active());
+        let mut seen_active_during_restore = None;
+        restore_pass(&st, &mut j, &p, |j, p| {
+            seen_active_during_restore = Some(st.sys_proxy_active());
+            cleanup::restore_with(j, p, cleanup::Scope::All)
+        });
+        assert_eq!(
+            seen_active_during_restore,
+            Some(false),
+            "a refresh waiting for the lock must already see `off`"
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_runs_after_the_switch_off_leaves_the_pac_off() {
+        let (st, fs, p) = fixture();
+        let mut j = journal(&fs);
+        enable_with(&st, &mut j, &p, PAC).unwrap();
+        restore_pass(&st, &mut j, &p, |j, p| {
+            cleanup::restore_with(j, p, cleanup::Scope::All)
+        });
+        let writes = p.os_writes();
+        // The refresh tick that was queued behind the switch-off now gets the lock.
+        let r = refresh_with(&st, &mut j, &p).unwrap();
+        assert!(!r.changed && r.configured.is_empty());
+        assert_eq!(p.os_writes(), writes, "nothing is written back");
+        assert_eq!(p.pac_of(&wifi()), restored_pac());
+    }
+
+    #[test]
+    fn control_a_refresh_that_still_sees_the_flag_up_does_put_the_pac_back() {
+        // The race itself, forced: restore WITHOUT lowering the flag first (the old order).
+        // Only where the PAC is actually written (macOS service, WinINet value).
+        if !cfg!(any(target_os = "macos", target_os = "windows")) {
+            return;
+        }
+        let (st, fs, p) = fixture();
+        let mut j = journal(&fs);
+        enable_with(&st, &mut j, &p, PAC).unwrap();
+        cleanup::restore_with(&mut j, &p, cleanup::Scope::All);
+        assert!(
+            st.sys_proxy_active(),
+            "old order: still up after the restore"
+        );
+        let writes = p.os_writes();
+        let r = refresh_with(&st, &mut j, &p).unwrap();
+        assert!(
+            r.changed && p.os_writes() > writes,
+            "the PAC is back: the bug"
+        );
+    }
+
+    #[test]
+    fn refresh_without_a_remembered_pac_url_does_nothing() {
+        let (st, fs, p) = fixture();
+        st.set_sys_proxy_active(true);
+        let mut j = journal(&fs);
+        let r = refresh_with(&st, &mut j, &p).unwrap();
+        assert!(!r.changed);
+        assert_eq!(p.os_writes(), 0);
+    }
+
+    #[test]
+    fn a_refused_enable_does_not_raise_the_flag() {
+        if !cfg!(target_os = "macos") {
+            return; // the temporary-DNS refusal is a macOS rule
+        }
+        let (st, fs, p) = fixture();
+        p.set_temp_dns(true);
+        let mut j = journal(&fs);
+        assert!(enable_with(&st, &mut j, &p, PAC).is_err());
+        assert!(!st.sys_proxy_active());
+        assert_eq!(st.last_pac_url(), None);
+    }
+
+    #[test]
+    fn the_restore_is_reported_as_deferred_only_while_a_vpn_holds_temporary_dns() {
+        if !cfg!(target_os = "macos") {
+            return; // PAC / chain journal records exist on macOS
+        }
+        let (st, fs, p) = fixture();
+        let mut j = journal(&fs);
+        enable_with(&st, &mut j, &p, PAC).unwrap();
+        p.set_temp_dns(true);
+        let report = cleanup::restore_with(&mut j, &p, cleanup::Scope::All);
+        assert!(report.restore_deferred_by_vpn_dns());
+        assert_ne!(
+            p.pac_of(&wifi()),
+            PacState::default(),
+            "PAC stays, as designed"
+        );
+        p.set_temp_dns(false);
+        let report = cleanup::restore_with(&mut j, &p, cleanup::Scope::All);
+        assert!(!report.restore_deferred_by_vpn_dns());
+        assert_eq!(p.pac_of(&wifi()), restored_pac());
+    }
+
+    #[test]
+    fn the_deferred_restore_text_is_plain_russian_and_carries_no_values() {
+        let t = RESTORE_DEFERRED_TEXT;
+        assert!(t.starts_with("Застава закрыта"));
+        assert!(t.contains("при следующем запуске") && t.contains("VPN"));
+        assert!(
+            !t.contains(['"', '\\', '\n']) && !t.chars().any(|c| c.is_ascii_digit()),
+            "it goes into an AppleScript string and must not hold an address"
+        );
+    }
+
+    #[test]
+    fn telling_the_user_goes_through_the_dry_run_gate() {
+        let before = dry_run_blocked_calls();
+        notify_restore_deferred();
+        if cfg!(target_os = "macos") {
+            assert!(
+                dry_run_blocked_calls() > before,
+                "osascript was not started"
+            );
+            assert!(dry_run_blocked_programs().iter().any(|p| p == "osascript"));
+        }
+    }
+
+    #[test]
+    fn a_running_app_makes_cleanup_stand_down_and_a_stopped_one_does_not() {
+        let fs = FakeFs::new();
+        let dir = Path::new("/d");
+        let app = take_app_lock(&fs, dir).expect("the app takes its lock");
+        assert!(
+            cleanup_cli_gate(&fs, dir).unwrap().is_none(),
+            "app alive -> --cleanup writes nothing"
+        );
+        drop(app);
+        let gate = cleanup_cli_gate(&fs, dir).unwrap();
+        assert!(gate.is_some(), "app gone -> --cleanup may go on");
+        // While --cleanup holds the lock, a second one (or an app start) is told.
+        assert!(cleanup_cli_gate(&fs, dir).unwrap().is_none());
+        assert_eq!(
+            take_app_lock(&fs, dir).err(),
+            Some(journal::JournalError::Locked)
+        );
+    }
+
+    #[test]
+    fn an_unusable_lock_file_is_an_error_not_a_green_light() {
+        let fs = FakeFs::new();
+        fs.fail_next(FsOp::Lock);
+        assert!(matches!(
+            cleanup_cli_gate(&fs, Path::new("/d")),
+            Err(journal::JournalError::Io("app_lock", _))
+        ));
+        fs.fail_next(FsOp::CreateDir);
+        assert!(matches!(
+            cleanup_cli_gate(&fs, Path::new("/d")),
+            Err(journal::JournalError::Io("create_dir", _))
+        ));
+    }
+
+    #[test]
+    fn the_app_lock_is_not_the_journal_lock() {
+        let fs = FakeFs::new();
+        let dir = Path::new("/d");
+        let _app = take_app_lock(&fs, dir).unwrap();
+        // The app lock does not stop journal operations of the same or another process.
+        assert!(Journal::open(Arc::new(fs.clone()), dir).is_ok());
+        assert_ne!(
+            journal::app_lock_path(dir),
+            dir.join("ownership").join("journal.lock")
+        );
+    }
+
+    #[test]
+    fn windows_keeps_the_journal_in_the_local_profile_and_falls_back_to_app_data() {
+        let roaming = Path::new("/roaming/io.zastava.desktop");
+        assert_eq!(
+            local_journal_base(Some(PathBuf::from("/local")), roaming),
+            PathBuf::from("/local").join(APP_IDENTIFIER)
+        );
+        assert_eq!(local_journal_base(None, roaming), roaming);
+        assert_eq!(local_journal_base(Some(PathBuf::new()), roaming), roaming);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(journal_base_dir(roaming), roaming);
     }
 }

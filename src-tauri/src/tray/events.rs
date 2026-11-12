@@ -17,7 +17,11 @@ pub fn handle_menu_event(
 ) {
     match id {
         "quit" => {
-            sysproxy::disable_all_sysproxy();
+            // Quit does not wait for a VPN with temporary DNS settings (the PAC is then restored
+            // at the next start); the user is told, the behaviour itself is unchanged.
+            if sysproxy::cleanup_all_persistent_settings().restore_deferred_by_vpn_dns() {
+                sysproxy::notify_restore_deferred();
+            }
             app.exit(0);
         }
         "show" => {
