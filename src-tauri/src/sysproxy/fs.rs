@@ -295,6 +295,16 @@ mod fake {
                 .insert(op, FailRule { skip, count: 1 });
         }
 
+        /// The `count` calls of `op` after `skip` successful ones fail (e.g. a write and the
+        /// clean-up write that follows it: the process "dies" in between).
+        pub fn fail_range(&self, op: FsOp, skip: usize, count: usize) {
+            self.st
+                .lock()
+                .unwrap()
+                .fail
+                .insert(op, FailRule { skip, count });
+        }
+
         fn check(&self, op: FsOp) -> io::Result<()> {
             let mut s = self.st.lock().unwrap();
             if let Some(rule) = s.fail.get_mut(&op) {

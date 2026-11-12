@@ -4,9 +4,13 @@
 //! `journal` + `fs` (ownership journal: what Zastava changed and what was there before),
 //! `macos` / `windows` (PAC, chained proxy and WinINet through the journal), `shell_rc`
 //! (zsh/bash/PowerShell blocks), `ide` (editor settings.json), `ai_cli` (Claude Code / Gemini CLI
-//! settings), `cli_protection` (enable/disable/status orchestration), `cleanup` (exit guard,
-//! signals, restore of the journal, one-time legacy migration).
-//! Zastava restores only what it changed itself: every system setting goes through the journal.
+//! settings), `jsonc` (point editor for JSONC), `cli_protection` (enable/disable/status
+//! orchestration), `cleanup` (exit guard, signals, restore of the journal, one-time legacy
+//! migration).
+//! Zastava restores only what it changed itself: every system setting and every key / block in a
+//! user file goes through the journal. Files are reached through [`FileCtx`] (file system, home,
+//! editor roots), runtime flags live in [`SysState`]; the no-argument public functions use the
+//! process-wide instances of both.
 
 mod ai_cli;
 mod cleanup;
@@ -14,44 +18,117 @@ mod cli_protection;
 pub mod fs;
 mod ide;
 pub mod journal;
+mod jsonc;
 mod macos;
 pub mod platform;
 mod shell_rc;
 mod windows;
 
-pub use ai_cli::{
-    apply_claude_code_settings_file, apply_claude_code_settings_file_with_tz,
-    apply_gemini_cli_settings_file, cleanup_claude_code_settings_file,
-    cleanup_gemini_cli_settings_file,
-};
 pub use cleanup::{
-    cleaned_components, cleanup_all_persistent_settings, force_clean_all_os_proxy_traces, legacy_env_plan,
-    legacy_env_plan_with_gateway, register_clean_exit_guard, spawn_signal_cleanup_watcher,
+    cleaned_components, cleanup_all_persistent_settings, force_clean_all_os_proxy_traces,
+    legacy_env_plan, legacy_env_plan_with_gateway, register_clean_exit_guard,
+    spawn_signal_cleanup_watcher,
 };
 pub use cli_protection::{
     disable_cli_and_ide_runtime_settings, disable_cli_protection, enable_cli_and_ide_protection,
     enable_cli_and_ide_protection_with_tz, is_cli_protection_enabled,
 };
-pub use ide::{
-    apply_ide_settings_file, apply_ide_settings_file_with_tz, candidate_ide_settings_paths,
-    cleanup_ide_settings_file, sanitize_jsonc,
-};
+pub use ide::{candidate_ide_settings_paths, sanitize_jsonc};
 pub use shell_rc::{
     build_powershell_guard_block_with_tz, build_shell_rc_guard_block,
-    build_shell_rc_guard_block_with_tz, get_windows_powershell_profile_paths, remove_shell_rc_block,
-    sanitize_timezone, upsert_powershell_profile_content_with_tz, upsert_shell_rc_content,
-    upsert_shell_rc_content_with_tz,
+    build_shell_rc_guard_block_with_tz, get_windows_powershell_profile_paths,
+    remove_shell_rc_block, sanitize_timezone, upsert_powershell_profile_content_with_tz,
+    upsert_shell_rc_content, upsert_shell_rc_content_with_tz,
 };
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
-static SYS_PROXY_ACTIVE: AtomicBool = AtomicBool::new(false);
-static CLI_PROTECTION_ACTIVE: AtomicBool = AtomicBool::new(false);
-static LAST_PAC_URL: Mutex<Option<String>> = Mutex::new(None);
-static CHAINED_PROXY: Mutex<Option<String>> = Mutex::new(None);
+/// Runtime state of the protection: what this process switched on. The durable facts (what was
+/// changed and what was there before) are in the ownership journal, not here.
+pub(crate) struct SysState {
+    sys_proxy_active: AtomicBool,
+    cli_protection_active: AtomicBool,
+    last_pac_url: Mutex<Option<String>>,
+    chained_proxy: Mutex<Option<String>>,
+}
+
+impl SysState {
+    pub(crate) const fn new() -> Self {
+        Self {
+            sys_proxy_active: AtomicBool::new(false),
+            cli_protection_active: AtomicBool::new(false),
+            last_pac_url: Mutex::new(None),
+            chained_proxy: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn sys_proxy_active(&self) -> bool {
+        self.sys_proxy_active.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_sys_proxy_active(&self, on: bool) {
+        self.sys_proxy_active.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn cli_protection_active(&self) -> bool {
+        self.cli_protection_active.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_cli_protection_active(&self, on: bool) {
+        self.cli_protection_active.store(on, Ordering::SeqCst);
+    }
+
+    pub(crate) fn last_pac_url(&self) -> Option<String> {
+        self.last_pac_url.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub(crate) fn set_last_pac_url(&self, url: Option<String>) {
+        if let Ok(mut g) = self.last_pac_url.lock() {
+            *g = url;
+        }
+    }
+
+    /// Port of Zastava's own gateway, from the PAC URL last enabled.
+    pub(crate) fn gateway_port(&self) -> Option<u16> {
+        self.last_pac_url()
+            .as_deref()
+            .and_then(parse_gateway_port_from_pac_url)
+    }
+
+    pub(crate) fn chained_proxy(&self) -> Option<String> {
+        self.chained_proxy.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Sets or clears the upstream proxy; Zastava's own gateway is refused (loop protection).
+    pub(crate) fn set_chained_proxy(&self, proxy: Option<String>) {
+        if let Some(ref p) = proxy
+            && is_gateway_host_port(p, self.gateway_port())
+        {
+            return;
+        }
+        if let Ok(mut g) = self.chained_proxy.lock() {
+            *g = proxy;
+        }
+    }
+
+    /// Everything off: protection switched off, nothing remembered.
+    pub(crate) fn reset(&self) {
+        self.set_sys_proxy_active(false);
+        self.set_cli_protection_active(false);
+        self.set_last_pac_url(None);
+        self.set_chained_proxy(None);
+    }
+}
+
+static STATE: SysState = SysState::new();
+
+/// The process-wide runtime state used by the no-argument public functions.
+pub(crate) fn state() -> &'static SysState {
+    &STATE
+}
 
 const ZASTAVA_RC_START: &str = "# >>> Zastava AI CLI & IDE Guard >>>";
 const ZASTAVA_RC_END: &str = "# <<< Zastava AI CLI & IDE Guard <<<";
@@ -59,23 +136,12 @@ const NO_PROXY_VALUE: &str = "localhost,127.0.0.1,::1,.local";
 
 /// Returns the currently discovered/configured upstream chained proxy (e.g. "127.0.0.1:10808"), if any.
 pub fn get_chained_proxy() -> Option<String> {
-    CHAINED_PROXY.lock().ok().and_then(|g| g.clone())
+    state().chained_proxy()
 }
 
 /// Sets or clears the upstream chained proxy with loop protection against Zastava's gateway.
 pub fn set_chained_proxy(proxy: Option<String>) {
-    if let Some(ref p) = proxy {
-        let current_gp = LAST_PAC_URL
-            .lock()
-            .ok()
-            .and_then(|g| g.as_deref().and_then(parse_gateway_port_from_pac_url));
-        if is_gateway_host_port(p, current_gp) {
-            return;
-        }
-    }
-    if let Ok(mut g) = CHAINED_PROXY.lock() {
-        *g = proxy;
-    }
+    state().set_chained_proxy(proxy);
 }
 
 /// Extracts gateway port from a PAC URL (e.g. "http://127.0.0.1:8899/proxy.pac" -> 8899).
@@ -85,7 +151,9 @@ pub fn parse_gateway_port_from_pac_url(pac_url: &str) -> Option<u16> {
         .or_else(|| pac_url.strip_prefix("https://"))
         .unwrap_or(pac_url);
     let host_port = without_scheme.split('/').next().unwrap_or("");
-    host_port.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok())
+    host_port
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
 }
 
 /// Checks whether `server:port` points to Zastava's own gateway port or default loopback ports,
@@ -97,7 +165,11 @@ pub fn is_gateway_target(server: &str, port: u16, gateway_port: Option<u16>) -> 
     if gateway_port.is_some_and(|gp| gp > 0 && port == gp) {
         return true;
     }
-    let s = server.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let s = server
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
     let is_loopback = s == "127.0.0.1" || s == "localhost" || s == "::1";
     if is_loopback && (port == 8899 || port == 8900) {
         return true;
@@ -162,7 +234,11 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
     }
 
     let candidate = if raw.contains('=') {
-        let parts: Vec<&str> = raw.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = raw
+            .split(';')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         let find_proto = |proto: &str| -> Option<&str> {
             parts.iter().find_map(|p| {
                 let (k, v) = p.split_once('=')?;
@@ -178,9 +254,9 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
             .or_else(|| find_proto("http"))
             .or_else(|| find_proto("socks"))
             .or_else(|| {
-                parts.first().and_then(|p| {
-                    p.split_once('=').map(|(_, v)| v.trim()).or(Some(p))
-                })
+                parts
+                    .first()
+                    .and_then(|p| p.split_once('=').map(|(_, v)| v.trim()).or(Some(p)))
             })
     } else {
         Some(raw)
@@ -203,7 +279,11 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
         return None;
     }
 
-    let clean_host = host.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+    let clean_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
     if clean_host.is_empty() {
         return None;
     }
@@ -225,7 +305,9 @@ pub fn parse_reg_dword(output: &str, value_name: &str) -> Option<u32> {
             && parts[1].eq_ignore_ascii_case("REG_DWORD")
         {
             let v = parts[2].trim_start_matches("0x").trim_start_matches("0X");
-            return u32::from_str_radix(v, 16).or_else(|_| parts[2].parse::<u32>()).ok();
+            return u32::from_str_radix(v, 16)
+                .or_else(|_| parts[2].parse::<u32>())
+                .ok();
         }
     }
     None
@@ -285,7 +367,10 @@ pub fn dry_run_blocked_calls() -> usize {
 
 /// Program names of the commands blocked so far in dry-run mode (diagnostics for tests).
 pub fn dry_run_blocked_programs() -> Vec<String> {
-    DRY_RUN_PROGRAMS.lock().map(|g| g.clone()).unwrap_or_default()
+    DRY_RUN_PROGRAMS
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
 }
 
 pub(crate) fn note_dry_run_blocked(what: &str) {
@@ -335,7 +420,9 @@ pub fn default_app_data_dir() -> Option<PathBuf> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")));
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
+        });
     base.map(|b| b.join(APP_IDENTIFIER))
 }
 
@@ -417,6 +504,76 @@ pub(super) fn real_user_env(name: &str) -> Option<String> {
     platform::RealPlatform.get_user_env(name).ok().flatten()
 }
 
+/// Where the user's files are: the file system to use, the home directory and the roots under
+/// which editors keep their per-user data (`<root>/<Editor>/User/settings.json`). Production code
+/// builds it with [`FileCtx::real`]; tests hand in a `FakeFs` and a scratch home, so nothing in
+/// the file layer reads `$HOME` / `%APPDATA%` on its own.
+pub(crate) struct FileCtx {
+    pub fs: Arc<dyn fs::Fs>,
+    pub home: PathBuf,
+    pub ide_roots: Vec<PathBuf>,
+}
+
+impl FileCtx {
+    pub(crate) fn new(fs: Arc<dyn fs::Fs>, home: PathBuf, ide_roots: Vec<PathBuf>) -> Self {
+        Self {
+            fs,
+            home,
+            ide_roots,
+        }
+    }
+
+    /// The real file system with the real per-user locations (the scratch home in dry-run).
+    pub(crate) fn real() -> Option<Self> {
+        Self::real_with_fs(Arc::new(fs::RealFs))
+    }
+
+    /// The real per-user locations on a given file system (the one the journal uses).
+    pub(crate) fn real_with_fs(fs: Arc<dyn fs::Fs>) -> Option<Self> {
+        let home = user_home_dir()?;
+        #[cfg(target_os = "macos")]
+        let roots = vec![home.join("Library").join("Application Support")];
+        #[cfg(target_os = "windows")]
+        let roots: Vec<PathBuf> = user_appdata_dir().into_iter().collect();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let roots = vec![home.join(".config")];
+        Some(Self::new(fs, home, roots))
+    }
+
+    pub(crate) fn claude_settings(&self) -> PathBuf {
+        self.home.join(".claude").join("settings.json")
+    }
+
+    pub(crate) fn gemini_settings(&self) -> PathBuf {
+        self.home.join(".gemini").join("settings.json")
+    }
+
+    pub(crate) fn powershell_profiles(&self) -> Vec<PathBuf> {
+        shell_rc::powershell_profile_paths(&self.home)
+    }
+}
+
+/// Runs `f` on the journal and the user's files (real home). Same gates as [`with_journal`].
+pub(crate) fn with_files<T>(
+    what: &str,
+    f: impl FnOnce(&mut journal::Journal, &dyn platform::Platform, &FileCtx) -> T,
+) -> Run<T> {
+    let mut f = Some(f);
+    let r = with_journal(what, |j, p| {
+        let ctx = FileCtx::real_with_fs(j.fs())?;
+        f.take().map(|f| f(j, p, &ctx))
+    });
+    match r {
+        Run::Blocked => Run::Blocked,
+        Run::Failed(e) => Run::Failed(e),
+        Run::Done(Some(v)) => Run::Done(v),
+        Run::Done(None) => Run::Failed(journal::JournalError::Io(
+            "home_dir",
+            std::io::ErrorKind::NotFound,
+        )),
+    }
+}
+
 /// Russian text for the toast when the journal blocks an enable. Contains no values.
 fn journal_failure_text(e: &journal::JournalError) -> String {
     let why = match e {
@@ -483,7 +640,8 @@ pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Co
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             let mut cmd = std::process::Command::new("cmd");
-            cmd.args(["/c", "exit", "0"]).creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["/c", "exit", "0"])
+                .creation_flags(CREATE_NO_WINDOW);
             return cmd;
         }
         #[cfg(not(target_os = "windows"))]
@@ -536,10 +694,8 @@ pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
             Run::Done(r) => r?.configured,
         };
 
-    SYS_PROXY_ACTIVE.store(true, Ordering::SeqCst);
-    if let Ok(mut g) = LAST_PAC_URL.lock() {
-        *g = Some(pac_url.to_string());
-    }
+    state().set_sys_proxy_active(true);
+    state().set_last_pac_url(Some(pac_url.to_string()));
 
     Ok(SysproxyStatus {
         enabled: true,
@@ -564,7 +720,7 @@ fn enable_system_proxy(
 
 /// Returns whether systemic PAC proxy is currently active.
 pub fn is_sysproxy_active() -> bool {
-    SYS_PROXY_ACTIVE.load(Ordering::SeqCst)
+    state().sys_proxy_active()
 }
 
 /// Re-applies the PAC configuration when a new network service appeared (e.g. a VPN client
@@ -575,7 +731,7 @@ pub fn refresh_if_services_changed() -> bool {
     if !is_sysproxy_active() {
         return false;
     }
-    let Some(pac) = LAST_PAC_URL.lock().ok().and_then(|g| g.clone()) else {
+    let Some(pac) = state().last_pac_url() else {
         return false;
     };
     match with_journal("refresh_sysproxy", |j, p| enable_system_proxy(j, p, &pac)) {
@@ -668,7 +824,6 @@ pub fn open_os_datetime_settings() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn app_identifier_matches_tauri_conf() {
@@ -682,7 +837,10 @@ mod tests {
         let dir = std::env::temp_dir().join("zastava-never-created-by-dry-run");
         let r = recover_ownership_on_start(&dir).unwrap();
         assert!(r.skipped_dry_run && r.items.is_empty());
-        assert!(!dir.exists(), "dry-run recovery must not even create the directory");
+        assert!(
+            !dir.exists(),
+            "dry-run recovery must not even create the directory"
+        );
         assert!(dry_run_blocked_calls() > before);
     }
 
@@ -724,7 +882,10 @@ mod tests {
         let before = dry_run_blocked_calls();
         let marker = "zastava-definitely-not-a-real-program";
         // A real spawn of this name would fail with NotFound; the no-op replacement succeeds.
-        let status = silent_command(marker).arg("--whatever").status().expect("no-op spawn");
+        let status = silent_command(marker)
+            .arg("--whatever")
+            .status()
+            .expect("no-op spawn");
         assert!(status.success());
         assert!(dry_run_blocked_calls() > before);
         assert!(dry_run_blocked_programs().iter().any(|p| p == marker));
@@ -735,111 +896,35 @@ mod tests {
         let home = user_home_dir().expect("dry-run home");
         assert!(home.is_dir());
         assert!(home.starts_with(std::env::temp_dir()));
-        assert_eq!(user_home_dir(), Some(home), "the dry-run home is stable per process");
+        assert_eq!(
+            user_home_dir(),
+            Some(home),
+            "the dry-run home is stable per process"
+        );
     }
 
     #[test]
-    fn dry_run_cli_protection_writes_only_inside_the_scratch_home() {
+    fn dry_run_cli_protection_changes_no_file_and_reports_no_target() {
         let before = dry_run_blocked_calls();
         let report = enable_cli_and_ide_protection("127.0.0.1:8899");
         assert!(report.enabled);
+        assert!(
+            report.configured_targets.is_empty(),
+            "nothing is written in dry-run, so nothing is configured"
+        );
+        // The journal gate blocked the file layer: the scratch home stays empty.
         let home = user_home_dir().unwrap();
-        // Shell profiles are written on Unix only; Windows has no zsh rc.
-        if cfg!(unix) {
-            assert!(home.join(".zshrc").is_file());
-        }
+        assert!(!home.join(".zshrc").exists());
+        assert!(!home.join(".claude").exists());
+        assert!(dry_run_blocked_calls() > before);
         disable_cli_protection();
-        assert!(!is_cli_protection_enabled() || CLI_PROTECTION_ACTIVE.load(Ordering::SeqCst));
-        if cfg!(target_os = "macos") {
-            assert!(dry_run_blocked_calls() > before, "launchctl must have been blocked");
-        }
-    }
-
-    #[test]
-    fn test_ide_and_claude_settings_apply_and_cleanup() {
-        let tmp_dir = std::env::temp_dir().join(format!("zastava_ide_test_{}", std::process::id()));
-        let _ = fs::create_dir_all(&tmp_dir);
-        let vscode_settings = tmp_dir.join("settings.json");
-
-        // Write JSONC with comments and trailing comma
-        let initial_jsonc = r#"{
-            // User custom theme
-            "workbench.colorTheme": "Default Dark+",
-            "editor.fontSize": 14,
-        }"#;
-        fs::write(&vscode_settings, initial_jsonc).unwrap();
-
-        assert!(apply_ide_settings_file(&vscode_settings, "http://127.0.0.1:8899").unwrap());
-        let content = fs::read_to_string(&vscode_settings).unwrap();
-        assert!(content.contains("\"http.proxy\": \"http://127.0.0.1:8899\""));
-        assert!(content.contains("\"HTTPS_PROXY\": \"http://127.0.0.1:8899\""));
-        assert!(content.contains("\"workbench.colorTheme\": \"Default Dark+\""));
-
-        // Cleanup removes Zastava proxy keys while preserving user settings
-        assert!(cleanup_ide_settings_file(&vscode_settings).unwrap());
-        let cleaned = fs::read_to_string(&vscode_settings).unwrap();
-        assert!(!cleaned.contains("127.0.0.1:8899"));
-        assert!(cleaned.contains("\"workbench.colorTheme\": \"Default Dark+\""));
-
-        // Test Claude Code ~/.claude/settings.json apply and cleanup
-        let claude_settings = tmp_dir.join(".claude").join("settings.json");
-        assert!(apply_claude_code_settings_file(&claude_settings, "http://127.0.0.1:8899").unwrap());
-        let claude_content = fs::read_to_string(&claude_settings).unwrap();
-        assert!(claude_content.contains("\"HTTPS_PROXY\": \"http://127.0.0.1:8899\""));
-
-        assert!(cleanup_claude_code_settings_file(&claude_settings).unwrap());
-        let claude_cleaned = fs::read_to_string(&claude_settings).unwrap();
-        assert!(!claude_cleaned.contains("127.0.0.1:8899"));
-
-        let _ = fs::remove_dir_all(&tmp_dir);
-    }
-
-    #[test]
-    fn test_ide_and_claude_settings_with_tz() {
-        let tmp_dir = std::env::temp_dir().join(format!("zastava_tz_test_{}", std::process::id()));
-        let _ = fs::create_dir_all(&tmp_dir);
-        let vscode_settings = tmp_dir.join("settings.json");
-
-        fs::write(&vscode_settings, "{}").unwrap();
-        assert!(apply_ide_settings_file_with_tz(
-            &vscode_settings,
-            "http://127.0.0.1:8899",
-            Some("Europe/Amsterdam")
-        )
-        .unwrap());
-
-        let content = fs::read_to_string(&vscode_settings).unwrap();
-        assert!(content.contains("\"TZ\": \"Europe/Amsterdam\""));
-        assert!(content.contains("\"LANG\": \"en_US.UTF-8\""));
-
-        // Cleanup removes TZ and LANG
-        assert!(cleanup_ide_settings_file(&vscode_settings).unwrap());
-        let cleaned = fs::read_to_string(&vscode_settings).unwrap();
-        assert!(!cleaned.contains("Europe/Amsterdam"));
-        assert!(!cleaned.contains("en_US.UTF-8"));
-
-        // Claude settings
-        let claude_settings = tmp_dir.join(".claude").join("settings.json");
-        assert!(apply_claude_code_settings_file_with_tz(
-            &claude_settings,
-            "http://127.0.0.1:8899",
-            Some("Europe/Helsinki")
-        )
-        .unwrap());
-        let claude_content = fs::read_to_string(&claude_settings).unwrap();
-        assert!(claude_content.contains("\"TZ\": \"Europe/Helsinki\""));
-        assert!(claude_content.contains("\"LANG\": \"en_US.UTF-8\""));
-
-        assert!(cleanup_claude_code_settings_file(&claude_settings).unwrap());
-        let claude_cleaned = fs::read_to_string(&claude_settings).unwrap();
-        assert!(!claude_cleaned.contains("Europe/Helsinki"));
-
-        let _ = fs::remove_dir_all(&tmp_dir);
+        assert!(!state().cli_protection_active());
     }
 
     #[test]
     fn test_parse_networksetup_webproxy_output() {
-        let active_output = "Enabled: Yes\nServer: 127.0.0.1\nPort: 10808\nAuthenticated Proxy Enabled: 0\n";
+        let active_output =
+            "Enabled: Yes\nServer: 127.0.0.1\nPort: 10808\nAuthenticated Proxy Enabled: 0\n";
         let parsed = parse_networksetup_webproxy_output(active_output);
         assert_eq!(parsed, Some(("127.0.0.1".to_string(), 10808)));
 
@@ -880,7 +965,10 @@ mod tests {
         );
 
         // Loop prevention: Zastava's active gateway port or default ports
-        assert_eq!(parse_windows_proxy_server("127.0.0.1:8899", Some(8899)), None);
+        assert_eq!(
+            parse_windows_proxy_server("127.0.0.1:8899", Some(8899)),
+            None
+        );
         assert_eq!(
             parse_windows_proxy_server("http=127.0.0.1:8899;https=127.0.0.1:8899", Some(8899)),
             None
@@ -903,15 +991,61 @@ mod tests {
 
     #[test]
     fn test_get_set_chained_proxy_loop_guard() {
-        set_chained_proxy(Some("127.0.0.1:10808".to_string()));
-        assert_eq!(get_chained_proxy(), Some("127.0.0.1:10808".to_string()));
+        // A context of its own: no other test can change it.
+        let st = SysState::new();
+        st.set_chained_proxy(Some("127.0.0.1:10808".to_string()));
+        assert_eq!(st.chained_proxy(), Some("127.0.0.1:10808".to_string()));
 
         // Setting Zastava default port should be rejected by loop guard
-        set_chained_proxy(Some("127.0.0.1:8899".to_string()));
-        assert_ne!(get_chained_proxy(), Some("127.0.0.1:8899".to_string()));
+        st.set_chained_proxy(Some("127.0.0.1:8899".to_string()));
+        assert_eq!(st.chained_proxy(), Some("127.0.0.1:10808".to_string()));
 
-        set_chained_proxy(None);
-        assert_eq!(get_chained_proxy(), None);
+        // The gateway port of the PAC last enabled is refused too.
+        st.set_last_pac_url(Some("http://127.0.0.1:9123/proxy.pac".to_string()));
+        assert_eq!(st.gateway_port(), Some(9123));
+        st.set_chained_proxy(Some("127.0.0.1:9123".to_string()));
+        assert_eq!(st.chained_proxy(), Some("127.0.0.1:10808".to_string()));
+
+        st.set_chained_proxy(None);
+        assert_eq!(st.chained_proxy(), None);
+    }
+
+    #[test]
+    fn sys_state_instances_are_independent_and_reset_clears_everything() {
+        let a = SysState::new();
+        let b = SysState::new();
+        a.set_sys_proxy_active(true);
+        a.set_cli_protection_active(true);
+        a.set_last_pac_url(Some("http://127.0.0.1:8899/proxy.pac".into()));
+        a.set_chained_proxy(Some("127.0.0.1:10808".into()));
+        assert!(!b.sys_proxy_active() && !b.cli_protection_active());
+        assert_eq!(b.last_pac_url(), None);
+        a.reset();
+        assert!(!a.sys_proxy_active() && !a.cli_protection_active());
+        assert_eq!((a.last_pac_url(), a.chained_proxy()), (None, None));
+    }
+
+    #[test]
+    fn file_context_is_built_from_what_it_is_given_not_from_the_environment() {
+        let fs = fs::FakeFs::new();
+        let ctx = FileCtx::new(
+            Arc::new(fs),
+            PathBuf::from("/h"),
+            vec![PathBuf::from("/h/root")],
+        );
+        assert_eq!(
+            ctx.claude_settings(),
+            PathBuf::from("/h/.claude/settings.json")
+        );
+        assert_eq!(
+            ctx.gemini_settings(),
+            PathBuf::from("/h/.gemini/settings.json")
+        );
+        assert!(
+            ctx.powershell_profiles()
+                .iter()
+                .all(|p| p.starts_with("/h/Documents"))
+        );
     }
 
     #[test]
@@ -924,6 +1058,9 @@ mod tests {
             parse_gateway_port_from_pac_url("http://127.0.0.1:8900/pac.js"),
             Some(8900)
         );
-        assert_eq!(parse_gateway_port_from_pac_url("127.0.0.1:8899"), Some(8899));
+        assert_eq!(
+            parse_gateway_port_from_pac_url("127.0.0.1:8899"),
+            Some(8899)
+        );
     }
 }
