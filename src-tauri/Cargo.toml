@@ -46,6 +46,8 @@ zastava = { path = ".", features = ["test-support"] }
 tempfile = "3"
 # `tauri::test::mock_app`/MockRuntime for tests/updater_signature.rs (test builds only; no new crate).
 tauri = { version = "2", features = ["test"] }
+# Virtual time (`start_paused`) for the guard's TTL / audit-timeout tests; same crate, test-only feature.
+tokio = { version = "1", features = ["test-util"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
 
 [profile.release]

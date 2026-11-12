@@ -14,7 +14,7 @@ use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::{Auditor, OverallStatus};
 use crate::proxy::guard::{gate_closed, wait_open, Gate, NetworkGuard};
 use crate::proxy::hold_queue::{
-    HoldQueue, HoldResolution, RiskInterceptPayload, DEFAULT_HOLD_TTL_SECS,
+    DEFAULT_HOLD_TTL_SECS, HoldQueue, HoldResolution, PHASE_READY, RiskInterceptPayload,
 };
 use crate::proxy::pac::generate_pac_script;
 use crate::proxy::route_watch::RouteWatch;
@@ -475,15 +475,21 @@ impl ProxyServer {
             id: hold_id.clone(),
             provider,
             host: host.clone(),
-            report: report.clone(),
+            report: Some(report.clone()),
             ttl_seconds: DEFAULT_HOLD_TTL_SECS,
             scope: "provider".to_string(),
             network_change: None,
             is_simulation: false,
+            detected_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            phase: PHASE_READY.to_string(),
         };
 
         // Emit event to UI and bring emergency modal to front
         if let Some(app) = &self.app_handle {
+            self.hold_queue.set_alert(payload.clone());
             let _ = app.emit("interceptor://risk-detected", &payload);
             crate::show_and_position_alert_popup(app);
         }
