@@ -889,6 +889,22 @@ export async function toggleSysproxyPrivileged(): Promise<boolean> {
   return mockSysproxyActive;
 }
 
+export async function getErrorDiagnostics(errorTitle?: string, errorMessage?: string): Promise<string> {
+  if (isTauri()) {
+    return await invoke<string>("get_error_diagnostics", {
+      errorTitle: errorTitle ?? null,
+      errorMessage: errorMessage ?? null,
+    });
+  }
+  const lines = [
+    `Zastava WebPreview (${typeof navigator !== "undefined" ? navigator.userAgent : "unknown"})`,
+    errorTitle ? `Error title: ${errorTitle}` : null,
+    errorMessage ? `Error text: ${errorMessage}` : null,
+    `Time: ${new Date().toISOString()}`,
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
 export async function enableCliProtection(): Promise<CliProtectionReport> {
   if (isTauri()) {
     return await invoke<CliProtectionReport>("enable_cli_protection");

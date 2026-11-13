@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { AppCoverageItem, CoverageSnapshot } from "../../types";
 import { restartAppWithGateway } from "../../utils/api";
 import { Badge, Banner, Button, Card, ConfirmModal, CopyBlock, ExpandRow, Progress, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
+import { CopyErrorLogButton } from "../../shared/components/CopyErrorLogButton";
 import type { BadgeTone, IconName, RowTone } from "../../ui";
 import { coverage as copy } from "../../shared/copy/ru";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
@@ -159,7 +160,21 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
           )}
           {vpn && <p className="zs-cov__hint zs-cov__vpn-line">{copy.vpn.untouched(vpn.names)}</p>}
           {result && (
-            <Banner tone={result.tone} title={result.title} className="zs-cov__vpn" action={<Button size="sm" variant="quiet" onClick={() => setResult(null)}>{copy.protection.dismiss}</Button>}>
+            <Banner
+              tone={result.tone}
+              title={result.title}
+              className="zs-cov__vpn"
+              action={
+                <div className="zs-banner__actions">
+                  {result.tone === "danger" && (
+                    <CopyErrorLogButton title={result.title} message={result.text} />
+                  )}
+                  <Button size="sm" variant="quiet" onClick={() => setResult(null)}>
+                    {copy.protection.dismiss}
+                  </Button>
+                </div>
+              }
+            >
               {result.text}
             </Banner>
           )}
@@ -169,18 +184,24 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
               title={copy.protection.adminAuthTitle}
               className="zs-cov__vpn"
               action={
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={busy !== null || protection.retryingAdminAuth}
-                  onClick={() => {
-                    void protection.enableSysproxyPrivileged().then((ok) => {
-                      if (ok) void refresh();
-                    });
-                  }}
-                >
-                  {protection.retryingAdminAuth ? copy.protection.adminAuthBusy : copy.protection.adminAuthRetry}
-                </Button>
+                <div className="zs-banner__actions">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={busy !== null || protection.retryingAdminAuth}
+                    onClick={() => {
+                      void protection.enableSysproxyPrivileged().then((ok) => {
+                        if (ok) void refresh();
+                      });
+                    }}
+                  >
+                    {protection.retryingAdminAuth ? copy.protection.adminAuthBusy : copy.protection.adminAuthRetry}
+                  </Button>
+                  <CopyErrorLogButton
+                    title={copy.protection.adminAuthTitle}
+                    message={protection.adminAuthMessage}
+                  />
+                </div>
               }
             >
               {protection.adminAuthMessage}

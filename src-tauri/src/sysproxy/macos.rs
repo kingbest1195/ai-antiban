@@ -239,6 +239,7 @@ struct PlannedPac {
     plans: Vec<Plan>,
     vpn_untouched: Vec<String>,
     unreadable: usize,
+    chain_admin_auth: bool,
 }
 
 fn plan_physical_pac(
@@ -248,12 +249,21 @@ fn plan_physical_pac(
 ) -> Result<PlannedPac, String> {
     match p.temp_dns_overrides() {
         Ok(false) => {}
-        Ok(true) => return Err(MSG_TEMP_DNS.to_string()),
-        Err(_) => return Err(MSG_DNS_UNKNOWN.to_string()),
+        Ok(true) => {
+            crate::diagnostics::record("sysproxy:macos", "enable refused: temp_dns_overrides=true");
+            return Err(MSG_TEMP_DNS.to_string());
+        }
+        Err(e) => {
+            crate::diagnostics::record("sysproxy:macos", &format!("enable refused: temp_dns_overrides error: {e}"));
+            return Err(MSG_DNS_UNKNOWN.to_string());
+        }
     }
     let enabled: Vec<ServiceId> = p
         .list_services()
-        .map_err(|_| "Не удалось получить список сетевых служб.".to_string())?
+        .map_err(|e| {
+            crate::diagnostics::record("sysproxy:macos", &format!("list_services failed: {e}"));
+            "Не удалось получить список сетевых служб.".to_string()
+        })?
         .into_iter()
         .filter(|s| s.enabled)
         .collect();
@@ -275,6 +285,14 @@ fn plan_physical_pac(
     }
     note_untouched_vpn(&vpn_untouched);
     if services.is_empty() && !enabled.is_empty() {
+        crate::diagnostics::record(
+            "sysproxy:macos",
+            &format!(
+                "no physical services (enabled={}, unclassified={unclassified}, untouched={})",
+                enabled.len(),
+                vpn_untouched.join(",")
+            ),
+        );
         return Err(if unclassified {
             MSG_KIND_UNKNOWN
         } else {
@@ -291,18 +309,32 @@ fn plan_physical_pac(
     // Phase 1: read and validate everything. Nothing is written yet.
     let mut plans: Vec<Plan> = Vec::new();
     let mut unreadable = 0usize;
+    let mut chain_admin_auth = false;
     for svc in services {
         let chain = match p.get_chain(&svc) {
             Ok(c) => c,
-            Err(_) => {
+            Err(e) => {
                 unreadable += 1;
+                if matches!(e, PlatformError::AdminAuthRequired(_)) {
+                    chain_admin_auth = true;
+                }
+                crate::diagnostics::record(
+                    "sysproxy:macos",
+                    &format!("get_chain failed for {} ({}): {e}", svc.name, svc.key()),
+                );
                 continue;
             }
         };
         let upstream = match detect_upstream(&chain, gateway_port) {
             Detect::None => None,
             Detect::Found(u) => Some(u),
-            Detect::Incompatible => return Err(msg_incompatible_service(&svc.name)),
+            Detect::Incompatible => {
+                crate::diagnostics::record(
+                    "sysproxy:macos",
+                    &format!("incompatible explicit proxy on service={}", svc.name),
+                );
+                return Err(msg_incompatible_service(&svc.name));
+            }
         };
         plans.push(Plan { svc, upstream });
     }
@@ -317,6 +349,9 @@ fn plan_physical_pac(
         }
     }
     if plans.is_empty() && unreadable > 0 {
+        if chain_admin_auth {
+            return Err(MSG_ADMIN_AUTH_REQUIRED.to_string());
+        }
         return Err("Не удалось прочитать настройки сетевых служб.".to_string());
     }
     // The PAC served by the gateway must chain through the upstream before it is switched off.
@@ -328,6 +363,7 @@ fn plan_physical_pac(
         plans,
         vpn_untouched,
         unreadable,
+        chain_admin_auth,
     })
 }
 
@@ -349,7 +385,7 @@ fn apply_pac(
         ..EnableReport::default()
     };
     let mut failed = 0usize;
-    let mut admin_auth_required = false;
+    let mut admin_auth_required = planned.chain_admin_auth;
     for plan in &planned.plans {
         let pac_res = Resource::Pac {
             service: plan.svc.clone(),
@@ -374,18 +410,21 @@ fn apply_pac(
                     );
                 }
             }
-            Err(JournalError::Platform(PlatformError::AdminAuthRequired(_))) => {
+            Err(JournalError::Platform(PlatformError::AdminAuthRequired(op))) => {
                 failed += 1;
                 admin_auth_required = true;
-                eprintln!(
-                    "Застава: {} требует прав администратора macOS",
-                    pac_res.id()
+                crate::diagnostics::record(
+                    "sysproxy:macos",
+                    &format!("{} ({}) requires admin auth on {op}", plan.svc.name, pac_res.id()),
                 );
                 continue;
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("Застава: {} не включён: {e}", pac_res.id());
+                crate::diagnostics::record(
+                    "sysproxy:macos",
+                    &format!("{} ({}) failed: {e}", plan.svc.name, pac_res.id()),
+                );
                 continue; // keep the user's explicit proxy while the PAC is not in place
             }
         }
@@ -413,6 +452,14 @@ fn apply_pac(
         }
     }
     if report.configured.is_empty() && (failed > 0 || planned.unreadable > 0) {
+        crate::diagnostics::record(
+            "sysproxy:macos",
+            &format!(
+                "apply_pac failed on all services: plans={}, failed={failed}, unreadable={}, admin_auth_required={admin_auth_required}",
+                planned.plans.len(),
+                planned.unreadable
+            ),
+        );
         if admin_auth_required {
             return Err(MSG_ADMIN_AUTH_REQUIRED.to_string());
         }
@@ -575,9 +622,15 @@ fn run_privileged_osascript(shell_script: &str) -> Result<(), JournalError> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let err_trimmed = stderr.trim();
-    if !err_trimmed.is_empty() {
-        eprintln!("[sysproxy:osascript] stderr: {err_trimmed}");
-    }
+    crate::diagnostics::record(
+        "sysproxy:osascript",
+        &format!(
+            "osascript failed (code={:?}): stderr={} stdout={}",
+            out.status.code(),
+            err_trimmed,
+            stdout.trim()
+        ),
+    );
     if is_admin_auth_error(&stdout, &stderr) {
         Err(JournalError::Platform(PlatformError::AdminAuthRequired(
             "osascript",

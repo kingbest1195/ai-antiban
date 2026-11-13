@@ -158,6 +158,7 @@
 .zs-step__toggle{display:block;width:100%;min-height:28px;margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer;border-radius:var(--radius-sm)}
 .zs-step__toggle:hover{color:var(--ink-2)}
 .zs-step__panel{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-2)}
+.zs-banner__actions{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}
 .zs-step__panel>.zs-btn{align-self:flex-start}
 .zs-step__panel>.zs-rows{margin-top:var(--space-1)}
 

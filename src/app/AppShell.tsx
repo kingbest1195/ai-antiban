@@ -27,6 +27,7 @@ import { openTelegramSupport } from "../utils/opener";
 import { bindUpstreamToClaudeProfile, onRouteUnavailable, takePendingDeepLink, upsertRoute } from "../utils/api";
 import { OverviewScreen } from "../features/overview/OverviewScreen";
 import { ConnectScreen } from "../features/connect/ConnectScreen";
+import { CopyErrorLogButton } from "../shared/components/CopyErrorLogButton";
 import { AlertOverlay } from "../features/alert";
 import { OnboardingFlow, useOnboarding } from "../features/onboarding";
 import { BackupScreen } from "../features/backup";
@@ -557,7 +558,14 @@ export function AppShell() {
         {/* Уведомления */}
         <ToastViewport>
           {toasts.map((t) => (
-            <Toast key={t.id} tone={t.tone} title={t.title} duration={3500} onClose={() => dismissToast(t.id)}>
+            <Toast
+              key={t.id}
+              tone={t.tone}
+              title={t.title}
+              duration={t.tone === "danger" ? undefined : 3500}
+              action={t.tone === "danger" ? <CopyErrorLogButton title={t.title} message={t.description} /> : undefined}
+              onClose={() => dismissToast(t.id)}
+            >
               {t.description}
             </Toast>
           ))}

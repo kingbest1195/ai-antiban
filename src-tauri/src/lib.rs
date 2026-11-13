@@ -4,6 +4,7 @@ pub mod autostart;
 pub mod bin_checker;
 pub mod commands;
 pub mod cowork_guard;
+pub mod diagnostics;
 pub mod popup;
 pub mod proxy;
 pub mod routing;

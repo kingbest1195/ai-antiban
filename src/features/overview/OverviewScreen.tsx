@@ -28,6 +28,7 @@ import {
   StatusHero,
   Switch,
 } from "../../ui";
+import { CopyErrorLogButton } from "../../shared/components/CopyErrorLogButton";
 import type { MenuEntry } from "../../ui";
 import { checks as checksCopy, coverage as coverageCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
@@ -273,16 +274,22 @@ export function OverviewScreen(props: OverviewScreenProps) {
             tone="warn"
             title={coverageCopy.protection.adminAuthTitle}
             action={
-              <Button
-                size="sm"
-                variant="primary"
-                disabled={props.protection.retryingAdminAuth}
-                onClick={() => void props.protection?.enableSysproxyPrivileged()}
-              >
-                {props.protection.retryingAdminAuth
-                  ? coverageCopy.protection.adminAuthBusy
-                  : coverageCopy.protection.adminAuthRetry}
-              </Button>
+              <div className="zs-banner__actions">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={props.protection.retryingAdminAuth}
+                  onClick={() => void props.protection?.enableSysproxyPrivileged()}
+                >
+                  {props.protection.retryingAdminAuth
+                    ? coverageCopy.protection.adminAuthBusy
+                    : coverageCopy.protection.adminAuthRetry}
+                </Button>
+                <CopyErrorLogButton
+                  title={coverageCopy.protection.adminAuthTitle}
+                  message={props.protection.adminAuthMessage}
+                />
+              </div>
             }
           >
             {props.protection.adminAuthMessage}

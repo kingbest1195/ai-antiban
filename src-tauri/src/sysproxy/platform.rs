@@ -775,6 +775,10 @@ where
             continue;
         }
         if entry.dns.unknown_fields {
+            crate::diagnostics::record(
+                "sysproxy:dns",
+                &format!("temp_dns triggered by service={name}: unknown fields in Setup:/Network/Service/*/DNS"),
+            );
             return Ok(true);
         }
         let (mut saved_servers, mut saved_domains) = read_saved_dns(name)?;
@@ -782,12 +786,28 @@ where
         live_servers.sort();
         saved_servers.sort();
         if live_servers != saved_servers {
+            crate::diagnostics::record(
+                "sysproxy:dns",
+                &format!(
+                    "temp_dns triggered by service={name}: live_servers({}) != saved_servers({})",
+                    live_servers.len(),
+                    saved_servers.len()
+                ),
+            );
             return Ok(true);
         }
         let mut live_domains = entry.dns.search_domains.clone();
         live_domains.sort();
         saved_domains.sort();
         if live_domains != saved_domains {
+            crate::diagnostics::record(
+                "sysproxy:dns",
+                &format!(
+                    "temp_dns triggered by service={name}: live_domains({}) != saved_domains({})",
+                    live_domains.len(),
+                    saved_domains.len()
+                ),
+            );
             return Ok(true);
         }
     }
@@ -834,37 +854,68 @@ pub fn is_admin_auth_error(stdout: &str, stderr: &str) -> bool {
     let check = |s: &str| {
         let lower = s.to_ascii_lowercase();
         lower.contains("-60005")
+            || lower.contains("-60006")
+            || lower.contains("-60007")
+            || lower.contains("-60008")
             || lower.contains("requires administrator")
+            || lower.contains("requires admin")
+            || lower.contains("requires at least admin privileges")
+            || lower.contains("root privileges are required")
             || lower.contains("authorization")
             || lower.contains("errauthorizationdenied")
             || lower.contains("not authorized")
+            || lower.contains("while authenticating")
+            || lower.contains("operation not permitted")
+            || lower.contains("permission denied")
     };
     check(stderr) || check(stdout)
 }
 
-/// Runs a program through [`super::silent_command`], capturing stdout and stderr.
-fn run(program: &'static str, args: &[&str], op: &'static str) -> PResult<(bool, String, String)> {
+/// Runs a program through [`super::silent_command`], capturing exit status, stdout and stderr.
+fn run_detailed(
+    program: &'static str,
+    args: &[&str],
+    op: &'static str,
+) -> PResult<(bool, Option<i32>, String, String)> {
     let out = super::silent_command(program)
         .args(args)
         .output()
-        .map_err(|_| PlatformError::Failed(op))?;
+        .map_err(|e| {
+            crate::diagnostics::record(
+                "sysproxy",
+                &format!("{op}: failed to spawn {program}: {}", e.kind()),
+            );
+            PlatformError::Failed(op)
+        })?;
     Ok((
         out.status.success(),
+        out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
 }
 
-/// Runs `program` and returns stdout on success, or logs non-empty stderr and maps macOS
-/// authorization failures to [`PlatformError::AdminAuthRequired`].
+/// Runs a program through [`super::silent_command`], capturing stdout and stderr.
+fn run(program: &'static str, args: &[&str], op: &'static str) -> PResult<(bool, String, String)> {
+    let (ok, _code, stdout, stderr) = run_detailed(program, args, op)?;
+    Ok((ok, stdout, stderr))
+}
+
+/// Runs `program` and returns stdout on success, or logs non-empty stderr/stdout to diagnostics
+/// and maps macOS authorization failures to [`PlatformError::AdminAuthRequired`].
 fn run_stdout(program: &'static str, args: &[&str], op: &'static str) -> PResult<String> {
-    match run(program, args, op)? {
-        (true, stdout, _) => Ok(stdout),
-        (false, stdout, stderr) => {
+    match run_detailed(program, args, op)? {
+        (true, _, stdout, _) => Ok(stdout),
+        (false, code, stdout, stderr) => {
             let err_trimmed = stderr.trim();
-            if !err_trimmed.is_empty() {
-                eprintln!("[sysproxy:{op}] {program} stderr: {err_trimmed}");
-            }
+            let out_trimmed = stdout.trim();
+            let subcmd = args.first().copied().unwrap_or("");
+            crate::diagnostics::record(
+                "sysproxy",
+                &format!(
+                    "{op}: {program} {subcmd} failed (code={code:?}) stderr={err_trimmed} stdout={out_trimmed}"
+                ),
+            );
             if is_admin_auth_error(&stdout, &stderr) {
                 Err(PlatformError::AdminAuthRequired(op))
             } else {
@@ -2514,6 +2565,14 @@ mod tests {
         assert!(is_admin_auth_error("", "errAuthorizationDenied"));
         assert!(is_admin_auth_error("Authorization failed.", ""));
         assert!(is_admin_auth_error("", "User is Not Authorized"));
+        assert!(is_admin_auth_error("", "Command requires admin privileges."));
+        assert!(is_admin_auth_error(
+            "",
+            "The networksetup tool requires at least admin privileges to change network settings."
+        ));
+        assert!(is_admin_auth_error("", "AuthorizationCreate() failed: -60007"));
+        assert!(is_admin_auth_error("", "An error occurred while authenticating."));
+        assert!(is_admin_auth_error("", "Operation not permitted"));
         assert!(!is_admin_auth_error("", "Wi-Fi is not a recognized network service."));
         assert!(
             PlatformError::AdminAuthRequired("set_pac")
@@ -2521,4 +2580,69 @@ mod tests {
                 .contains("admin")
         );
     }
+}
+
+/// Collects a sanitized, read-only OS network diagnostic snapshot (macOS only; empty on other OS
+/// or when OS effects are disabled in tests).
+pub fn collect_os_diagnostic_snapshot() -> Vec<String> {
+    if !cfg!(target_os = "macos") || !super::os_effects_enabled() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if let Ok((ok, code, stdout, stderr)) =
+        run_detailed("networksetup", &["-listnetworkserviceorder"], "diag_services")
+    {
+        if ok {
+            let svcs = parse_service_order(&stdout);
+            let nc = run_detailed("scutil", &["--nc", "list"], "diag_nc")
+                .ok()
+                .filter(|(ok, _, _, _)| *ok)
+                .map(|(_, _, out, _)| parse_nc_list(&out));
+            let summary: Vec<String> = svcs
+                .iter()
+                .map(|s| {
+                    let kind = classify_service(s, nc.as_deref());
+                    format!(
+                        "{}(dev={}, enabled={}, kind={kind:?})",
+                        s.name,
+                        if s.device.is_empty() { "-" } else { &s.device },
+                        s.enabled
+                    )
+                })
+                .collect();
+            lines.push(format!("services: {}", summary.join("; ")));
+            if let Some(connections) = nc {
+                let nc_summary: Vec<String> = connections
+                    .iter()
+                    .map(|c| format!("{}={}", c.name, if c.connected { "connected" } else { "disconnected" }))
+                    .collect();
+                lines.push(format!(
+                    "scutil_nc: {}",
+                    if nc_summary.is_empty() {
+                        "none".to_string()
+                    } else {
+                        nc_summary.join("; ")
+                    }
+                ));
+            } else {
+                lines.push("scutil_nc: unavailable".to_string());
+            }
+        } else {
+            lines.push(format!(
+                "services_error: code={code:?} {}",
+                stderr.trim()
+            ));
+        }
+    }
+    if let Ok((ok, _, stdout, _)) = run_detailed("scutil", &["--proxy"], "diag_proxy")
+        && ok
+    {
+        let eff = parse_scutil_proxy(&stdout);
+        lines.push(format!(
+            "scutil_proxy: pac_enabled={:?}, pac_url_present={}",
+            eff.pac_enabled,
+            eff.pac_url.is_some()
+        ));
+    }
+    lines
 }

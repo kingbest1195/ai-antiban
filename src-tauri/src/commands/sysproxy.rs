@@ -46,17 +46,24 @@ async fn enable_sysproxy_with(
     proxy_manager: &proxy::ProxyManager,
 ) -> Result<bool, String> {
     let pac_url = format!("http://{}/proxy.pac", proxy_manager.server.bound_addr);
-    if privileged {
-        sysproxy::enable_sysproxy_privileged(&pac_url)?;
+    let res = if privileged {
+        sysproxy::enable_sysproxy_privileged(&pac_url)
     } else {
-        sysproxy::enable_sysproxy(&pac_url)?;
+        sysproxy::enable_sysproxy(&pac_url)
+    };
+    if let Err(err) = res {
+        crate::diagnostics::record(
+            if privileged { "cmd:toggle_sysproxy_privileged" } else { "cmd:toggle_sysproxy" },
+            &err,
+        );
+        return Err(err);
     }
     let data = state.get_data().await;
     let tz = sync_tz_for(data.sync_ai_tz_enabled, state, auditor).await;
     let report =
         sysproxy::enable_cli_and_ide_protection_with(&pac_url, data.cli_mode, tz.as_deref());
     if let Some(err) = report.error {
-        eprintln!("Застава: {err}");
+        crate::diagnostics::record("cmd:cli_follow_up", &err);
     }
     Ok(true)
 }
@@ -75,6 +82,10 @@ pub async fn toggle_sysproxy(
         crate::startup::note_user_off(&app);
         let report = sysproxy::cleanup_all_persistent_settings();
         if report.has_failures() {
+            crate::diagnostics::record(
+                "cmd:toggle_sysproxy_off",
+                &format!("partial restore: {}", report.summary()),
+            );
             return Err(PARTIAL_RESTORE_TEXT.to_string());
         }
         Ok(false)
@@ -266,10 +277,77 @@ pub fn force_clean_os_proxy_cmd(app: tauri::AppHandle) -> Result<Vec<String>, St
     crate::startup::note_user_off(&app);
     let report = sysproxy::cleanup_all_persistent_settings();
     if report.has_failures() {
+        crate::diagnostics::record(
+            "cmd:force_clean_os_proxy",
+            &format!("partial restore: {}", report.summary()),
+        );
         // Nothing is lost: what could not be restored stays recorded and is finished later.
         return Err(PARTIAL_RESTORE_TEXT.to_string());
     }
     Ok(sysproxy::cleaned_components())
+}
+
+pub(crate) fn build_error_diagnostics_report(
+    error_title: Option<&str>,
+    error_message: Option<&str>,
+    gateway_port: u16,
+    os_lines: &[String],
+    entries: &[String],
+) -> String {
+    let mut out = Vec::new();
+    out.push(format!(
+        "Zastava v{} ({}/{})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    if let Some(title) = error_title.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push(format!("Error title: {title}"));
+    }
+    if let Some(msg) = error_message.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push(format!("Error text: {msg}"));
+    }
+    out.push(format!(
+        "State: sysproxy_active={}, cli_active={}, gateway_port={}, chained_proxy_set={}",
+        sysproxy::is_sysproxy_active(),
+        sysproxy::is_cli_protection_enabled(),
+        gateway_port,
+        sysproxy::get_chained_proxy().is_some()
+    ));
+
+    if !os_lines.is_empty() {
+        out.push("--- OS Network Snapshot ---".to_string());
+        out.extend(os_lines.iter().cloned());
+    }
+
+    out.push("--- Diagnostic Log ---".to_string());
+    if entries.is_empty() {
+        out.push("(no recorded events in this session)".to_string());
+    } else {
+        out.extend(entries.iter().cloned());
+    }
+
+    out.join("\n")
+}
+
+/// Builds a sanitized, copyable diagnostic bundle when the user clicks "Скопировать лог" on an error.
+#[tauri::command]
+pub async fn get_error_diagnostics(
+    error_title: Option<String>,
+    error_message: Option<String>,
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+) -> Result<String, String> {
+    let os_lines = tokio::task::spawn_blocking(sysproxy::platform::collect_os_diagnostic_snapshot)
+        .await
+        .unwrap_or_default();
+    let entries = crate::diagnostics::dump();
+    Ok(build_error_diagnostics_report(
+        error_title.as_deref(),
+        error_message.as_deref(),
+        proxy_manager.server.bound_addr.port(),
+        &os_lines,
+        &entries,
+    ))
 }
 
 #[cfg(test)]
@@ -303,5 +381,21 @@ mod tests {
         .unwrap();
         assert_eq!(none["cli_mode"], "ai_only");
         assert!(none["synced_ai_timezone"].is_null());
+    }
+
+    #[test]
+    fn diagnostic_report_includes_error_os_snapshot_and_logs() {
+        let report = build_error_diagnostics_report(
+            Some("Не удалось переключить защиту"),
+            Some("Command failed"),
+            8899,
+            &["services: Wi-Fi(dev=en0, enabled=true)".to_string()],
+            &["[+1s] [sysproxy] set_pac failed".to_string()],
+        );
+        assert!(report.contains("Zastava v"));
+        assert!(report.contains("Error title: Не удалось переключить защиту"));
+        assert!(report.contains("gateway_port=8899"));
+        assert!(report.contains("services: Wi-Fi(dev=en0, enabled=true)"));
+        assert!(report.contains("[+1s] [sysproxy] set_pac failed"));
     }
 }
