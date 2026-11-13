@@ -39,6 +39,28 @@ async fn sync_tz_for(
     Some(detected)
 }
 
+async fn enable_sysproxy_with(
+    privileged: bool,
+    state: &state::AppState,
+    auditor: &auditor::Auditor,
+    proxy_manager: &proxy::ProxyManager,
+) -> Result<bool, String> {
+    let pac_url = format!("http://{}/proxy.pac", proxy_manager.server.bound_addr);
+    if privileged {
+        sysproxy::enable_sysproxy_privileged(&pac_url)?;
+    } else {
+        sysproxy::enable_sysproxy(&pac_url)?;
+    }
+    let data = state.get_data().await;
+    let tz = sync_tz_for(data.sync_ai_tz_enabled, state, auditor).await;
+    let report =
+        sysproxy::enable_cli_and_ide_protection_with(&pac_url, data.cli_mode, tz.as_deref());
+    if let Some(err) = report.error {
+        eprintln!("Застава: {err}");
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn toggle_sysproxy(
     enable: bool,
@@ -48,16 +70,7 @@ pub async fn toggle_sysproxy(
     app: tauri::AppHandle,
 ) -> Result<bool, String> {
     if enable {
-        let pac_url = format!("http://{}/proxy.pac", proxy_manager.server.bound_addr);
-        sysproxy::enable_sysproxy(&pac_url)?;
-        let data = state.get_data().await;
-        let tz = sync_tz_for(data.sync_ai_tz_enabled, &state, &auditor).await;
-        let report =
-            sysproxy::enable_cli_and_ide_protection_with(&pac_url, data.cli_mode, tz.as_deref());
-        if let Some(err) = report.error {
-            eprintln!("Застава: {err}");
-        }
-        Ok(true)
+        enable_sysproxy_with(false, &state, &auditor, &proxy_manager).await
     } else {
         crate::startup::note_user_off(&app);
         let report = sysproxy::cleanup_all_persistent_settings();
@@ -66,6 +79,18 @@ pub async fn toggle_sysproxy(
         }
         Ok(false)
     }
+}
+
+/// User-triggered retry of enabling the macOS system proxy via administrator authorization
+/// (`osascript ... with administrator privileges`) after `toggle_sysproxy(true)` failed with
+/// `ADMIN_AUTH_REQUIRED:`. On non-macOS systems this delegates to normal `toggle_sysproxy(true)`.
+#[tauri::command]
+pub async fn toggle_sysproxy_privileged(
+    state: tauri::State<'_, state::AppState>,
+    auditor: tauri::State<'_, auditor::Auditor>,
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+) -> Result<bool, String> {
+    enable_sysproxy_with(cfg!(target_os = "macos"), &state, &auditor, &proxy_manager).await
 }
 
 #[tauri::command]

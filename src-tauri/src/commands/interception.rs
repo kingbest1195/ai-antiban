@@ -123,10 +123,50 @@ pub async fn resolve_interception(
     Ok(())
 }
 
+fn build_simulation_network_change(
+    data: &state::AppStateData,
+    provider_key: &str,
+) -> proxy::hold_queue::NetworkChange {
+    let last_entry = data
+        .ip_history
+        .get(provider_key)
+        .and_then(|v| v.last())
+        .or_else(|| data.ip_history.values().filter_map(|v| v.last()).next());
+
+    let old_ip = data
+        .pinned_ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| last_entry.map(|e| e.ip.clone()))
+        .unwrap_or_else(|| "185.212.102.40".to_string());
+
+    let old_country = last_entry
+        .and_then(|e| {
+            if e.ip.trim() == old_ip.trim() {
+                Some(e.country_code.clone())
+            } else {
+                None
+            }
+        })
+        .or_else(|| last_entry.map(|e| e.country_code.clone()))
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or_else(|| "NL".to_string());
+
+    proxy::hold_queue::NetworkChange {
+        old_ip: Some(old_ip),
+        old_country: Some(old_country),
+        new_ip: Some("185.220.101.5".to_string()),
+        new_country: Some("TR".to_string()),
+    }
+}
+
 #[tauri::command]
 pub async fn simulate_interception(
     provider: Option<String>,
     app: tauri::AppHandle,
+    state: tauri::State<'_, state::AppState>,
     auditor: tauri::State<'_, auditor::Auditor>,
     proxy_manager: tauri::State<'_, proxy::ProxyManager>,
 ) -> Result<(), String> {
@@ -235,6 +275,9 @@ pub async fn simulate_interception(
         .register(hold_id.clone(), provider_id.as_str())
         .await;
 
+    let data = state.get_data().await;
+    let network_change = Some(build_simulation_network_change(&data, provider_id.as_str()));
+
     let payload = proxy::RiskInterceptPayload {
         id: hold_id,
         provider: provider_id,
@@ -242,7 +285,7 @@ pub async fn simulate_interception(
         report: Some(report),
         ttl_seconds: proxy::hold_queue::DEFAULT_HOLD_TTL_SECS,
         scope: "simulation".to_string(),
-        network_change: None,
+        network_change,
         is_simulation: true,
         detected_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -319,4 +362,37 @@ pub async fn get_network_killswitch_status_cmd(
     guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
 ) -> Result<bool, String> {
     Ok(guard.is_gate_blocked())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulation_network_change_uses_pinned_history_or_defaults() {
+        let mut data = state::AppStateData::default();
+        let nc = build_simulation_network_change(&data, "anthropic");
+        assert_eq!(nc.old_ip.as_deref(), Some("185.212.102.40"));
+        assert_eq!(nc.old_country.as_deref(), Some("NL"));
+        assert_eq!(nc.new_ip.as_deref(), Some("185.220.101.5"));
+        assert_eq!(nc.new_country.as_deref(), Some("TR"));
+
+        data.ip_history.insert(
+            "anthropic".to_string(),
+            vec![state::IpHistoryEntry::new(
+                "45.83.220.10".to_string(),
+                "DE".to_string(),
+                Some(24940),
+                1,
+            )],
+        );
+        let nc_hist = build_simulation_network_change(&data, "anthropic");
+        assert_eq!(nc_hist.old_ip.as_deref(), Some("45.83.220.10"));
+        assert_eq!(nc_hist.old_country.as_deref(), Some("DE"));
+
+        data.pinned_ip = Some("91.199.10.20".to_string());
+        let nc_pinned = build_simulation_network_change(&data, "anthropic");
+        assert_eq!(nc_pinned.old_ip.as_deref(), Some("91.199.10.20"));
+        assert_eq!(nc_pinned.old_country.as_deref(), Some("DE"));
+    }
 }

@@ -185,6 +185,66 @@ pub async fn unblock_provider_cmd(
     Ok(())
 }
 
+fn should_verify_unblock(
+    manual_killswitch: bool,
+    report: &auditor::RiskReport,
+    _pinned_ip: Option<&str>,
+) -> bool {
+    if manual_killswitch {
+        return false;
+    }
+    proxy::guard::report_no_critical_and_geo_ok(report)
+}
+
+/// Runs a fresh forced audit for `provider` and unblocks it if traffic is no longer under a
+/// manual kill-switch and the audit confirms an allowed geo with no critical failures.
+#[tauri::command]
+pub async fn verify_and_unblock_provider(
+    provider: String,
+    state: tauri::State<'_, state::AppState>,
+    auditor: tauri::State<'_, auditor::Auditor>,
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    let provider_id = auditor::ProviderId::from_id(&provider)
+        .ok_or_else(|| format!("Неизвестный провайдер: {provider}"))?;
+    let report = auditor.evaluate_all(provider_id, &state, true).await?;
+
+    let st_before = state.get_data().await;
+    let manual_ks = guard.is_manual_killswitch();
+    let is_pinned = st_before
+        .pinned_ip
+        .as_deref()
+        .map(|p| p.trim() == report.telemetry.ip.trim())
+        .unwrap_or(false);
+
+    if !should_verify_unblock(manual_ks, &report, st_before.pinned_ip.as_deref()) {
+        let has_blocked =
+            !st_before.blocked_providers.is_empty() || guard.gate() != proxy::Gate::Open;
+        update_tray_from_report(&app, &report, is_pinned, has_blocked);
+        return Ok(false);
+    }
+
+    state
+        .unblock_provider(provider_id.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    let entry = state::IpHistoryEntry::new(
+        report.telemetry.ip.clone(),
+        report.telemetry.country_code.clone(),
+        report.telemetry.asn,
+        report.telemetry.resolved_at,
+    );
+    let _ = state.record_ip_history(provider_id.as_str(), entry).await;
+    guard.ensure_open_for_verified(&report.telemetry).await;
+
+    let st_after = state.get_data().await;
+    let has_blocked = !st_after.blocked_providers.is_empty() || guard.gate() != proxy::Gate::Open;
+    update_tray_from_report(&app, &report, is_pinned, has_blocked);
+    let _ = app.emit("network://changed", &report);
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn get_gateway_stats(
     state: tauri::State<'_, state::AppState>,
@@ -212,5 +272,55 @@ mod tests {
         assert_eq!(json["kind"], "check");
         assert_eq!(json["index"], 6);
         assert_eq!(json["result"]["code"], "DNS_PUBLIC_RESOLVER");
+    }
+
+    #[test]
+    fn verify_unblock_decision_respects_killswitch_geo_and_critical_checks() {
+        let ok = auditor::CheckResult::ok("T", "t");
+        let base_report = |status: auditor::OverallStatus, cc: &str| auditor::RiskReport {
+            provider: auditor::ProviderId::Openai,
+            overall_status: status,
+            trust_score: 90,
+            telemetry: auditor::NetworkTelemetry {
+                ip: "1.1.1.1".into(),
+                country_code: cc.into(),
+                hostname: None,
+                asn: Some(1),
+                org: None,
+                isp: None,
+                timezone: None,
+                resolved_at: 0,
+            },
+            geo_result: ok.clone(),
+            pinning_result: ok.clone(),
+            travel_result: ok.clone(),
+            dnsbl_result: ok.clone(),
+            dnsbl_clean_count: "0/0".into(),
+            asn_result: ok.clone(),
+            ipv6_result: ok.clone(),
+            timezone_result: ok.clone(),
+            ipv6_exit: false,
+            checks: vec![ok.clone()],
+            unknown_count: 0,
+            applicable_count: 13,
+            incomplete: false,
+        };
+
+        let green = base_report(auditor::OverallStatus::Green, "NL");
+        assert!(should_verify_unblock(false, &green, None));
+        assert!(!should_verify_unblock(true, &green, None));
+
+        // Non-critical Yellow warning on allowed geo / pinned IP succeeds.
+        let mut yellow = base_report(auditor::OverallStatus::Yellow, "NL");
+        yellow.checks = vec![ok.clone(), auditor::CheckResult::warning("TZ", "diff", None)];
+        assert!(should_verify_unblock(false, &yellow, Some("1.1.1.1")));
+
+        // Sanctioned country stays blocked even if checks weren't flagged.
+        let ru = base_report(auditor::OverallStatus::Green, "RU");
+        assert!(!should_verify_unblock(false, &ru, None));
+
+        // Red status stays blocked.
+        let red = base_report(auditor::OverallStatus::Red, "NL");
+        assert!(!should_verify_unblock(false, &red, Some("1.1.1.1")));
     }
 }

@@ -5,9 +5,10 @@
 //! only what Zastava itself wrote. The logic is platform-neutral (it only talks to `Platform`),
 //! so it is tested with `FakePlatform` on every OS; `RealPlatform` implements `networksetup`.
 
-use super::journal::{ApplyOutcome, EntryState, Journal, Resource, Value};
+use super::journal::{ApplyOutcome, EntryState, Journal, JournalError, Resource, Value};
 use super::platform::{
-    ChainState, PacState, Platform, ProxyEndpoint, ServiceId, ServiceKind, classify_services,
+    ChainState, PacState, Platform, PlatformError, ProxyEndpoint, ServiceId, ServiceKind,
+    classify_services, is_admin_auth_error,
 };
 use super::{EnableReport, is_gateway_target, parse_gateway_port_from_pac_url, set_chained_proxy};
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,6 +20,12 @@ use std::time::{Duration, Instant};
 pub(super) const MSG_TEMP_DNS: &str = "Защита не включена: активный VPN держит временные настройки DNS, \
 и их применение могло бы сбросить DNS этого VPN. Отключите VPN (или подключите его заново \
 после включения защиты) и повторите.";
+
+/// Returned when `networksetup` fails because macOS requires administrator authorization.
+/// The exact `"ADMIN_AUTH_REQUIRED:"` prefix lets the frontend offer a privileged retry.
+pub(super) const MSG_ADMIN_AUTH_REQUIRED: &str = "ADMIN_AUTH_REQUIRED:Не удалось изменить \
+системный прокси без прав администратора macOS. Нажмите «Разрешить с паролем», чтобы \
+подтвердить настройку.";
 
 /// The DNS state could not be checked, so nothing is written.
 pub(super) const MSG_DNS_UNKNOWN: &str = "Защита не включена: не удалось проверить временные \
@@ -228,12 +235,17 @@ pub(super) fn refresh_pac(
     apply_pac(j, p, pac_url, Some((heal, now)))
 }
 
-fn apply_pac(
-    j: &mut Journal,
+struct PlannedPac {
+    plans: Vec<Plan>,
+    vpn_untouched: Vec<String>,
+    unreadable: usize,
+}
+
+fn plan_physical_pac(
     p: &dyn Platform,
     pac_url: &str,
     heal: Option<(&HealGuard, Instant)>,
-) -> Result<EnableReport, String> {
+) -> Result<PlannedPac, String> {
     match p.temp_dns_overrides() {
         Ok(false) => {}
         Ok(true) => return Err(MSG_TEMP_DNS.to_string()),
@@ -312,6 +324,20 @@ fn apply_pac(
     if let Some(target) = chosen {
         set_chained_proxy(Some(target.to_string()));
     }
+    Ok(PlannedPac {
+        plans,
+        vpn_untouched,
+        unreadable,
+    })
+}
+
+fn apply_pac(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    heal: Option<(&HealGuard, Instant)>,
+) -> Result<EnableReport, String> {
+    let planned = plan_physical_pac(p, pac_url, heal)?;
 
     // Phase 2: write, service by service; one failure does not stop the others.
     let want = Value::Pac(PacState {
@@ -319,11 +345,12 @@ fn apply_pac(
         enabled: Some(true),
     });
     let mut report = EnableReport {
-        skipped_vpn: vpn_untouched,
+        skipped_vpn: planned.vpn_untouched,
         ..EnableReport::default()
     };
     let mut failed = 0usize;
-    for plan in &plans {
+    let mut admin_auth_required = false;
+    for plan in &planned.plans {
         let pac_res = Resource::Pac {
             service: plan.svc.clone(),
         };
@@ -346,6 +373,15 @@ fn apply_pac(
                         plan.svc.name
                     );
                 }
+            }
+            Err(JournalError::Platform(PlatformError::AdminAuthRequired(_))) => {
+                failed += 1;
+                admin_auth_required = true;
+                eprintln!(
+                    "Застава: {} требует прав администратора macOS",
+                    pac_res.id()
+                );
+                continue;
             }
             Err(e) => {
                 failed += 1;
@@ -376,8 +412,269 @@ fn apply_pac(
             }
         }
     }
-    if report.configured.is_empty() && (failed > 0 || unreadable > 0) {
+    if report.configured.is_empty() && (failed > 0 || planned.unreadable > 0) {
+        if admin_auth_required {
+            return Err(MSG_ADMIN_AUTH_REQUIRED.to_string());
+        }
         return Err("Не удалось включить защиту ни на одной сетевой службе.".to_string());
+    }
+    Ok(report)
+}
+
+fn is_safe_pac_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    url.chars().all(|c| {
+        c.is_ascii_graphic()
+            && !matches!(
+                c,
+                '\'' | '"' | '\\' | '`' | '$' | ';' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}'
+            )
+    })
+}
+
+fn validate_service_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return Err("Некорректное имя сетевой службы macOS.".to_string());
+    }
+    Ok(())
+}
+
+/// Strictly wraps an arbitrary argument for `/bin/sh` using POSIX single quoting.
+fn posix_single_quote(arg: &str) -> Result<String, String> {
+    if arg.contains('\0') || arg.contains('\n') || arg.contains('\r') {
+        return Err("Недопустимый управляющий символ в аргументе команды.".to_string());
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('\'');
+    for ch in arg.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    Ok(out)
+}
+
+/// Escapes `s` as a double-quoted AppleScript string literal (rejecting control breaks).
+fn applescript_string_literal(s: &str) -> Result<String, String> {
+    if s.chars().any(char::is_control) {
+        return Err("Недопустимый управляющий символ в скрипте AppleScript.".to_string());
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    Ok(out)
+}
+
+fn build_privileged_networksetup_script(
+    p: &dyn Platform,
+    items: &[(Resource, Value)],
+) -> Result<String, String> {
+    let current_services = p
+        .list_services()
+        .map_err(|_| "Не удалось получить список сетевых служб.".to_string())?;
+    let mut cmds: Vec<String> = Vec::new();
+    for (res, val) in items {
+        let svc = match res {
+            Resource::Pac { service } | Resource::Chain { service } => service,
+            _ => {
+                return Err("Неподдерживаемый тип ресурса для привилегированной настройки.".into());
+            }
+        };
+        let resolved_name = current_services
+            .iter()
+            .find(|s| s.key() == svc.key())
+            .map(|s| s.name.as_str())
+            .unwrap_or(svc.name.as_str());
+        validate_service_name(resolved_name)?;
+        let q_name = posix_single_quote(resolved_name)?;
+        match (res, val) {
+            (Resource::Pac { .. }, Value::Pac(pac)) => {
+                if pac.enabled == Some(false) {
+                    cmds.push(format!("/usr/sbin/networksetup -setautoproxystate {q_name} off"));
+                }
+                match pac.url.as_deref() {
+                    Some("") => {
+                        cmds.push(format!("/usr/sbin/networksetup -setautoproxyurl {q_name} ''"));
+                    }
+                    Some(url) => {
+                        if !is_safe_pac_url(url) {
+                            return Err("Небезопасный адрес PAC-конфигурации.".to_string());
+                        }
+                        let q_url = posix_single_quote(url)?;
+                        cmds.push(format!(
+                            "/usr/sbin/networksetup -setautoproxyurl {q_name} {q_url}"
+                        ));
+                    }
+                    None => {}
+                }
+                if pac.enabled == Some(true) {
+                    cmds.push(format!("/usr/sbin/networksetup -setautoproxystate {q_name} on"));
+                }
+            }
+            (Resource::Chain { .. }, Value::Chain(chain)) => {
+                if let Some(on) = chain.http.enabled {
+                    let flag = if on { "on" } else { "off" };
+                    cmds.push(format!("/usr/sbin/networksetup -setwebproxystate {q_name} {flag}"));
+                }
+                if let Some(on) = chain.https.enabled {
+                    let flag = if on { "on" } else { "off" };
+                    cmds.push(format!(
+                        "/usr/sbin/networksetup -setsecurewebproxystate {q_name} {flag}"
+                    ));
+                }
+            }
+            _ => {
+                return Err("Несовпадение ресурса и значения при настройке прокси.".into());
+            }
+        }
+    }
+    Ok(cmds.join(" && "))
+}
+
+fn build_osascript_arg(shell_script: &str) -> Result<String, String> {
+    Ok(format!(
+        "do shell script {} with administrator privileges",
+        applescript_string_literal(shell_script)?
+    ))
+}
+
+fn run_privileged_osascript(shell_script: &str) -> Result<(), JournalError> {
+    if shell_script.is_empty() {
+        return Ok(());
+    }
+    if !super::os_effects_enabled() {
+        return Ok(());
+    }
+    let osa_arg = build_osascript_arg(shell_script)
+        .map_err(|_| JournalError::Platform(PlatformError::Failed("osascript")))?;
+    let out = super::silent_command("osascript")
+        .args(["-e", &osa_arg])
+        .output()
+        .map_err(|_| JournalError::Platform(PlatformError::Failed("osascript")))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let err_trimmed = stderr.trim();
+    if !err_trimmed.is_empty() {
+        eprintln!("[sysproxy:osascript] stderr: {err_trimmed}");
+    }
+    if is_admin_auth_error(&stdout, &stderr) {
+        Err(JournalError::Platform(PlatformError::AdminAuthRequired(
+            "osascript",
+        )))
+    } else {
+        Err(JournalError::Platform(PlatformError::Failed("osascript")))
+    }
+}
+
+/// Applies PAC (and disables chained upstream explicit proxies) in one elevated `osascript`
+/// session, recording every baseline and applied state in the ownership journal.
+pub(super) fn enable_pac_privileged(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+) -> Result<EnableReport, String> {
+    enable_pac_privileged_with(j, p, pac_url, run_privileged_osascript)
+}
+
+fn enable_pac_privileged_with<F>(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    exec_shell: F,
+) -> Result<EnableReport, String>
+where
+    F: FnOnce(&str) -> Result<(), JournalError>,
+{
+    if !is_safe_pac_url(pac_url) {
+        return Err("Небезопасный адрес PAC-конфигурации.".to_string());
+    }
+    let planned = plan_physical_pac(p, pac_url, None)?;
+    if planned.plans.is_empty() {
+        return Ok(EnableReport {
+            skipped_vpn: planned.vpn_untouched,
+            ..EnableReport::default()
+        });
+    }
+    let want_pac = Value::Pac(PacState {
+        url: Some(pac_url.to_string()),
+        enabled: Some(true),
+    });
+
+    // Record existing bypass lists in the journal before turning off upstream explicit proxies.
+    // Since each value equals what the OS already holds, `RealPlatform::set_proxy_bypass_domains`
+    // performs no OS write, avoiding a separate unprivileged authorization failure.
+    let mut batch: Vec<(Resource, Value)> = Vec::new();
+    for plan in &planned.plans {
+        batch.push((
+            Resource::Pac {
+                service: plan.svc.clone(),
+            },
+            want_pac.clone(),
+        ));
+        if let Some(u) = &plan.upstream {
+            let bypass_res = Resource::Bypass {
+                service: plan.svc.clone(),
+            };
+            match p.get_proxy_bypass_domains(&plan.svc) {
+                Ok(list) => {
+                    if let Err(e) = j.apply(p, &bypass_res, Value::Bypass(list)) {
+                        eprintln!("Застава: {} не записан: {e}", bypass_res.id());
+                    }
+                }
+                Err(_) => eprintln!("Застава: {} не прочитан", bypass_res.id()),
+            }
+            batch.push((
+                Resource::Chain {
+                    service: plan.svc.clone(),
+                },
+                Value::Chain(u.chain_off.clone()),
+            ));
+        }
+    }
+
+    let outcomes = j
+        .apply_batch(p, batch, |items| {
+            let script = build_privileged_networksetup_script(p, items)
+                .map_err(|_| JournalError::Platform(PlatformError::Failed("osascript")))?;
+            exec_shell(&script)
+        })
+        .map_err(|e| match e {
+            JournalError::Platform(PlatformError::AdminAuthRequired(_)) => {
+                MSG_ADMIN_AUTH_REQUIRED.to_string()
+            }
+            other => format!("Не удалось включить защиту с правами администратора: {other}"),
+        })?;
+
+    let mut report = EnableReport {
+        skipped_vpn: planned.vpn_untouched,
+        ..EnableReport::default()
+    };
+    for (res, outcome) in outcomes {
+        note_changed(outcome, &mut report.changed);
+        if let Resource::Pac { service } = res {
+            report.configured.push(service.name);
+        }
     }
     Ok(report)
 }
@@ -1191,5 +1488,133 @@ mod tests {
             }
         }
         assert_eq!(p.os_writes(), 5, "five idle VPN services, one clear each");
+    }
+
+    #[test]
+    fn admin_auth_required_error_surfaces_exact_prefix_without_writes() {
+        let (fs, p) = setup();
+        p.fail_next_auth(PlatOp::SetPac);
+        let mut j = open(&fs);
+        let err = enable_pac(&mut j, &p, PAC).unwrap_err();
+        assert!(
+            err.starts_with("ADMIN_AUTH_REQUIRED:"),
+            "expected ADMIN_AUTH_REQUIRED: prefix, got {err}"
+        );
+        assert_eq!(p.os_writes(), 0);
+        // Journal entry must not be left dangling Applied when auth failed.
+        let pac_res = Resource::Pac { service: wifi() };
+        assert!(j.entry(&pac_res).is_none());
+    }
+
+    #[test]
+    fn unlisted_utun_tunnel_is_skipped_while_wifi_is_configured() {
+        let (fs, p) = setup();
+        let amnezia = ServiceId::new("utun4", "AmneziaWG", "AmneziaWG");
+        p.add_service(amnezia.clone());
+        let mut j = open(&fs);
+        let report = enable_pac(&mut j, &p, PAC).unwrap();
+        assert_eq!(report.configured, vec!["Wi-Fi"]);
+        assert_eq!(report.skipped_vpn, vec!["AmneziaWG"]);
+        assert!(!touched(&p, &amnezia));
+        assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)));
+    }
+
+    #[test]
+    fn privileged_script_quotes_special_names_and_rejects_injections() {
+        assert!(is_safe_pac_url(PAC));
+        assert!(!is_safe_pac_url("ftp://127.0.0.1:8899/proxy.pac"));
+        assert!(!is_safe_pac_url("http://127.0.0.1:8899/proxy.pac;id"));
+        assert!(!is_safe_pac_url("http://127.0.0.1/$(whoami)"));
+
+        let quoted = posix_single_quote("Bob's Wi-Fi; $(id)").unwrap();
+        assert_eq!(quoted, "'Bob'\\''s Wi-Fi; $(id)'");
+        assert!(posix_single_quote("bad\nname").is_err());
+
+        let p = FakePlatform::new();
+        let sneaky = ServiceId::new("en0", "Wi-Fi", "Bob's Wi-Fi \"1\"");
+        p.add_service(sneaky.clone());
+        let script = build_privileged_networksetup_script(
+            &p,
+            &[(
+                Resource::Pac { service: sneaky },
+                Value::Pac(pac(Some(PAC), Some(true))),
+            )],
+        )
+        .unwrap();
+        assert!(script.contains("'Bob'\\''s Wi-Fi \"1\"'"), "{script}");
+        assert!(script.contains(&format!("'{PAC}'")), "{script}");
+        let osa = build_osascript_arg(&script).unwrap();
+        assert!(osa.starts_with("do shell script \""));
+        assert!(osa.ends_with("\" with administrator privileges"));
+        assert!(osa.contains("\\\"1\\\""), "{osa}");
+    }
+
+    #[test]
+    fn privileged_enable_batches_services_records_journal_and_rolls_back_on_cancel() {
+        let (fs, p) = setup();
+        let eth = ServiceId::new("en7", "USB 10/100/1000 LAN", "Ethernet");
+        p.add_service(eth.clone());
+        p.seed_chain(
+            &wifi(),
+            ChainState {
+                http: ProxyEndpoint {
+                    enabled: Some(true),
+                    server: Some("127.0.0.1".into()),
+                    port: Some(10808),
+                    authenticated: Some(false),
+                },
+                https: ProxyEndpoint::default(),
+            },
+        );
+        let mut j = open(&fs);
+        // Cancelled UAC / AppleScript prompt must roll back cleanly.
+        let err = enable_pac_privileged_with(&mut j, &p, PAC, |_| {
+            Err(JournalError::Platform(PlatformError::AdminAuthRequired(
+                "osascript",
+            )))
+        })
+        .unwrap_err();
+        assert!(err.starts_with("ADMIN_AUTH_REQUIRED:"));
+        assert!(j.entry(&Resource::Pac { service: wifi() }).is_none());
+
+        // Successful batch applies both physical services in a single prompt and commits journal.
+        let mut exec_count = 0usize;
+        let report = enable_pac_privileged_with(&mut j, &p, PAC, |script| {
+            exec_count += 1;
+            assert!(script.contains("-setautoproxyurl 'Wi-Fi'"));
+            assert!(script.contains("-setautoproxyurl 'Ethernet'"));
+            assert!(script.contains("-setwebproxystate 'Wi-Fi' off"));
+            p.set_pac(&wifi(), &pac(Some(PAC), Some(true))).unwrap();
+            p.set_pac(&eth, &pac(Some(PAC), Some(true))).unwrap();
+            p.set_chain(
+                &wifi(),
+                &ChainState {
+                    http: ProxyEndpoint {
+                        enabled: Some(false),
+                        server: Some("127.0.0.1".into()),
+                        port: Some(10808),
+                        authenticated: Some(false),
+                    },
+                    https: ProxyEndpoint::default(),
+                },
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(exec_count, 1);
+        assert_eq!(report.configured, vec!["Wi-Fi", "Ethernet"]);
+        assert_eq!(
+            j.entry(&Resource::Pac { service: wifi() }).unwrap().state,
+            EntryState::Applied
+        );
+        assert_eq!(
+            j.entry(&Resource::Pac { service: eth }).unwrap().state,
+            EntryState::Applied
+        );
+        assert_eq!(
+            j.entry(&Resource::Chain { service: wifi() }).unwrap().state,
+            EntryState::Applied
+        );
     }
 }
