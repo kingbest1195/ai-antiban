@@ -551,7 +551,7 @@ export function SettingsModal({
                 )}
 
                 <div className="zs-settings__form" style={{ marginTop: "var(--space-2)", flexWrap: "wrap" }}>
-                  {coworkStatus.supported && (
+                  {coworkStatus.platform === "windows" && coworkStatus.supported && (
                     <Button
                       variant={coworkStatus.needs_repair ? "primary" : "secondary"}
                       size="sm"

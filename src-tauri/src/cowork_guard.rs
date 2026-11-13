@@ -322,11 +322,17 @@ pub fn parse_launchctl_output(stdout: &str) -> Vec<DetectedAiProcess> {
         }
         let label = cols[2];
         let lower = label.to_ascii_lowercase();
+        if lower.starts_with("com.apple.") {
+            continue;
+        }
+        let is_cursor_ide = (lower.contains("todesktop") && lower.contains("cursor"))
+            || lower.contains("cursor.app")
+            || lower.contains("com.cursor.");
         let interesting = lower.contains("claudefordesktop")
             || lower.contains("anthropic")
             || lower.contains("openai.chat")
             || lower.contains("chatgpt")
-            || lower.contains("cursor");
+            || is_cursor_ide;
         if !interesting {
             continue;
         }
@@ -573,12 +579,20 @@ mod tests {
 
         let launchctl = "\
 -\t0\tcom.apple.Finder
+-\t0\tcom.apple.TextInputUI.xpc.CursorUIViewService
+42\t0\tcom.example.cursor-related
 1234\t0\tcom.anthropic.claudefordesktop.ShipIt
+-\t0\tcom.todesktop.cursor.ShipIt
 ";
         let agents = parse_launchctl_output(launchctl);
-        assert_eq!(agents.len(), 1);
+        assert_eq!(agents.len(), 2);
         assert_eq!(agents[0].name, "com.anthropic.claudefordesktop.ShipIt");
         assert!(agents[0].running);
+        assert_eq!(agents[1].name, "com.todesktop.cursor.ShipIt");
+        assert!(!agents[1].running);
+        assert!(!agents
+            .iter()
+            .any(|a| a.name.contains("CursorUIViewService")));
     }
 
     #[test]

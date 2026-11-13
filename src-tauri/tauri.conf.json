@@ -29,7 +29,7 @@
         "title": "Zastava Alert",
         "url": "index.html?window=alert-popup",
         "width": 440,
-        "height": 360,
+        "height": 470,
         "resizable": false,
         "alwaysOnTop": true,
         "decorations": false,

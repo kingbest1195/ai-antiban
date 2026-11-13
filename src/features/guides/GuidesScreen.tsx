@@ -18,6 +18,7 @@ export interface GuidesScreenProps {
   /** Какой гайд открыть: «Обзор», «Подключение», диалог обрыва и трей передают id (см. resolveGuide). */
   initialGuide?: string;
   currentIp?: string;
+  currentCountry?: string;
   currentTimezone?: string;
   onPinIp?: (ip: string) => void;
   onToast?: ShowToast;
@@ -27,6 +28,7 @@ export interface GuidesScreenProps {
 export function GuidesScreen({
   initialGuide = "01-personal-vpn-15min",
   currentIp = "185.212.102.40",
+  currentCountry = "NL",
   currentTimezone,
   onPinIp,
   onToast,
@@ -50,8 +52,17 @@ export function GuidesScreen({
   }, [initialGuide]);
 
   const { copiedId, copy: copyText } = useCopy(onToast);
+  const resolvedCountry = currentCountry && currentCountry !== "--" ? currentCountry : "NL";
 
-  const ctx: GuideContextValue = { currentIp, currentTimezone, onPinIp, onToast, copiedId, copy: copyText };
+  const ctx: GuideContextValue = {
+    currentIp,
+    currentCountry: resolvedCountry,
+    currentTimezone,
+    onPinIp,
+    onToast,
+    copiedId,
+    copy: copyText,
+  };
 
   const openSupport = () => {
     onToast?.(copy.toast.support, copy.toast.supportText, "info");

@@ -229,4 +229,20 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
     const html = renderToStaticMarkup(createElement(AlertWindow, { initialPayload: detecting() }));
     expect(html).toContain("disabled");
   });
+
+  it("AlertWindow рендерит длинное название страны в Было → Стало и обе горячие клавиши 1 и 2", () => {
+    const html = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        initialPayload: {
+          ...detecting(),
+          phase: "ready",
+          network_change: { old_ip: "185.212.102.40", old_country: "NL", new_ip: "104.28.14.99", new_country: "US" },
+        },
+      }),
+    );
+    expect(html).toContain("zs-route-diff");
+    expect(html).toContain(formatCountryWithCode("US"));
+    expect(html).toContain('aria-keyshortcuts="1"');
+    expect(html).toContain('aria-keyshortcuts="2"');
+  });
 });

@@ -536,6 +536,11 @@ export function AppShell() {
               <GuidesScreen
                 initialGuide={nav.guideTarget}
                 currentIp={gw.currentIp}
+                currentCountry={
+                  gw.currentCountry && gw.currentCountry !== "--"
+                    ? gw.currentCountry
+                    : gw.activeReport?.telemetry.country_code || "NL"
+                }
                 currentTimezone={gw.activeReport?.telemetry?.timezone}
                 onPinIp={pinning.handlePinIp}
                 onToast={showToast}

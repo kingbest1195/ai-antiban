@@ -3,6 +3,7 @@ import type { ShowToast } from "../../shared/hooks";
 
 export interface GuideContextValue {
   currentIp: string;
+  currentCountry: string;
   currentTimezone?: string;
   onPinIp?: (ip: string) => void;
   onToast?: ShowToast;

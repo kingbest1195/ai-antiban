@@ -304,6 +304,35 @@ pub(crate) fn report_no_critical_and_geo_ok(report: &RiskReport) -> bool {
         && !crate::is_sanctioned_or_blocked_country(&report.telemetry.country_code)
 }
 
+/// Downgrades a `Red` report to `Yellow` for tray display when traffic is actually flowing
+/// (`!has_blocked`) because the user explicitly allowed the audited provider for the session.
+pub(crate) fn effective_tray_report<'a>(
+    report: &'a RiskReport,
+    has_blocked: bool,
+    st: &crate::state::AppStateData,
+) -> std::borrow::Cow<'a, RiskReport> {
+    if !has_blocked
+        && report.overall_status == OverallStatus::Red
+        && st.session_allowed_providers.contains(report.provider.as_str())
+    {
+        let mut adjusted = report.clone();
+        adjusted.overall_status = OverallStatus::Yellow;
+        std::borrow::Cow::Owned(adjusted)
+    } else {
+        std::borrow::Cow::Borrowed(report)
+    }
+}
+
+fn all_unrouted_session_allowed(
+    unrouted: &[&'static str],
+    st: &crate::state::AppStateData,
+) -> bool {
+    !unrouted.is_empty()
+        && unrouted
+            .iter()
+            .all(|p| st.session_allowed_providers.contains(*p))
+}
+
 async fn audit_one_with_retry(
     audit: &AuditFn,
     provider: ProviderId,
@@ -824,19 +853,25 @@ impl NetworkGuard {
             }
             return;
         };
-        self.update_tray(env, &summary.tray).await;
-        let pinned_ip = env.state.get_pinned_ip().await;
-        let is_pinned = pinned_ip
+        let st = env.state.get_data().await;
+        let is_pinned = st
+            .pinned_ip
             .as_deref()
             .map(|p| {
                 p.trim() == baseline_ip.trim() || p.trim() == summary.tel.ip.trim()
             })
             .unwrap_or(false);
-        if summary.all_green || (is_pinned && summary.no_critical_and_geo_ok) {
+        let country_allowed = !crate::is_sanctioned_or_blocked_country(&summary.tel.country_code);
+        let session_allowed = all_unrouted_session_allowed(&unrouted, &st);
+        if summary.all_green
+            || (is_pinned && summary.no_critical_and_geo_ok)
+            || (!was_blocked && (country_allowed || session_allowed))
+        {
             self.restore_locked(env, inner).await;
         } else if was_blocked {
             self.set_gate(Gate::Blocked);
         }
+        self.update_tray(env, &summary.tray).await;
     }
 
     /// The route fingerprint changed: decide what the probed IP means.
@@ -864,7 +899,22 @@ impl NetworkGuard {
 
             if baseline_ip.as_deref() == Some(new_ip.as_str()) {
                 // The external IP did NOT change at all — local utun refresh on macOS (e.g. Amnezia)!
-                if baseline_trusted {
+                let trusted_or_allowed = if baseline_trusted {
+                    true
+                } else {
+                    let unrouted = env.state.unrouted_providers().await;
+                    let st = env.state.get_data().await;
+                    if all_unrouted_session_allowed(&unrouted, &st) {
+                        if let Some(b) = inner.baseline.as_mut() {
+                            b.trusted = true;
+                        }
+                        inner.handled_ip = None;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if trusted_or_allowed {
                     if self.probe_is_stale(inner, planned_fp) {
                         return; // the route moved again meanwhile: the next tick decides
                     }
@@ -959,6 +1009,21 @@ impl NetworkGuard {
                         .await;
                 } else {
                     inner.handled_ip = None;
+                }
+                return;
+            }
+            let unrouted = env.state.unrouted_providers().await;
+            let st = env.state.get_data().await;
+            if all_unrouted_session_allowed(&unrouted, &st) {
+                if let Some(b) = inner.baseline.as_mut() {
+                    b.trusted = true;
+                }
+                inner.handled_ip = None;
+                if self.gate() != Gate::Open || inner.pending.is_some() || was_blocked {
+                    if self.probe_is_stale(inner, planned_fp) {
+                        return;
+                    }
+                    self.restore_locked(env, inner).await;
                 }
                 return;
             }
@@ -1455,6 +1520,73 @@ impl NetworkGuard {
         }
     }
 
+    /// Confirms the current network as a trusted baseline after explicit user confirmation in the
+    /// main window (`allow_provider_session` / `unblock_provider_cmd`). Unlike `accept_current`,
+    /// this also updates `baseline.trusted = true` when the gate is already `Gate::Open` (e.g.
+    /// startup on a warning/untrusted network) so subsequent regular probes on the same IP do not
+    /// re-freeze or block traffic. Never lifts a manual kill-switch or opens a closed gate without
+    /// resolved telemetry.
+    pub async fn confirm_current_session(self: &Arc<Self>, tel: Option<&NetworkTelemetry>) {
+        if self.is_manual_killswitch() {
+            return;
+        }
+        let mut inner = self.inner.lock().await;
+        if let Some(env) = self.env.get() {
+            let resolved = match tel {
+                Some(t) => Ok(t.clone()),
+                None => env.resolve_telemetry().await,
+            };
+            match resolved {
+                Ok(t) => {
+                    let ip = inner.observed_ip.clone().unwrap_or_else(|| t.ip.clone());
+                    if self.gate() != Gate::Open {
+                        self.accept_locked(env, &mut inner, &ip, &t).await;
+                    } else {
+                        if let Some(p) = inner.invalidate_alert() {
+                            env.hold_queue.remove(&p.id).await;
+                        }
+                        inner.baseline = Some(Baseline {
+                            ip,
+                            country: Some(t.country_code.clone()),
+                            trusted: true,
+                        });
+                        inner.handled_ip = None;
+                        self.set_gate(Gate::Open);
+                    }
+                }
+                Err(e) => {
+                    if self.gate() == Gate::Open {
+                        if let Some(b) = inner.baseline.as_mut() {
+                            b.trusted = true;
+                        }
+                        inner.handled_ip = None;
+                    } else {
+                        eprintln!(
+                            "Network guard: cannot confirm the network, gate stays closed: {e}"
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(t) = tel {
+            inner.invalidate_alert();
+            inner.baseline = Some(Baseline {
+                ip: t.ip.clone(),
+                country: Some(t.country_code.clone()),
+                trusted: true,
+            });
+            inner.handled_ip = None;
+            self.set_gate(Gate::Open);
+        } else if self.gate() == Gate::Open {
+            if let Some(b) = inner.baseline.as_mut() {
+                b.trusted = true;
+            }
+            inner.handled_ip = None;
+        }
+    }
+
     /// The user's "allow" for the network alert `id` (command layer). Accepted only while that
     /// alert is still the current one (same id and epoch) AND its audit finished (`phase ==
     /// "ready"`); otherwise nothing is opened or written and an error goes back to the window.
@@ -1520,7 +1652,8 @@ impl NetworkGuard {
             .map(|p| p.trim() == report.telemetry.ip.trim())
             .unwrap_or(false);
         let held = self.gate() != Gate::Open || !st.blocked_providers.is_empty();
-        env.io.tray_report(report, is_pinned, held);
+        let tray_report = effective_tray_report(report, held, &st);
+        env.io.tray_report(&tray_report, is_pinned, held);
     }
 
     /// Re-reads the status for the tray in the background (a full audit: 0.3-2 s must never be
@@ -2782,5 +2915,172 @@ mod tests {
 
         assert_eq!(guard.gate(), Gate::Blocked);
         assert!(state.is_provider_blocked("anthropic").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_transient_route_flicker_on_non_pinned_warning_network_recovers_and_keeps_allows()
+    {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let probe_calls2 = Arc::clone(&probe_calls);
+        let probe: ProbeFn = Arc::new(move || {
+            let n = probe_calls2.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if n == 0 {
+                    None // brief DNS/socket hiccup during local route flicker
+                } else {
+                    Some("8.8.8.8".to_string())
+                }
+            })
+        });
+        let audit: AuditFn = Arc::new(move |provider, _force| {
+            Box::pin(async move {
+                let mut r = test_report(provider, OverallStatus::Yellow, "8.8.8.8", "NL");
+                r.unknown_count = 1;
+                r.checks = vec![
+                    CheckResult::ok("Geo", "ok"),
+                    CheckResult::warning("Timezone", "mismatch", None),
+                ];
+                Ok(r)
+            })
+        });
+
+        let io = Arc::new(TestIo::default());
+        let state = AppState::new_in_memory();
+        // Not pinned, user has a session allowance on this warning network.
+        state.allow_provider_for_session("anthropic").await.unwrap();
+        let env = Env {
+            auditor: Auditor::new().expect("auditor"),
+            state: state.clone(),
+            hold_queue: Arc::new(HoldQueue::new()),
+            io: io.clone(),
+            audit,
+            probe: Some(probe),
+            resolve: None,
+            audit_timeout: Duration::from_secs(5),
+        };
+        let guard = Arc::new(NetworkGuard::new());
+        assert!(guard.install_env(env.clone()));
+        {
+            let mut inner = guard.inner.lock().await;
+            inner.baseline = Some(Baseline {
+                ip: "8.8.8.8".to_string(),
+                country: Some("NL".to_string()),
+                trusted: true,
+            });
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+        }
+
+        // 1. Transient route flicker where probe returns None: stays recoverable (not Blocked)
+        //    and preserves session_allowed_providers.
+        guard.inner.lock().await.route_dirty = true;
+        guard.check_route_and_tick(&env).await;
+        assert_eq!(guard.gate(), Gate::Pending);
+        assert!(state.is_provider_session_allowed("anthropic").await);
+        assert!(state.get_data().await.blocked_providers.is_empty());
+
+        // 2. Next regular probe gets unchanged IP "8.8.8.8" on non-pinned warning network:
+        //    restores Gate::Open and keeps session allowance.
+        guard.inner.lock().await.last_probe =
+            Instant::now().checked_sub(Duration::from_millis(PROBE_MIN_GAP_MS + 10));
+        guard.check_route_and_tick(&env).await;
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(guard.gate(), Gate::Open);
+        assert!(state.is_provider_session_allowed("anthropic").await);
+        assert!(state.get_data().await.blocked_providers.is_empty());
+        assert_eq!(io.count("interceptor://risk-detected"), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_confirm_current_session_marks_untrusted_baseline_trusted() {
+        let h = harness(
+            slow_audit(Duration::from_millis(10), "5.5.5.5", OverallStatus::Red),
+            "5.5.5.5",
+        )
+        .await;
+        {
+            let mut inner = h.guard.inner.lock().await;
+            inner.baseline = Some(Baseline {
+                ip: "5.5.5.5".to_string(),
+                country: Some("RU".to_string()),
+                trusted: false,
+            });
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+        }
+        assert_eq!(h.guard.gate(), Gate::Open);
+
+        let tel =
+            test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU").telemetry;
+        h.guard.confirm_current_session(Some(&tel)).await;
+        {
+            let inner = h.guard.inner.lock().await;
+            assert!(inner.baseline.as_ref().is_some_and(|b| b.trusted));
+            assert!(inner.handled_ip.is_none());
+        }
+
+        // Subsequent regular probe on the same IP must not freeze or open an alert.
+        let probes_before = h.probes.load(Ordering::SeqCst);
+        h.guard.inner.lock().await.last_probe =
+            Instant::now().checked_sub(Duration::from_millis(PROBE_MIN_GAP_MS + 10));
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.probes.load(Ordering::SeqCst), probes_before + 1);
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert_eq!(h.io.count("interceptor://risk-detected"), 0);
+        assert!(h.state.get_data().await.blocked_providers.is_empty());
+
+        // Manual kill-switch must not be lifted by confirm_current_session.
+        assert!(h.guard.set_manual_killswitch(true, &h.state).await);
+        h.guard.confirm_current_session(Some(&tel)).await;
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+        assert!(h.guard.is_manual_killswitch());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_regular_probe_on_untrusted_baseline_respects_all_session_allowed() {
+        let h = harness(
+            slow_audit(Duration::from_millis(10), "5.5.5.5", OverallStatus::Red),
+            "5.5.5.5",
+        )
+        .await;
+        for p in KNOWN_PROVIDERS {
+            h.state.allow_provider_for_session(p).await.unwrap();
+        }
+        {
+            let mut inner = h.guard.inner.lock().await;
+            inner.baseline = Some(Baseline {
+                ip: "5.5.5.5".to_string(),
+                country: Some("RU".to_string()),
+                trusted: false,
+            });
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+        }
+
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert_eq!(h.io.count("interceptor://risk-detected"), 0);
+        assert!(h.guard.inner.lock().await.baseline.as_ref().is_some_and(|b| b.trusted));
+        for p in KNOWN_PROVIDERS {
+            assert!(h.state.is_provider_session_allowed(p).await);
+        }
+    }
+
+    #[test]
+    fn test_effective_tray_report_downgrades_red_when_session_allowed_and_open() {
+        let report = test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU");
+        let mut st = crate::state::AppStateData::default();
+        assert_eq!(
+            effective_tray_report(&report, false, &st).overall_status,
+            OverallStatus::Red
+        );
+
+        st.session_allowed_providers.insert("anthropic".to_string());
+        assert_eq!(
+            effective_tray_report(&report, false, &st).overall_status,
+            OverallStatus::Yellow
+        );
+        // When actually blocked/pending, keep Red.
+        assert_eq!(
+            effective_tray_report(&report, true, &st).overall_status,
+            OverallStatus::Red
+        );
     }
 }

@@ -1,7 +1,8 @@
 /* Окно-диалог обрыва VPN (Tauri: alert-popup, прозрачное, без рамки). Только токены.
    Поле вокруг Dialog оставляет место тени shadow-pop; фон окна прозрачный. */
 .zs-root.zs-alert-win{display:flex;align-items:flex-start;justify-content:center;width:100%;min-height:100vh;padding:var(--space-3);background:transparent}
-.zs-alert-win .zs-dialog{width:100%;max-height:calc(100vh - 24px);overflow:auto}
+.zs-alert-win .zs-dialog{width:100%;max-height:calc(100vh - 24px);overflow:auto;padding:var(--space-4)}
+.zs-alert-win .zs-route,.zs-alert-win .zs-route-diff,.zs-alert-win .zs-dialog__actions,.zs-alert-win .zs-dialog__confirm{margin-top:var(--space-3)}
 .zs-root.zs-alert-overlay{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:var(--space-4);background:color-mix(in srgb,var(--bg-0) 78%,transparent)}
 /* Шапка: заголовок в одну строку при ширине окна 440px */
 .zs-alert-win .zs-dialog__head{gap:var(--space-2)}

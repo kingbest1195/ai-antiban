@@ -380,7 +380,9 @@ fn spawn_tray_status_watcher(
                     let has_blocked = !st.blocked_providers.is_empty()
                         || watcher_guard.gate() != proxy::Gate::Open;
 
-                    update_tray_from_report(&watcher_handle, &report, is_pinned, has_blocked);
+                    let tray_report =
+                        proxy::guard::effective_tray_report(&report, has_blocked, &st);
+                    update_tray_from_report(&watcher_handle, &tray_report, is_pinned, has_blocked);
                     let _ = watcher_handle.emit("audit://refreshed", &report);
 
                     if !initial_synced {

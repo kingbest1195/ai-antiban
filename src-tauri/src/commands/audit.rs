@@ -89,7 +89,8 @@ pub async fn audit_connection(
             .unwrap_or(false);
         let has_blocked =
             !st.blocked_providers.is_empty() || guard.gate() != proxy::Gate::Open;
-        update_tray_from_report(&app, &report, is_pinned, has_blocked);
+        let tray_report = proxy::guard::effective_tray_report(&report, has_blocked, &st);
+        update_tray_from_report(&app, &tray_report, is_pinned, has_blocked);
     }
 
     Ok(report)
@@ -135,15 +136,17 @@ pub async fn allow_provider_session(
         .map_err(|e| e.to_string())?;
 
     // Record current IP in history so Impossible Travel is acknowledged and cleared
+    let mut tel_opt = None;
     if let Some(provider_id) = auditor::ProviderId::from_id(&provider) {
         if let Ok(tel) = auditor.resolve_for_provider(provider_id, &state, false).await {
             let entry = state::IpHistoryEntry::new(
-                tel.ip,
-                tel.country_code,
+                tel.ip.clone(),
+                tel.country_code.clone(),
                 tel.asn,
                 tel.resolved_at,
             );
             let _ = state.record_ip_history(provider_id.as_str(), entry).await;
+            tel_opt = Some(tel);
         }
     }
 
@@ -152,8 +155,11 @@ pub async fn allow_provider_session(
         .resolve_all_for_provider(&provider, proxy::HoldResolution::Allow)
         .await;
 
-    // If traffic was frozen after a network change, the user's manual confirmation resumes it
-    proxy_manager.guard.accept_current().await;
+    // Confirm current baseline as trusted and resume traffic if frozen (no-op under manual kill-switch)
+    proxy_manager
+        .guard
+        .confirm_current_session(tel_opt.as_ref())
+        .await;
 
     Ok(())
 }
@@ -163,6 +169,7 @@ pub async fn unblock_provider_cmd(
     provider: String,
     state: tauri::State<'_, state::AppState>,
     auditor: tauri::State<'_, auditor::Auditor>,
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
 ) -> Result<(), String> {
     state
         .unblock_provider(&provider)
@@ -170,16 +177,27 @@ pub async fn unblock_provider_cmd(
         .map_err(|e| e.to_string())?;
 
     // Also update IP history to current IP so a stale Impossible Travel doesn't immediately re-flag
+    let mut tel_opt = None;
     if let Some(provider_id) = auditor::ProviderId::from_id(&provider) {
         if let Ok(tel) = auditor.resolve_for_provider(provider_id, &state, false).await {
             let entry = state::IpHistoryEntry::new(
-                tel.ip,
-                tel.country_code,
+                tel.ip.clone(),
+                tel.country_code.clone(),
                 tel.asn,
                 tel.resolved_at,
             );
             let _ = state.record_ip_history(provider_id.as_str(), entry).await;
+            tel_opt = Some(tel);
         }
+    }
+
+    if state.get_data().await.blocked_providers.is_empty()
+        && !proxy_manager.guard.is_manual_killswitch()
+    {
+        proxy_manager
+            .guard
+            .confirm_current_session(tel_opt.as_ref())
+            .await;
     }
 
     Ok(())

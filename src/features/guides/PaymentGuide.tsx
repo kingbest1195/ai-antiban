@@ -2,14 +2,17 @@ import { Badge, Banner, Card, Row, Steps } from "../../ui";
 import type { StepItem } from "../../ui";
 import { common, guides as copy } from "../../shared/copy/ru";
 import { openExternal } from "../../utils/opener";
+import { AddressCard } from "../subscription/AddressCard";
+import { CardCheck } from "../subscription/CardCheck";
+import "../subscription/subscription.css";
 import { useGuide } from "./context";
 import { Rich } from "./Rich";
 import { VIRTUAL_CARD_PROVIDERS } from "./providers";
 import type { VirtualCardProvider } from "./providers";
 
-/** Раздел «Оплата»: сервисы виртуальных карт и три правила платежной гигиены. */
+/** Раздел «Оплата»: BIN-чекер, безналоговый адрес США, сервисы виртуальных карт и правила платежной гигиены. */
 export function PaymentGuide() {
-  const { onToast } = useGuide();
+  const { currentCountry, onToast } = useGuide();
   const t = copy.payment;
 
   const open = (card: VirtualCardProvider) => {
@@ -28,6 +31,10 @@ export function PaymentGuide() {
       <Banner tone="warn" icon="lock" title={t.pitchTitle}>
         {t.pitchText}
       </Banner>
+
+      <CardCheck country={currentCountry} onToast={onToast} />
+
+      <AddressCard onToast={onToast} />
 
       <Card title={t.servicesTitle}>
         <p className="guides-note guides-note--tight">{t.servicesAside}</p>
