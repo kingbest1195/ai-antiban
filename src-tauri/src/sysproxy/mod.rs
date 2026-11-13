@@ -1272,6 +1272,7 @@ mod tests {
     #[test]
     fn dry_run_cli_protection_changes_no_file_and_reports_no_target() {
         let before = dry_run_blocked_calls();
+        let before_programs = dry_run_blocked_programs().len();
         let report = enable_cli_and_ide_protection("127.0.0.1:8899");
         assert!(report.enabled);
         assert!(
@@ -1283,19 +1284,21 @@ mod tests {
         assert!(!home.join(".zshrc").exists());
         assert!(!home.join(".claude").exists());
         assert!(dry_run_blocked_calls() > before);
-        // No `launchctl setenv` for the GUI session, with or without a timezone sync.
+        // No `launchctl setenv` / registry write for the GUI session, with or without a timezone sync.
         let with_tz = enable_cli_and_ide_protection_with(
             "127.0.0.1:8899",
             crate::state::CliMode::AiOnly,
             Some("Europe/Berlin"),
         );
         assert!(with_tz.enabled);
+        let new_programs = dry_run_blocked_programs();
+        let recent = new_programs.get(before_programs..).unwrap_or(&[]);
         assert!(
-            !dry_run_blocked_programs()
+            !recent
                 .iter()
-                .any(|w| w.contains("launchctl") || w.contains("user_env")),
+                .any(|w| w.contains("launchctl") || w == "user_env:set" || w == "user_env:unset"),
             "the GUI session stays clean: {:?}",
-            dry_run_blocked_programs()
+            recent
         );
         let report = disable_cli_protection();
         assert!(report.skipped_dry_run || !report.has_failures());
