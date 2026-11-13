@@ -7,6 +7,7 @@ import type {
   PartialAudit,
   ProviderId,
   RiskReport,
+  RoutesSnapshot,
   UpdateCheckResult,
 } from "../../types";
 import {
@@ -31,6 +32,8 @@ import type { MenuEntry } from "../../ui";
 import { checks as checksCopy, coverage as coverageCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import { formatNumber } from "../../shared/lib/format";
+import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
+import { openZastavaBot } from "../../utils/opener";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
 import { CoverageSection } from "../coverage/CoverageSection";
 import { buildPendingChecks, failedChecks, progressOf } from "../checks/checksModel";
@@ -52,6 +55,7 @@ export interface OverviewScreenProps {
   gatewayStats: GatewayStatsSnapshot | null;
   updateInfo: UpdateCheckResult | null;
   coverageSnapshot?: CoverageSnapshot | null;
+  routesSnapshot?: RoutesSnapshot | null;
   /** Возраст данных в минутах, если отчёт устарел или аудит упал; иначе null. */
   dataAgeMinutes?: number | null;
 
@@ -81,6 +85,7 @@ export interface OverviewScreenProps {
   onOpenTimezone: () => void;
   onOpenUpdate: () => void;
   onOpenCrashTest: () => void;
+  onOpenConnect?: () => void;
 }
 
 /** Цифры дня, пока данных нет: прочерк, а не «0» (ноль — это уже известный ответ). */
@@ -148,9 +153,50 @@ export function OverviewScreen(props: OverviewScreenProps) {
 
   const progress = progressOf(buildPendingChecks(partial ?? null, state));
 
+  const expiringRoute = (() => {
+    const routes = props.routesSnapshot?.routes;
+    if (!routes || routes.length === 0) return null;
+    return (
+      routes.find((r) => {
+        if (!r.enabled || !r.expires_at) return false;
+        const urgency = getRouteExpiryUrgency(r.expires_at);
+        return urgency === "expired" || urgency === "critical" || urgency === "soon";
+      }) ?? null
+    );
+  })();
+  const expiringUrgency = expiringRoute?.expires_at ? getRouteExpiryUrgency(expiringRoute.expires_at) : "none";
+
   return (
     <>
       {!loading && !failed && <ProblemBanner kind={model.banner} {...props} />}
+
+      {expiringRoute && expiringRoute.expires_at && (
+        <Banner
+          tone={expiringUrgency === "critical" || expiringUrgency === "expired" ? "danger" : "warn"}
+          title={
+            expiringUrgency === "expired"
+              ? copy.banner.expiringKey.titleExpired
+              : copy.banner.expiringKey.titleSoon
+          }
+          action={
+            <>
+              <Button size="sm" variant="primary" onClick={() => openZastavaBot(expiringRoute.id)}>
+                {copy.banner.expiringKey.renew}
+              </Button>{" "}
+              {props.onOpenConnect && (
+                <Button size="sm" variant="quiet" onClick={props.onOpenConnect}>
+                  {copy.banner.expiringKey.openConnect}
+                </Button>
+              )}
+            </>
+          }
+        >
+          {copy.banner.expiringKey.text(
+            expiringRoute.label || copy.facts.key,
+            formatRemainingTimeRu(expiringRoute.expires_at),
+          )}
+        </Banner>
+      )}
 
       {loading ? (
         <HeroChecking startup={startupPending} done={progress.done} total={progress.total} />
@@ -415,6 +461,12 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
         ] as MenuEntry[])),
   ];
 
+  const hasActiveRoute = Boolean(
+    props.routesSnapshot &&
+      (Object.values(props.routesSnapshot.effective || {}).some(Boolean) ||
+        props.routesSnapshot.routes.some((r) => r.enabled && r.status === "active")),
+  );
+
   const extra: ReactNode =
     model.pinState === "pinned" ? (
       <Badge icon="lock">{copy.facts.pinned}</Badge>
@@ -422,7 +474,7 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
       <Badge tone="warn" icon="alert">
         {copy.facts.pinChanged}
       </Badge>
-    ) : props.state?.upstream_proxy?.enabled ? (
+    ) : props.state?.upstream_proxy?.enabled || hasActiveRoute ? (
       <Badge icon="key">{copy.facts.key}</Badge>
     ) : null;
 

@@ -1,5 +1,3 @@
-import { status } from "./status";
-
 /** Экран «Подключение»: свой VPN, ключ Заставы, маршруты. */
 export const connect = {
   vpn: {
@@ -15,14 +13,20 @@ export const connect = {
   },
   key: {
     title: "Ключ Заставы",
-    badge: status.testing,
     text: "Только трафик ИИ пойдёт через выделенный IP. Банки, рабочие сайты и загрузки — напрямую, на полной скорости.",
     fieldLabel: "Ключ или адрес прокси",
     placeholder: "zastava://… / https://… / socks5://…",
     caption: "Поддерживаются ключи zastava://, socks5://, https://, http://.",
+    scopeLabel: "Куда применить ключ",
+    scopeOptions: {
+      all: "Все профили / По умолчанию",
+      save_only: "Только сохранить для привязки",
+    },
     connect: "Добавить ключ",
     connecting: "Подключаем…",
     get: "Получить ключ",
+    renew: "Продлить",
+    expiringSoon: (remaining: string) => `Истекает (${remaining})`,
     empty: "Введите ключ или адрес прокси.",
     defaultLabel: "Выделенный шлюз Заставы",
     switchLabel: "Маршрут активен",
@@ -45,7 +49,8 @@ export const connect = {
     latency: (ms: number) => `${ms} мс`,
     toast: {
       connected: "Ключ добавлен",
-      connectedText: "Маршрут сохранён и готов к использованию.",
+      connectedText: "Маршрут установлен по умолчанию для всех провайдеров без отдельной привязки.",
+      savedOnlyText: "Маршрут сохранён. Привяжите его к профилю Claude или сервису ниже.",
       connectError: "Не удалось подключить ключ",
       on: "Маршрут включён",
       onText: "Трафик снова может идти через этот маршрут.",

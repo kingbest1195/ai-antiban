@@ -220,6 +220,10 @@ pub struct AppStateData {
     #[serde(default = "default_true")]
     pub auto_update_enabled: bool,
     #[serde(default)]
+    pub autostart_enabled: bool,
+    #[serde(default)]
+    pub cowork_guard_enabled: bool,
+    #[serde(default)]
     pub interception_behavior: InterceptionBehavior,
     #[serde(default)]
     pub popup_position: PopupPosition,
@@ -269,6 +273,8 @@ impl std::fmt::Debug for AppStateData {
             .field("sync_ai_tz_enabled", &self.sync_ai_tz_enabled)
             .field("cli_mode", &self.cli_mode)
             .field("auto_update_enabled", &self.auto_update_enabled)
+            .field("autostart_enabled", &self.autostart_enabled)
+            .field("cowork_guard_enabled", &self.cowork_guard_enabled)
             .field("interception_behavior", &self.interception_behavior)
             .field("popup_position", &self.popup_position)
             .field("custom_ai_domains", &self.custom_ai_domains)
@@ -427,6 +433,8 @@ impl Default for AppStateData {
             sync_ai_tz_enabled: true,
             cli_mode: CliMode::AiOnly,
             auto_update_enabled: true,
+            autostart_enabled: false,
+            cowork_guard_enabled: false,
             interception_behavior: InterceptionBehavior::AskPopup,
             popup_position: PopupPosition::TopRight,
             custom_ai_domains: Vec::new(),
@@ -933,6 +941,30 @@ impl AppState {
         {
             let mut w = self.inner.write().await;
             w.auto_update_enabled = enabled;
+        }
+        self.save_async().await
+    }
+
+    pub async fn is_autostart_enabled(&self) -> bool {
+        self.inner.read().await.autostart_enabled
+    }
+
+    pub async fn set_autostart_enabled(&self, enabled: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.autostart_enabled = enabled;
+        }
+        self.save_async().await
+    }
+
+    pub async fn is_cowork_guard_enabled(&self) -> bool {
+        self.inner.read().await.cowork_guard_enabled
+    }
+
+    pub async fn set_cowork_guard_enabled(&self, enabled: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.cowork_guard_enabled = enabled;
         }
         self.save_async().await
     }
@@ -2083,6 +2115,8 @@ mod tests {
             data.sync_ai_tz_enabled,
             "the switch is on unless the user turned it off"
         );
+        assert!(!data.autostart_enabled);
+        assert!(!data.cowork_guard_enabled);
         assert_eq!(data.cli_mode, CliMode::AiOnly);
         assert_eq!(data.synced_ai_timezone.as_deref(), Some("Europe/Amsterdam"));
         // The v1.3.1 file has neither field either.

@@ -43,6 +43,10 @@
   ${EndIf}
   Pop $1
   Pop $0
+
+  ; Clean up OS autostart entry and CoworkVMService boot-guard scheduled task if installed.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Zastava"
+  ExecWait '"$SYSDIR\schtasks.exe" /Delete /TN "\Zastava\CoworkVMServiceManualGuard" /F'
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

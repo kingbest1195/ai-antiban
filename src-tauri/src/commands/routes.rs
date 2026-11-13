@@ -59,8 +59,14 @@ pub async fn add_route(
     auditor: tauri::State<'_, auditor::Auditor>,
 ) -> Result<RouteView, String> {
     let route = routing::parse_route_key(&key, current_timestamp())?;
+    let raw_key = route.raw_key.clone();
     let id = state.upsert_route(route).await.map_err(|e| e.to_string())?;
     auditor.resolver.invalidate_route(&id).await;
+    if let Ok(Some(active_key)) =
+        auditor::profile_switcher::sync_profiles_for_route_update(&id, Some(&raw_key))
+    {
+        let _ = routing::apply_profile_key(&state, active_key.as_deref()).await;
+    }
     let data = state.get_data().await;
     let route = data
         .routes
@@ -85,6 +91,11 @@ pub async fn remove_route(
         return Err(format!("Маршрут не найден: {id}"));
     }
     auditor.resolver.invalidate_route(&id).await;
+    if let Ok(Some(active_key)) =
+        auditor::profile_switcher::sync_profiles_for_route_update(&id, None)
+    {
+        let _ = routing::apply_profile_key(&state, active_key.as_deref()).await;
+    }
     Ok(snapshot(&state).await)
 }
 

@@ -6,9 +6,9 @@
 //!
 //! * `anthropic`: route of the active Claude profile (`profile_route_id`) -> explicit
 //!   `provider_routes[provider]` -> `default_route_id` -> direct;
-//! * every other provider: explicit `provider_routes[provider]` -> `default_route_id` -> route of
-//!   the active Claude profile (fallback, the v1.3.1 semantics) -> direct (through whatever
-//!   network / VPN the user has).
+//! * every other provider: explicit `provider_routes[provider]` -> `default_route_id` -> direct
+//!   (through whatever network / VPN the user has). A route bound to a Claude profile never
+//!   leaks to other providers when `default_route_id` is `None`.
 //!
 //! Once a route is selected it is fail-closed: if it is disabled, expired, missing, invalid or
 //! unreachable the connection is refused and never falls back to a direct connection.
@@ -326,10 +326,6 @@ pub fn select_route_id(data: &AppStateData, provider: &str) -> Option<String> {
     }
     if let Some(id) = data.default_route_id.as_ref() {
         return Some(id.clone());
-    }
-    if !is_claude {
-        // v1.3.1: the active profile's key carried everything that has no other route.
-        return profile;
     }
     None
 }
@@ -768,5 +764,31 @@ mod tests {
         assert_eq!(a, route_id_for_raw_key("  socks5://u:p@1.2.3.4:1080 "));
         assert_eq!(a.len(), 26);
         assert_ne!(a, route_id_for_raw_key("socks5://u:p@1.2.3.4:1081"));
+    }
+
+    #[test]
+    fn test_profile_route_does_not_leak_to_other_providers() {
+        let mut d = AppStateData::default();
+        d.routes = vec![route("p1"), route("oa")];
+        d.profile_route_id = Some("p1".into());
+        // `default_route_id` is None: Claude uses the profile route, while OpenAI and Gemini
+        // stay Direct unless explicitly bound via `provider_routes` or `default_route_id`.
+        assert_eq!(select_route_id(&d, "anthropic").as_deref(), Some("p1"));
+        assert_eq!(select_route_id(&d, "openai"), None);
+        assert_eq!(select_route_id(&d, "gemini"), None);
+        assert_eq!(select_route(&d, "openai"), RouteSelection::Direct);
+        assert_eq!(select_route(&d, "gemini"), RouteSelection::Direct);
+
+        // Even when profile route is invalid, other providers are unaffected.
+        d.profile_route_invalid = Some("bad key".into());
+        assert_eq!(select_route(&d, "anthropic"), RouteSelection::Invalid("bad key".into()));
+        assert_eq!(select_route(&d, "openai"), RouteSelection::Direct);
+        assert_eq!(select_route(&d, "gemini"), RouteSelection::Direct);
+
+        // Explicit provider route or default route still works for OpenAI/Gemini.
+        d.profile_route_invalid = None;
+        d.provider_routes.insert("openai".into(), "oa".into());
+        assert_eq!(select_route_id(&d, "openai").as_deref(), Some("oa"));
+        assert_eq!(select_route_id(&d, "gemini"), None);
     }
 }

@@ -1,4 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getBotRenewUrl } from "../shared/lib/zastavaKey";
 
 export const TELEGRAM_SUPPORT_URL = "https://t.me/nomadnocode";
 export const TELEGRAM_FALLBACK_URL = "https://telegram.me/nomadnocode";
@@ -26,4 +27,8 @@ export async function openTelegramSupport(): Promise<void> {
   } catch {
     await openExternal(TELEGRAM_FALLBACK_URL);
   }
+}
+
+export async function openZastavaBot(routeId?: string | null): Promise<void> {
+  await openExternal(getBotRenewUrl(routeId));
 }

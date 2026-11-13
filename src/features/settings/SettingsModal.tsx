@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { CliMode, InterceptionBehavior, PopupPosition } from "../../types";
+import type { AutostartStatus, CliMode, CoworkGuardStatus, InterceptionBehavior, PopupPosition } from "../../types";
 import type { ShowToast } from "../../shared/hooks";
 import {
   addCustomAiDomain,
   forceCleanOsProxy,
+  getAutostartStatus,
   getCliSettings,
+  getCoworkGuardStatus,
   getCustomAiDomains,
   getInterceptionBehavior,
   getPopupPosition,
+  installOrRepairCoworkGuard,
+  onCoworkGuardStatus,
   removeCustomAiDomain,
+  setAutostartEnabled,
   setCliMode,
   setInterceptionBehavior,
   setPopupPosition,
@@ -77,6 +82,10 @@ export function SettingsModal({
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [confirmGlobal, setConfirmGlobal] = useState(false);
   const [proxyResult, setProxyResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [autostartStatus, setAutostartStatus] = useState<AutostartStatus | null>(null);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  const [coworkStatus, setCoworkStatus] = useState<CoworkGuardStatus | null>(null);
+  const [coworkBusy, setCoworkBusy] = useState(false);
 
   // При открытии окна подтягиваем сохранённые значения из шлюза.
   useEffect(() => {
@@ -99,8 +108,78 @@ export function SettingsModal({
         setSyncTz(cli.sync_ai_tz_enabled);
       })
       .catch(() => {});
+    getAutostartStatus()
+      .then(setAutostartStatus)
+      .catch(() => {});
+    getCoworkGuardStatus()
+      .then(setCoworkStatus)
+      .catch(() => {});
     setProxyResult(null);
+
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    onCoworkGuardStatus((status) => {
+      if (active) setCoworkStatus(status);
+    })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
   }, [open, propBehavior, propPosition, propCustomDomains]);
+
+  const handleToggleAutostart = async () => {
+    if (autostartBusy) return;
+    const next = !(autostartStatus?.active_in_os ?? autostartStatus?.enabled ?? false);
+    setAutostartBusy(true);
+    try {
+      const updated = await setAutostartEnabled(next);
+      setAutostartStatus(updated);
+      onStateUpdated?.();
+      if (updated.active_in_os) {
+        onToast?.(copy.autostart.toastOnTitle, copy.autostart.toastOnText, "success");
+      } else {
+        onToast?.(copy.autostart.toastOffTitle, copy.autostart.toastOffText, "info");
+      }
+    } catch (err) {
+      onToast?.(copy.autostart.error, errText(err), "warning");
+    } finally {
+      setAutostartBusy(false);
+    }
+  };
+
+  const handleInstallCoworkGuard = async () => {
+    if (coworkBusy) return;
+    setCoworkBusy(true);
+    try {
+      const updated = await installOrRepairCoworkGuard();
+      setCoworkStatus(updated);
+      onStateUpdated?.();
+      onToast?.(copy.coworkGuard.toastOkTitle, updated.summary, updated.needs_repair ? "warning" : "success");
+    } catch (err) {
+      onToast?.(copy.coworkGuard.toastErrTitle, errText(err), "warning");
+    } finally {
+      setCoworkBusy(false);
+    }
+  };
+
+  const handleRefreshCoworkGuard = async () => {
+    if (coworkBusy) return;
+    setCoworkBusy(true);
+    try {
+      const updated = await getCoworkGuardStatus();
+      setCoworkStatus(updated);
+    } catch {
+      // ignore
+    } finally {
+      setCoworkBusy(false);
+    }
+  };
 
   const handleToggleAutoUpdate = async () => {
     if (updatingToggle) return;
@@ -365,6 +444,134 @@ export function SettingsModal({
                 }
               />
             </Rows>
+          </Section>
+
+          {/* Автозапуск ОС */}
+          <Section title={copy.autostart.section}>
+            <Rows>
+              <Row
+                icon="power"
+                title={copy.autostart.title}
+                sub={
+                  (autostartStatus?.active_in_os ?? autostartStatus?.enabled)
+                    ? copy.autostart.subOn
+                    : copy.autostart.subOff
+                }
+                trail={
+                  <Switch
+                    checked={Boolean(autostartStatus?.active_in_os ?? autostartStatus?.enabled)}
+                    disabled={autostartBusy || (autostartStatus !== null && !autostartStatus.supported)}
+                    onChange={handleToggleAutostart}
+                    aria-label={copy.autostart.label}
+                  />
+                }
+              />
+            </Rows>
+            {autostartStatus?.target && (
+              <p className="zs-settings__hint">
+                <Mono>{autostartStatus.target}</Mono>
+              </p>
+            )}
+          </Section>
+
+          {/* Защита от фонового запуска ИИ-служб (Windows CoworkVMService / macOS) */}
+          <Section title={copy.coworkGuard.section}>
+            {!coworkStatus ? (
+              <p className="zs-settings__hint">{copy.coworkGuard.loading}</p>
+            ) : (
+              <>
+                <Banner
+                  tone={
+                    coworkStatus.needs_repair
+                      ? "warn"
+                      : coworkStatus.platform === "windows" && coworkStatus.task_healthy
+                      ? "ok"
+                      : "info"
+                  }
+                  title={
+                    coworkStatus.needs_repair
+                      ? copy.coworkGuard.statusNeedsRepair
+                      : coworkStatus.platform === "windows" && coworkStatus.task_healthy
+                      ? copy.coworkGuard.statusHealthy
+                      : copy.coworkGuard.statusInfo
+                  }
+                >
+                  {coworkStatus.summary}
+                </Banner>
+
+                {coworkStatus.platform === "windows" && (
+                  <div className="zs-settings__form" style={{ marginTop: "var(--space-2)", gap: "var(--space-2)", flexWrap: "wrap" }}>
+                    {coworkStatus.service_present && coworkStatus.start_type !== null && (
+                      <Badge
+                        tone={
+                          coworkStatus.start_type === 3
+                            ? "ok"
+                            : coworkStatus.start_type === 2
+                            ? "warn"
+                            : "danger"
+                        }
+                      >
+                        {coworkStatus.start_type === 2
+                          ? copy.coworkGuard.startAutoBadge
+                          : coworkStatus.start_type === 3
+                          ? copy.coworkGuard.startManualBadge
+                          : copy.coworkGuard.startDisabledBadge}
+                      </Badge>
+                    )}
+                    {coworkStatus.service_present && (
+                      <Badge tone={coworkStatus.service_running ? "warn" : "ok"}>
+                        {coworkStatus.service_running
+                          ? copy.coworkGuard.serviceRunningBadge
+                          : copy.coworkGuard.serviceStoppedBadge}
+                      </Badge>
+                    )}
+                    <Badge tone={coworkStatus.task_healthy ? "ok" : "warn"}>
+                      {coworkStatus.task_healthy
+                        ? copy.coworkGuard.taskHealthyBadge
+                        : copy.coworkGuard.taskMissingBadge}
+                    </Badge>
+                  </div>
+                )}
+
+                {coworkStatus.detected_ai_apps.length > 0 && (
+                  <>
+                    <p className="zs-settings__sub">{copy.coworkGuard.macosDetectedTitle}</p>
+                    <Rows>
+                      {coworkStatus.detected_ai_apps.map((item) => (
+                        <Row
+                          key={`${item.kind}:${item.name}:${item.detail}`}
+                          icon="shield"
+                          title={item.name}
+                          sub={<Mono>{item.detail}</Mono>}
+                          trail={<Badge tone="info">{item.kind === "process" ? "Процесс" : "LaunchAgent"}</Badge>}
+                        />
+                      ))}
+                    </Rows>
+                  </>
+                )}
+
+                <div className="zs-settings__form" style={{ marginTop: "var(--space-2)", flexWrap: "wrap" }}>
+                  {coworkStatus.supported && (
+                    <Button
+                      variant={coworkStatus.needs_repair ? "primary" : "secondary"}
+                      size="sm"
+                      disabled={coworkBusy}
+                      onClick={handleInstallCoworkGuard}
+                    >
+                      {coworkBusy ? copy.coworkGuard.actionRepairing : copy.coworkGuard.actionInstall}
+                    </Button>
+                  )}
+                  <Button
+                    variant="quiet"
+                    size="sm"
+                    disabled={coworkBusy}
+                    onClick={handleRefreshCoworkGuard}
+                  >
+                    {copy.coworkGuard.actionRecheck}
+                  </Button>
+                </div>
+              </>
+            )}
           </Section>
 
           {/* Приватность */}
