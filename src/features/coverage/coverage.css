@@ -12,4 +12,11 @@
 .zs-cov__actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
 .zs-cov__vpn{margin-bottom:var(--space-2)}
 .zs-cov__vpn-line{padding-bottom:var(--space-2)}
+/* 2-строчный Grid для шапки строки покрытия: 1-я строка (иконка + название + компактный бейдж + шеврон), 2-я строка (sub на всю ширину) */
+.zs-cov__row.zs-row,.zs-cov__row .zs-xrow__head{display:grid;grid-template-columns:32px minmax(0,1fr) auto;column-gap:var(--space-3);row-gap:var(--space-1);align-items:center}
+.zs-cov__row .zs-row__icon{grid-column:1;grid-row:1}
+.zs-cov__row .zs-row__body{display:contents}
+.zs-cov__row .zs-row__title{grid-column:2;grid-row:1;min-width:0;overflow-wrap:anywhere}
+.zs-cov__row .zs-row__trail{grid-column:3;grid-row:1;justify-self:end}
+.zs-cov__row .zs-row__sub{grid-column:1/-1;grid-row:2;margin:0;min-width:0;overflow-wrap:break-word}
 @media (max-width:420px){.zs-cov__head{flex-direction:column;align-items:flex-start}}

@@ -13,6 +13,8 @@ export const toast = {
   strictOffText: "Вместо остановки вы будете получать уведомления.",
   accessAllowed: "Блок снят",
   accessAllowedText: (name: string) => `${name} разрешён до конца сессии.`,
+  accessRestored: "Доступ восстановлен",
+  accessRestoredText: (name: string) => `Адрес проверен, блокировка ${name} снята.`,
   guard: {
     onTitle: "Защита включена",
     onText: "Запросы к ИИ-доменам идут через Заставу (порт 8899).",

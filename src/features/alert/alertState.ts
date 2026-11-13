@@ -75,6 +75,13 @@ export function isDetecting(state: AlertState): boolean {
   return state.payload?.phase === "detecting";
 }
 
+/** Опасный адрес/отчёт (RU, BY или overall_status === "red"): требует подтверждения перед принудительным разрешением. */
+export function isHighRiskAlert(payload: RiskInterceptPayload | null | undefined): boolean {
+  if (!payload) return false;
+  const cc = (payload.network_change?.new_country || payload.report?.telemetry?.country_code)?.toUpperCase();
+  return cc === "RU" || cc === "BY" || payload.report?.overall_status === "red";
+}
+
 export type AllowErrorKind = "stale" | "pending" | "killswitch" | "generic";
 
 /** Код отказа бэкенда на Allow (`AllowErrorCode` в Rust, snake_case). Решение принимается только по нему, текст не разбирается. */

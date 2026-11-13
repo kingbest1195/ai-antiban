@@ -17,16 +17,22 @@ import {
   getStartupState,
   getSysproxyStatus,
   onAuditProgress,
+  onAuditRefreshed,
   onStartupChanged,
 } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 import { pickWorstReport } from "../../features/checks/checksModel";
 
-/** Возраст отчёта в минутах для подписи или null, если данные свежие. Вынесено для тестов. */
+/** Порог устаревания отчёта без ошибок: 15 минут. */
+export const STALE_REPORT_MS = 15 * 60_000;
+/** Перепроверка при возврате фокуса окна: если отчёту больше 3 минут. */
+export const FOCUS_REFRESH_MS = 3 * 60_000;
+
+/** Возраст отчёта в минутах для подписи или null, если данные свежие и аудит не падал. Вынесено для тестов. */
 export function dataAge(ageMs: number, auditFailed: boolean): number | null {
-  const minutes = Math.max(1, Math.floor(ageMs / 60000));
-  return ageMs > 2 * 60000 || auditFailed ? minutes : null;
+  if (!auditFailed && ageMs < STALE_REPORT_MS) return null;
+  return Math.max(1, Math.floor(ageMs / 60_000));
 }
 
 /** Число проверок в отчёте шлюза (места 0..12 в `RiskReport.checks`). */
@@ -80,6 +86,8 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   const activeRuns = useRef<Partial<Record<ProviderId, string>>>({});
   /** Сколько аудитов идёт прямо сейчас: самолечение не плодит параллельные запуски. */
   const inFlight = useRef(0);
+  const reportAtRef = useRef<number | null>(null);
+  reportAtRef.current = reportAt;
 
   /** Получить актуальный снимок покрытия приложений и цепочки PAC. */
   const refreshCoverage = useCallback(async () => {
@@ -153,7 +161,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
         }));
         setPartials((prev) => ({ ...prev, anthropic: undefined }));
         setAuditError(null);
-        setReportAt(Date.now());
+        const refreshedAt = Date.now();
+        reportAtRef.current = refreshedAt;
+        setReportAt(refreshedAt);
 
         const [gptSettled, geminiSettled] = await Promise.allSettled([
           auditConnection("openai", false),
@@ -170,6 +180,12 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
         const elapsed = Math.round(performance.now() - startTime);
         setScanLatencyMs(Math.max(18, elapsed));
         await sideReads;
+        // Повторно читаем AppStateData после завершения аудита, чтобы blocked_providers всегда был актуален.
+        try {
+          const freshState = await fetchAppState();
+          setState(freshState);
+          if (freshState.auto_update_enabled !== undefined) setAutoUpdateEnabled(freshState.auto_update_enabled);
+        } catch {}
         await refreshGatewayStats();
       } catch (err: any) {
         console.error("Failed to run audit:", err);
@@ -285,7 +301,55 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     return () => clearInterval(timer);
   }, []);
 
-  /** «Данные N мин назад»: показываем, если отчёту больше двух минут или последний аудит упал. */
+  // Фоновое обновление отчёта из стража/трея: сбрасывает возраст данных и подтягивает свежий отчёт.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    onAuditRefreshed((report) => {
+      const provider = report.provider || "anthropic";
+      setReports((prev) => ({ ...prev, [provider]: report }));
+      setAuditError(null);
+      const ts = Date.now();
+      reportAtRef.current = ts;
+      setReportAt(ts);
+      fetchAppState()
+        .then((st) => {
+          setState(st);
+          if (st.auto_update_enabled !== undefined) setAutoUpdateEnabled(st.auto_update_enabled);
+        })
+        .catch(() => {});
+    })
+      .then((un) => (cancelled ? un() : (off = un)))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, []);
+
+  // Возврат фокуса/видимости окна: перепроверяем, если с последнего отчёта прошло > 3 минут.
+  const runFullAuditRef = useRef(runFullAudit);
+  runFullAuditRef.current = runFullAudit;
+  useEffect(() => {
+    const maybeRefresh = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      if (inFlight.current > 0) return;
+      const last = reportAtRef.current;
+      if (last == null || Date.now() - last <= FOCUS_REFRESH_MS) return;
+      void runFullAuditRef.current(false, true);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") maybeRefresh();
+    };
+    window.addEventListener("focus", maybeRefresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", maybeRefresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  /** «Данные N мин назад»: показываем только при ошибке обновления или если отчёт старше 15 минут. */
   const dataAgeMinutes = useMemo<number | null>(() => {
     if (!activeReport || reportAt == null) return null;
     return dataAge(now - reportAt, auditError != null);

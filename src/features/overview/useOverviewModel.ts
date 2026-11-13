@@ -189,7 +189,12 @@ export function tabBadges(
   return out;
 }
 
-/** Нужно ли подтверждение перед «Разрешить принудительно»: только для красного сервиса и для адреса из РФ, где запросы пойдут без проверки. */
-export function needsForceConfirm(status: ServiceStatus, report: RiskReport | null | undefined): boolean {
-  return status === "critical" || report?.telemetry?.country_code === "RU";
+/** Нужно ли подтверждение перед «Разрешить принудительно»: только по фактическому риску отчёта (red / RU / BY / нет отчёта), не по флагу blocked_providers. */
+export function needsForceConfirm(_status: ServiceStatus, report: RiskReport | null | undefined): boolean {
+  return (
+    !report ||
+    report.overall_status === "red" ||
+    report.telemetry?.country_code === "RU" ||
+    report.telemetry?.country_code === "BY"
+  );
 }

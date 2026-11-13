@@ -17,3 +17,13 @@ export function countryName(code: string | null | undefined): string {
     return code;
   }
 }
+
+/** Страна с кодом: «NL» → «Нидерланды (NL)». При отсутствии кода возвращает пустую строку. */
+export function formatCountryWithCode(code: string | null | undefined): string {
+  if (!code || code === "--") return "";
+  const upper = code.trim().toUpperCase();
+  if (!upper) return "";
+  const name = countryName(upper);
+  if (!name || name.toUpperCase() === upper) return upper;
+  return `${name} (${upper})`;
+}

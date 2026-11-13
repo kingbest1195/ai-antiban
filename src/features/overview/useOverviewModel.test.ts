@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { CheckResult, RiskReport } from "../../types";
 import { overview as copy } from "../../shared/copy/ru";
+import { parseAdminAuthError } from "../../shared/hooks/useProtectionToggles";
+import { fetchAppState, setMockScenario, toggleSysproxyPrivileged, verifyAndUnblockProvider } from "../../utils/api";
 import { useOverviewModel } from "./useOverviewModel";
 import type { OverviewModel } from "./useOverviewModel";
 
@@ -82,5 +84,30 @@ describe("Обзор: запуск и ожидание", () => {
   it("сервис без отчёта при идущей проверке — «Проверяем», а не «Нужна проверка»", () => {
     const m = model({ refreshing: true });
     expect(m.services.every((s) => s.status === "checking")).toBe(true);
+  });
+});
+
+describe("ADMIN_AUTH_REQUIRED и умное снятие блока", () => {
+  it("parseAdminAuthError снимает префикс ADMIN_AUTH_REQUIRED:", () => {
+    expect(parseAdminAuthError("ADMIN_AUTH_REQUIRED:Нужен пароль администратора")).toBe("Нужен пароль администратора");
+    expect(parseAdminAuthError(new Error("ADMIN_AUTH_REQUIRED:Требуются права"))).toBe("Требуются права");
+    expect(parseAdminAuthError("ADMIN_AUTH_REQUIRED:")).toBeTruthy();
+    expect(parseAdminAuthError(new Error("Обычная ошибка"))).toBeNull();
+    expect(parseAdminAuthError(null)).toBeNull();
+  });
+
+  it("verifyAndUnblockProvider в чистом сценарии возвращает true без session_allowed_providers, а в RU — false", async () => {
+    setMockScenario("clean");
+    expect(await verifyAndUnblockProvider("anthropic")).toBe(true);
+    const st = await fetchAppState();
+    expect(st.session_allowed_providers).not.toContain("anthropic");
+
+    setMockScenario("ru");
+    expect(await verifyAndUnblockProvider("anthropic")).toBe(false);
+    setMockScenario("clean");
+  });
+
+  it("toggleSysproxyPrivileged в браузерном моке включает защиту", async () => {
+    expect(await toggleSysproxyPrivileged()).toBe(true);
   });
 });

@@ -88,9 +88,8 @@ export function StepAlert({ onReacted, onBack }: { onReacted: () => void; onBack
         <Section title={copy.alert.sectionChoices}>
           <Card>
             <Rows>
-              <Row title={c.guide.title} sub={c.guide.sub} />
-              <Row title={c.allow.title} sub={c.allow.sub} />
               <Row title={c.block.title} sub={c.block.sub} />
+              <Row title={c.allow.title} sub={c.allow.sub} />
             </Rows>
           </Card>
         </Section>

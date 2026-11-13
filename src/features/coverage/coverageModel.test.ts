@@ -1,6 +1,9 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppCoverageItem, AppCoverageStatus, CliProtectionReport, RestartOutcome } from "../../types";
 import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, canRestartAntigravity, coverageNeedsAttention, enableResult, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, resolveWaiting, restartResult, sinceLastSeen, startWaiting, uncoveredAiApps, viewOf, vpnNotice } from "./coverageModel";
+import { CoverageSection } from "./CoverageSection";
 import { checkCliProtectionStatus, disableCliProtection, enableCliProtection, restartAppWithGateway } from "../../utils/api";
 import { coverage as copy } from "../../shared/copy/ru";
 
@@ -321,5 +324,37 @@ describe("мок restartAppWithGateway: ?mockRestart", () => {
     expect(await outcomeFor("?mockRestart=not_closed")).toBe("not_closed");
     expect(await outcomeFor("?mockRestart=permission")).toBe("needs_automation_permission");
     expect(await outcomeFor("?mockRestart=failed")).toBe("launch_failed");
+  });
+});
+
+describe("CoverageSection: короткие бейджи и zs-cov__row", () => {
+  it("бейджи укладываются в 1–2 слова, а строки используют zs-cov__row", () => {
+    for (const label of Object.values(copy.status)) {
+      expect(label.trim().split(/\s+/).length).toBeLessThanOrEqual(2);
+    }
+    const html = renderToStaticMarkup(
+      createElement(CoverageSection, {
+        variant: "overview",
+        pending: false,
+        initialSnapshot: {
+          sysproxy_enabled: true,
+          cli_protection_enabled: true,
+          chained_proxy: null,
+          gateway_addr: "127.0.0.1:40111",
+          pac_url: "http://127.0.0.1:40111/proxy.pac",
+          generated_at_ms: 1,
+          cli_mode: "ai_only",
+          apps: [
+            app("browsers", "confirmed", { name: "Браузеры", category: "browser", ai_requests: 3, last_seen_ms: 1 }),
+            app("chatgpt-desktop", "configured", { name: "ChatGPT Desktop", category: "desktop", detail: "Системный PAC включён" }),
+            app("node-cli", "off", { name: "Node.js", category: "cli", detail: "Идёт напрямую" }),
+          ],
+        },
+      }),
+    );
+    expect(html).toContain("zs-cov__row");
+    expect(html).toContain(copy.status.confirmed);
+    expect(html).toContain(copy.status.configured);
+    expect(html).toContain(copy.status.direct);
   });
 });

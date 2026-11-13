@@ -28,7 +28,7 @@ import {
   Switch,
 } from "../../ui";
 import type { MenuEntry } from "../../ui";
-import { checks as checksCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
+import { checks as checksCopy, coverage as coverageCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import { formatNumber } from "../../shared/lib/format";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
@@ -72,6 +72,7 @@ export interface OverviewScreenProps {
   onToggleStrict: () => void;
   onAllowProvider: (provider: ProviderId) => void;
   onUnblockProvider: (provider: ProviderId) => void;
+  onVerifyAndUnblockProvider?: (provider: ProviderId) => Promise<boolean>;
 
   onRetry: () => void;
   /** «Что исправить» у сервиса: открыть «Проверки» с его отчётом. */
@@ -121,14 +122,26 @@ export function OverviewScreen(props: OverviewScreenProps) {
     startupPending,
   });
 
-  // Подтверждение «Разрешить принудительно»: только для красных сервисов и адреса из РФ.
+  // Подтверждение «Разрешить принудительно»: только когда сеть действительно красная / RU / BY.
   const [pendingAllow, setPendingAllow] = useState<ProviderId | null>(null);
+  const [verifyingAllow, setVerifyingAllow] = useState<ProviderId | null>(null);
   const runAllow = (provider: ProviderId, blockedByUser: boolean) => {
-    // Как раньше: снятие блока — сначала unblock (если блок поставлен вручную), затем разрешение на сессию.
     if (blockedByUser) props.onUnblockProvider(provider);
     props.onAllowProvider(provider);
   };
-  const requestAllow = (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => {
+  const requestAllow = async (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => {
+    if (blockedByUser && !needsForceConfirm(service.status, report) && props.onVerifyAndUnblockProvider) {
+      setVerifyingAllow(service.id);
+      try {
+        const unblocked = await props.onVerifyAndUnblockProvider(service.id);
+        if (!unblocked) {
+          setPendingAllow(service.id);
+        }
+      } finally {
+        setVerifyingAllow(null);
+      }
+      return;
+    }
     if (needsForceConfirm(service.status, report)) setPendingAllow(service.id);
     else runAllow(service.id, blockedByUser);
   };
@@ -187,6 +200,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
                   onFix={props.onFixService}
                   onAllow={requestAllow}
                   blockedByUser={Boolean(state?.blocked_providers?.includes(service.id))}
+                  verifying={verifyingAllow === service.id}
                 />
               ))}
             </Rows>
@@ -208,6 +222,26 @@ export function OverviewScreen(props: OverviewScreenProps) {
       </ConfirmModal>
 
       <Section title={copy.sectionProtected}>
+        {props.protection?.adminAuthMessage && (
+          <Banner
+            tone="warn"
+            title={coverageCopy.protection.adminAuthTitle}
+            action={
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={props.protection.retryingAdminAuth}
+                onClick={() => void props.protection?.enableSysproxyPrivileged()}
+              >
+                {props.protection.retryingAdminAuth
+                  ? coverageCopy.protection.adminAuthBusy
+                  : coverageCopy.protection.adminAuthRetry}
+              </Button>
+            }
+          >
+            {props.protection.adminAuthMessage}
+          </Banner>
+        )}
         <Card>
           <Rows>
             <Row
@@ -397,7 +431,11 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
       <Badge tone={allPassed ? "ok" : "warn"} icon={allPassed ? "check" : "alert"}>
         {model.checksLabel}
       </Badge>
-      {props.dataAgeMinutes != null && <Badge>{checksCopy.dataAge(props.dataAgeMinutes)}</Badge>}
+      {props.dataAgeMinutes != null && (
+        <Badge tone={props.auditError ? "warn" : "neutral"} icon={props.auditError ? "alert" : undefined}>
+          {checksCopy.dataAge(props.dataAgeMinutes, Boolean(props.auditError))}
+        </Badge>
+      )}
       {model.providerName && <Badge>{model.providerName}</Badge>}
       {extra}
       <Menu items={menu} label={copy.ipMenu.label} align="end" className="-my-1" />
@@ -412,6 +450,7 @@ function ServiceRow({
   report,
   state,
   blockedByUser,
+  verifying,
   onFix,
   onAllow,
 }: {
@@ -419,6 +458,7 @@ function ServiceRow({
   report: RiskReport | undefined;
   state: AppStateData | null;
   blockedByUser: boolean;
+  verifying?: boolean;
   onFix: (provider: ProviderId) => void;
   onAllow: (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => void;
 }) {
@@ -510,11 +550,13 @@ function ServiceRow({
             {copy.service.fix}
           </Button>
         )}
-        <Button variant="quiet" size="sm" onClick={() => onAllow(service, report, blockedByUser)}>
+        <Button variant="quiet" size="sm" disabled={verifying} onClick={() => onAllow(service, report, blockedByUser)}>
           {blockedByUser ? copy.service.unblock : copy.service.forceAllow}
         </Button>
       </div>
-      <p className="zs-t-caption">{copy.service.forceHint}</p>
+      <p className="zs-t-caption">
+        {blockedByUser && !needsForceConfirm(service.status, report) ? copy.service.unblockHint : copy.service.forceHint}
+      </p>
     </ExpandRow>
   );
 }

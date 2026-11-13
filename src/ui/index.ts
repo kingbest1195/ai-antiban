@@ -23,7 +23,7 @@ export type { StatusHeroProps, TrustRingProps, HeroTone } from "./StatusHero";
 export { Field } from "./Field";
 export type { FieldProps } from "./Field";
 export { Dialog } from "./Dialog";
-export type { DialogProps, DialogAction } from "./Dialog";
+export type { DialogProps, DialogAction, DialogPreviousRoute } from "./Dialog";
 export { Steps } from "./Steps";
 export type { StepItem, StepStatus, StepsProps } from "./Steps";
 export { ExpandRow } from "./ExpandRow";

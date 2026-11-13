@@ -113,12 +113,23 @@ describe("tabBadges", () => {
 });
 
 describe("needsForceConfirm", () => {
-  const nl = rep("openai", "yellow", [warn()]);
-  const ru = rep("openai", "yellow", [warn()], { telemetry: { ip: "1.1.1.1", country_code: "RU", resolved_at: 1 } });
-  it("для красного сервиса — да", () => expect(needsForceConfirm("critical", nl)).toBe(true));
-  it("для адреса из РФ — да, даже если статус жёлтый", () => expect(needsForceConfirm("warn", ru)).toBe(true));
-  it("для жёлтого не из РФ — нет", () => {
-    expect(needsForceConfirm("warn", nl)).toBe(false);
-    expect(needsForceConfirm("warn", undefined)).toBe(false);
+  const nlGreen = rep("openai", "green", []);
+  const nlYellow = rep("openai", "yellow", [warn()]);
+  const nlRed = rep("openai", "red", [crit()]);
+  const ruYellow = rep("openai", "yellow", [warn()], { telemetry: { ip: "1.1.1.1", country_code: "RU", resolved_at: 1 } });
+  const byGreen = rep("openai", "green", [], { telemetry: { ip: "1.1.1.1", country_code: "BY", resolved_at: 1 } });
+
+  it("для red, RU, BY или отсутствующего отчёта — да", () => {
+    expect(needsForceConfirm("critical", nlRed)).toBe(true);
+    expect(needsForceConfirm("warn", ruYellow)).toBe(true);
+    expect(needsForceConfirm("ok", byGreen)).toBe(true);
+    expect(needsForceConfirm("warn", undefined)).toBe(true);
+    expect(needsForceConfirm("critical", null)).toBe(true);
+  });
+
+  it("для green/yellow не из РФ/РБ — нет, даже если провайдер был заблокирован (status = critical)", () => {
+    expect(needsForceConfirm("warn", nlYellow)).toBe(false);
+    expect(needsForceConfirm("critical", nlGreen)).toBe(false);
+    expect(needsForceConfirm("critical", nlYellow)).toBe(false);
   });
 });

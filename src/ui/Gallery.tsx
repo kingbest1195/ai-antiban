@@ -195,16 +195,16 @@ function ScreenAlert() {
         text="VPN отключился, и запрос ушёл бы с небезопасного адреса. Застава держит его, пока вы не решите."
         service="Claude"
         ip="185.220.101.5"
-        country="Турция"
+        country="Турция (TR)"
+        previous={{ ip: "185.212.102.40", country: "Нидерланды (NL)", label: "Было" }}
         seconds={59}
-        onTimeout={() => setLog("Время вышло — запрос заблокирован")}
+        onTimeout={() => setLog("Время вышло — запрос на паузе")}
         actions={[
-          { label: "Включить VPN", icon: "zap", onSelect: () => setLog("Выбрано 1: Включить VPN") },
-          { label: "Блокировать", onSelect: () => setLog("Выбрано 2: Блокировать") },
-          { label: "Пропустить раз", onSelect: () => setLog("Выбрано 3: Пропустить раз") },
+          { label: "Держать на паузе", onSelect: () => setLog("Выбрано 1: Держать на паузе") },
+          { label: "Разрешить принудительно", variant: "danger", onSelect: () => setLog("Выбрано 2: Разрешить принудительно") },
         ]}
       />
-      <p className="gl__label" role="status">Клавиши 1, 2, 3 работают. {log}</p>
+      <p className="gl__label" role="status">Клавиши 1, 2 работают. {log}</p>
     </div>
   );
 }
@@ -641,7 +641,7 @@ export default function Gallery() {
           </div>
         </Sec>
 
-        <Sec title="Dialog (клавиши 1, 2, 3 включены только на эталонном экране ниже)">
+        <Sec title="Dialog (клавиши 1, 2 включены только на эталонном экране ниже)">
           <div className="gl__grid">
             <Dialog
               hotkeys={false}
@@ -649,13 +649,13 @@ export default function Gallery() {
               text="VPN отключился, и запрос ушёл бы с небезопасного адреса. Застава держит его, пока вы не решите."
               service="Claude"
               ip="185.220.101.5"
-              country="Турция"
+              country="Турция (TR)"
+              previous={{ ip: "185.212.102.40", country: "Нидерланды (NL)", label: "Было" }}
               demo
               seconds={30}
               actions={[
-                { label: "Включить VPN", icon: "zap", onSelect: noop },
-                { label: "Блокировать", onSelect: noop },
-                { label: "Пропустить раз", onSelect: noop },
+                { label: "Держать на паузе", onSelect: noop },
+                { label: "Разрешить принудительно", variant: "danger", onSelect: noop },
               ]}
             />
           </div>
