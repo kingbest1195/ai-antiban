@@ -11,11 +11,21 @@ pub struct ClaudeProfile {
     pub bound_country: Option<String>,
     #[serde(default)]
     pub bound_upstream_key: Option<String>,
+    #[serde(default)]
+    pub bound_route_id: Option<String>,
     pub isolated_device_id: String,
     pub created_at: u64,
     pub last_used_at: u64,
     pub is_active: bool,
     pub has_saved_session: bool,
+}
+
+pub fn resolve_route_id_for_key(key: Option<&str>) -> Option<String> {
+    let trimmed = key.map(str::trim).filter(|s| !s.is_empty())?;
+    crate::routing::parse_route_key(trimmed, 0)
+        .ok()
+        .map(|r| r.id)
+        .or_else(|| Some(crate::routing::route_id_for_raw_key(trimmed)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +136,7 @@ fn load_or_init_storage_in(
         bound_ip: current_pinned_ip.map(|s| s.to_string()),
         bound_country: None,
         bound_upstream_key: None,
+        bound_route_id: None,
         isolated_device_id: device_id,
         created_at: now,
         last_used_at: now,
@@ -366,8 +377,20 @@ fn build_list_response(
         .map(|p| p.id.clone())
         .unwrap_or_else(|| "default".to_string());
 
+    let profiles = storage
+        .profiles
+        .iter()
+        .cloned()
+        .map(|mut p| {
+            if p.bound_route_id.is_none() {
+                p.bound_route_id = resolve_route_id_for_key(p.bound_upstream_key.as_deref());
+            }
+            p
+        })
+        .collect();
+
     Ok(ClaudeProfileListResponse {
-        profiles: storage.profiles.clone(),
+        profiles,
         active_profile_id: active_id,
         claude_desktop_installed: claude_dir.exists(),
         storage_dir: storage_dir.to_string_lossy().to_string(),
@@ -400,12 +423,14 @@ pub fn create_claude_profile_in(
     let device_id = Uuid::new_v4().to_string();
     let now = current_timestamp();
 
+    let bound_route_id = resolve_route_id_for_key(bind_upstream_key.as_deref());
     let new_profile = ClaudeProfile {
         id: new_id.clone(),
         name: name.trim().to_string(),
         bound_ip: bind_ip,
         bound_country: bind_country,
         bound_upstream_key: bind_upstream_key,
+        bound_route_id,
         isolated_device_id: device_id,
         created_at: now,
         last_used_at: now,
@@ -468,6 +493,10 @@ pub fn switch_claude_profile_in(
     }
     let now = current_timestamp();
     storage.profiles[target_idx].last_used_at = now;
+    if storage.profiles[target_idx].bound_route_id.is_none() {
+        storage.profiles[target_idx].bound_route_id =
+            resolve_route_id_for_key(storage.profiles[target_idx].bound_upstream_key.as_deref());
+    }
     let active_profile = storage.profiles[target_idx].clone();
 
     save_storage_in(storage_dir, &storage)?;
@@ -551,10 +580,65 @@ pub fn update_profile_bound_upstream_in(
         .find(|p| p.id == profile_id)
         .ok_or_else(|| format!("Профиль «{profile_id}» не найден."))?;
 
+    p.bound_route_id = resolve_route_id_for_key(upstream_key.as_deref());
     p.bound_upstream_key = upstream_key;
 
     save_storage_in(storage_dir, &storage)?;
     build_list_response(storage_dir, claude_dir, &storage)
+}
+
+/// Keeps saved Claude profiles in sync when a route is updated (`new_raw_key = Some(...)`)
+/// or deleted (`new_raw_key = None`). Returns `Some(new_active_key)` when the currently active
+/// profile was modified so callers can refresh runtime routing state.
+pub fn sync_profiles_for_route_update_in(
+    storage_dir: &Path,
+    claude_dir: &Path,
+    route_id: &str,
+    new_raw_key: Option<&str>,
+) -> Result<Option<Option<String>>, String> {
+    if !storage_dir.join("profiles.json").exists() {
+        return Ok(None);
+    }
+    let mut storage = load_or_init_storage_in(storage_dir, claude_dir, None)?;
+    let mut changed = false;
+    let mut active_updated: Option<Option<String>> = None;
+
+    for p in &mut storage.profiles {
+        let current_id = p
+            .bound_route_id
+            .clone()
+            .or_else(|| resolve_route_id_for_key(p.bound_upstream_key.as_deref()));
+        if current_id.as_deref() == Some(route_id) {
+            match new_raw_key {
+                Some(raw_key) => {
+                    let next_key = Some(raw_key.to_string());
+                    if p.bound_upstream_key.as_ref() != next_key.as_ref()
+                        || p.bound_route_id.as_deref() != Some(route_id)
+                    {
+                        p.bound_upstream_key = next_key.clone();
+                        p.bound_route_id = Some(route_id.to_string());
+                        changed = true;
+                        if p.is_active {
+                            active_updated = Some(next_key);
+                        }
+                    }
+                }
+                None => {
+                    p.bound_upstream_key = None;
+                    p.bound_route_id = None;
+                    changed = true;
+                    if p.is_active {
+                        active_updated = Some(None);
+                    }
+                }
+            }
+        }
+    }
+
+    if changed {
+        save_storage_in(storage_dir, &storage)?;
+    }
+    Ok(active_updated)
 }
 
 // -----------------------------------------------------------------------------
@@ -607,6 +691,15 @@ pub fn update_profile_bound_upstream(
     let storage_dir = default_profiles_storage_dir();
     let claude_dir = default_claude_desktop_dir().unwrap_or_else(|| PathBuf::from("mock_claude"));
     update_profile_bound_upstream_in(&storage_dir, &claude_dir, profile_id, upstream_key)
+}
+
+pub fn sync_profiles_for_route_update(
+    route_id: &str,
+    new_raw_key: Option<&str>,
+) -> Result<Option<Option<String>>, String> {
+    let storage_dir = default_profiles_storage_dir();
+    let claude_dir = default_claude_desktop_dir().unwrap_or_else(|| PathBuf::from("mock_claude"));
+    sync_profiles_for_route_update_in(&storage_dir, &claude_dir, route_id, new_raw_key)
 }
 
 #[cfg(test)]
@@ -761,5 +854,48 @@ mod tests {
             updated_upstream.profiles[0].bound_upstream_key.as_deref(),
             Some("socks5://127.0.0.1:1080")
         );
+        assert!(updated_upstream.profiles[0].bound_route_id.is_some());
+    }
+
+    #[test]
+    fn test_sync_profiles_for_route_update_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage_dir = temp.path().join(".zastava").join("claude_profiles");
+        let claude_dir = temp.path().join("Claude");
+
+        let _ = list_claude_profiles_in(&storage_dir, &claude_dir, None).unwrap();
+        let initial_key = "socks5://127.0.0.1:1080#NL";
+        let bound = update_profile_bound_upstream_in(
+            &storage_dir,
+            &claude_dir,
+            "default",
+            Some(initial_key.to_string()),
+        )
+        .unwrap();
+        let route_id = bound.profiles[0].bound_route_id.clone().unwrap();
+
+        // Update raw key for the same route ID
+        let updated_key = "socks5://127.0.0.1:1080#NL-Updated";
+        let res = sync_profiles_for_route_update_in(
+            &storage_dir,
+            &claude_dir,
+            &route_id,
+            Some(updated_key),
+        )
+        .unwrap();
+        assert_eq!(res, Some(Some(updated_key.to_string())));
+
+        // Remove route -> clears profile binding and reports active profile cleared
+        let removed = sync_profiles_for_route_update_in(
+            &storage_dir,
+            &claude_dir,
+            &route_id,
+            None,
+        )
+        .unwrap();
+        assert_eq!(removed, Some(None));
+        let after = list_claude_profiles_in(&storage_dir, &claude_dir, None).unwrap();
+        assert_eq!(after.profiles[0].bound_upstream_key, None);
+        assert_eq!(after.profiles[0].bound_route_id, None);
     }
 }

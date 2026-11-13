@@ -1,35 +1,50 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { ClaudeProfile } from "../../types";
+import type { ClaudeProfile, RouteView, RoutesSnapshot } from "../../types";
 import {
   bindIpToClaudeProfile,
+  bindRouteToClaudeProfile,
   bindUpstreamToClaudeProfile,
   createClaudeProfile,
   deleteClaudeProfile,
+  getRoutesSnapshot,
   listClaudeProfiles,
   switchClaudeProfile,
 } from "../../utils/api";
-import { Badge, Button, Card, ConfirmModal, EmptyState, Field, Menu, Modal, Mono, Row, Rows, Section, Skeleton, Switch } from "../../ui";
-import type { MenuEntry } from "../../ui";
+import { Badge, Banner, Button, Card, ConfirmModal, EmptyState, Field, Menu, Modal, Mono, Row, Rows, Section, Select, Skeleton, Switch } from "../../ui";
+import type { MenuEntry, SelectOption } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
-import { status as words } from "../../shared/copy/ru";
 import { backup as copy, common as commonCopy } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
+import { decodeZastavaKeyPreview } from "../../shared/lib/zastavaKey";
 
 export interface ProfilesSectionProps {
   currentIp: string;
   currentCountry: string;
   activeUpstreamKey?: string | null;
+  routesSnapshot?: RoutesSnapshot | null;
+  onRoutesUpdated?: () => Promise<unknown> | void;
   onProfileSwitched: (profileName: string, pinnedIp?: string | null) => void;
   onToast: ShowToast;
 }
 
 const CREATE_FORM_ID = "claude-profile-create-form";
+const BIND_FORM_ID = "claude-profile-bind-key-form";
+const KEY_OPTION_NONE = "__none__";
+const KEY_OPTION_NEW = "__new__";
 
 /** Профили Claude: строка на профиль, переключение, привязка IP и ключа, удаление с подтверждением, создание. */
-export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, onToast }: ProfilesSectionProps) {
+export function ProfilesSection({
+  currentIp,
+  currentCountry,
+  routesSnapshot: propRoutesSnapshot,
+  onRoutesUpdated,
+  onProfileSwitched,
+  onToast,
+}: ProfilesSectionProps) {
   const [profiles, setProfiles] = useState<ClaudeProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string>("default");
+  const [routes, setRoutes] = useState<RouteView[]>(propRoutesSnapshot?.routes ?? []);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -40,10 +55,25 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [bindCurrentOnCreate, setBindCurrentOnCreate] = useState(true);
+  const [createKeyChoice, setCreateKeyChoice] = useState<string>(KEY_OPTION_NONE);
+  const [createKeyInput, setCreateKeyInput] = useState("");
   const [creating, setCreating] = useState(false);
+  const [bindingTarget, setBindingTarget] = useState<ClaudeProfile | null>(null);
+  const [bindChoice, setBindChoice] = useState<string>(KEY_OPTION_NONE);
+  const [bindKeyInput, setBindKeyInput] = useState("");
+  const [savingBind, setSavingBind] = useState(false);
   const t = copy.profiles;
   const t_toast = copy.toast;
   const ipKnown = Boolean(currentIp) && currentIp !== "--";
+
+  const refreshRoutes = async () => {
+    try {
+      const snap = await getRoutesSnapshot();
+      setRoutes(snap.routes ?? []);
+    } catch {
+      // ignore
+    }
+  };
 
   const fetchProfiles = async () => {
     setLoading(true);
@@ -61,7 +91,14 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
 
   useEffect(() => {
     fetchProfiles();
+    refreshRoutes();
   }, []);
+
+  useEffect(() => {
+    if (propRoutesSnapshot?.routes) {
+      setRoutes(propRoutesSnapshot.routes);
+    }
+  }, [propRoutesSnapshot]);
 
   const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -98,8 +135,69 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
     }
   };
 
-  const handleBindKey = () => {
-    onToast(copy.soon.title, copy.soon.text, "warning");
+  const resolveBoundLabel = (p: ClaudeProfile): string | null => {
+    if (!p.bound_upstream_key && !p.bound_route_id) return null;
+    if (p.bound_route_id) {
+      const match = routes.find((r) => r.id === p.bound_route_id);
+      if (match) {
+        return match.country ? `${match.label} · ${match.country}` : match.label;
+      }
+    }
+    if (p.bound_upstream_key) {
+      const preview = decodeZastavaKeyPreview(p.bound_upstream_key);
+      if (preview?.label) {
+        return preview.country ? `${preview.label} · ${preview.country}` : preview.label;
+      }
+      if (preview?.entrySummary) return preview.entrySummary;
+    }
+    return t.keyBound;
+  };
+
+  const openBindModal = (p: ClaudeProfile) => {
+    refreshRoutes();
+    setBindingTarget(p);
+    if (p.bound_route_id && routes.some((r) => r.id === p.bound_route_id)) {
+      setBindChoice(p.bound_route_id);
+      setBindKeyInput("");
+    } else if (p.bound_upstream_key) {
+      setBindChoice(KEY_OPTION_NEW);
+      setBindKeyInput(p.bound_upstream_key);
+    } else {
+      setBindChoice(routes[0]?.id ?? KEY_OPTION_NEW);
+      setBindKeyInput("");
+    }
+  };
+
+  const handleSaveBindKey = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!bindingTarget || savingBind) return;
+    setSavingBind(true);
+    try {
+      let res;
+      if (bindChoice === KEY_OPTION_NONE) {
+        res = await bindUpstreamToClaudeProfile(bindingTarget.id, null);
+        setProfiles(res.profiles || []);
+        onToast(t_toast.unbound, t_toast.unboundText, "info");
+      } else if (bindChoice === KEY_OPTION_NEW) {
+        const cleanKey = bindKeyInput.trim();
+        if (!cleanKey) return;
+        res = await bindUpstreamToClaudeProfile(bindingTarget.id, cleanKey);
+        setProfiles(res.profiles || []);
+        onToast(t_toast.keyBound, t_toast.keyBoundText(bindingTarget.name), "success");
+      } else {
+        res = await bindRouteToClaudeProfile(bindingTarget.id, bindChoice);
+        setProfiles(res.profiles || []);
+        onToast(t_toast.keyBound, t_toast.keyBoundText(bindingTarget.name), "success");
+      }
+      await refreshRoutes();
+      await onRoutesUpdated?.();
+      setBindingTarget(null);
+      setBindKeyInput("");
+    } catch (err) {
+      onToast(t_toast.keyBindError, errText(err), "error");
+    } finally {
+      setSavingBind(false);
+    }
   };
 
   const handleUnbindKey = async (profileId: string) => {
@@ -107,6 +205,8 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
     try {
       const res = await bindUpstreamToClaudeProfile(profileId, null);
       setProfiles(res.profiles || []);
+      await refreshRoutes();
+      await onRoutesUpdated?.();
       onToast(t_toast.unbound, t_toast.unboundText, "info");
     } catch (err) {
       onToast(t_toast.unbindError, errText(err), "error");
@@ -141,10 +241,27 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
     try {
       const ipToBind = bindCurrentOnCreate && ipKnown ? currentIp : null;
       const countryToBind = bindCurrentOnCreate && currentCountry !== "--" ? currentCountry : null;
-      const res = await createClaudeProfile(cleanName, ipToBind, countryToBind, null);
+      let keyToBind: string | null = null;
+      let routeIdToBind: string | null = null;
+      if (createKeyChoice === KEY_OPTION_NEW) {
+        keyToBind = createKeyInput.trim() || null;
+      } else if (createKeyChoice !== KEY_OPTION_NONE) {
+        routeIdToBind = createKeyChoice;
+      }
+      let res = await createClaudeProfile(cleanName, ipToBind, countryToBind, keyToBind);
+      if (routeIdToBind) {
+        const created = res.profiles[res.profiles.length - 1];
+        if (created) {
+          res = await bindRouteToClaudeProfile(created.id, routeIdToBind);
+        }
+      }
       setProfiles(res.profiles || []);
       setNewName("");
+      setCreateKeyChoice(KEY_OPTION_NONE);
+      setCreateKeyInput("");
       setCreateOpen(false);
+      await refreshRoutes();
+      await onRoutesUpdated?.();
       onToast(t_toast.created, t_toast.createdText(cleanName), "success");
     } catch (err) {
       onToast(t_toast.createError, errText(err), "error");
@@ -166,11 +283,22 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
     if (ipKnown && p.bound_ip !== currentIp) {
       items.push({ id: "bind-ip", label: t.bindIp, icon: "lock", disabled: bindingId === p.id, onSelect: () => handleBindCurrentIp(p.id) });
     }
-    items.push(
-      p.bound_upstream_key
-        ? { id: "unbind-key", label: t.unbindKey, icon: "x", disabled: bindingProxyId === p.id, onSelect: () => handleUnbindKey(p.id) }
-        : { id: "bind-key", label: t.bindKey, icon: "key", onSelect: handleBindKey },
-    );
+    items.push({
+      id: "bind-key",
+      label: p.bound_upstream_key ? t.changeKey : t.bindKey,
+      icon: "key",
+      disabled: bindingProxyId === p.id,
+      onSelect: () => openBindModal(p),
+    });
+    if (p.bound_upstream_key) {
+      items.push({
+        id: "unbind-key",
+        label: t.unbindKey,
+        icon: "x",
+        disabled: bindingProxyId === p.id,
+        onSelect: () => handleUnbindKey(p.id),
+      });
+    }
     if (!isActive && profiles.length > 1) {
       items.push({ id: "sep", type: "separator" });
       items.push({ id: "remove", label: t.remove, icon: "x", tone: "danger", onSelect: () => setRemoving(p) });
@@ -211,6 +339,7 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
                 {profiles.map((p) => {
                   const isActive = p.id === activeProfileId;
                   const country = countryName(p.bound_country);
+                  const boundLabel = resolveBoundLabel(p);
                   return (
                     <Row
                       key={p.id}
@@ -219,9 +348,9 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
                       title={
                         <span className="zs-profile__name">
                           <span className="zs-profile__text">{p.name}</span>
-                          {p.bound_upstream_key && (
+                          {boundLabel && (
                             <Badge tone="info" icon="key">
-                              {t.keyBound}
+                              {boundLabel === t.keyBound ? t.keyBound : t.keyBoundLabel(boundLabel)}
                             </Badge>
                           )}
                         </span>
@@ -310,9 +439,95 @@ export function ProfilesSection({ currentIp, currentCountry, onProfileSwitched, 
               icon="key"
               title={copy.create.keyTitle}
               sub={copy.create.keySub}
-              trail={<Badge tone="info">{words.soon}</Badge>}
             />
           </Rows>
+          <Select
+            label={copy.create.keyTitle}
+            value={createKeyChoice}
+            onChange={(e) => setCreateKeyChoice(e.target.value)}
+            options={
+              [
+                { value: KEY_OPTION_NONE, label: copy.create.keyNone },
+                ...routes.map((r) => ({
+                  value: r.id,
+                  label: r.country ? `${r.label} · ${r.country}` : r.label,
+                })),
+                { value: KEY_OPTION_NEW, label: copy.create.keyNewOption },
+              ] satisfies SelectOption[]
+            }
+          />
+          {createKeyChoice === KEY_OPTION_NEW && (
+            <Field
+              label={copy.create.keyPasteLabel}
+              placeholder={copy.create.keyPastePlaceholder}
+              value={createKeyInput}
+              onChange={(e) => setCreateKeyInput(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          )}
+        </form>
+      </Modal>
+
+      <Modal
+        open={bindingTarget !== null}
+        onClose={() => (savingBind ? undefined : setBindingTarget(null))}
+        title={copy.bindKeyModal.title(bindingTarget?.name ?? "")}
+        footer={
+          <>
+            <Button onClick={() => setBindingTarget(null)} disabled={savingBind}>
+              {commonCopy.cancel}
+            </Button>
+            <Button
+              variant="primary"
+              type="submit"
+              form={BIND_FORM_ID}
+              disabled={savingBind || (bindChoice === KEY_OPTION_NEW && !bindKeyInput.trim())}
+            >
+              {savingBind ? copy.bindKeyModal.saving : copy.bindKeyModal.save}
+            </Button>
+          </>
+        }
+      >
+        <form id={BIND_FORM_ID} className="zs-backup__create" onSubmit={handleSaveBindKey}>
+          <p className="zs-t-body">{copy.bindKeyModal.lead}</p>
+          <Select
+            label={copy.bindKeyModal.sourceLabel}
+            value={bindChoice}
+            onChange={(e) => setBindChoice(e.target.value)}
+            options={
+              [
+                { value: KEY_OPTION_NONE, label: copy.bindKeyModal.noneOption },
+                ...routes.map((r) => ({
+                  value: r.id,
+                  label: `${r.label}${r.country ? ` · ${r.country}` : ""}${r.exit_ip ? ` (${r.exit_ip})` : ""}`,
+                })),
+                { value: KEY_OPTION_NEW, label: copy.bindKeyModal.newOption },
+              ] satisfies SelectOption[]
+            }
+          />
+          {bindChoice === KEY_OPTION_NEW && (
+            <>
+              <Field
+                label={copy.bindKeyModal.inputLabel}
+                placeholder={copy.bindKeyModal.inputPlaceholder}
+                value={bindKeyInput}
+                onChange={(e) => setBindKeyInput(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              {(() => {
+                const preview = decodeZastavaKeyPreview(bindKeyInput);
+                if (!preview) return null;
+                const parts = [preview.label, preview.country, preview.exit_ip, preview.entrySummary].filter(Boolean);
+                return parts.length > 0 ? (
+                  <Banner tone="info" title={copy.bindKeyModal.previewLabel}>
+                    {parts.join(" · ")}
+                  </Banner>
+                ) : null;
+              })()}
+            </>
+          )}
         </form>
       </Modal>
 

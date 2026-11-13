@@ -126,6 +126,14 @@ export const overview = {
       text: "Новая версия Заставы готова к установке.",
       action: "Что нового",
     },
+    expiringKey: {
+      titleSoon: "Срок ключа Заставы заканчивается",
+      titleExpired: "Срок ключа Заставы истёк",
+      text: (label: string, remaining: string) =>
+        `Ключ «${label}» (${remaining}). Продлите его в @zastava_app_bot, чтобы ИИ-сервисы не остановились.`,
+      renew: "Продлить",
+      openConnect: "Маршруты",
+    },
   },
   error: {
     title: "Нет связи с сетью",

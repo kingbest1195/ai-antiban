@@ -7,12 +7,11 @@ import {
   removeRoute,
   setDefaultRoute,
   setRouteEnabled,
-  setUpstreamProxy,
   testRoute,
   toggleUpstreamProxy,
   upsertRoute,
 } from "../../utils/api";
-import { openExternal, openTelegramSupport } from "../../utils/opener";
+import { openExternal, openZastavaBot } from "../../utils/opener";
 import {
   Badge,
   Banner,
@@ -22,12 +21,14 @@ import {
   Mono,
   Row,
   Rows,
+  Segmented,
   Select,
   Switch,
 } from "../../ui";
-import type { BadgeTone, RowTone } from "../../ui";
+import type { BadgeTone, RowTone, SegmentedOption } from "../../ui";
 import { connect as copy } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
+import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
 import type { ShowToast } from "../../shared/hooks";
 import { HOSTINGS } from "./hostings";
 
@@ -51,6 +52,13 @@ const PROVIDERS: { id: ProviderId; name: string }[] = [
   { id: "gemini", name: copy.routes.services.gemini },
 ];
 
+type AddKeyScope = "all" | "save_only";
+
+const ADD_SCOPE_OPTIONS: SegmentedOption<AddKeyScope>[] = [
+  { value: "all", label: copy.key.scopeOptions.all },
+  { value: "save_only", label: copy.key.scopeOptions.save_only },
+];
+
 /** Экран «Подключение»: личный VPN, ключ Заставы, список маршрутов и привязки по сервисам. */
 export function ConnectScreen({
   state,
@@ -65,6 +73,7 @@ export function ConnectScreen({
 }: ConnectScreenProps) {
   const [localSnapshot, setLocalSnapshot] = useState<RoutesSnapshot | null>(null);
   const [inputKey, setInputKey] = useState<string>("");
+  const [addScope, setAddScope] = useState<AddKeyScope>("all");
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState<boolean>(false);
   const [testingId, setTestingId] = useState<string | null>(null);
@@ -111,15 +120,15 @@ export function ConnectScreen({
     setError(null);
     setConnecting(true);
     try {
-      await upsertRoute(key);
-      try {
-        await setUpstreamProxy(key);
-      } catch {
-        // Fallback если legacy proxy не поддерживается
-      }
+      const applyToAll = addScope === "all";
+      await upsertRoute(key, null, applyToAll);
       await refresh();
       setInputKey("");
-      onToast(copy.key.toast.connected, copy.key.toast.connectedText, "success");
+      onToast(
+        copy.key.toast.connected,
+        applyToAll ? copy.key.toast.connectedText : copy.key.toast.savedOnlyText,
+        "success",
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
@@ -218,8 +227,12 @@ export function ConnectScreen({
   const handleResetAllDangling = async () => {
     try {
       const dangling = snapshot?.dangling || [];
+      let clearedDefault = false;
       for (const item of dangling) {
-        if (item.provider) {
+        if (item.kind === "default" && !clearedDefault) {
+          await setDefaultRoute(null);
+          clearedDefault = true;
+        } else if (item.provider) {
           await bindProviderRoute(item.provider as ProviderId, "direct");
         }
       }
@@ -302,7 +315,7 @@ export function ConnectScreen({
         </Button>
       </Card>
 
-      <Card title={copy.key.title} aside={<Badge tone="info">{copy.key.badge}</Badge>}>
+      <Card title={copy.key.title}>
         <p className="zs-t-body mb-3 text-ink-2">{copy.key.text}</p>
 
         {hasRoutes ? (
@@ -312,7 +325,9 @@ export function ConnectScreen({
                 const isTesting = testingId === r.id;
                 const isToggling = togglingId === r.id;
                 const isDeleting = deletingId === r.id;
-                const isExpired = r.status === "expired" || Boolean(r.expires_at && r.expires_at * 1000 < Date.now());
+                const expiryUrgency = getRouteExpiryUrgency(r.expires_at);
+                const isExpired = r.status === "expired" || expiryUrgency === "expired";
+                const showRenew = expiryUrgency !== "none" || isExpired;
 
                 const statusTone: BadgeTone =
                   r.status === "active"
@@ -351,6 +366,11 @@ export function ConnectScreen({
                           {r.is_default && <Badge tone="info">{copy.key.defaultBadge}</Badge>}
                           {r.is_profile_route && <Badge tone="neutral">{copy.key.profileBadge}</Badge>}
                           <Badge tone={statusTone}>{statusText}</Badge>
+                          {(expiryUrgency === "soon" || expiryUrgency === "critical") && r.expires_at && (
+                            <Badge tone={expiryUrgency === "critical" ? "danger" : "warn"}>
+                              {copy.key.expiringSoon(formatRemainingTimeRu(r.expires_at))}
+                            </Badge>
+                          )}
                         </span>
                       }
                       sub={
@@ -371,7 +391,7 @@ export function ConnectScreen({
                       }
                     />
 
-                    <div className="flex items-center gap-2 pl-9">
+                    <div className="flex items-center gap-2 pl-9 flex-wrap">
                       <Button
                         size="sm"
                         variant="secondary"
@@ -380,6 +400,15 @@ export function ConnectScreen({
                       >
                         {isTesting ? copy.key.testing : copy.key.test}
                       </Button>
+                      {showRenew && (
+                        <Button
+                          size="sm"
+                          variant={expiryUrgency === "critical" || isExpired ? "primary" : "secondary"}
+                          onClick={() => openZastavaBot(r.id)}
+                        >
+                          {copy.key.renew}
+                        </Button>
+                      )}
                       {!r.is_default && (
                         <Button
                           size="sm"
@@ -403,7 +432,16 @@ export function ConnectScreen({
               })}
             </Rows>
 
-            <div className="mt-4 pt-3 border-t border-line">
+            <div className="mt-4 pt-3 border-t border-line zs-stack gap-3">
+              <div className="zs-stack gap-1">
+                <span className="zs-t-label text-ink-2">{copy.key.scopeLabel}</span>
+                <Segmented
+                  aria-label={copy.key.scopeLabel}
+                  options={ADD_SCOPE_OPTIONS}
+                  value={addScope}
+                  onChange={setAddScope}
+                />
+              </div>
               <Field
                 label={copy.key.fieldLabel}
                 placeholder={copy.key.placeholder}
@@ -425,6 +463,11 @@ export function ConnectScreen({
                   </Button>
                 }
               />
+              <div>
+                <Button variant="quiet" size="sm" className="-ml-3" onClick={() => openZastavaBot()}>
+                  {copy.key.get}
+                </Button>
+              </div>
             </div>
           </>
         ) : isLegacyConfigured && upstream ? (
@@ -463,7 +506,16 @@ export function ConnectScreen({
             </Button>
           </>
         ) : (
-          <>
+          <div className="zs-stack gap-3">
+            <div className="zs-stack gap-1">
+              <span className="zs-t-label text-ink-2">{copy.key.scopeLabel}</span>
+              <Segmented
+                aria-label={copy.key.scopeLabel}
+                options={ADD_SCOPE_OPTIONS}
+                value={addScope}
+                onChange={setAddScope}
+              />
+            </div>
             <Field
               label={copy.key.fieldLabel}
               placeholder={copy.key.placeholder}
@@ -485,10 +537,12 @@ export function ConnectScreen({
                 </Button>
               }
             />
-            <Button variant="quiet" size="sm" className="mt-2 -ml-3" onClick={() => openTelegramSupport()}>
-              {copy.key.get}
-            </Button>
-          </>
+            <div>
+              <Button variant="quiet" size="sm" className="-ml-3" onClick={() => openZastavaBot()}>
+                {copy.key.get}
+              </Button>
+            </div>
+          </div>
         )}
       </Card>
 

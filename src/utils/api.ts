@@ -35,6 +35,9 @@ import {
   UpstreamProxyConfig,
   RiskInterceptPayload,
   EnrichedPayload,
+  AutostartStatus,
+  CoworkGuardStatus,
+  RouteUnavailablePayload,
 } from "../types";
 
 let mockState: AppStateData = {
@@ -1338,9 +1341,53 @@ export async function bindUpstreamToClaudeProfile(
       }
     );
   }
+  const route = upstreamKey ? await upsertRoute(upstreamKey, null, false) : null;
   mockProfiles = mockProfiles.map((p) =>
-    p.id === profileId ? { ...p, bound_upstream_key: upstreamKey || null } : p
+    p.id === profileId
+      ? {
+          ...p,
+          bound_upstream_key: upstreamKey || null,
+          bound_route_id: route ? route.id : null,
+        }
+      : p
   );
+  return await listClaudeProfiles();
+}
+
+export async function bindRouteToClaudeProfile(
+  profileId: string,
+  routeId: string | null
+): Promise<ClaudeProfileListResponse> {
+  if (isTauri()) {
+    return await invoke<ClaudeProfileListResponse>(
+      "bind_route_to_claude_profile",
+      {
+        profileId,
+        routeId: routeId || null,
+      }
+    );
+  }
+  const route = routeId
+    ? mockRoutesSnapshot.routes.find((r) => r.id === routeId)
+    : null;
+  mockProfiles = mockProfiles.map((p) =>
+    p.id === profileId
+      ? {
+          ...p,
+          bound_upstream_key: route ? `zastava://mock-${route.id}` : null,
+          bound_route_id: route ? route.id : null,
+        }
+      : p
+  );
+  const active = mockProfiles.find((p) => p.is_active);
+  if (active?.id === profileId) {
+    mockRoutesSnapshot.profile_route_id = route ? route.id : null;
+    mockRoutesSnapshot.effective.anthropic =
+      route?.id ??
+      mockRoutesSnapshot.provider_routes.anthropic ??
+      mockRoutesSnapshot.default_route_id ??
+      null;
+  }
   return await listClaudeProfiles();
 }
 
@@ -1845,5 +1892,80 @@ export async function takePendingDeepLink(): Promise<string | null> {
   const pending = mockPendingDeepLink;
   mockPendingDeepLink = null;
   return pending;
+}
+
+// ---- Автозапуск ОС и защита от фоновых ИИ-служб ----
+
+let mockAutostartEnabled = false;
+let mockCoworkTaskInstalled = false;
+
+export async function getAutostartStatus(): Promise<AutostartStatus> {
+  if (isTauri()) {
+    return await invoke<AutostartStatus>("get_autostart_status");
+  }
+  return {
+    platform: "macos",
+    supported: true,
+    enabled: mockAutostartEnabled,
+    active_in_os: mockAutostartEnabled,
+    target: "~/Library/LaunchAgents/io.zastava.desktop.plist",
+  };
+}
+
+export async function setAutostartEnabled(
+  enabled: boolean
+): Promise<AutostartStatus> {
+  if (isTauri()) {
+    return await invoke<AutostartStatus>("set_autostart_enabled", { enabled });
+  }
+  mockAutostartEnabled = enabled;
+  mockState.autostart_enabled = enabled;
+  return getAutostartStatus();
+}
+
+export async function getCoworkGuardStatus(): Promise<CoworkGuardStatus> {
+  if (isTauri()) {
+    return await invoke<CoworkGuardStatus>("get_cowork_guard_status");
+  }
+  return {
+    platform: "macos",
+    supported: true,
+    service_present: false,
+    start_type: null,
+    service_running: false,
+    task_installed: mockCoworkTaskInstalled,
+    task_healthy: mockCoworkTaskInstalled,
+    needs_repair: false,
+    summary:
+      "Фоновые службы в порядке: на macOS приложения с автозапуском стартуют через LaunchAgents; убедитесь, что Застава запускается при входе раньше Claude и IDE.",
+    detected_ai_apps: [],
+  };
+}
+
+export async function installOrRepairCoworkGuard(): Promise<CoworkGuardStatus> {
+  if (isTauri()) {
+    return await invoke<CoworkGuardStatus>("install_or_repair_cowork_guard");
+  }
+  mockCoworkTaskInstalled = true;
+  mockState.cowork_guard_enabled = true;
+  return getCoworkGuardStatus();
+}
+
+export async function onCoworkGuardStatus(
+  handler: (status: CoworkGuardStatus) => void
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  return await listen<CoworkGuardStatus>("cowork-guard://status", (event) => {
+    handler(event.payload);
+  });
+}
+
+export async function onRouteUnavailable(
+  handler: (payload: RouteUnavailablePayload) => void
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  return await listen<RouteUnavailablePayload>("route://unavailable", (event) => {
+    handler(event.payload);
+  });
 }
 

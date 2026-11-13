@@ -2,7 +2,7 @@
 
 use crate::tray::update_tray_from_report;
 use crate::startup::{self, StartupSink, StartupSnapshot, StartupState, StartupSteps};
-use crate::{auditor, bin_checker, commands, proxy, state, sysproxy, tray, updater};
+use crate::{auditor, bin_checker, commands, cowork_guard, proxy, state, sysproxy, tray, updater};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -11,13 +11,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let mut found_deep_link = false;
+            let minimized = argv.iter().any(|arg| arg == "--minimized");
             for arg in &argv {
                 if arg.starts_with("zastava://") {
                     commands::deeplink::handle_deep_link(app, arg);
                     found_deep_link = true;
                 }
             }
-            if !found_deep_link {
+            if !found_deep_link && !minimized {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();
                     let _ = win.unminimize();
@@ -57,6 +58,17 @@ pub fn run() {
 
             spawn_tray_status_watcher(app, &risk_auditor, &app_state, guard_for_watcher.clone());
             spawn_update_checker(app, &app_state);
+            spawn_cowork_guard_watcher(app);
+
+            // Window starts hidden (`visible: false` in tauri.conf.json) so `--minimized`
+            // keeps Zastava strictly in the tray; show it on interactive launches.
+            let start_minimized = std::env::args().any(|a| a == "--minimized");
+            if !start_minimized {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
 
             // The gateway listens (`pac_url` exists only after the bind), so the sequence may
             // switch protection on: recovery -> protection -> guard, off the setup path.
@@ -144,6 +156,11 @@ pub fn run() {
             commands::claude::delete_claude_profile_cmd,
             commands::claude::bind_ip_to_claude_profile_cmd,
             commands::claude::bind_upstream_to_claude_profile_cmd,
+            commands::claude::bind_route_to_claude_profile,
+            commands::autostart::get_autostart_status,
+            commands::autostart::set_autostart_enabled,
+            commands::autostart::get_cowork_guard_status,
+            commands::autostart::install_or_repair_cowork_guard,
             commands::interception::get_interception_behavior_cmd,
             commands::interception::set_interception_behavior_cmd,
             commands::interception::get_popup_position_cmd,
@@ -418,6 +435,38 @@ fn spawn_update_checker(app: &tauri::App, app_state: &state::AppState) {
                 }
             }
             tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    });
+}
+
+/// Periodically verifies Windows `CoworkVMService` Start type / macOS AI helpers every 60s.
+/// If a Windows Store update resets `CoworkVMService\Start` back to `2` (Automatic) while the
+/// Task Scheduler guard is installed, triggers the guard task automatically and notifies the UI.
+fn spawn_cowork_guard_watcher(app: &tauri::App) {
+    let handle = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        loop {
+            if let Ok(mut status) =
+                tokio::task::spawn_blocking(cowork_guard::get_cowork_guard_status).await
+            {
+                if status.supported && status.task_installed && status.start_type == Some(2) {
+                    let triggered =
+                        tokio::task::spawn_blocking(cowork_guard::trigger_cowork_guard_task)
+                            .await
+                            .unwrap_or(false);
+                    if triggered {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        if let Ok(refreshed) =
+                            tokio::task::spawn_blocking(cowork_guard::get_cowork_guard_status).await
+                        {
+                            status = refreshed;
+                        }
+                    }
+                }
+                let _ = handle.emit("cowork-guard://status", &status);
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 }

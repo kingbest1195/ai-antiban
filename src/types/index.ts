@@ -170,6 +170,10 @@ export interface AppStateData {
   sync_ai_tz_enabled?: boolean;
   /** Режим покрытия CLI. */
   cli_mode?: CliMode;
+  /** Автозапуск Заставы при входе в систему (в трей). */
+  autostart_enabled?: boolean;
+  /** Защита от фонового автозапуска ИИ-служб (Windows CoworkVMService / macOS). */
+  cowork_guard_enabled?: boolean;
 }
 
 export type AppStateSnapshot = AppStateData;
@@ -323,6 +327,7 @@ export interface ClaudeProfile {
   bound_ip?: string | null;
   bound_country?: string | null;
   bound_upstream_key?: string | null;
+  bound_route_id?: string | null;
   isolated_device_id: string;
   created_at: number;
   last_used_at: number;
@@ -498,5 +503,39 @@ export interface CoverageSnapshot {
   system_proxy_effective?: boolean | null;
   /** Включённые VPN-службы, подключённые сейчас. Застава в них ничего не пишет. */
   vpn_connected?: string[];
+}
+
+export interface AutostartStatus {
+  platform: string;
+  supported: boolean;
+  enabled: boolean;
+  active_in_os: boolean;
+  target: string;
+}
+
+export interface DetectedAiProcess {
+  name: string;
+  kind: "process" | "login_item";
+  detail: string;
+}
+
+export interface CoworkGuardStatus {
+  platform: string;
+  supported: boolean;
+  service_present: boolean;
+  start_type: number | null;
+  service_running: boolean;
+  task_installed: boolean;
+  task_healthy: boolean;
+  needs_repair: boolean;
+  summary: string;
+  detected_ai_apps: DetectedAiProcess[];
+}
+
+export interface RouteUnavailablePayload {
+  route_id: string;
+  provider: string;
+  reason: string;
+  message: string;
 }
 

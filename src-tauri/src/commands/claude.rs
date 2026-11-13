@@ -37,7 +37,13 @@ pub async fn create_claude_profile_cmd(
     bind_ip: Option<String>,
     bind_country: Option<String>,
     bind_upstream_key: Option<String>,
+    state: tauri::State<'_, state::AppState>,
 ) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
+    let bind_upstream_key = bind_upstream_key.filter(|k| !k.trim().is_empty());
+    if let Some(ref k) = bind_upstream_key {
+        let route = routing::parse_route_key(k, crate::auditor::network::current_timestamp())?;
+        state.upsert_route(route).await.map_err(|e| e.to_string())?;
+    }
     auditor::profile_switcher::create_claude_profile(&name, bind_ip, bind_country, bind_upstream_key)
 }
 
@@ -89,8 +95,37 @@ pub async fn bind_upstream_to_claude_profile_cmd(
     let upstream_key = upstream_key.filter(|k| !k.trim().is_empty());
     // Validate before persisting so a profile never carries an unusable key.
     if let Some(ref k) = upstream_key {
-        routing::parse_route_key(k, crate::auditor::network::current_timestamp())?;
+        let route = routing::parse_route_key(k, crate::auditor::network::current_timestamp())?;
+        state.upsert_route(route).await.map_err(|e| e.to_string())?;
     }
+    let resp = auditor::profile_switcher::update_profile_bound_upstream(&profile_id, upstream_key.clone())?;
+    if resp.active_profile_id == profile_id {
+        routing::apply_profile_key(&state, upstream_key.as_deref()).await?;
+    }
+    Ok(resp)
+}
+
+#[tauri::command]
+pub async fn bind_route_to_claude_profile(
+    profile_id: String,
+    route_id: Option<String>,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
+    let upstream_key = match route_id.filter(|id| !id.trim().is_empty()) {
+        Some(rid) => {
+            let data = state.get_data().await;
+            let route = data
+                .routes
+                .iter()
+                .find(|r| r.id == rid)
+                .ok_or_else(|| format!("Маршрут не найден: {rid}"))?;
+            let raw_key = route.raw_key.clone();
+            routing::parse_route_key(&raw_key, crate::auditor::network::current_timestamp())?;
+            Some(raw_key)
+        }
+        None => None,
+    };
+
     let resp = auditor::profile_switcher::update_profile_bound_upstream(&profile_id, upstream_key.clone())?;
     if resp.active_profile_id == profile_id {
         routing::apply_profile_key(&state, upstream_key.as_deref()).await?;

@@ -1,6 +1,7 @@
 //! Tauri command handlers, grouped by domain. Registered in `app::run()` via `generate_handler!`.
 
 pub mod audit;
+pub mod autostart;
 pub mod claude;
 pub mod coverage;
 pub mod crash_test;

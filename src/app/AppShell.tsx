@@ -22,8 +22,9 @@ import {
   useUpdater,
 } from "../shared/hooks";
 import type { TabId } from "../shared/hooks";
+import type { RouteUnavailablePayload } from "../types";
 import { openTelegramSupport } from "../utils/opener";
-import { takePendingDeepLink, upsertRoute } from "../utils/api";
+import { bindUpstreamToClaudeProfile, onRouteUnavailable, takePendingDeepLink, upsertRoute } from "../utils/api";
 import { OverviewScreen } from "../features/overview/OverviewScreen";
 import { ConnectScreen } from "../features/connect/ConnectScreen";
 import { AlertOverlay } from "../features/alert";
@@ -36,6 +37,7 @@ import { SettingsModal } from "../features/settings";
 import { SubscriptionScreen } from "../features/subscription";
 import { AboutModal } from "./AboutModal";
 import { DeepLinkModal } from "./DeepLinkModal";
+import type { DeepLinkConfirmOptions } from "./DeepLinkModal";
 import { EventsModal } from "./EventsModal";
 import { TimezoneModal } from "./TimezoneModal";
 import { UpdateModal } from "./UpdateModal";
@@ -76,6 +78,7 @@ export function AppShell() {
   const [browserSimulation, setBrowserSimulation] = useState(false);
   const [pendingDeepLinkKey, setPendingDeepLinkKey] = useState<string | null>(null);
   const [submittingDeepLink, setSubmittingDeepLink] = useState(false);
+  const [routeUnavailableBanner, setRouteUnavailableBanner] = useState<RouteUnavailablePayload | null>(null);
 
   // ---- Состояние и действия, вынесенные из старого Dashboard ----
   const stats = useGatewayStats(nav.tab === "overview" && !nav.subscriptionOpen);
@@ -195,15 +198,55 @@ export function AppShell() {
     };
   }, []);
 
-  const handleConfirmDeepLink = async () => {
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    onRouteUnavailable((info) => {
+      if (!active) return;
+      setRouteUnavailableBanner(info);
+      showToast(
+        `Маршрут недоступен (${info.provider.toUpperCase()})`,
+        info.message || "Подключение через выбранный ключ остановлено для защиты IP.",
+        "error",
+      );
+      gw.refreshRoutes().catch(() => {});
+    })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleConfirmDeepLink = async ({ scope, profileId }: DeepLinkConfirmOptions) => {
     if (!pendingDeepLinkKey) return;
     const key = pendingDeepLinkKey;
     setSubmittingDeepLink(true);
     try {
-      await upsertRoute(key, null, true);
-      nav.goTab("connect");
+      if (scope === "profile") {
+        await bindUpstreamToClaudeProfile(profileId || "default", key);
+        nav.goTab("backup");
+        showToast("Ключ привязан к профилю", "Ключ Заставы привязан только к выбранному профилю Claude.", "success");
+      } else {
+        const setAsDefault = scope === "all";
+        await upsertRoute(key, null, setAsDefault);
+        nav.goTab("connect");
+        showToast(
+          "Ключ подключён",
+          setAsDefault
+            ? "Маршрут Заставы добавлен и назначен основным для всех ИИ-сервисов."
+            : "Маршрут Заставы сохранён в списке без изменения текущего подключения.",
+          "success",
+        );
+      }
       await gw.refreshRoutes();
-      showToast("Ключ подключён", "Маршрут Заставы успешно добавлен и назначен основным", "success");
+      await refreshState();
       setPendingDeepLinkKey(null);
     } catch (err: any) {
       console.error("Failed to add deep-link route:", err);
@@ -369,6 +412,32 @@ export function AppShell() {
               </Banner>
             )}
 
+            {routeUnavailableBanner && (
+              <Banner
+                tone="danger"
+                role="alert"
+                title={`Маршрут для ${routeUnavailableBanner.provider.toUpperCase()} недоступен`}
+                action={
+                  <>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        nav.goTab("connect");
+                        setRouteUnavailableBanner(null);
+                      }}
+                    >
+                      Открыть подключение
+                    </Button>{" "}
+                    <Button size="sm" variant="quiet" onClick={() => setRouteUnavailableBanner(null)}>
+                      {copy.intercept.dismiss}
+                    </Button>
+                  </>
+                }
+              >
+                {routeUnavailableBanner.message}
+              </Banner>
+            )}
+
             <TabPanel idPrefix={TAB_PREFIX} id="overview" selected={nav.tab === "overview"} className="zs-stack">
               <OverviewScreen
                 reports={gw.reports}
@@ -383,6 +452,7 @@ export function AppShell() {
                 gatewayStats={stats.gatewayStats}
                 updateInfo={updater.updateInfo}
                 coverageSnapshot={gw.coverageSnapshot}
+                routesSnapshot={gw.routesSnapshot}
                 dataAgeMinutes={gw.dataAgeMinutes}
                 sysproxyActive={gw.sysproxyActive}
                 cliProtected={toggles.cliProtected}
@@ -405,6 +475,7 @@ export function AppShell() {
                 onOpenTimezone={() => setTimezoneOpen(true)}
                 onOpenUpdate={() => updater.setShowUpdateModal(true)}
                 onOpenCrashTest={() => setCrashTestOpen(true)}
+                onOpenConnect={() => nav.goTab("connect")}
               />
             </TabPanel>
 
@@ -450,6 +521,8 @@ export function AppShell() {
                 currentIp={gw.currentIp}
                 currentCountry={gw.currentCountry}
                 activeUpstreamKey={gw.state?.upstream_proxy?.raw_key}
+                routesSnapshot={gw.routesSnapshot}
+                onRoutesUpdated={() => gw.refreshRoutes()}
                 onProfileSwitched={(_name, pin) => {
                   if (pin) pinning.handlePinIp(pin);
                   else runFullAudit(false);
