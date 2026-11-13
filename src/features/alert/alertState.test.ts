@@ -1,7 +1,12 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { EnrichedPayload, RiskInterceptPayload } from "../../types";
 import { alertDialog } from "../../shared/copy/ru";
-import { alertReducer, allowErrorText, canAllow, classifyAllowError, initialAlertState, isFailed } from "./alertState";
+import { formatCountryWithCode } from "../../shared/lib/country";
+import { Dialog } from "../../ui";
+import { AlertWindow } from "./AlertWindow";
+import { alertReducer, allowErrorText, canAllow, classifyAllowError, initialAlertState, isFailed, isHighRiskAlert } from "./alertState";
 
 function detecting(id = "a1"): RiskInterceptPayload {
   return {
@@ -119,5 +124,109 @@ describe("allowErrorText", () => {
     const texts = (["stale", "pending", "killswitch", "generic"] as const).map(allowErrorText);
     expect(new Set(texts).size).toBe(4);
     expect(allowErrorText("killswitch")).toBe(alertDialog.allowErrorKillswitch);
+  });
+});
+
+describe("isHighRiskAlert & formatCountryWithCode", () => {
+  it("форматирует страну с ISO-кодом и не дублирует неизвестные коды", () => {
+    expect(formatCountryWithCode("NL")).toBe("Нидерланды (NL)");
+    expect(formatCountryWithCode("ru")).toBe("Россия (RU)");
+    expect(formatCountryWithCode("--")).toBe("");
+    expect(formatCountryWithCode(null)).toBe("");
+  });
+
+  it("считает RU, BY и red высоким риском", () => {
+    expect(isHighRiskAlert(null)).toBe(false);
+    expect(isHighRiskAlert({ ...detecting(), phase: "ready", network_change: { new_country: "RU" } })).toBe(true);
+    expect(isHighRiskAlert({ ...detecting(), phase: "ready", network_change: { new_country: "BY" } })).toBe(true);
+    expect(
+      isHighRiskAlert({
+        ...detecting(),
+        phase: "ready",
+        network_change: { new_country: "TR" },
+        report: {
+          provider: "anthropic",
+          overall_status: "red",
+          trust_score: 20,
+          telemetry: { ip: "2.2.2.2", country_code: "TR", resolved_at: 1 },
+          geo_result: { status: "ok", code: "OK", message: "ok" },
+          pinning_result: { status: "critical", code: "PIN", message: "pin" },
+          travel_result: { status: "ok", code: "OK", message: "ok" },
+          dnsbl_result: { status: "ok", code: "OK", message: "ok" },
+          dnsbl_clean_count: "",
+          asn_result: { status: "ok", code: "OK", message: "ok" },
+          ipv6_result: { status: "ok", code: "OK", message: "ok" },
+          timezone_result: { status: "ok", code: "OK", message: "ok" },
+          checks: [],
+        },
+      }),
+    ).toBe(true);
+    expect(isHighRiskAlert({ ...detecting(), phase: "ready", network_change: { new_country: "TR" } })).toBe(false);
+  });
+});
+
+describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () => {
+  it("Dialog рисует 2 кнопки и блок Было → Стало при наличии previous", () => {
+    const html = renderToStaticMarkup(
+      createElement(Dialog, {
+        title: alertDialog.title,
+        text: alertDialog.textDrop,
+        service: "Claude",
+        ip: "185.220.101.5",
+        country: "Турция (TR)",
+        previous: { ip: "185.212.102.40", country: "Нидерланды (NL)", label: "Было" },
+        actions: [
+          { label: alertDialog.block, onSelect: () => {} },
+          { label: alertDialog.allow, variant: "danger", onSelect: () => {} },
+        ],
+      }),
+    );
+    expect(html).toContain("zs-route-diff");
+    expect(html).toContain("Нидерланды (NL)");
+    expect(html).toContain("185.212.102.40");
+    expect(html).toContain("Турция (TR)");
+    expect(html).toContain("185.220.101.5");
+    expect(html).toContain(alertDialog.block);
+    expect(html).toContain(alertDialog.allow);
+    expect(html).not.toContain("Открыть инструкцию");
+  });
+
+  it("AlertWindow показывает Было → Стало при смене IP и fallback без old_ip", () => {
+    const withOld = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        initialPayload: {
+          ...detecting(),
+          phase: "ready",
+          network_change: { old_ip: "185.212.102.40", old_country: "NL", new_ip: "185.220.101.5", new_country: "RU" },
+        },
+      }),
+    );
+    expect(withOld).toContain("Было");
+    expect(withOld).toContain("Стало");
+    expect(withOld).toContain("Нидерланды (NL)");
+    expect(withOld).toContain("Россия (RU)");
+    expect(withOld).toContain("Держать на паузе");
+    expect(withOld).toContain("Разрешить принудительно");
+    expect(withOld).not.toContain("Открыть инструкцию");
+
+    const withoutOld = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        initialPayload: {
+          ...detecting(),
+          scope: "provider",
+          phase: "ready",
+          network_change: { old_ip: null, old_country: null, new_ip: "185.220.101.5", new_country: "TR" },
+        },
+      }),
+    );
+    expect(withoutOld).toContain("zs-route");
+    expect(withoutOld).not.toContain("zs-route-diff");
+    expect(withoutOld).toContain("Турция (TR)");
+    expect(withoutOld).toContain("185.220.101.5");
+  });
+
+  it("пока phase === detecting, кнопка Разрешить принудительно отключена", () => {
+    const html = renderToStaticMarkup(createElement(AlertWindow, { initialPayload: detecting() }));
+    expect(html).toContain("disabled");
   });
 });

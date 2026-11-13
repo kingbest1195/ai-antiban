@@ -9,11 +9,20 @@ import {
   resolveInterception,
   takePendingAlert,
 } from "../../utils/api";
-import { Dialog, Skeleton } from "../../ui";
-import { alertReducer, allowErrorText, canAllow, classifyAllowError, initialAlertState, isDetecting, isFailed } from "./alertState";
+import { Button, Dialog, Skeleton } from "../../ui";
+import {
+  alertReducer,
+  allowErrorText,
+  canAllow,
+  classifyAllowError,
+  initialAlertState,
+  isDetecting,
+  isFailed,
+  isHighRiskAlert,
+} from "./alertState";
 import type { AlertState } from "./alertState";
 import { alertDialog as copy, providers as providerCopy } from "../../shared/copy/ru";
-import { countryName } from "../../shared/lib/country";
+import { formatCountryWithCode } from "../../shared/lib/country";
 import "./alert.css";
 
 export interface AlertWindowProps {
@@ -23,8 +32,7 @@ export interface AlertWindowProps {
 
 /**
  * Диалог обрыва VPN (окно Tauri alert-popup и оверлей в браузере).
- * Клавиши прежние по смыслу: 1 — открыть инструкцию и держать блок, 2 — разрешить на сессию, 3 или Esc — блокировать до смены сети.
- * Теперь порядок кнопок на экране совпадает с номерами.
+ * Клавиши совпадают с кнопками: 1 или Esc — держать на паузе до смены сети, 2 — разрешить принудительно.
  */
 export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
   const [state, dispatch] = useReducer(
@@ -36,6 +44,7 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
   const [resolving, setResolving] = useState<boolean>(false);
   const [demoFeedback, setDemoFeedback] = useState<string | null>(null);
   const [allowError, setAllowError] = useState<string | null>(null);
+  const [confirmForce, setConfirmForce] = useState<boolean>(false);
 
   const { payload } = state;
   const generation = state.generation;
@@ -88,10 +97,11 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
     };
   }, []);
 
-  // Новый алерт: сбрасываем ошибку и демо-подпись предыдущего.
+  // Новый алерт: сбрасываем ошибку, подтверждение и демо-подпись предыдущего.
   useEffect(() => {
     setAllowError(null);
     setDemoFeedback(null);
+    setConfirmForce(false);
   }, [generation]);
 
   const isDemo = Boolean(payload && (payload.is_simulation || payload.id.startsWith("sim-")));
@@ -164,7 +174,7 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
     if (onResolved) onResolved("BlockUntilNetworkChange");
   };
 
-  // Esc — то же, что закрытие окна. Клавиши 1, 2, 3 обрабатывает сам Dialog.
+  // Esc — то же, что закрытие окна. Клавиши 1, 2 обрабатывает сам Dialog.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (resolving || !payload || e.key !== "Escape") return;
@@ -181,13 +191,15 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
   const { report, network_change } = payload;
   const detecting = isDetecting(state);
   const failed = isFailed(state);
+  const highRisk = isHighRiskAlert(payload);
   const previousIp = network_change?.old_ip;
+  const previousCountry = formatCountryWithCode(network_change?.old_country) || copy.unknownCountry;
   const currentIp = network_change?.new_ip || report?.telemetry?.ip || copy.unknownIp;
   const currentCountryCode = network_change?.new_country || report?.telemetry?.country_code || null;
   const service = providerCopy[payload.provider]?.name ?? payload.provider;
 
   const countryNode: ReactNode = currentCountryCode ? (
-    countryName(currentCountryCode) || currentCountryCode
+    formatCountryWithCode(currentCountryCode) || currentCountryCode
   ) : detecting ? (
     <Skeleton width={72} height={12} />
   ) : (
@@ -208,6 +220,28 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
 
   const locked = resolving || Boolean(demoFeedback);
 
+  const inlineConfirm = confirmForce ? (
+    <>
+      <p className="zs-dialog__confirm-text">{copy.confirmForceText}</p>
+      <div className="zs-dialog__confirm-actions">
+        <Button size="md" onClick={() => setConfirmForce(false)} disabled={locked}>
+          {copy.confirmForceCancel}
+        </Button>
+        <Button
+          variant="danger-solid"
+          size="md"
+          disabled={locked}
+          onClick={() => {
+            setConfirmForce(false);
+            void handleAction("AllowSession");
+          }}
+        >
+          {copy.confirmForceAccept}
+        </Button>
+      </div>
+    </>
+  ) : undefined;
+
   return (
     <Dialog
       key={`${payload.id}:${generation}`}
@@ -216,16 +250,28 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
       service={service}
       ip={currentIp}
       country={countryNode}
-      countryTone={detecting && !currentCountryCode ? "neutral" : failed ? "warn" : "danger"}
+      countryTone={detecting && !currentCountryCode ? "neutral" : highRisk ? "danger" : "warn"}
+      previous={previousIp ? { ip: previousIp, country: previousCountry, label: copy.was } : null}
+      currentLabel={copy.became}
+      unknownCountryLabel={copy.unknownCountry}
       demo={isDemo}
       seconds={ttl}
+      hotkeys={!confirmForce}
       onTimeout={handleTimeout}
       onClose={handleClose}
       closeLabel={copy.closeLabel}
+      inlineConfirm={inlineConfirm}
       actions={[
-        { label: copy.openGuide, icon: "zap", disabled: locked, onSelect: () => handleAction("OpenGuideAndBlock") },
-        { label: copy.allow, disabled: locked || !allowEnabled, onSelect: () => handleAction("AllowSession") },
         { label: copy.block, disabled: locked, onSelect: () => handleAction("BlockUntilNetworkChange") },
+        {
+          label: copy.allow,
+          variant: highRisk ? "danger" : "secondary",
+          disabled: locked || !allowEnabled,
+          onSelect: () => {
+            if (highRisk) setConfirmForce(true);
+            else void handleAction("AllowSession");
+          },
+        },
       ]}
     />
   );

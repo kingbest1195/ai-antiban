@@ -6,6 +6,7 @@ import {
   toggleStrictPinning,
   unblockProvider,
   unpinIp,
+  verifyAndUnblockProvider,
 } from "../../utils/api";
 import { providers, toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
@@ -102,6 +103,23 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
     [runFullAudit, showToast],
   );
 
+  const handleVerifyAndUnblockProvider = useCallback(
+    async (provider: ProviderId): Promise<boolean> => {
+      try {
+        const unblocked = await verifyAndUnblockProvider(provider);
+        if (unblocked) {
+          showToast(t.accessRestored, t.accessRestoredText(providers[provider].name), "success");
+        }
+        await runFullAudit(false);
+        return unblocked;
+      } catch (err: any) {
+        showToast(t.genericError, err?.message || String(err), "error");
+        return false;
+      }
+    },
+    [runFullAudit, showToast],
+  );
+
   return {
     copiedIp,
     handleCopyIp,
@@ -110,5 +128,6 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
     handleToggleStrict,
     handleAllowProvider,
     handleUnblockProvider,
+    handleVerifyAndUnblockProvider,
   };
 }

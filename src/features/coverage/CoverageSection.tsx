@@ -163,11 +163,35 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
               {result.text}
             </Banner>
           )}
+          {variant === "checks" && protection?.adminAuthMessage && (
+            <Banner
+              tone="warn"
+              title={copy.protection.adminAuthTitle}
+              className="zs-cov__vpn"
+              action={
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={busy !== null || protection.retryingAdminAuth}
+                  onClick={() => {
+                    void protection.enableSysproxyPrivileged().then((ok) => {
+                      if (ok) void refresh();
+                    });
+                  }}
+                >
+                  {protection.retryingAdminAuth ? copy.protection.adminAuthBusy : copy.protection.adminAuthRetry}
+                </Button>
+              }
+            >
+              {protection.adminAuthMessage}
+            </Banner>
+          )}
           {restarting && <Progress label={copy.restart.progress} className="zs-cov__vpn" />}
           {busy && <Progress label={busy.action === "enable" ? copy.protection.inProgress : copy.protection.inProgressOff} className="zs-cov__vpn" />}
           <Rows>
             {snapshot.chained_proxy && (
               <Row
+                className="zs-cov__row"
                 icon="pulse"
                 title={copy.chain.title(snapshot.chained_proxy)}
                 sub={copy.chain.sub}
@@ -253,7 +277,18 @@ function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy,
   if (view === "not_installed") return null;
   const badge = BADGES[view];
   const since = sinceLastSeen(app, now);
-  const sub = view === "confirmed" && app.ai_requests > 0 ? copy.seen(app.ai_requests, since) : app.detail;
+  const sub =
+    view === "confirmed" && app.ai_requests > 0
+      ? copy.seen(app.ai_requests, since)
+      : view === "waiting"
+        ? copy.statusSub.waiting
+        : view === "waiting_timeout"
+          ? copy.statusSub.waitingTimeout
+          : view === "configured"
+            ? app.detail || copy.statusSub.configured
+            : view === "direct"
+              ? app.detail || copy.statusSub.direct
+              : app.detail;
   const trail = (
     <Badge tone={badge.tone} icon={badge.icon}>
       {badge.label}
@@ -262,7 +297,7 @@ function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy,
 
   // Без шагов раскрывать нечего: обычная строка.
   if (setup.steps.length === 0) {
-    return <Row icon={ICONS[app.category]} tone={rowTone(view)} title={app.name} sub={sub} trail={trail} />;
+    return <Row className="zs-cov__row" icon={ICONS[app.category]} tone={rowTone(view)} title={app.name} sub={sub} trail={trail} />;
   }
 
   const kind = setup.protection;
@@ -270,6 +305,7 @@ function AppRow({ app, snapshot, waiting, now, open, onToggle, copiedId, onCopy,
 
   return (
     <ExpandRow
+      className="zs-cov__row"
       icon={ICONS[app.category]}
       tone={rowTone(view)}
       title={app.name}

@@ -398,6 +398,7 @@ export function AppShell() {
                 onToggleStrict={pinning.handleToggleStrict}
                 onAllowProvider={pinning.handleAllowProvider}
                 onUnblockProvider={pinning.handleUnblockProvider}
+                onVerifyAndUnblockProvider={pinning.handleVerifyAndUnblockProvider}
                 onRetry={() => runFullAudit(true)}
                 onOpenChecks={() => nav.goTab("checks")}
                 onFixService={(provider) => nav.goTab("checks", { provider })}

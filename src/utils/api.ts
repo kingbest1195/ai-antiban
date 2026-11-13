@@ -199,6 +199,7 @@ function mockOption(name: string): string | null {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export const MOCK_AUDIT_PROGRESS_EVENT = "mock-audit-progress";
+export const MOCK_AUDIT_REFRESHED_EVENT = "mock-audit-refreshed";
 export const MOCK_STARTUP_EVENT = "mock-startup-phase";
 
 /** Через сколько мс после запуска мок-аудита приходит каждая проверка (место в отчёте → задержка). */
@@ -317,6 +318,16 @@ export async function onAuditProgress(handler: (event: AuditProgressEvent) => vo
   const listener = (e: Event) => handler((e as CustomEvent<AuditProgressEvent>).detail);
   window.addEventListener(MOCK_AUDIT_PROGRESS_EVENT, listener);
   return () => window.removeEventListener(MOCK_AUDIT_PROGRESS_EVENT, listener);
+}
+
+/** Фоновое обновление отчёта от стража/трея: обновляет timestamp и основной отчёт без ручного рескана. */
+export async function onAuditRefreshed(handler: (report: RiskReport) => void): Promise<() => void> {
+  if (isTauri()) {
+    return await listen<RiskReport>("audit://refreshed", (e) => handler(e.payload));
+  }
+  const listener = (e: Event) => handler((e as CustomEvent<RiskReport>).detail);
+  window.addEventListener(MOCK_AUDIT_REFRESHED_EVENT, listener);
+  return () => window.removeEventListener(MOCK_AUDIT_REFRESHED_EVENT, listener);
 }
 
 /** Где фоновый запуск шлюза (защита, страж): пока `starting`, состояние защиты не известно. */
@@ -710,6 +721,21 @@ export async function unblockProvider(provider: ProviderId): Promise<void> {
   );
 }
 
+/**
+ * Проверить текущую сеть и снять ручной блок с провайдера без добавления в session_allowed_providers.
+ * Возвращает true, если сеть безопасна и блок снят; false — если риск сохраняется и нужно принудительное решение.
+ */
+export async function verifyAndUnblockProvider(provider: ProviderId): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("verify_and_unblock_provider", { provider });
+  }
+  if (currentMockScenario === "ru") {
+    return false;
+  }
+  mockState.blocked_providers = mockState.blocked_providers.filter((p) => p !== provider);
+  return true;
+}
+
 export async function resolveInterception(
   id: string,
   action: InterceptionAction,
@@ -845,7 +871,18 @@ export async function toggleSysproxy(enable: boolean): Promise<boolean> {
   if (isTauri()) {
     return await invoke<boolean>("toggle_sysproxy", { enable });
   }
+  if (enable && mockOption("mockAdminAuth") === "1") {
+    throw new Error("ADMIN_AUTH_REQUIRED:Для включения системного прокси на macOS требуются права администратора.");
+  }
   mockSysproxyActive = enable;
+  return mockSysproxyActive;
+}
+
+export async function toggleSysproxyPrivileged(): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("toggle_sysproxy_privileged");
+  }
+  mockSysproxyActive = true;
   return mockSysproxyActive;
 }
 

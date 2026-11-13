@@ -195,7 +195,7 @@ export function ChecksScreen({
                 )}
               </>
             )}
-            {dataAgeMinutes != null && <p className="zs-verdict__text">{copy.dataAge(dataAgeMinutes)}</p>}
+            {dataAgeMinutes != null && <p className="zs-verdict__text">{copy.dataAge(dataAgeMinutes, Boolean(auditError))}</p>}
           </div>
           {onRecheck && !waiting && (
             <div className="zs-verdict__action">

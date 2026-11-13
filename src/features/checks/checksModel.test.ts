@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CheckResult, IpType, RiskReport } from "../../types";
 import { checks as copy } from "../../shared/copy/ru";
 import { buildChecks, buildPendingChecks, classify, countChecks, isYellowOnlyUnknown, progressOf } from "./checksModel";
+import { checks as checksCopy } from "../../shared/copy/ru";
 import { applyProgress, dataAge, emptyPartial } from "../../shared/hooks/useGatewayState";
 import type { AuditProgressEvent, PartialAudit } from "../../types";
 import { evaluateNetwork } from "../onboarding/networkVerdict";
@@ -152,10 +153,18 @@ describe("evaluateNetwork", () => {
 });
 
 describe("dataAge", () => {
-  it("свежие данные — null, старше 2 минут или упавший аудит — минуты", () => {
+  it("при активной защите до 15 мин — null; >= 15 мин или при ошибке аудита — минуты", () => {
     expect(dataAge(60_000, false)).toBeNull();
-    expect(dataAge(3 * 60_000, false)).toBe(3);
+    expect(dataAge(3 * 60_000, false)).toBeNull();
+    expect(dataAge(14 * 60_000, false)).toBeNull();
+    expect(dataAge(15 * 60_000, false)).toBe(15);
     expect(dataAge(10_000, true)).toBe(1);
+    expect(dataAge(5 * 60_000, true)).toBe(5);
+  });
+
+  it("текст бейджа различает обычное устаревание и ошибку обновления", () => {
+    expect(checksCopy.dataAge(16, false)).toBe("Данные 16 мин назад");
+    expect(checksCopy.dataAge(5, true)).toBe("Не удалось обновить · 5 мин назад");
   });
 });
 
