@@ -31,3 +31,15 @@ spec-*.md
 
 # Design system package (source for src/ui, not shipped)
 design/
+
+# Social & marketing content (Threads posts, generated cards)
+threads/
+threads_content/
+
+
+# Local screenshots staging (copied into docs/ by hand)
+.shots/
+
+# Local builds handed to the owner
+binaries/
+src-tauri/target-release/

@@ -905,6 +905,17 @@ export async function getErrorDiagnostics(errorTitle?: string, errorMessage?: st
   return lines.join("\n");
 }
 
+/** Копирует текст в системный буфер обмена через нативную команду Tauri (без потери user-gesture в WebView). */
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    await invoke<void>("copy_text_to_clipboard", { text });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function enableCliProtection(): Promise<CliProtectionReport> {
   if (isTauri()) {
     return await invoke<CliProtectionReport>("enable_cli_protection");

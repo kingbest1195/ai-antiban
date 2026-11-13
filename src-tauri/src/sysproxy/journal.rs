@@ -454,6 +454,13 @@ impl RecoveryReport {
     pub fn restore_deferred_by_vpn_dns(&self) -> bool {
         self.count(|o| matches!(o, Outcome::Failed("temp_dns"))) > 0
     }
+    /// Every reported failure is solely `Outcome::Failed("temp_dns")` (no journal write error or
+    /// other failed restore): protection can be marked off while OS proxy restore waits for VPN.
+    pub fn is_only_vpn_dns_deferred(&self) -> bool {
+        !self.journal_write_failed
+            && self.failed() > 0
+            && self.failed() == self.count(|o| matches!(o, Outcome::Failed("temp_dns")))
+    }
     /// One line for logs: counts and resource names only.
     pub fn summary(&self) -> String {
         if self.skipped_dry_run {
@@ -2837,5 +2844,47 @@ mod tests {
         let _j = open(&fs).unwrap();
         assert!(fs.get(&stale).is_none(), "the stale temp file is gone");
         assert!(fs.get(&keep).is_some(), "the journal itself stays");
+    }
+
+    #[test]
+    fn is_only_vpn_dns_deferred_detects_pure_temp_dns_deferral() {
+        let deferred = RecoveryReport {
+            items: vec![
+                ReportItem {
+                    resource: "pac(Wi-Fi)".into(),
+                    outcome: Outcome::Failed("temp_dns"),
+                },
+                ReportItem {
+                    resource: "env(HTTP_PROXY)".into(),
+                    outcome: Outcome::Restored,
+                },
+            ],
+            skipped_dry_run: false,
+            journal_write_failed: false,
+        };
+        assert!(deferred.restore_deferred_by_vpn_dns());
+        assert!(deferred.is_only_vpn_dns_deferred());
+
+        let mixed = RecoveryReport {
+            items: vec![
+                ReportItem {
+                    resource: "pac(Wi-Fi)".into(),
+                    outcome: Outcome::Failed("temp_dns"),
+                },
+                ReportItem {
+                    resource: "env(HTTP_PROXY)".into(),
+                    outcome: Outcome::Failed("env_write"),
+                },
+            ],
+            skipped_dry_run: false,
+            journal_write_failed: false,
+        };
+        assert!(!mixed.is_only_vpn_dns_deferred());
+
+        let journal_err = RecoveryReport {
+            journal_write_failed: true,
+            ..deferred
+        };
+        assert!(!journal_err.is_only_vpn_dns_deferred());
     }
 }

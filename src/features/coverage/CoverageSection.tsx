@@ -101,7 +101,12 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
     try {
       const off = kind === "sysproxy" ? await protection.disableSysproxy() : await protection.disableCli();
       if (off) {
-        const out: ProtectionResult = { tone: "ok", title: copy.protection.result.disabledTitle[kind], text: copy.protection.result.disabledText };
+        const deferredText = typeof off === "object" ? off.deferred : undefined;
+        const out: ProtectionResult = {
+          tone: deferredText ? "warn" : "ok",
+          title: copy.protection.result.disabledTitle[kind],
+          text: deferredText ?? copy.protection.result.disabledText,
+        };
         setResult(out);
         onToast?.(out.title, out.text, "info");
       } else {

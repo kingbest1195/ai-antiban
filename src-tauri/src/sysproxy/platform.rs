@@ -854,21 +854,49 @@ pub fn is_admin_auth_error(stdout: &str, stderr: &str) -> bool {
     let check = |s: &str| {
         let lower = s.to_ascii_lowercase();
         lower.contains("-60005")
-            || lower.contains("-60006")
             || lower.contains("-60007")
             || lower.contains("-60008")
+            || lower.contains("-60031")
             || lower.contains("requires administrator")
             || lower.contains("requires admin")
             || lower.contains("requires at least admin privileges")
             || lower.contains("root privileges are required")
-            || lower.contains("authorization")
-            || lower.contains("errauthorizationdenied")
+            || lower.contains("admin privileges")
+            || lower.contains("administrator privileges")
+            || lower.contains("must be run as root")
+            || lower.contains("must be root")
+            || lower.contains("errauthorization")
+            || lower.contains("authorization failed")
             || lower.contains("not authorized")
             || lower.contains("while authenticating")
+            || lower.contains("authentication failed")
+            || lower.contains("authentication required")
+            || lower.contains("user canceled")
             || lower.contains("operation not permitted")
             || lower.contains("permission denied")
+            || lower.contains("администратор")
+            || lower.contains("суперпользовател")
     };
     check(stderr) || check(stdout)
+}
+
+static LAST_OS_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn set_last_os_error(msg: Option<String>) {
+    if let Ok(mut g) = LAST_OS_ERROR.lock() {
+        *g = msg;
+    }
+}
+
+/// Clears the last recorded OS command failure (e.g., before starting a new operation).
+pub fn clear_last_os_error() {
+    set_last_os_error(None);
+}
+
+/// Returns the most recent sanitized OS command failure recorded by `RealPlatform::run_stdout`,
+/// containing only the operation name, tool exit code, and trimmed OS error line (never values).
+pub fn last_os_error() -> Option<String> {
+    LAST_OS_ERROR.lock().ok().and_then(|g| g.clone())
 }
 
 /// Runs a program through [`super::silent_command`], capturing exit status, stdout and stderr.
@@ -905,17 +933,19 @@ fn run(program: &'static str, args: &[&str], op: &'static str) -> PResult<(bool,
 /// and maps macOS authorization failures to [`PlatformError::AdminAuthRequired`].
 fn run_stdout(program: &'static str, args: &[&str], op: &'static str) -> PResult<String> {
     match run_detailed(program, args, op)? {
-        (true, _, stdout, _) => Ok(stdout),
+        (true, _, stdout, _) => {
+            clear_last_os_error();
+            Ok(stdout)
+        }
         (false, code, stdout, stderr) => {
             let err_trimmed = stderr.trim();
             let out_trimmed = stdout.trim();
             let subcmd = args.first().copied().unwrap_or("");
-            crate::diagnostics::record(
-                "sysproxy",
-                &format!(
-                    "{op}: {program} {subcmd} failed (code={code:?}) stderr={err_trimmed} stdout={out_trimmed}"
-                ),
+            let summary = format!(
+                "{op}: {program} {subcmd} failed (code={code:?}) stderr={err_trimmed} stdout={out_trimmed}"
             );
+            crate::diagnostics::record("sysproxy", &summary);
+            set_last_os_error(Some(summary));
             if is_admin_auth_error(&stdout, &stderr) {
                 Err(PlatformError::AdminAuthRequired(op))
             } else {
@@ -1608,6 +1638,71 @@ mod ffi {
             );
         }
     }
+
+    pub fn write_clipboard_unicode(text: &str) -> Result<(), String> {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn OpenClipboard(h_wnd_new_owner: *mut core::ffi::c_void) -> i32;
+            fn EmptyClipboard() -> i32;
+            fn SetClipboardData(u_format: u32, h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+            fn CloseClipboard() -> i32;
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GlobalAlloc(u_flags: u32, dw_bytes: usize) -> *mut core::ffi::c_void;
+            fn GlobalLock(h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+            fn GlobalUnlock(h_mem: *mut core::ffi::c_void) -> i32;
+            fn GlobalFree(h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        }
+        const CF_UNICODETEXT: u32 = 13;
+        const GMEM_MOVEABLE: u32 = 0x0002;
+
+        let utf16: Vec<u16> = text.encode_utf16().chain(core::iter::once(0)).collect();
+        let byte_len = utf16
+            .len()
+            .checked_mul(core::mem::size_of::<u16>())
+            .ok_or_else(|| "Clipboard text too large".to_string())?;
+
+        unsafe {
+            let mut opened = false;
+            for attempt in 0..3 {
+                if OpenClipboard(core::ptr::null_mut()) != 0 {
+                    opened = true;
+                    break;
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            if !opened {
+                return Err("OpenClipboard failed".to_string());
+            }
+            if EmptyClipboard() == 0 {
+                let _ = CloseClipboard();
+                return Err("EmptyClipboard failed".to_string());
+            }
+            let h_mem = GlobalAlloc(GMEM_MOVEABLE, byte_len);
+            if h_mem.is_null() {
+                let _ = CloseClipboard();
+                return Err("GlobalAlloc failed".to_string());
+            }
+            let ptr = GlobalLock(h_mem) as *mut u16;
+            if ptr.is_null() {
+                let _ = GlobalFree(h_mem);
+                let _ = CloseClipboard();
+                return Err("GlobalLock failed".to_string());
+            }
+            core::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
+            let _ = GlobalUnlock(h_mem);
+            let res = SetClipboardData(CF_UNICODETEXT, h_mem);
+            let _ = CloseClipboard();
+            if res.is_null() {
+                let _ = GlobalFree(h_mem);
+                return Err("SetClipboardData failed".to_string());
+            }
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2077,6 +2172,126 @@ mod fake {
             self.st.lock().unwrap().excluded.push(path.to_path_buf());
             Ok(())
         }
+    }
+}
+
+/// Collects a sanitized, read-only OS network diagnostic snapshot (macOS only; empty on other OS
+/// or when OS effects are disabled in tests).
+pub fn collect_os_diagnostic_snapshot() -> Vec<String> {
+    if !cfg!(target_os = "macos") || !super::os_effects_enabled() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    if let Ok((ok, _, ver, _)) = run_detailed("sw_vers", &["-productVersion"], "diag_sw_vers")
+        && ok
+    {
+        let build = run_detailed("sw_vers", &["-buildVersion"], "diag_sw_build")
+            .ok()
+            .filter(|(ok, _, _, _)| *ok)
+            .map(|(_, _, b, _)| b.trim().to_string())
+            .unwrap_or_default();
+        if build.is_empty() {
+            lines.push(format!("macos_version: {}", ver.trim()));
+        } else {
+            lines.push(format!("macos_version: {} ({build})", ver.trim()));
+        }
+    }
+    if let Ok((ok, code, stdout, stderr)) =
+        run_detailed("networksetup", &["-listnetworkserviceorder"], "diag_services")
+    {
+        if ok {
+            let svcs = parse_service_order(&stdout);
+            let nc = run_detailed("scutil", &["--nc", "list"], "diag_nc")
+                .ok()
+                .filter(|(ok, _, _, _)| *ok)
+                .map(|(_, _, out, _)| parse_nc_list(&out));
+            let summary: Vec<String> = svcs
+                .iter()
+                .map(|s| {
+                    let kind = classify_service(s, nc.as_deref());
+                    format!(
+                        "{}(dev={}, enabled={}, kind={kind:?})",
+                        s.name,
+                        if s.device.is_empty() { "-" } else { &s.device },
+                        s.enabled
+                    )
+                })
+                .collect();
+            lines.push(format!("services: {}", summary.join("; ")));
+            if let Some(connections) = nc {
+                let nc_summary: Vec<String> = connections
+                    .iter()
+                    .map(|c| format!("{}={}", c.name, if c.connected { "connected" } else { "disconnected" }))
+                    .collect();
+                lines.push(format!(
+                    "scutil_nc: {}",
+                    if nc_summary.is_empty() {
+                        "none".to_string()
+                    } else {
+                        nc_summary.join("; ")
+                    }
+                ));
+            } else {
+                lines.push("scutil_nc: unavailable".to_string());
+            }
+        } else {
+            lines.push(format!(
+                "services_error: code={code:?} {}",
+                stderr.trim()
+            ));
+        }
+    }
+    if let Ok((ok, _, stdout, _)) = run_detailed("scutil", &["--proxy"], "diag_proxy")
+        && ok
+    {
+        let eff = parse_scutil_proxy(&stdout);
+        lines.push(format!(
+            "scutil_proxy: pac_enabled={:?}, pac_url_present={}",
+            eff.pac_enabled,
+            eff.pac_url.is_some()
+        ));
+    }
+    lines
+}
+
+/// Writes UTF-8 text to the OS clipboard natively without relying on WebView user activation.
+pub fn write_text_to_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = super::silent_command("/usr/bin/pbcopy")
+            .env("LANG", "en_US.UTF-8")
+            .env("LC_ALL", "en_US.UTF-8")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn pbcopy: {e}"))?;
+        let write_res = if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())
+        } else {
+            Ok(())
+        };
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("pbcopy wait failed: {e}"))?;
+        write_res.map_err(|e| format!("Failed to write clipboard payload: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(format!("pbcopy failed ({}): {}", out.status, err.trim()))
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        ffi::write_clipboard_unicode(text)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = text;
+        Err("Native OS clipboard is not supported on this platform".to_string())
     }
 }
 
@@ -2573,76 +2788,15 @@ mod tests {
         assert!(is_admin_auth_error("", "AuthorizationCreate() failed: -60007"));
         assert!(is_admin_auth_error("", "An error occurred while authenticating."));
         assert!(is_admin_auth_error("", "Operation not permitted"));
+        assert!(is_admin_auth_error("", "Error: -60031 errAuthorizationInternal"));
+        assert!(is_admin_auth_error("", "This tool must be run as root."));
+        assert!(is_admin_auth_error("", "Недостаточно прав администратора для изменения настроек."));
         assert!(!is_admin_auth_error("", "Wi-Fi is not a recognized network service."));
+        assert!(!is_admin_auth_error("", "Corp Authentication is not a recognized network service."));
         assert!(
             PlatformError::AdminAuthRequired("set_pac")
                 .to_string()
                 .contains("admin")
         );
     }
-}
-
-/// Collects a sanitized, read-only OS network diagnostic snapshot (macOS only; empty on other OS
-/// or when OS effects are disabled in tests).
-pub fn collect_os_diagnostic_snapshot() -> Vec<String> {
-    if !cfg!(target_os = "macos") || !super::os_effects_enabled() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    if let Ok((ok, code, stdout, stderr)) =
-        run_detailed("networksetup", &["-listnetworkserviceorder"], "diag_services")
-    {
-        if ok {
-            let svcs = parse_service_order(&stdout);
-            let nc = run_detailed("scutil", &["--nc", "list"], "diag_nc")
-                .ok()
-                .filter(|(ok, _, _, _)| *ok)
-                .map(|(_, _, out, _)| parse_nc_list(&out));
-            let summary: Vec<String> = svcs
-                .iter()
-                .map(|s| {
-                    let kind = classify_service(s, nc.as_deref());
-                    format!(
-                        "{}(dev={}, enabled={}, kind={kind:?})",
-                        s.name,
-                        if s.device.is_empty() { "-" } else { &s.device },
-                        s.enabled
-                    )
-                })
-                .collect();
-            lines.push(format!("services: {}", summary.join("; ")));
-            if let Some(connections) = nc {
-                let nc_summary: Vec<String> = connections
-                    .iter()
-                    .map(|c| format!("{}={}", c.name, if c.connected { "connected" } else { "disconnected" }))
-                    .collect();
-                lines.push(format!(
-                    "scutil_nc: {}",
-                    if nc_summary.is_empty() {
-                        "none".to_string()
-                    } else {
-                        nc_summary.join("; ")
-                    }
-                ));
-            } else {
-                lines.push("scutil_nc: unavailable".to_string());
-            }
-        } else {
-            lines.push(format!(
-                "services_error: code={code:?} {}",
-                stderr.trim()
-            ));
-        }
-    }
-    if let Ok((ok, _, stdout, _)) = run_detailed("scutil", &["--proxy"], "diag_proxy")
-        && ok
-    {
-        let eff = parse_scutil_proxy(&stdout);
-        lines.push(format!(
-            "scutil_proxy: pac_enabled={:?}, pac_url_present={}",
-            eff.pac_enabled,
-            eff.pac_url.is_some()
-        ));
-    }
-    lines
 }

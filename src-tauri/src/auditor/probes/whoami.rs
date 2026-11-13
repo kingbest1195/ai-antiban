@@ -20,8 +20,9 @@ pub const GOOGLE_TXT_HOST: &str = "o-o.myaddr.l.google.com";
 /// `CheckResult::measured_via` of the checks that rest on both whoami sources.
 pub const MEASURED_VIA: &str = "whoami:akamai+google";
 
-/// Time limit of each whoami lookup (both run in parallel).
-pub const WHOAMI_LIMIT: Duration = Duration::from_millis(1200);
+/// Time limit of each whoami lookup (both A-record and TXT run in parallel).
+/// Together with `GEO_TOTAL_LIMIT` (1800 ms) stays under `CHECK_LIMIT_IO` (4000 ms).
+pub const WHOAMI_LIMIT: Duration = Duration::from_millis(2000);
 /// Time limit of one geo request and of the whole geo cascade.
 const GEO_REQUEST_LIMIT: Duration = Duration::from_millis(900);
 const GEO_TOTAL_LIMIT: Duration = Duration::from_millis(1800);

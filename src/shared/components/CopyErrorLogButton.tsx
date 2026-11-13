@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "../../ui";
 import type { ButtonSize, ButtonVariant } from "../../ui";
-import { getErrorDiagnostics } from "../../utils/api";
+import { copyTextToClipboard, getErrorDiagnostics } from "../../utils/api";
 
 interface CopyErrorLogButtonProps {
   title?: string;
@@ -22,6 +22,9 @@ function fallbackFormat(title?: string, message?: string): string {
 }
 
 async function writeClipboard(text: string): Promise<boolean> {
+  if (await copyTextToClipboard(text)) {
+    return true;
+  }
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text);

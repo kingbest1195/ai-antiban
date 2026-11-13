@@ -85,31 +85,336 @@ impl DnsLookup for SystemDns {
     }
 }
 
-/// One TXT query through the resolvers of the OS configuration (scutil / registry / resolv.conf),
-/// without cache and without search domains: a fresh answer of the very resolver in use.
-async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
+/// Returns `true` if `ip` is a plausibly reachable recursive DNS server address
+/// (filters unspecified, multicast, link-local IPv6 without zone, and RFC3879 `fec0:0:0:ffff::*` Windows placeholders).
+pub(crate) fn is_usable_nameserver(ip: &IpAddr) -> bool {
+    if ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(_) => true,
+        IpAddr::V6(v6) => {
+            if v6.is_unicast_link_local() {
+                return false;
+            }
+            let segs = v6.segments();
+            // Windows RFC3879 / site-local dummy DNS addresses on interfaces without DHCPv6
+            !(segs[0] == 0xfec0 && segs[1] == 0 && segs[2] == 0 && segs[3] == 0xffff)
+        }
+    }
+}
+
+/// Parses active reachable DNS nameservers from macOS `scutil --dns` output.
+/// Global default resolvers (before `DNS configuration (for scoped queries)` and without a `domain :` filter)
+/// come first; scoped default resolvers come second as fallback.
+pub(crate) fn parse_scutil_dns_nameservers(output: &str) -> Vec<IpAddr> {
+    let mut global_ips = Vec::new();
+    let mut scoped_ips = Vec::new();
+    let mut in_scoped_section = false;
+
+    let mut cur_ips: Vec<IpAddr> = Vec::new();
+    let mut has_domain = false;
+    let mut not_reachable = false;
+    let mut in_block = false;
+
+    let flush = |in_block: bool,
+                 has_domain: bool,
+                 not_reachable: bool,
+                 in_scoped: bool,
+                 cur_ips: &mut Vec<IpAddr>,
+                 global_ips: &mut Vec<IpAddr>,
+                 scoped_ips: &mut Vec<IpAddr>| {
+        if in_block && !has_domain && !not_reachable {
+            let target = if in_scoped { scoped_ips } else { global_ips };
+            for ip in cur_ips.drain(..) {
+                if is_usable_nameserver(&ip) && !target.contains(&ip) {
+                    target.push(ip);
+                }
+            }
+        } else {
+            cur_ips.clear();
+        }
+    };
+
+    for raw in output.lines() {
+        let line = raw.trim();
+        if line.starts_with("DNS configuration (for scoped queries)") {
+            flush(
+                in_block,
+                has_domain,
+                not_reachable,
+                in_scoped_section,
+                &mut cur_ips,
+                &mut global_ips,
+                &mut scoped_ips,
+            );
+            in_block = false;
+            has_domain = false;
+            not_reachable = false;
+            in_scoped_section = true;
+            continue;
+        }
+        if line.starts_with("resolver #") {
+            flush(
+                in_block,
+                has_domain,
+                not_reachable,
+                in_scoped_section,
+                &mut cur_ips,
+                &mut global_ips,
+                &mut scoped_ips,
+            );
+            in_block = true;
+            has_domain = false;
+            not_reachable = false;
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        if line.starts_with("domain") && line.contains(':') {
+            has_domain = true;
+        } else if line.starts_with("reach") && line.contains("Not Reachable") {
+            not_reachable = true;
+        } else if line.starts_with("nameserver[")
+            && let Some((_, val)) = line.split_once(':')
+            && let Ok(ip) = val.trim().parse::<IpAddr>()
+        {
+            cur_ips.push(ip);
+        }
+    }
+    flush(
+        in_block,
+        has_domain,
+        not_reachable,
+        in_scoped_section,
+        &mut cur_ips,
+        &mut global_ips,
+        &mut scoped_ips,
+    );
+
+    // Never mix scoped per-interface LAN resolvers with an active global VPN resolver:
+    // racing them concurrently could make a local router answer before the VPN DNS.
+    if !global_ips.is_empty() {
+        global_ips
+    } else {
+        scoped_ips
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_scutil_nameservers() -> Vec<IpAddr> {
+    tokio::task::spawn_blocking(|| {
+        let out = crate::sysproxy::silent_command("scutil")
+            .arg("--dns")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(parse_scutil_dns_nameservers(&String::from_utf8_lossy(
+            &out.stdout,
+        )))
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+async fn windows_native_txt_lookup(host: &str, limit: Duration) -> Option<TxtOutcome> {
+    let host_fqdn = format!("{}.", host.trim_end_matches('.'));
+    tokio::time::timeout(
+        limit,
+        tokio::task::spawn_blocking(move || win_dns::query_txt(&host_fqdn)),
+    )
+    .await
+    .ok()
+    .and_then(|res| res.ok())
+    .flatten()
+}
+
+#[cfg(target_os = "windows")]
+mod win_dns {
+    use super::TxtOutcome;
+    use core::ffi::c_void;
+
+    const DNS_TYPE_TEXT: u16 = 0x0010;
+    const DNS_QUERY_BYPASS_CACHE: u32 = 0x0000_0008;
+    const DNS_QUERY_TREAT_AS_FQDN: u32 = 0x0000_1000;
+    const DNS_FREE_RECORD_LIST: i32 = 1;
+    const DNS_ERROR_RCODE_NAME_ERROR: i32 = 9003;
+    const DNS_INFO_NO_RECORDS: i32 = 9501;
+    const ERROR_TIMEOUT: i32 = 1460;
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct DnsTxtDataW {
+        dw_string_count: u32,
+        p_string_array: [*const u16; 1],
+    }
+
+    #[repr(C)]
+    union DnsRecordData {
+        txt: DnsTxtDataW,
+        _pad: [usize; 8],
+    }
+
+    #[repr(C)]
+    struct DnsRecordW {
+        p_next: *mut DnsRecordW,
+        p_name: *const u16,
+        w_type: u16,
+        w_data_length: u16,
+        flags: u32,
+        dw_ttl: u32,
+        dw_reserved: u32,
+        data: DnsRecordData,
+    }
+
+    #[link(name = "dnsapi")]
+    unsafe extern "system" {
+        fn DnsQuery_W(
+            psz_name: *const u16,
+            w_type: u16,
+            options: u32,
+            p_extra: *mut c_void,
+            pp_query_results: *mut *mut DnsRecordW,
+            p_reserved: *mut c_void,
+        ) -> i32;
+        fn DnsRecordListFree(p_record_list: *mut c_void, free_type: i32);
+    }
+
+    unsafe fn utf16_ptr_to_string(ptr: *const u16) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        unsafe {
+            while len < 4096 && *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let slice = core::slice::from_raw_parts(ptr, len);
+            Some(String::from_utf16_lossy(slice))
+        }
+    }
+
+    pub fn query_txt(host_fqdn: &str) -> Option<TxtOutcome> {
+        let wide: Vec<u16> = host_fqdn.encode_utf16().chain(core::iter::once(0)).collect();
+        let mut head: *mut DnsRecordW = core::ptr::null_mut();
+        let status = unsafe {
+            DnsQuery_W(
+                wide.as_ptr(),
+                DNS_TYPE_TEXT,
+                DNS_QUERY_BYPASS_CACHE | DNS_QUERY_TREAT_AS_FQDN,
+                core::ptr::null_mut(),
+                &mut head,
+                core::ptr::null_mut(),
+            )
+        };
+        if status == DNS_ERROR_RCODE_NAME_ERROR || status == DNS_INFO_NO_RECORDS {
+            if !head.is_null() {
+                unsafe { DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST) };
+            }
+            return Some(TxtOutcome::NotFound);
+        }
+        if status == ERROR_TIMEOUT {
+            if !head.is_null() {
+                unsafe { DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST) };
+            }
+            return None; // fall through to hickory retry
+        }
+        if status != 0 || head.is_null() {
+            if !head.is_null() {
+                unsafe { DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST) };
+            }
+            crate::diagnostics::record("auditor:dns", &format!("DnsQuery_W failed status={status}"));
+            return None;
+        }
+
+        let mut records = Vec::new();
+        let mut cur: *const DnsRecordW = head;
+        unsafe {
+            while !cur.is_null() {
+                // Read fields via raw pointers to avoid slice/union provenance over Windows' variable-length pStringArray.
+                let w_type = core::ptr::addr_of!((*cur).w_type).read();
+                let data_len = core::ptr::addr_of!((*cur).w_data_length).read() as usize;
+                let next = core::ptr::addr_of!((*cur).p_next).read();
+                if w_type == DNS_TYPE_TEXT {
+                    let count = core::ptr::addr_of!((*cur).data.txt.dw_string_count).read() as usize;
+                    let header_bytes = core::mem::offset_of!(DnsTxtDataW, p_string_array);
+                    let max_ptrs = data_len.saturating_sub(header_bytes) / core::mem::size_of::<*const u16>();
+                    let bounded_count = count.min(max_ptrs).min(64);
+                    let arr_ptr = core::ptr::addr_of!((*cur).data.txt.p_string_array).cast::<*const u16>();
+                    let mut joined = String::new();
+                    for i in 0..bounded_count {
+                        if let Some(part) = utf16_ptr_to_string(*arr_ptr.add(i)) {
+                            joined.push_str(&part);
+                        }
+                    }
+                    if !joined.is_empty() {
+                        records.push(joined);
+                    }
+                }
+                cur = next;
+            }
+            DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST);
+        }
+        if records.is_empty() {
+            Some(TxtOutcome::NotFound)
+        } else {
+            Some(TxtOutcome::Records(records))
+        }
+    }
+}
+
+async fn hickory_txt_query(
+    host_fqdn: &str,
+    per_try_timeout: Duration,
+    explicit_servers: Option<&[IpAddr]>,
+) -> TxtOutcome {
     use hickory_resolver::TokioResolver;
-    use hickory_resolver::config::ResolveHosts;
+    use hickory_resolver::config::{NameServerConfig, ResolveHosts, ResolverConfig};
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
     use hickory_resolver::net::{DnsError, NetError};
     use hickory_resolver::proto::rr::{RData, RecordType};
 
-    let Ok(mut builder) = TokioResolver::builder_tokio() else {
-        // The OS gave no resolver list (offline, empty configuration).
-        return TxtOutcome::Failed;
+    let cfg = if let Some(ips) = explicit_servers {
+        let usable: Vec<NameServerConfig> = ips
+            .iter()
+            .filter(|ip| is_usable_nameserver(ip))
+            .copied()
+            .map(NameServerConfig::udp_and_tcp)
+            .collect();
+        if usable.is_empty() {
+            return TxtOutcome::Failed;
+        }
+        ResolverConfig::from_parts(None, vec![], usable)
+    } else {
+        let Ok((mut sys_cfg, _)) = hickory_resolver::system_conf::read_system_conf() else {
+            return TxtOutcome::Failed;
+        };
+        sys_cfg.name_servers.retain(|ns| is_usable_nameserver(&ns.ip));
+        if sys_cfg.name_servers.is_empty() {
+            return TxtOutcome::Failed;
+        }
+        sys_cfg
     };
+    let mut builder = TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default());
+
     {
         let opts = builder.options_mut();
         opts.cache_size = 0;
-        opts.attempts = 1;
-        opts.timeout = limit;
+        opts.attempts = 2;
+        opts.timeout = per_try_timeout;
         opts.use_hosts_file = ResolveHosts::Never;
+        opts.num_concurrent_reqs = 2;
     }
     let Ok(resolver) = builder.build() else {
         return TxtOutcome::Failed;
     };
-    // The trailing dot makes the name absolute (no search-domain suffixes are tried).
-    let name = format!("{}.", host.trim_end_matches('.'));
-    match resolver.lookup(name, RecordType::TXT).await {
+    match resolver.lookup(host_fqdn, RecordType::TXT).await {
         Ok(lookup) => {
             let records: Vec<String> = lookup
                 .answers()
@@ -134,6 +439,55 @@ async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
         Err(NetError::Dns(DnsError::NoRecordsFound(_))) => TxtOutcome::NotFound,
         Err(_) => TxtOutcome::Failed,
     }
+}
+
+/// One TXT query through the resolvers of the OS configuration (`DnsQuery_W` on Windows,
+/// `scutil --dns` / system configuration on macOS), without cache and without search domains.
+async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
+    // The trailing dot makes the name absolute (no search-domain suffixes are tried).
+    let name = format!("{}.", host.trim_end_matches('.'));
+    let started = std::time::Instant::now();
+    let per_try = Duration::from_millis((limit.as_millis() as u64 / 3).clamp(400, 750));
+
+    #[cfg(target_os = "windows")]
+    if let Some(outcome) = windows_native_txt_lookup(&name, per_try.max(Duration::from_millis(1000))).await {
+        if matches!(outcome, TxtOutcome::Records(_) | TxtOutcome::NotFound) {
+            return outcome;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let scutil_ips = macos_scutil_nameservers().await;
+        if !scutil_ips.is_empty() {
+            let outcome = hickory_txt_query(&name, per_try, Some(&scutil_ips)).await;
+            if matches!(outcome, TxtOutcome::Records(_) | TxtOutcome::NotFound) {
+                return outcome;
+            }
+            crate::diagnostics::record(
+                "auditor:dns",
+                &format!(
+                    "scutil TXT lookup for {host} via {} servers returned {outcome:?}, trying fallback",
+                    scutil_ips.len()
+                ),
+            );
+            let remaining = limit.saturating_sub(started.elapsed());
+            if remaining < Duration::from_millis(250) {
+                return outcome;
+            }
+        }
+    }
+
+    let remaining = limit.saturating_sub(started.elapsed());
+    let fallback_try = Duration::from_millis((remaining.as_millis() as u64 / 2).clamp(250, 750));
+    let outcome = hickory_txt_query(&name, fallback_try, None).await;
+    if !matches!(outcome, TxtOutcome::Records(_)) {
+        crate::diagnostics::record(
+            "auditor:dns",
+            &format!("system TXT lookup for {host} finished with {outcome:?}"),
+        );
+    }
+    outcome
 }
 
 /// `getaddrinfo` reports NXDOMAIN and a broken resolver through the same error type; only the
@@ -1011,5 +1365,68 @@ mod tests {
         } else {
             assert_eq!(refused, HttpProbeOutcome::ConnectFailed);
         }
+    }
+
+    #[test]
+    fn usable_nameserver_filters_unspecified_multicast_link_local_and_fec0_placeholders() {
+        use std::net::IpAddr;
+        assert!(is_usable_nameserver(&"1.1.1.1".parse::<IpAddr>().unwrap()));
+        assert!(is_usable_nameserver(&"10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_usable_nameserver(&"2606:4700:4700::1111".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(&"0.0.0.0".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(&"::".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(&"224.0.0.251".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(&"fe80::1".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(&"fec0:0:0:ffff::1".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(&"fec0:0:0:ffff::2".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn parse_scutil_dns_prioritizes_reachable_default_resolvers_and_skips_domain_or_unreachable() {
+        use std::net::IpAddr;
+        let sample = "\
+DNS configuration
+
+resolver #1
+  nameserver[0] : 10.8.0.1
+  nameserver[1] : fec0:0:0:ffff::1
+  flags    : Request A records
+  reach    : 0x00000002 (Reachable)
+
+resolver #2
+  domain   : corp.local
+  nameserver[0] : 10.99.0.1
+  flags    : Request A records
+  reach    : 0x00000002 (Reachable)
+
+resolver #3
+  nameserver[0] : 198.51.100.9
+  flags    : Request A records
+  reach    : 0x00000000 (Not Reachable)
+
+DNS configuration (for scoped queries)
+
+resolver #1
+  nameserver[0] : 192.168.1.1
+  if_index : 6 (en0)
+  flags    : Scoped, Request A records
+  reach    : 0x00000002 (Reachable)
+";
+        let got = parse_scutil_dns_nameservers(sample);
+        assert_eq!(got, vec!["10.8.0.1".parse::<IpAddr>().unwrap()]);
+
+        let scoped_only = "\
+DNS configuration (for scoped queries)
+
+resolver #1
+  nameserver[0] : 192.168.1.1
+  if_index : 6 (en0)
+  flags    : Scoped, Request A records
+  reach    : 0x00000002 (Reachable)
+";
+        assert_eq!(
+            parse_scutil_dns_nameservers(scoped_only),
+            vec!["192.168.1.1".parse::<IpAddr>().unwrap()]
+        );
     }
 }

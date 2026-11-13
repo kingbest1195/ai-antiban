@@ -147,6 +147,7 @@ pub fn run() {
             commands::sysproxy::open_os_network_settings_cmd,
             commands::sysproxy::get_sysproxy_status,
             commands::sysproxy::get_error_diagnostics,
+            commands::sysproxy::copy_text_to_clipboard,
             commands::payment::check_payment_bin,
             commands::updates::check_for_updates,
             commands::updates::install_update,

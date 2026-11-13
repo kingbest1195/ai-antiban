@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { AutostartStatus, CliMode, CoworkGuardStatus, InterceptionBehavior, PopupPosition } from "../../types";
 import type { ShowToast } from "../../shared/hooks";
+import { parseTempDnsDeferredError } from "../../shared/hooks/useProtectionToggles";
 import {
   addCustomAiDomain,
   forceCleanOsProxy,
@@ -299,6 +300,12 @@ export function SettingsModal({
       setProxyResult({ ok: true, text: results.length > 0 ? results.join(" · ") : copy.proxy.doneDefault });
       onToast?.(copy.proxy.toastTitle, copy.proxy.toastText, "success");
     } catch (err) {
+      const deferred = parseTempDnsDeferredError(err);
+      if (deferred !== null) {
+        setProxyResult({ ok: true, text: deferred });
+        onToast?.(copy.proxy.toastTitle, deferred, "info");
+        return;
+      }
       const message = errText(err);
       setProxyResult({ ok: false, text: message });
       onToast?.(copy.proxy.toastError, message, "warning");

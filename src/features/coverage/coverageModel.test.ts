@@ -173,7 +173,7 @@ describe("vpnNotice: подключённый VPN и системный прок
   });
   it("тексты: строка про неизменённые службы и предупреждение с именем и советом", () => {
     expect(copy.vpn.untouched("Alpha, Beta Pro")).toBe("VPN-службы не изменялись: Alpha, Beta Pro");
-    expect(copy.vpn.overridden.title("V2 Pro")).toBe("Системный прокси не действует поверх VPN «V2 Pro»: ИИ-трафик может идти мимо Заставы");
+    expect(copy.vpn.overridden.title("V2 Pro")).toBe("VPN «V2 Pro» сейчас управляет маршрутами — системный прокси выключен на время его работы");
     expect(copy.vpn.overridden.text).toContain("системный прокси");
     expect(copy.vpn.overridden.text).toContain("вручную");
   });

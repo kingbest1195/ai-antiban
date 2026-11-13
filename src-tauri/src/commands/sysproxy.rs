@@ -8,6 +8,11 @@ const PARTIAL_RESTORE_TEXT: &str = "Часть системных настрое
 держит временные настройки DNS, или журнал занят). Они сохранены и будут восстановлены при \
 следующем запуске Заставы или после отключения VPN.";
 
+/// Returned when turning protection off stopped all Zastava routing and the only un-restored
+/// OS items are physical PAC/chain entries deferred solely because an active VPN holds temp DNS.
+const TEMP_DNS_DEFERRED_TEXT: &str = "TEMP_DNS_DEFERRED:Системный прокси вернётся к прежним \
+настройкам после отключения VPN, чтобы не сбросить его DNS. Защита Заставы отключена.";
+
 /// The zone to put into the AI tools' environment, for `enabled == true`: the stored one, or - when
 /// none is stored - the zone of the exit IP of the Anthropic provider (kept in the state), unless
 /// the exit country is blocked. `None` when the switch is off or no zone is known.
@@ -86,6 +91,9 @@ pub async fn toggle_sysproxy(
                 "cmd:toggle_sysproxy_off",
                 &format!("partial restore: {}", report.summary()),
             );
+            if report.is_only_vpn_dns_deferred() {
+                return Err(TEMP_DNS_DEFERRED_TEXT.to_string());
+            }
             return Err(PARTIAL_RESTORE_TEXT.to_string());
         }
         Ok(false)
@@ -281,6 +289,9 @@ pub fn force_clean_os_proxy_cmd(app: tauri::AppHandle) -> Result<Vec<String>, St
             "cmd:force_clean_os_proxy",
             &format!("partial restore: {}", report.summary()),
         );
+        if report.is_only_vpn_dns_deferred() {
+            return Err(TEMP_DNS_DEFERRED_TEXT.to_string());
+        }
         // Nothing is lost: what could not be restored stays recorded and is finished later.
         return Err(PARTIAL_RESTORE_TEXT.to_string());
     }
@@ -348,6 +359,14 @@ pub async fn get_error_diagnostics(
         &os_lines,
         &entries,
     ))
+}
+
+/// Writes diagnostic or error log text directly to the OS clipboard natively (immune to WebView async activation limits).
+#[tauri::command]
+pub async fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || sysproxy::platform::write_text_to_clipboard(&text))
+        .await
+        .map_err(|e| format!("Clipboard task failed: {e}"))?
 }
 
 #[cfg(test)]

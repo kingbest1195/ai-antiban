@@ -13,13 +13,32 @@ import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
 export const ADMIN_AUTH_PREFIX = "ADMIN_AUTH_REQUIRED:";
+export const TEMP_DNS_DEFERRED_PREFIX = "TEMP_DNS_DEFERRED:";
+
+/** Извлекает текст ошибки с заданным префиксом или возвращает null. */
+function parsePrefixedError(err: unknown, prefix: string, fallback: string): string | null {
+  const raw = typeof err === "string" ? err : (err as { message?: unknown } | null)?.message;
+  if (typeof raw !== "string" || !raw.startsWith(prefix)) return null;
+  const msg = raw.slice(prefix.length).trim();
+  return msg || fallback;
+}
 
 /** Распознаёт ошибку нехватки прав macOS (префикс `ADMIN_AUTH_REQUIRED:`) и возвращает текст для пользователя. */
 export function parseAdminAuthError(err: unknown): string | null {
-  const raw = typeof err === "string" ? err : (err as { message?: unknown } | null)?.message;
-  if (typeof raw !== "string" || !raw.startsWith(ADMIN_AUTH_PREFIX)) return null;
-  const msg = raw.slice(ADMIN_AUTH_PREFIX.length).trim();
-  return msg || "Для включения системного прокси требуются права администратора macOS.";
+  return parsePrefixedError(
+    err,
+    ADMIN_AUTH_PREFIX,
+    "Для включения системного прокси требуются права администратора macOS.",
+  );
+}
+
+/** Распознаёт отложенное восстановление DNS из-за активного VPN (префикс `TEMP_DNS_DEFERRED:`). */
+export function parseTempDnsDeferredError(err: unknown): string | null {
+  return parsePrefixedError(
+    err,
+    TEMP_DNS_DEFERRED_PREFIX,
+    "Системный прокси выключен. Временные настройки DNS удерживает активный VPN — они восстановятся после его отключения.",
+  );
 }
 
 export interface CliToggleOptions {
@@ -36,8 +55,8 @@ export interface ProtectionActions {
   enableSysproxy: () => Promise<boolean>;
   /** Повторное включение системного прокси через запрос прав администратора macOS. */
   enableSysproxyPrivileged: () => Promise<boolean>;
-  /** Возвращает true, если выключен. */
-  disableSysproxy: () => Promise<boolean>;
+  /** Возвращает true (или `{ deferred }`, если DNS удерживает VPN), если прокси выключен. */
+  disableSysproxy: () => Promise<boolean | { deferred: string }>;
   /** Ответ команды (что записано, заметки, ошибка) или null, если команда не выполнилась. */
   enableCli: () => Promise<CliProtectionReport | null>;
   /** Возвращает true, если выключена. */
@@ -88,6 +107,13 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
       setAdminAuthMessage(null);
       showToast(res ? t.guard.onTitle : t.guard.offTitle, res ? t.guard.onText : t.guard.offText, res ? "success" : "info");
     } catch (err: any) {
+      const deferredMsg = parseTempDnsDeferredError(err);
+      if (deferredMsg !== null) {
+        setSysproxyActive(false);
+        setAdminAuthMessage(null);
+        showToast(t.guard.offTitle, deferredMsg, "info");
+        return;
+      }
       const adminMsg = parseAdminAuthError(err);
       if (adminMsg !== null) {
         setAdminAuthMessage(adminMsg);
@@ -175,6 +201,12 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
           setAdminAuthMessage(null);
           return !res;
         } catch (err: any) {
+          const deferredMsg = parseTempDnsDeferredError(err);
+          if (deferredMsg !== null) {
+            setSysproxyActive(false);
+            setAdminAuthMessage(null);
+            return { deferred: deferredMsg };
+          }
           showToast(t.guard.error, err?.message || String(err), "error");
           return false;
         }

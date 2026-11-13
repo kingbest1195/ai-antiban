@@ -373,6 +373,9 @@ fn apply_pac(
     pac_url: &str,
     heal: Option<(&HealGuard, Instant)>,
 ) -> Result<EnableReport, String> {
+    if super::os_effects_enabled() {
+        super::platform::clear_last_os_error();
+    }
     let planned = plan_physical_pac(p, pac_url, heal)?;
 
     // Phase 2: write, service by service; one failure does not stop the others.
@@ -462,6 +465,13 @@ fn apply_pac(
         );
         if admin_auth_required {
             return Err(MSG_ADMIN_AUTH_REQUIRED.to_string());
+        }
+        if super::os_effects_enabled()
+            && let Some(detail) = super::platform::last_os_error()
+        {
+            return Err(format!(
+                "Не удалось включить защиту ни на одной сетевой службе. Детали: {detail}"
+            ));
         }
         return Err("Не удалось включить защиту ни на одной сетевой службе.".to_string());
     }

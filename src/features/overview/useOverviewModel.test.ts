@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { CheckResult, RiskReport } from "../../types";
 import { overview as copy } from "../../shared/copy/ru";
-import { parseAdminAuthError } from "../../shared/hooks/useProtectionToggles";
+import { parseAdminAuthError, parseTempDnsDeferredError } from "../../shared/hooks/useProtectionToggles";
 import { fetchAppState, setMockScenario, toggleSysproxyPrivileged, verifyAndUnblockProvider } from "../../utils/api";
 import { useOverviewModel } from "./useOverviewModel";
 import type { OverviewModel } from "./useOverviewModel";
@@ -94,6 +94,14 @@ describe("ADMIN_AUTH_REQUIRED и умное снятие блока", () => {
     expect(parseAdminAuthError("ADMIN_AUTH_REQUIRED:")).toBeTruthy();
     expect(parseAdminAuthError(new Error("Обычная ошибка"))).toBeNull();
     expect(parseAdminAuthError(null)).toBeNull();
+  });
+
+  it("parseTempDnsDeferredError снимает префикс TEMP_DNS_DEFERRED:", () => {
+    expect(parseTempDnsDeferredError("TEMP_DNS_DEFERRED:Прокси выключен, DNS ждёт VPN")).toBe(
+      "Прокси выключен, DNS ждёт VPN",
+    );
+    expect(parseTempDnsDeferredError(new Error("TEMP_DNS_DEFERRED:"))).toBeTruthy();
+    expect(parseTempDnsDeferredError(new Error("Обычная ошибка"))).toBeNull();
   });
 
   it("verifyAndUnblockProvider в чистом сценарии возвращает true без session_allowed_providers, а в RU — false", async () => {
