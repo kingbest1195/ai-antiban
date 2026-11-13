@@ -294,23 +294,38 @@ fn network_change(
     }
 }
 
-/// Audits anthropic, openai and gemini (each on its own egress) concurrently. Only the first call
-/// forces a fresh geo lookup (with 1 automatic retry for transient VPN interface handshakes);
+/// Returns `true` when `report` has an allowed, resolved exit country and zero critical
+/// failures (non-critical Yellow warnings such as timezone/travel remain acceptable).
+pub(crate) fn report_no_critical_and_geo_ok(report: &RiskReport) -> bool {
+    report.overall_status != OverallStatus::Red
+        && !report.checks.iter().any(|c| c.status.is_critical())
+        && !report.geo_result.status.is_critical()
+        && !report.geo_result.status.is_unknown()
+        && !crate::is_sanctioned_or_blocked_country(&report.telemetry.country_code)
+}
+
+async fn audit_one_with_retry(
+    audit: &AuditFn,
+    provider: ProviderId,
+    force: bool,
+) -> Result<RiskReport, String> {
+    match audit(provider, force).await {
+        Ok(r) => Ok(r),
+        Err(_) => {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            audit(provider, force).await
+        }
+    }
+}
+
+/// Audits anthropic, openai and gemini (each on its own egress) concurrently, each with 1 short
+/// retry for transient VPN interface handshakes. Only the first call forces a fresh geo lookup;
 /// the others share the resolver's cache. One provider failing does not affect the others.
 async fn audit_all(audit: &AuditFn) -> AuditResults {
-    let anthropic = async {
-        match audit(ProviderId::Anthropic, true).await {
-            Ok(r) => Ok(r),
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(400)).await;
-                audit(ProviderId::Anthropic, true).await
-            }
-        }
-    };
     let (anthropic, openai, gemini) = tokio::join!(
-        anthropic,
-        audit(ProviderId::Openai, false),
-        audit(ProviderId::Gemini, false)
+        audit_one_with_retry(audit, ProviderId::Anthropic, true),
+        audit_one_with_retry(audit, ProviderId::Openai, false),
+        audit_one_with_retry(audit, ProviderId::Gemini, false),
     );
     vec![
         (ProviderId::Anthropic, anthropic),
@@ -328,6 +343,8 @@ struct AuditSummary {
     tel: NetworkTelemetry,
     /// Every unrouted provider was audited successfully and is green.
     all_green: bool,
+    /// Every unrouted provider was audited successfully, geo is allowed, and zero critical issues.
+    no_critical_and_geo_ok: bool,
 }
 
 /// `None` = the audit failed: the first (active) unrouted provider could not be audited.
@@ -360,6 +377,9 @@ fn summarize(results: &AuditResults, unrouted: &[&'static str]) -> Option<AuditS
         && relevant
             .iter()
             .all(|r| r.overall_status == OverallStatus::Green);
+    let no_critical_and_geo_ok = !any_unrouted_failed
+        && !relevant.is_empty()
+        && relevant.iter().all(|r| report_no_critical_and_geo_ok(r));
     let tray = results
         .iter()
         .find_map(|(_, r)| r.as_ref().ok())
@@ -372,6 +392,7 @@ fn summarize(results: &AuditResults, unrouted: &[&'static str]) -> Option<AuditS
         worst,
         tel,
         all_green,
+        no_critical_and_geo_ok,
     })
 }
 
@@ -755,6 +776,9 @@ impl NetworkGuard {
         // governed by the gate, and the probe below measures the direct egress only.
         let current_fp = compute_local_route_fingerprint(None);
         let unrouted = env.state.unrouted_providers().await;
+        // Capture before `plan_tick` transitions `Gate::Blocked -> Gate::Pending` on route change.
+        let was_blocked = self.gate() == Gate::Blocked
+            || !env.state.get_data().await.blocked_providers.is_empty();
 
         match self.plan_tick(current_fp, &unrouted).await {
             TickPlan::Done => {}
@@ -762,15 +786,56 @@ impl NetworkGuard {
                 // 2. Probe external IP (no lock held: other tasks keep working meanwhile)
                 let probed = self.probe(env).await;
                 let mut inner = self.inner.lock().await;
-                self.apply_changed_probe(env, &mut inner, probed, t0, &planned_fp)
+                self.apply_changed_probe(env, &mut inner, probed, t0, &planned_fp, was_blocked)
                     .await;
             }
             TickPlan::ProbeRegular(planned_fp) => {
                 let probed = self.probe(env).await;
                 let mut inner = self.inner.lock().await;
-                self.apply_regular_probe(env, &mut inner, probed, &planned_fp)
+                self.apply_regular_probe(env, &mut inner, probed, &planned_fp, was_blocked)
                     .await;
             }
+        }
+    }
+
+    /// Re-audits the restored baseline IP after an open alert or prior block (`Gate::Blocked` /
+    /// populated `blocked_providers`). Clears `blocked_providers` and opens the gate only when the
+    /// audit confirms all green or an explicitly pinned IP with allowed geo and no critical issues.
+    async fn verify_and_restore_baseline_locked(
+        self: &Arc<Self>,
+        env: &Env,
+        inner: &mut Inner,
+        baseline_ip: &str,
+        was_blocked: bool,
+    ) {
+        if self.is_manual_killswitch() {
+            self.set_gate(Gate::Blocked);
+            return;
+        }
+        env.auditor.resolver.invalidate_cache().await;
+        let unrouted = env.state.unrouted_providers().await;
+        let audited = tokio::time::timeout(env.audit_timeout, audit_all(&env.audit)).await;
+        let Some(summary) = audited
+            .ok()
+            .and_then(|results| summarize(&results, &unrouted))
+        else {
+            if was_blocked {
+                self.set_gate(Gate::Blocked);
+            }
+            return;
+        };
+        self.update_tray(env, &summary.tray).await;
+        let pinned_ip = env.state.get_pinned_ip().await;
+        let is_pinned = pinned_ip
+            .as_deref()
+            .map(|p| {
+                p.trim() == baseline_ip.trim() || p.trim() == summary.tel.ip.trim()
+            })
+            .unwrap_or(false);
+        if summary.all_green || (is_pinned && summary.no_critical_and_geo_ok) {
+            self.restore_locked(env, inner).await;
+        } else if was_blocked {
+            self.set_gate(Gate::Blocked);
         }
     }
 
@@ -782,6 +847,7 @@ impl NetworkGuard {
         probed: Option<String>,
         t0: Instant,
         planned_fp: &str,
+        was_blocked: bool,
     ) {
         inner.last_probe = Some(Instant::now());
 
@@ -802,9 +868,14 @@ impl NetworkGuard {
                     if self.probe_is_stale(inner, planned_fp) {
                         return; // the route moved again meanwhile: the next tick decides
                     }
-                    if inner.pending.is_some() {
-                        // An alert for another network is still open: the old network is back.
-                        self.restore_locked(env, inner).await;
+                    if inner.pending.is_some() || was_blocked {
+                        self.verify_and_restore_baseline_locked(
+                            env,
+                            inner,
+                            new_ip,
+                            was_blocked,
+                        )
+                        .await;
                     } else {
                         self.set_gate(Gate::Open);
                     }
@@ -840,6 +911,7 @@ impl NetworkGuard {
         inner: &mut Inner,
         probed: Option<String>,
         planned_fp: &str,
+        was_blocked: bool,
     ) {
         inner.last_probe = Some(Instant::now());
         let t0 = Instant::now();
@@ -879,11 +951,12 @@ impl NetworkGuard {
 
         if ip == baseline_ip {
             if baseline_trusted {
-                if self.gate() != Gate::Open {
+                if self.gate() != Gate::Open || inner.pending.is_some() || was_blocked {
                     if self.probe_is_stale(inner, planned_fp) {
                         return; // the route moved again meanwhile: the next tick decides
                     }
-                    self.restore_locked(env, inner).await;
+                    self.verify_and_restore_baseline_locked(env, inner, &ip, was_blocked)
+                        .await;
                 } else {
                     inner.handled_ip = None;
                 }
@@ -990,6 +1063,7 @@ impl NetworkGuard {
             worst,
             tel,
             all_green,
+            no_critical_and_geo_ok,
         } = summary;
 
         let pinned_ip = env.state.get_pinned_ip().await;
@@ -1000,8 +1074,9 @@ impl NetworkGuard {
 
         self.update_tray(env, &tray).await;
 
-        // Returning to the trusted pinned VPS with a clean audit needs no confirmation.
-        if is_pinned && all_green {
+        // Returning to the trusted pinned VPS (all green, or non-critical warnings only with
+        // allowed geo) auto-restores without freezing on travel/TZ warnings.
+        if is_pinned && (all_green || no_critical_and_geo_ok) {
             self.accept_locked(env, inner, &new_ip, &tel).await;
             return;
         }
@@ -1306,10 +1381,36 @@ impl NetworkGuard {
             let _ = env.state.record_ip_history(p, entry).await;
         }
 
+        if !self.is_manual_killswitch() {
+            let _ = env.state.clear_blocked_providers().await;
+        }
         self.set_gate(Gate::Open);
         self.hide_popup(env);
         env.emit("network://changed", &());
         self.spawn_refresh_tray(env);
+    }
+
+    /// Opens the guard gate (when not under a manual kill-switch) after a single provider was
+    /// verified and unblocked, without touching remaining entries in `blocked_providers`.
+    pub async fn ensure_open_for_verified(self: &Arc<Self>, tel: &NetworkTelemetry) {
+        let Some(env) = self.env.get() else {
+            return;
+        };
+        if self.is_manual_killswitch() {
+            return;
+        }
+        let mut inner = self.inner.lock().await;
+        if let Some(p) = inner.invalidate_alert() {
+            env.hold_queue.remove(&p.id).await;
+        }
+        inner.handled_ip = None;
+        inner.baseline = Some(Baseline {
+            ip: tel.ip.clone(),
+            country: Some(tel.country_code.clone()),
+            trusted: true,
+        });
+        self.set_gate(Gate::Open);
+        self.hide_popup(env);
     }
 
     /// The previous (trusted) IP is back: resume traffic.
@@ -2156,7 +2257,34 @@ mod tests {
                 .iter()
                 .all(|(p, force)| *force == (*p == ProviderId::Anthropic))
         );
-        assert_eq!(calls.len(), 3);
+        // Anthropic (1) + OpenAI (1 + 1 retry) + Gemini (1) = 4
+        assert_eq!(calls.len(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_audit_all_retries_transient_openai_and_gemini_failures() {
+        let attempts: Arc<std::sync::Mutex<std::collections::HashMap<ProviderId, usize>>> =
+            Arc::default();
+        let attempts2 = Arc::clone(&attempts);
+        let audit: AuditFn = Arc::new(move |provider, _force| {
+            let mut map = attempts2.lock().unwrap();
+            let count = map.entry(provider).or_insert(0);
+            *count += 1;
+            let n = *count;
+            Box::pin(async move {
+                if matches!(provider, ProviderId::Openai | ProviderId::Gemini) && n == 1 {
+                    Err("transient interface shake".to_string())
+                } else {
+                    Ok(test_report(provider, OverallStatus::Green, "9.9.9.9", "NL"))
+                }
+            })
+        });
+        let results = audit_all(&audit).await;
+        assert!(results.iter().all(|(_, r)| r.is_ok()));
+        let map = attempts.lock().unwrap();
+        assert_eq!(map.get(&ProviderId::Anthropic), Some(&1));
+        assert_eq!(map.get(&ProviderId::Openai), Some(&2));
+        assert_eq!(map.get(&ProviderId::Gemini), Some(&2));
     }
 
     #[test]
@@ -2529,5 +2657,130 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(40)).await;
         assert_eq!(h.io.count("interceptor://enriched"), 0);
         assert_eq!(h.guard.gate(), Gate::Blocked);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_returning_to_pinned_ip_after_blocked_audits_and_clears_blocked_providers() {
+        let current_ip = Arc::new(std::sync::Mutex::new("9.9.9.9".to_string()));
+        let probe_ip = Arc::clone(&current_ip);
+        let audit_calls: Arc<std::sync::Mutex<Vec<ProviderId>>> = Arc::default();
+        let audit_calls2 = Arc::clone(&audit_calls);
+        let current_ip_audit = Arc::clone(&current_ip);
+        let audit: AuditFn = Arc::new(move |provider, _force| {
+            audit_calls2.lock().unwrap().push(provider);
+            let ip = current_ip_audit.lock().unwrap().clone();
+            Box::pin(async move {
+                if ip == "9.9.9.9" {
+                    Ok(test_report(provider, OverallStatus::Red, "9.9.9.9", "RU"))
+                } else {
+                    // Non-critical Yellow warning on pinned IP must still auto-restore.
+                    let mut r = test_report(provider, OverallStatus::Yellow, "1.1.1.1", "DE");
+                    r.checks = vec![
+                        CheckResult::ok("Geo", "ok"),
+                        CheckResult::warning("Timezone", "mismatch", None),
+                    ];
+                    Ok(r)
+                }
+            })
+        });
+
+        let io = Arc::new(TestIo::default());
+        let state = AppState::new_in_memory();
+        state.set_pinned_ip(Some("1.1.1.1".to_string())).await.unwrap();
+        state
+            .set_interception_behavior(crate::state::InterceptionBehavior::AutoLockSilent)
+            .await
+            .unwrap();
+        let probe: ProbeFn = Arc::new(move || {
+            let ip = probe_ip.lock().unwrap().clone();
+            Box::pin(async move { Some(ip) })
+        });
+        let env = Env {
+            auditor: Auditor::new().expect("auditor"),
+            state: state.clone(),
+            hold_queue: Arc::new(HoldQueue::new()),
+            io: io.clone(),
+            audit,
+            probe: Some(probe),
+            resolve: None,
+            audit_timeout: Duration::from_secs(5),
+        };
+        let guard = Arc::new(NetworkGuard::new());
+        assert!(guard.install_env(env.clone()));
+        {
+            let mut inner = guard.inner.lock().await;
+            inner.baseline = Some(Baseline {
+                ip: "1.1.1.1".to_string(),
+                country: Some("DE".to_string()),
+                trusted: true,
+            });
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+        }
+
+        // 1. Drop to RU -> Blocked with pending = None and all 3 providers blocked.
+        guard.inner.lock().await.route_dirty = true;
+        guard.check_route_and_tick(&env).await;
+        assert_eq!(guard.gate(), Gate::Blocked);
+        assert!(guard.inner.lock().await.pending.is_none());
+        for p in KNOWN_PROVIDERS {
+            assert!(state.is_provider_blocked(p).await);
+        }
+        let changed_before = io.count("network://changed");
+        audit_calls.lock().unwrap().clear();
+
+        // 2. Return to previously pinned IP ("1.1.1.1") -> re-audits all 3 providers, clears
+        // blocked_providers, opens gate, and emits network://changed.
+        *current_ip.lock().unwrap() = "1.1.1.1".to_string();
+        guard.inner.lock().await.route_dirty = true;
+        guard.check_route_and_tick(&env).await;
+
+        assert_eq!(guard.gate(), Gate::Open);
+        assert!(guard.inner.lock().await.handled_ip.is_none());
+        assert!(state.get_data().await.blocked_providers.is_empty());
+        assert_eq!(io.count("network://changed"), changed_before + 1);
+        let audited = audit_calls.lock().unwrap();
+        assert!(audited.contains(&ProviderId::Anthropic));
+        assert!(audited.contains(&ProviderId::Openai));
+        assert!(audited.contains(&ProviderId::Gemini));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_returning_to_baseline_with_critical_audit_stays_blocked() {
+        let audit: AuditFn = Arc::new(move |provider, _force| {
+            Box::pin(async move {
+                Ok(test_report(provider, OverallStatus::Red, "1.1.1.1", "RU"))
+            })
+        });
+        let io = Arc::new(TestIo::default());
+        let state = AppState::new_in_memory();
+        state.block_provider("anthropic").await.unwrap();
+        let probe: ProbeFn = Arc::new(|| Box::pin(async { Some("1.1.1.1".to_string()) }));
+        let env = Env {
+            auditor: Auditor::new().expect("auditor"),
+            state: state.clone(),
+            hold_queue: Arc::new(HoldQueue::new()),
+            io,
+            audit,
+            probe: Some(probe),
+            resolve: None,
+            audit_timeout: Duration::from_secs(5),
+        };
+        let guard = Arc::new(NetworkGuard::new());
+        assert!(guard.install_env(env.clone()));
+        {
+            let mut inner = guard.inner.lock().await;
+            inner.baseline = Some(Baseline {
+                ip: "1.1.1.1".to_string(),
+                country: Some("DE".to_string()),
+                trusted: true,
+            });
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+        }
+        guard.set_gate(Gate::Blocked);
+        guard.inner.lock().await.route_dirty = true;
+        guard.check_route_and_tick(&env).await;
+
+        assert_eq!(guard.gate(), Gate::Blocked);
+        assert!(state.is_provider_blocked("anthropic").await);
     }
 }

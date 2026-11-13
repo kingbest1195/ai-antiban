@@ -118,10 +118,12 @@ pub fn run() {
             commands::audit::toggle_strict_pinning,
             commands::audit::allow_provider_session,
             commands::audit::unblock_provider_cmd,
+            commands::audit::verify_and_unblock_provider,
             commands::interception::resolve_interception,
             commands::interception::simulate_interception,
             commands::interception::take_pending_alert,
             commands::sysproxy::toggle_sysproxy,
+            commands::sysproxy::toggle_sysproxy_privileged,
             commands::sysproxy::enable_cli_protection,
             commands::sysproxy::disable_cli_protection,
             commands::sysproxy::check_cli_protection_status,
@@ -362,6 +364,7 @@ fn spawn_tray_status_watcher(
                         || watcher_guard.gate() != proxy::Gate::Open;
 
                     update_tray_from_report(&watcher_handle, &report, is_pinned, has_blocked);
+                    let _ = watcher_handle.emit("audit://refreshed", &report);
 
                     if !initial_synced {
                         initial_synced = true;

@@ -885,10 +885,21 @@ pub fn disable_all_sysproxy() {
 /// incompatible upstream, unusable journal) happens before any system write and returns the
 /// Russian text for the user.
 pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
+    enable_sysproxy_inner(pac_url, false)
+}
+
+/// Enables the system PAC proxy using macOS administrator privileges (`osascript`) when
+/// `enable_sysproxy` previously failed with `ADMIN_AUTH_REQUIRED:`. On non-macOS systems this is
+/// equivalent to [`enable_sysproxy`].
+pub fn enable_sysproxy_privileged(pac_url: &str) -> Result<SysproxyStatus, String> {
+    enable_sysproxy_inner(pac_url, true)
+}
+
+fn enable_sysproxy_inner(pac_url: &str, privileged: bool) -> Result<SysproxyStatus, String> {
     register_clean_exit_guard();
 
     let (configured, vpn_untouched) = match with_journal("enable_sysproxy", |j, p| {
-        enable_with(state(), j, p, pac_url)
+        enable_with_mode(state(), j, p, pac_url, privileged)
     }) {
         Run::Blocked => {
             // Dry-run: nothing was written, the flags still follow the call.
@@ -918,13 +929,33 @@ fn mark_active(st: &SysState, pac_url: &str) {
 /// The enable pass, run inside the `OS_OPS` lock. The "PAC is on" flag is raised here, after the
 /// write and under the same lock, so a switch-off that runs next ([`restore_pass`]) cannot be
 /// overtaken by a late `set_sys_proxy_active(true)`.
+#[cfg(test)]
 fn enable_with(
     st: &SysState,
     j: &mut journal::Journal,
     p: &dyn platform::Platform,
     pac_url: &str,
 ) -> Result<EnableReport, String> {
-    let report = enable_system_proxy(j, p, pac_url, false)?;
+    enable_with_mode(st, j, p, pac_url, false)
+}
+
+fn enable_with_mode(
+    st: &SysState,
+    j: &mut journal::Journal,
+    p: &dyn platform::Platform,
+    pac_url: &str,
+    privileged: bool,
+) -> Result<EnableReport, String> {
+    let report = if privileged {
+        if cfg!(target_os = "macos") {
+            HEAL.reset();
+            macos::enable_pac_privileged(j, p, pac_url)?
+        } else {
+            enable_system_proxy(j, p, pac_url, false)?
+        }
+    } else {
+        enable_system_proxy(j, p, pac_url, false)?
+    };
     mark_active(st, pac_url);
     Ok(report)
 }

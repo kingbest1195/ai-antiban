@@ -214,6 +214,8 @@ pub enum PlatformError {
     Unsupported(&'static str),
     /// The service / value does not exist any more.
     NotFound(&'static str),
+    /// macOS authorization / admin password is required (`networksetup` `-60005`, etc.).
+    AdminAuthRequired(&'static str),
     /// The external program or API call failed.
     Failed(&'static str),
 }
@@ -224,6 +226,7 @@ impl fmt::Display for PlatformError {
             PlatformError::DryRun => write!(f, "OS dry-run mode"),
             PlatformError::Unsupported(op) => write!(f, "{op}: unsupported"),
             PlatformError::NotFound(op) => write!(f, "{op}: not found"),
+            PlatformError::AdminAuthRequired(op) => write!(f, "{op}: admin auth required"),
             PlatformError::Failed(op) => write!(f, "{op}: failed"),
         }
     }
@@ -396,13 +399,24 @@ pub fn parse_nc_list(output: &str) -> Vec<VpnConnection> {
     out
 }
 
-/// Decides what a service is. A VPN is a service listed by `scutil --nc list` (matched by name)
-/// or one without a device in `networksetup -listnetworkserviceorder`. When the connection list
-/// could not be read (`nc` is `None`) a service with a device cannot be vouched for and is
-/// `Unknown`; one without a device is a VPN whose state is not known, i.e. connected.
+/// Returns `true` for macOS virtual tunnel interface names (`utun*`, `tun*`, `tap*`, `ppp*`,
+/// `ipsec*`) used by VPN clients even when absent from `scutil --nc list`.
+pub fn is_virtual_tunnel_device(device: &str) -> bool {
+    let d = device.trim().to_ascii_lowercase();
+    ["utun", "tun", "tap", "ppp", "ipsec"]
+        .iter()
+        .any(|prefix| d.starts_with(prefix))
+}
+
+/// Decides what a service is. A VPN is a service listed by `scutil --nc list` (matched by name),
+/// a service without a device in `networksetup -listnetworkserviceorder`, or a virtual tunnel
+/// device (`utun*`, `tun*`, `tap*`, `ppp*`, `ipsec*`). When the connection list could not be read
+/// (`nc` is `None`) a service with a non-tunnel device cannot be vouched for and is `Unknown`;
+/// one without a device or with a tunnel device is a VPN whose state is not known, i.e. connected.
 pub fn classify_service(svc: &ServiceId, nc: Option<&[VpnConnection]>) -> ServiceKind {
+    let is_tunnel = svc.device.is_empty() || is_virtual_tunnel_device(&svc.device);
     let Some(list) = nc else {
-        return if svc.device.is_empty() {
+        return if is_tunnel {
             ServiceKind::Vpn { connected: true }
         } else {
             ServiceKind::Unknown
@@ -415,7 +429,7 @@ pub fn classify_service(svc: &ServiceId, nc: Option<&[VpnConnection]>) -> Servic
             connected: listed.iter().any(|c| c.connected),
         };
     }
-    if svc.device.is_empty() {
+    if is_tunnel {
         ServiceKind::Vpn { connected: true }
     } else {
         ServiceKind::Physical
@@ -617,15 +631,24 @@ fn registry_names(_subkey: &str, op: &'static str) -> PResult<Vec<String>> {
 }
 
 /// Parsed `scutil` dictionary of `Setup:/Network/Service/<id>/DNS`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsDict {
     pub servers: Vec<String>,
     pub search_domains: Vec<String>,
-    /// A key other than `ServerAddresses` / `SearchDomains` was present.
+    /// An unrecognised key other than `ServerAddresses` / `SearchDomains` / benign metadata was present.
     pub unknown_fields: bool,
 }
 
+fn is_benign_scutil_dns_key(key: &str) -> bool {
+    matches!(
+        key,
+        "DomainName" | "ConfirmedServiceID" | "InterfaceName" | "SupplementalMatchDomains"
+    ) || key.starts_with('_')
+}
+
 /// Parses `scutil` `show` output. Key order inside the dictionary does not matter.
+/// Tolerates benign metadata keys (`DomainName`, `ConfirmedServiceID`, `InterfaceName`,
+/// `SupplementalMatchDomains`, and `_`-prefixed keys).
 pub fn parse_scutil_dns(output: &str) -> DnsDict {
     let mut d = DnsDict {
         servers: vec![],
@@ -633,34 +656,69 @@ pub fn parse_scutil_dns(output: &str) -> DnsDict {
         unknown_fields: false,
     };
     let mut current: Option<&'static str> = None;
+    let mut sub_depth: usize = 0;
     for line in output.lines() {
         let t = line.trim();
-        if t.is_empty() || t.starts_with("<dictionary>") || t == "}" {
-            if t == "}" {
-                current = None;
+        if t.is_empty() || t.starts_with("<dictionary>") {
+            continue;
+        }
+        if t == "}" {
+            if sub_depth > 0 {
+                sub_depth -= 1;
+                if sub_depth == 0 {
+                    current = None;
+                }
+            }
+            continue;
+        }
+        if sub_depth > 0 {
+            if t.ends_with('{') {
+                sub_depth += 1;
+                continue;
+            }
+            if sub_depth == 1
+                && let Some((k, v)) = t.split_once(" : ")
+            {
+                let k = k.trim();
+                let v = v.trim();
+                if k.chars().all(|c| c.is_ascii_digit()) {
+                    match current {
+                        Some("servers") => d.servers.push(v.to_string()),
+                        Some("domains") => d.search_domains.push(v.to_string()),
+                        Some("ignored") | Some("unknown") => {}
+                        _ => d.unknown_fields = true,
+                    }
+                } else if !matches!(current, Some("ignored") | Some("unknown")) {
+                    d.unknown_fields = true;
+                }
             }
             continue;
         }
         if let Some((k, v)) = t.split_once(" : ") {
             let k = k.trim();
             let v = v.trim();
-            if k.chars().all(|c| c.is_ascii_digit()) {
-                match current {
-                    Some("servers") => d.servers.push(v.to_string()),
-                    Some("domains") => d.search_domains.push(v.to_string()),
-                    _ => d.unknown_fields = true,
-                }
-            } else if v.starts_with("<array>") {
+            if v.starts_with("<array>") && v.ends_with('{') {
                 current = match k {
                     "ServerAddresses" => Some("servers"),
                     "SearchDomains" => Some("domains"),
+                    _ if is_benign_scutil_dns_key(k) => Some("ignored"),
                     _ => {
                         d.unknown_fields = true;
-                        None
+                        Some("unknown")
                     }
                 };
+                sub_depth = 1;
+            } else if is_benign_scutil_dns_key(k) {
+                if v.ends_with('{') {
+                    current = Some("ignored");
+                    sub_depth = 1;
+                }
             } else {
                 d.unknown_fields = true;
+                if v.ends_with('{') {
+                    current = Some("unknown");
+                    sub_depth = 1;
+                }
             }
         }
     }
@@ -675,6 +733,65 @@ pub fn parse_getdnsservers(output: &str) -> Vec<String> {
         .filter(|l| !l.is_empty() && !l.starts_with("There aren't any DNS Servers"))
         .map(str::to_string)
         .collect()
+}
+
+/// `networksetup -getsearchdomains` -> domains (empty when none are set).
+pub fn parse_getsearchdomains(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("There aren't any Search Domains"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// One `Setup:/Network/Service/<id>/DNS` entry paired with its `UserDefinedName`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupDnsEntry {
+    pub service_id: String,
+    pub user_defined_name: Option<String>,
+    pub dns: DnsDict,
+}
+
+/// Pure evaluation of temporary DNS overrides, scoped strictly to `physical_services` (services
+/// Zastava actually modifies). Synthetic/VPN service IDs not matching an enabled physical service
+/// are ignored.
+pub fn has_physical_temp_dns_override<F>(
+    physical_services: &[ServiceId],
+    entries: &[SetupDnsEntry],
+    mut read_saved_dns: F,
+) -> PResult<bool>
+where
+    F: FnMut(&str) -> PResult<(Vec<String>, Vec<String>)>,
+{
+    if physical_services.is_empty() {
+        return Ok(false);
+    }
+    for entry in entries {
+        let Some(name) = entry.user_defined_name.as_deref() else {
+            continue;
+        };
+        if !physical_services.iter().any(|s| s.name == name) {
+            continue;
+        }
+        if entry.dns.unknown_fields {
+            return Ok(true);
+        }
+        let (mut saved_servers, mut saved_domains) = read_saved_dns(name)?;
+        let mut live_servers = entry.dns.servers.clone();
+        live_servers.sort();
+        saved_servers.sort();
+        if live_servers != saved_servers {
+            return Ok(true);
+        }
+        let mut live_domains = entry.dns.search_domains.clone();
+        live_domains.sort();
+        saved_domains.sort();
+        if live_domains != saved_domains {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -711,8 +828,22 @@ fn write_gate(what: &str) -> PResult<bool> {
     }
 }
 
-/// Runs a program through [`super::silent_command`]; only the exit status and stdout survive.
-fn run(program: &'static str, args: &[&str], op: &'static str) -> PResult<(bool, String)> {
+/// Returns `true` when macOS `networksetup` (or another OS tool) failed because
+/// administrator authorization / authentication is required or was denied.
+pub fn is_admin_auth_error(stdout: &str, stderr: &str) -> bool {
+    let check = |s: &str| {
+        let lower = s.to_ascii_lowercase();
+        lower.contains("-60005")
+            || lower.contains("requires administrator")
+            || lower.contains("authorization")
+            || lower.contains("errauthorizationdenied")
+            || lower.contains("not authorized")
+    };
+    check(stderr) || check(stdout)
+}
+
+/// Runs a program through [`super::silent_command`], capturing stdout and stderr.
+fn run(program: &'static str, args: &[&str], op: &'static str) -> PResult<(bool, String, String)> {
     let out = super::silent_command(program)
         .args(args)
         .output()
@@ -720,14 +851,31 @@ fn run(program: &'static str, args: &[&str], op: &'static str) -> PResult<(bool,
     Ok((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
 }
 
-fn run_ok(program: &'static str, args: &[&str], op: &'static str) -> PResult<()> {
+/// Runs `program` and returns stdout on success, or logs non-empty stderr and maps macOS
+/// authorization failures to [`PlatformError::AdminAuthRequired`].
+fn run_stdout(program: &'static str, args: &[&str], op: &'static str) -> PResult<String> {
     match run(program, args, op)? {
-        (true, _) => Ok(()),
-        _ => Err(PlatformError::Failed(op)),
+        (true, stdout, _) => Ok(stdout),
+        (false, stdout, stderr) => {
+            let err_trimmed = stderr.trim();
+            if !err_trimmed.is_empty() {
+                eprintln!("[sysproxy:{op}] {program} stderr: {err_trimmed}");
+            }
+            if is_admin_auth_error(&stdout, &stderr) {
+                Err(PlatformError::AdminAuthRequired(op))
+            } else {
+                Err(PlatformError::Failed(op))
+            }
+        }
     }
+}
+
+fn run_ok(program: &'static str, args: &[&str], op: &'static str) -> PResult<()> {
+    run_stdout(program, args, op).map(|_| ())
 }
 
 /// The one place that knows how a PAC URL is cleared. `networksetup` has no "unset"; clearing it
@@ -777,14 +925,11 @@ impl Platform for RealPlatform {
     fn list_services(&self) -> PResult<Vec<ServiceId>> {
         Self::require_macos("list_services")?;
         dry_run_gate("networksetup:listnetworkserviceorder")?;
-        let (ok, text) = run(
+        let text = run_stdout(
             "networksetup",
             &["-listnetworkserviceorder"],
             "list_services",
         )?;
-        if !ok {
-            return Err(PlatformError::Failed("list_services"));
-        }
         Ok(parse_service_order(&text))
     }
 
@@ -792,10 +937,7 @@ impl Platform for RealPlatform {
         Self::require_macos("get_pac")?;
         dry_run_gate("networksetup:getautoproxyurl")?;
         let name = self.current_name(svc, "get_pac")?;
-        let (ok, text) = run("networksetup", &["-getautoproxyurl", &name], "get_pac")?;
-        if !ok {
-            return Err(PlatformError::Failed("get_pac"));
-        }
+        let text = run_stdout("networksetup", &["-getautoproxyurl", &name], "get_pac")?;
         Ok(parse_autoproxy(&text))
     }
 
@@ -832,11 +974,8 @@ impl Platform for RealPlatform {
         Self::require_macos("get_chain")?;
         dry_run_gate("networksetup:getwebproxy")?;
         let name = self.current_name(svc, "get_chain")?;
-        let (ok1, web) = run("networksetup", &["-getwebproxy", &name], "get_chain")?;
-        let (ok2, sec) = run("networksetup", &["-getsecurewebproxy", &name], "get_chain")?;
-        if !(ok1 && ok2) {
-            return Err(PlatformError::Failed("get_chain"));
-        }
+        let web = run_stdout("networksetup", &["-getwebproxy", &name], "get_chain")?;
+        let sec = run_stdout("networksetup", &["-getsecurewebproxy", &name], "get_chain")?;
         Ok(ChainState {
             http: parse_webproxy(&web),
             https: parse_webproxy(&sec),
@@ -866,7 +1005,7 @@ impl Platform for RealPlatform {
             if let (Some(host), Some(port)) = (&ep.server, ep.port) {
                 // `-setwebproxy` also switches the proxy on and resets its authentication, so it
                 // runs only when the address really differs from what the service holds now.
-                let (ok, text) = run("networksetup", &[get, &name], "set_chain")?;
+                let (ok, text, _) = run("networksetup", &[get, &name], "set_chain")?;
                 let same = ok && {
                     let cur = parse_webproxy(&text);
                     cur.server.as_deref() == Some(host.as_str()) && cur.port == Some(port)
@@ -894,14 +1033,11 @@ impl Platform for RealPlatform {
         Self::require_macos("get_proxy_bypass_domains")?;
         dry_run_gate("networksetup:getproxybypassdomains")?;
         let name = self.current_name(svc, "get_proxy_bypass_domains")?;
-        let (ok, text) = run(
+        let text = run_stdout(
             "networksetup",
             &["-getproxybypassdomains", &name],
             "get_proxy_bypass_domains",
         )?;
-        if !ok {
-            return Err(PlatformError::Failed("get_proxy_bypass_domains"));
-        }
         Ok(parse_bypass_domains(&text))
     }
 
@@ -926,20 +1062,14 @@ impl Platform for RealPlatform {
     fn vpn_connections(&self) -> PResult<Vec<VpnConnection>> {
         Self::require_macos("vpn_connections")?;
         dry_run_gate("scutil:nc-list")?;
-        let (ok, text) = run("scutil", &["--nc", "list"], "vpn_connections")?;
-        if !ok {
-            return Err(PlatformError::Failed("vpn_connections"));
-        }
+        let text = run_stdout("scutil", &["--nc", "list"], "vpn_connections")?;
         Ok(parse_nc_list(&text))
     }
 
     fn effective_proxy(&self) -> PResult<EffectiveProxy> {
         Self::require_macos("effective_proxy")?;
         dry_run_gate("scutil:proxy")?;
-        let (ok, text) = run("scutil", &["--proxy"], "effective_proxy")?;
-        if !ok {
-            return Err(PlatformError::Failed("effective_proxy"));
-        }
+        let text = run_stdout("scutil", &["--proxy"], "effective_proxy")?;
         Ok(parse_scutil_proxy(&text))
     }
 
@@ -964,8 +1094,17 @@ impl Platform for RealPlatform {
                 .map_err(|_| PlatformError::Failed("temp_dns_overrides"))?;
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         };
-        let listing = scutil("list Setup:/Network/Service/[^/]+/DNS\nquit\n")?;
         let services = self.list_services()?;
+        let nc = self.vpn_connections()?;
+        let physical: Vec<ServiceId> = services
+            .into_iter()
+            .filter(|s| s.enabled && classify_service(s, Some(&nc)).is_physical())
+            .collect();
+        if physical.is_empty() {
+            return Ok(false);
+        }
+        let listing = scutil("list Setup:/Network/Service/[^/]+/DNS\nquit\n")?;
+        let mut entries = Vec::new();
         for line in listing.lines() {
             // "  subKey [0] = Setup:/Network/Service/<ID>/DNS"
             let Some(key) = line.split(" = ").nth(1).map(str::trim) else {
@@ -977,45 +1116,41 @@ impl Platform for RealPlatform {
             else {
                 continue;
             };
-            let dict = parse_scutil_dns(&scutil(&format!("show {key}\nquit\n"))?);
-            if dict.unknown_fields {
-                return Ok(true); // unknown fields -> refuse, never guess
-            }
+            let dns = parse_scutil_dns(&scutil(&format!("show {key}\nquit\n"))?);
             let svc_dump = scutil(&format!("show Setup:/Network/Service/{id}\nquit\n"))?;
-            let name = svc_dump.lines().find_map(|l| {
+            let user_defined_name = svc_dump.lines().find_map(|l| {
                 l.trim()
                     .strip_prefix("UserDefinedName : ")
                     .map(|v| v.trim().to_string())
             });
-            let Some(name) = name.filter(|n| services.iter().any(|s| &s.name == n)) else {
-                return Ok(true); // cannot map to a saved service -> treat as temporary
-            };
-            let (ok, saved) = run(
+            entries.push(SetupDnsEntry {
+                service_id: id.to_string(),
+                user_defined_name,
+                dns,
+            });
+        }
+        has_physical_temp_dns_override(&physical, &entries, |name| {
+            let saved_dns = run_stdout(
                 "networksetup",
-                &["-getdnsservers", &name],
+                &["-getdnsservers", name],
                 "temp_dns_overrides",
             )?;
-            if !ok {
-                return Err(PlatformError::Failed("temp_dns_overrides"));
-            }
-            let mut live = dict.servers.clone();
-            let mut saved = parse_getdnsservers(&saved);
-            live.sort();
-            saved.sort();
-            if live != saved {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+            let saved_search = run_stdout(
+                "networksetup",
+                &["-getsearchdomains", name],
+                "temp_dns_overrides",
+            )?;
+            Ok((
+                parse_getdnsservers(&saved_dns),
+                parse_getsearchdomains(&saved_search),
+            ))
+        })
     }
 
     fn get_user_env(&self, key: &str) -> PResult<Option<String>> {
         dry_run_gate("user_env:get")?;
         if cfg!(target_os = "macos") {
-            let (ok, text) = run("launchctl", &["getenv", key], "get_user_env")?;
-            if !ok {
-                return Err(PlatformError::Failed("get_user_env"));
-            }
+            let text = run_stdout("launchctl", &["getenv", key], "get_user_env")?;
             // launchctl prints nothing for an unset variable; "set to empty" is indistinguishable.
             let v = text.trim_end_matches('\n');
             Ok(if v.is_empty() {
@@ -1477,6 +1612,7 @@ mod fake {
         calls: Vec<String>,
         os_writes: usize,
         fail: BTreeMap<PlatOp, usize>,
+        fail_auth: BTreeMap<PlatOp, usize>,
         excluded: Vec<PathBuf>,
         /// The next `set_chain` writes the HTTP side only and then fails (a process killed
         /// between the two commands).
@@ -1618,6 +1754,13 @@ mod fake {
         pub fn fail_next_n(&self, op: PlatOp, n: usize) {
             self.st.lock().unwrap().fail.insert(op, n);
         }
+        /// Next `n` calls of `op` fail with `PlatformError::AdminAuthRequired`.
+        pub fn fail_next_auth(&self, op: PlatOp) {
+            self.fail_next_auth_n(op, 1);
+        }
+        pub fn fail_next_auth_n(&self, op: PlatOp, n: usize) {
+            self.st.lock().unwrap().fail_auth.insert(op, n);
+        }
 
         /// The next `set_chain` lands its HTTP side and fails before the HTTPS side, as if the
         /// process had been killed between the two `networksetup` commands (the call after it
@@ -1653,6 +1796,15 @@ mod fake {
             } else {
                 format!("{name}:{res}")
             });
+            if let Some(n) = s.fail_auth.get_mut(&op)
+                && *n > 0
+            {
+                *n -= 1;
+                if *n == 0 {
+                    s.fail_auth.remove(&op);
+                }
+                return Err(PlatformError::AdminAuthRequired(name));
+            }
             if let Some(n) = s.fail.get_mut(&op)
                 && *n > 0
             {
@@ -2020,10 +2172,73 @@ mod tests {
         let (da, db) = (parse_scutil_dns(a), parse_scutil_dns(b));
         assert_eq!(da, db);
         assert_eq!(da.servers, vec!["1.1.1.1", "8.8.8.8"]);
-        let unknown =
-            "<dictionary> {\n  SupplementalMatchDomains : <array> {\n    0 : corp\n  }\n}\n";
+        let benign = "<dictionary> {\n  ConfirmedServiceID : 1234-ABCD\n  DomainName : vpn.internal\n  InterfaceName : utun4\n  SupplementalMatchDomains : <array> {\n    0 : corp\n  }\n  _Reserved : <dictionary> {\n    foo : bar\n  }\n}\n";
+        assert!(!parse_scutil_dns(benign).unknown_fields);
+        let unknown = "<dictionary> {\n  UnexpectedCustomDnsFlag : 1\n}\n";
         assert!(parse_scutil_dns(unknown).unknown_fields);
         assert!(parse_getdnsservers("There aren't any DNS Servers set on Wi-Fi.\n").is_empty());
+        assert!(parse_getsearchdomains("There aren't any Search Domains set on Wi-Fi.\n").is_empty());
+    }
+
+    #[test]
+    fn scutil_dns_amneziavpn_metadata_and_synthetic_services_do_not_trigger_temp_dns() {
+        let amnezia_dns = parse_scutil_dns(
+            "<dictionary> {\n  ConfirmedServiceID : E1A2-AMNEZIA\n  DomainName : amnezia.local\n  InterfaceName : utun4\n  ServerAddresses : <array> {\n    0 : 1.1.1.1\n  }\n  SupplementalMatchDomains : <array> {\n    0 : \n  }\n  __ORDER__ : 1\n}\n",
+        );
+        assert!(!amnezia_dns.unknown_fields);
+        assert_eq!(amnezia_dns.servers, vec!["1.1.1.1"]);
+
+        let wifi = svc("en0", "Wi-Fi");
+        let entries = vec![
+            // Synthetic / VPN Setup:/Network/Service/AmneziaWG/DNS not matching physical services.
+            SetupDnsEntry {
+                service_id: "E1A2-AMNEZIA".into(),
+                user_defined_name: Some("AmneziaWG".into()),
+                dns: amnezia_dns,
+            },
+            // Unmapped synthetic service with no UserDefinedName.
+            SetupDnsEntry {
+                service_id: "SYNTHETIC-TUN".into(),
+                user_defined_name: None,
+                dns: parse_scutil_dns("<dictionary> {\n  UnexpectedField : 1\n}\n"),
+            },
+            // Wi-Fi matches preferences.plist (192.168.1.1 + SearchDomains empty), plus benign keys.
+            SetupDnsEntry {
+                service_id: "WIFI-UUID".into(),
+                user_defined_name: Some("Wi-Fi".into()),
+                dns: parse_scutil_dns(
+                    "<dictionary> {\n  ConfirmedServiceID : WIFI-UUID\n  InterfaceName : en0\n  ServerAddresses : <array> {\n    0 : 192.168.1.1\n  }\n}\n",
+                ),
+            },
+        ];
+        let triggered = has_physical_temp_dns_override(&[wifi.clone()], &entries, |name| {
+            assert_eq!(name, "Wi-Fi");
+            Ok((vec!["192.168.1.1".into()], Vec::new()))
+        })
+        .unwrap();
+        assert!(!triggered, "AmneziaVPN / synthetic DNS entries must be ignored");
+
+        // Now simulate Wi-Fi having an ephemeral DNS server override differing from preferences.
+        let mut override_entries = entries.clone();
+        override_entries[2].dns.servers = vec!["9.9.9.9".into()];
+        assert!(
+            has_physical_temp_dns_override(&[wifi.clone()], &override_entries, |_| Ok((
+                vec!["192.168.1.1".into()],
+                Vec::new()
+            )))
+            .unwrap()
+        );
+
+        // And simulate Wi-Fi having an ephemeral SearchDomains override differing from preferences.
+        let mut search_entries = entries;
+        search_entries[2].dns.search_domains = vec!["corp.local".into()];
+        assert!(
+            has_physical_temp_dns_override(&[wifi], &search_entries, |_| Ok((
+                vec!["192.168.1.1".into()],
+                Vec::new()
+            )))
+            .unwrap()
+        );
     }
 
     #[test]
@@ -2265,5 +2480,45 @@ mod tests {
         assert_eq!(parse_scutil_proxy("").pac_enabled, None);
         let shown = format!("{e:?}");
         assert!(!shown.contains("127.0.0.1"), "{shown}");
+    }
+
+    #[test]
+    fn virtual_tunnel_devices_are_classified_as_vpn_even_without_scutil_nc() {
+        let nc = parse_nc_list(NC_LIST);
+        for dev in ["utun0", "utun4", "tun0", "tap1", "ppp0", "ipsec0", "UTUN7"] {
+            assert_eq!(
+                classify_service(&svc(dev, "AmneziaVPN Tunnel"), Some(&nc)),
+                ServiceKind::Vpn { connected: true },
+                "{dev} with nc list"
+            );
+            assert_eq!(
+                classify_service(&svc(dev, "AmneziaVPN Tunnel"), None),
+                ServiceKind::Vpn { connected: true },
+                "{dev} without nc list"
+            );
+        }
+        assert!(!is_virtual_tunnel_device("en0"));
+        assert!(!is_virtual_tunnel_device("bridge0"));
+    }
+
+    #[test]
+    fn admin_auth_error_detection_matches_macos_authorization_failures() {
+        assert!(is_admin_auth_error(
+            "",
+            "Error: -60005 The user is not authorized."
+        ));
+        assert!(is_admin_auth_error(
+            "",
+            "This operation requires administrator privileges."
+        ));
+        assert!(is_admin_auth_error("", "errAuthorizationDenied"));
+        assert!(is_admin_auth_error("Authorization failed.", ""));
+        assert!(is_admin_auth_error("", "User is Not Authorized"));
+        assert!(!is_admin_auth_error("", "Wi-Fi is not a recognized network service."));
+        assert!(
+            PlatformError::AdminAuthRequired("set_pac")
+                .to_string()
+                .contains("admin")
+        );
     }
 }
