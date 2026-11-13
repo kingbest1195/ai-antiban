@@ -13,15 +13,10 @@ use zastava_lib::state::{AppState, AppStateData, IpHistoryEntry};
 fn test_edge_case_turkey_gemini_special_rules() {
     let matrix = ProviderMatrix::load_bundled().expect("Failed to load bundled provider matrix");
 
-    // Gemini in Turkey must be strictly Critical with explanation
+    // Gemini in Turkey is officially supported (web & API)
     let gemini_tr = evaluate_provider_geo(&matrix, ProviderId::Gemini, "TR");
-    assert_eq!(gemini_tr.status, CheckStatus::Critical);
-    assert_eq!(gemini_tr.code, "GEMINI_GEO_BLOCKED");
-    assert!(
-        gemini_tr.message.contains("Turkey") || gemini_tr.message.contains("Google"),
-        "Gemini TR block message missing key details: {}",
-        gemini_tr.message
-    );
+    assert_eq!(gemini_tr.status, CheckStatus::Ok);
+    assert_eq!(gemini_tr.code, "GEO_ALLOWED");
 
     // Claude (Anthropic) in Turkey is Warning
     let anthropic_tr = evaluate_provider_geo(&matrix, ProviderId::Anthropic, "TR");

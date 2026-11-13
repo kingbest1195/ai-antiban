@@ -1,10 +1,25 @@
 /* Экран «Проверки»: только токены ДС. Блок-вердикт и подробности строки проверки; раскрывающаяся строка — ExpandRow из src/ui. */
 .zs-verdict__head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--space-3)}
 .zs-verdict__body{flex:1;min-width:0}
+.zs-verdict__meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+.zs-verdict__provider{font-size:12px;line-height:16px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-2)}
 .zs-verdict__title{margin:var(--space-2) 0 0;font-size:20px;line-height:26px;font-weight:600;letter-spacing:-.01em}
 .zs-verdict__text{margin:var(--space-1) 0 0;font-size:13px;line-height:18px;color:var(--ink-2)}
-.zs-verdict__action{flex:none}
-@media (max-width:420px){.zs-verdict__head{flex-direction:column}}
+.zs-verdict__actions{margin-top:var(--space-3)}
+.zs-verdict__ratio{flex:none;display:flex;flex-direction:column;align-items:flex-end;text-align:right;padding-top:2px}
+.zs-verdict__count{font-family:var(--font-mono);font-size:28px;line-height:32px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}
+.zs-verdict__ratio--ok .zs-verdict__count{color:var(--brand-text)}
+.zs-verdict__ratio--warn .zs-verdict__count{color:var(--warn-text)}
+.zs-verdict__ratio--danger .zs-verdict__count{color:var(--danger-text)}
+.zs-verdict__of{font-size:12px;line-height:16px;color:var(--ink-3)}
+@media (max-width:420px){.zs-verdict__head{gap:var(--space-2)}}
+
+.zs-check__priority{font-weight:600}
+.zs-check__priority--tier1{color:var(--warn-text)}
+.zs-check__priority--tier2{color:var(--ink-2)}
+.zs-check__priority--tier3{color:var(--ink-2)}
+.zs-check__priority--advisory{color:var(--ink-3)}
+.zs-checks__passed-list .zs-xrow__detail{margin-left:0;background:var(--bg-1)}
 
 .zs-check__label{margin:0;font-size:12px;line-height:16px;color:var(--ink-3)}
 .zs-check__message{margin:2px 0 0;font-size:13px;line-height:18px;color:var(--ink-2)}

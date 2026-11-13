@@ -425,10 +425,11 @@ export function AppShell() {
             <TabPanel idPrefix={TAB_PREFIX} id="checks" selected={nav.tab === "checks"}>
               <ChecksScreen
                 report={(nav.checksProvider && gw.reports[nav.checksProvider]) || gw.checksReport}
+                reports={gw.reports}
                 partial={gw.partialAudit}
                 auditError={gw.auditError}
                 startupPending={gw.startupPending}
-                provider={nav.checksProvider && gw.reports[nav.checksProvider] ? nav.checksProvider : undefined}
+                provider={nav.checksProvider}
                 state={gw.state}
                 coverageSnapshot={gw.coverageSnapshot}
                 protection={toggles.protection}

@@ -370,6 +370,106 @@ export function pickWorstReport(
   return best;
 }
 
+/** Худший провайдер из доступных отчётов; при равенстве — Claude, ChatGPT, Gemini. Без отчётов — Claude. */
+export function pickWorstProvider(reports: Partial<Record<ProviderId, RiskReport>>): ProviderId {
+  return pickWorstReport(reports)?.provider ?? "anthropic";
+}
+
+export type CheckPriorityTier = 1 | 2 | 3;
+
+export interface ProviderPrioritySpec {
+  tier1: readonly CheckId[];
+  tier2: readonly CheckId[];
+  tier3: readonly CheckId[];
+  tier3Advisory: boolean;
+}
+
+/** Приоритет и важность каждой из 13 проверок в разрезе конкретного ИИ-провайдера. */
+export const PROVIDER_CHECK_MATRIX: Record<ProviderId, ProviderPrioritySpec> = {
+  anthropic: {
+    tier1: ["geo_matrix", "travel", "ipv6", "dnsbl", "asn"],
+    tier2: ["pinning", "timezone", "locale_hygiene", "dns", "dns_country", "udp_stun", "reverse_dns"],
+    tier3: ["wifi_geo"],
+    tier3Advisory: false,
+  },
+  openai: {
+    tier1: ["geo_matrix", "ipv6", "dnsbl", "asn"],
+    tier2: ["dns", "dns_country", "udp_stun", "pinning", "travel", "timezone"],
+    tier3: ["locale_hygiene", "reverse_dns", "wifi_geo"],
+    tier3Advisory: true,
+  },
+  gemini: {
+    tier1: ["geo_matrix", "ipv6", "udp_stun", "dns", "dns_country", "asn", "wifi_geo"],
+    tier2: ["timezone", "pinning", "travel", "dnsbl"],
+    tier3: ["locale_hygiene", "reverse_dns"],
+    tier3Advisory: true,
+  },
+};
+
+export interface CheckPriorityInfo {
+  tier: CheckPriorityTier;
+  rank: number;
+  advisory: boolean;
+}
+
+export type PrioritizedCheckItem = CheckItem & CheckPriorityInfo;
+
+/** Определяет уровень важности и порядок сортировки проверки для выбранного провайдера. */
+export function priorityOfCheck(id: string, provider: ProviderId): CheckPriorityInfo {
+  const spec = PROVIDER_CHECK_MATRIX[provider];
+  const i1 = spec.tier1.indexOf(id as CheckId);
+  if (i1 >= 0) return { tier: 1, rank: i1, advisory: false };
+  const i2 = spec.tier2.indexOf(id as CheckId);
+  if (i2 >= 0) return { tier: 2, rank: 100 + i2, advisory: false };
+  const i3 = spec.tier3.indexOf(id as CheckId);
+  if (i3 >= 0) return { tier: 3, rank: 200 + i3, advisory: spec.tier3Advisory };
+  return { tier: 3, rank: 300, advisory: false };
+}
+
+function actionBucket(cls: CheckClass): number {
+  if (cls === "crit" || cls === "warn") return 0;
+  if (cls === "unknown") return 1;
+  return 2;
+}
+
+/**
+ * Делит проверки на требующие внимания (отсортированы по приоритету провайдера)
+ * и пройденные (`ok` и `not_applicable`) для сворачивания в «Остальные проверки».
+ */
+export function partitionChecksForProvider(
+  items: CheckItem[],
+  provider: ProviderId,
+): { actionItems: PrioritizedCheckItem[]; passedItems: PrioritizedCheckItem[] } {
+  const actionItems: PrioritizedCheckItem[] = [];
+  const passedItems: PrioritizedCheckItem[] = [];
+
+  for (const item of items) {
+    const prio = priorityOfCheck(item.id, provider);
+    const enriched: PrioritizedCheckItem = { ...item, ...prio };
+    if (item.cls === "ok" || item.cls === "na") passedItems.push(enriched);
+    else actionItems.push(enriched);
+  }
+
+  actionItems.sort((a, b) => {
+    const bucketDiff = actionBucket(a.cls) - actionBucket(b.cls);
+    if (bucketDiff !== 0) return bucketDiff;
+    const tierDiff = a.tier - b.tier;
+    if (tierDiff !== 0) return tierDiff;
+    if (a.cls !== b.cls) {
+      if (a.cls === "crit") return -1;
+      if (b.cls === "crit") return 1;
+    }
+    return a.rank - b.rank;
+  });
+
+  passedItems.sort((a, b) => {
+    if (a.cls !== b.cls) return a.cls === "ok" ? -1 : 1;
+    return a.rank - b.rank;
+  });
+
+  return { actionItems, passedItems };
+}
+
 /** Непройденные проверки отчёта (замечание, критично, не удалось проверить; «не применимо» не считается). Берётся из того же кода, что строит экран. */
 export function failedChecks(report: RiskReport, state: AppStateData | null): CheckItem[] {
   return buildChecks(report, state).items.filter((i) => i.cls === "warn" || i.cls === "crit" || i.cls === "unknown");
