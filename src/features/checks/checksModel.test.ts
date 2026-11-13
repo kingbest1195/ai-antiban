@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type { CheckResult, IpType, RiskReport } from "../../types";
+import type { CheckResult, IpType, ProviderId, RiskReport } from "../../types";
 import { checks as copy } from "../../shared/copy/ru";
-import { buildChecks, buildPendingChecks, classify, countChecks, isYellowOnlyUnknown, progressOf } from "./checksModel";
+import {
+  PROVIDER_CHECK_MATRIX,
+  buildChecks,
+  buildPendingChecks,
+  classify,
+  countChecks,
+  isYellowOnlyUnknown,
+  partitionChecksForProvider,
+  pickWorstProvider,
+  priorityOfCheck,
+  progressOf,
+} from "./checksModel";
 import { checks as checksCopy } from "../../shared/copy/ru";
 import { applyProgress, dataAge, emptyPartial } from "../../shared/hooks/useGatewayState";
 import type { AuditProgressEvent, PartialAudit } from "../../types";
@@ -389,5 +400,120 @@ describe("тип адреса внутри проверки репутации �
 
   it("старый отчёт без ipv6_exit читается как IPv4", () => {
     expect(report(thirteen()).ipv6_exit).toBeUndefined();
+  });
+});
+
+describe("матрица приоритетов по ИИ-провайдерам и группировка", () => {
+  const ALL_13_IDS = [
+    "geo_matrix",
+    "pinning",
+    "travel",
+    "dnsbl",
+    "asn",
+    "ipv6",
+    "dns",
+    "timezone",
+    "wifi_geo",
+    "reverse_dns",
+    "dns_country",
+    "locale_hygiene",
+    "udp_stun",
+  ];
+
+  it("все 13 проверок без повторов и пропусков заданы для Claude, ChatGPT и Gemini", () => {
+    for (const provider of ["anthropic", "openai", "gemini"] as ProviderId[]) {
+      const spec = PROVIDER_CHECK_MATRIX[provider];
+      const all = [...spec.tier1, ...spec.tier2, ...spec.tier3];
+      expect(all).toHaveLength(13);
+      expect(new Set(all).size).toBe(13);
+      expect([...all].sort()).toEqual([...ALL_13_IDS].sort());
+    }
+    expect(PROVIDER_CHECK_MATRIX.anthropic.tier3Advisory).toBe(false);
+    expect(PROVIDER_CHECK_MATRIX.openai.tier3Advisory).toBe(true);
+    expect(PROVIDER_CHECK_MATRIX.gemini.tier3Advisory).toBe(true);
+  });
+
+  it("приоритет проверок меняется в зависимости от провайдера (Claude vs ChatGPT vs Gemini)", () => {
+    // wifi_geo: Tier 3 у Claude/ChatGPT, но Tier 1 у Gemini; travel: Tier 1 у Claude, Tier 2 у ChatGPT/Gemini
+    expect(priorityOfCheck("wifi_geo", "anthropic")).toMatchObject({ tier: 3, advisory: false });
+    expect(priorityOfCheck("wifi_geo", "openai")).toMatchObject({ tier: 3, advisory: true });
+    expect(priorityOfCheck("wifi_geo", "gemini")).toMatchObject({ tier: 1, advisory: false });
+    expect(priorityOfCheck("travel", "anthropic").tier).toBe(1);
+    expect(priorityOfCheck("travel", "openai").tier).toBe(2);
+    expect(priorityOfCheck("udp_stun", "gemini").tier).toBe(1);
+    expect(priorityOfCheck("udp_stun", "anthropic").tier).toBe(2);
+
+    // Одинаковые предупреждения по travel (2), dnsbl (3), wifi_geo (8), udp_stun (12) сортируются по-разному
+    const items = buildChecks(
+      report(thirteen({ 2: warn(), 3: warn(), 8: warn(), 12: warn() })),
+      null,
+    ).items;
+
+    expect(partitionChecksForProvider(items, "anthropic").actionItems.map((i) => i.id)).toEqual([
+      "travel",
+      "dnsbl",
+      "udp_stun",
+      "wifi_geo",
+    ]);
+    expect(partitionChecksForProvider(items, "openai").actionItems.map((i) => i.id)).toEqual([
+      "dnsbl",
+      "udp_stun",
+      "travel",
+      "wifi_geo",
+    ]);
+    expect(partitionChecksForProvider(items, "gemini").actionItems.map((i) => i.id)).toEqual([
+      "udp_stun",
+      "wifi_geo",
+      "travel",
+      "dnsbl",
+    ]);
+  });
+
+  it("деление на требующие внимания (вверху) и пройденные/na (в «Остальные проверки»)", () => {
+    // 0: geo (crit, Tier 1), 6: dns (unknown, Tier 2), 8: wifi_geo (na), 11: locale_hygiene (warn, Tier 3)
+    const r = report(thirteen({ 0: crit(), 6: unknown(), 8: unknown("not_applicable"), 11: warn() }));
+    const { items } = buildChecks(r, null);
+    const { actionItems, passedItems } = partitionChecksForProvider(items, "openai");
+
+    // Подтверждённые замечания отсортированы по Tier, затем unknown, а ok + na уходят в passedItems
+    expect(actionItems.map((i) => i.id)).toEqual(["geo_matrix", "locale_hygiene", "dns"]);
+    expect(passedItems).toHaveLength(10);
+    expect(passedItems.some((i) => i.id === "wifi_geo" && i.cls === "na")).toBe(true);
+    expect(passedItems.filter((i) => i.cls === "ok")).toHaveLength(9);
+  });
+
+  it("pickWorstProvider выбирает худший отчёт с порядком Claude -> ChatGPT -> Gemini", () => {
+    const mk = (provider: ProviderId, overall_status: RiskReport["overall_status"], over: Partial<RiskReport> = {}): RiskReport =>
+      report(thirteen(), { provider, overall_status, ...over });
+
+    expect(pickWorstProvider({})).toBe("anthropic");
+    expect(
+      pickWorstProvider({
+        anthropic: mk("anthropic", "green"),
+        openai: mk("openai", "yellow"),
+        gemini: mk("gemini", "red"),
+      }),
+    ).toBe("gemini");
+    expect(
+      pickWorstProvider({
+        anthropic: mk("anthropic", "green"),
+        openai: mk("openai", "yellow"),
+        gemini: mk("gemini", "yellow"),
+      }),
+    ).toBe("openai");
+    expect(
+      pickWorstProvider({
+        anthropic: mk("anthropic", "red"),
+        openai: mk("openai", "red"),
+        gemini: mk("gemini", "red"),
+      }),
+    ).toBe("anthropic");
+    expect(
+      pickWorstProvider({
+        anthropic: mk("anthropic", "green"),
+        openai: mk("openai", "green"),
+        gemini: mk("gemini", "green", { incomplete: true }),
+      }),
+    ).toBe("gemini");
   });
 });

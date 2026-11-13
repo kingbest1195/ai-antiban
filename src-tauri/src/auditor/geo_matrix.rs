@@ -417,12 +417,21 @@ pub fn evaluate_provider_geo(
 
     // 1. Check Global Sanctioned List (RU, BY, CN, HK, MO, IR, KP, SY, CU)
     if matrix.global_blocked_countries.contains(&country_code) {
-        let msg = if country_code == "HK" {
-            "Гонконг (HK) глобально заблокирован в Claude, OpenAI и Google Gemini. Многие ставят HK как «быстрый узел», что ведет к мгновенному бану аккаунта. Переключитесь на NL, DE или US."
-        } else if country_code == "RU" || country_code == "BY" {
-            "Подключение идет из неподдерживаемого региона. Прямой доступ к сервису ограничен политиками платформы в этой юрисдикции. Переключитесь на доверенный рабочий шлюз (NL, DE, US)."
-        } else {
-            "Доступ из этой юрисдикции заблокирован всеми основными ИИ-провайдерами. Соединение остановлено для защиты аккаунта."
+        let msg = match country_code.as_str() {
+            "HK" => match provider {
+                ProviderId::Gemini => "Гонконг (HK) заблокирован для веб-версии Google Gemini (gemini.google.com) и ограничен для Google AI Studio API (в отличие от части платных проектов Vertex AI). Также HK глобально заблокирован в Claude и OpenAI. Переключитесь на NL, DE или US.",
+                _ => "Гонконг (HK) глобально заблокирован в Claude, OpenAI и веб-версии Google Gemini (а для AI Studio API действуют строгие ограничения). Многие ставят HK как «быстрый узел», что ведет к мгновенному бану аккаунта. Переключитесь на NL, DE или US.",
+            },
+            "MO" => match provider {
+                ProviderId::Gemini => "Макао (MO) заблокирован для веб-версии Google Gemini (gemini.google.com) и ограничен для Google AI Studio API. Переключитесь на NL, DE или US.",
+                _ => "Макао (MO) глобально заблокирован в Claude, OpenAI и Google Gemini. Переключитесь на NL, DE или US.",
+            },
+            "CN" => match provider {
+                ProviderId::Gemini => "Материковый Китай (CN) заблокирован как для веб-версии Google Gemini, так и для Google AI Studio API. Переключитесь на NL, DE или US.",
+                _ => "Материковый Китай (CN) заблокирован всеми основными ИИ-провайдерами (включая Claude, OpenAI, Google Gemini web и AI Studio API). Соединение остановлено для защиты аккаунта.",
+            },
+            "RU" | "BY" => "Подключение идет из неподдерживаемого региона. Прямой доступ к сервису ограничен политиками платформы в этой юрисдикции. Переключитесь на доверенный рабочий шлюз (NL, DE, US).",
+            _ => "Доступ из этой юрисдикции заблокирован всеми основными ИИ-провайдерами. Соединение остановлено для защиты аккаунта.",
         };
 
         return CheckResult::critical(
@@ -456,44 +465,13 @@ pub fn evaluate_provider_geo(
             );
         }
 
-        // 3. Provider-specific warning countries
+        // 3. Provider-specific warning countries (includes transit hubs & partial restrictions from provider_matrix.json)
         if let Some(warn_msg) = r.warning_countries.get(&country_code) {
             return CheckResult::warning(
                 format!("{}_GEO_WARNING", provider.as_str().to_uppercase()),
                 warn_msg.clone(),
                 Some(GUIDE_PERSONAL_VPN.to_string()),
             );
-        }
-    }
-
-    // 4. Regional specifics for transit CIS & Middle East hubs
-    // ("KZ", "AM", "GE", "UZ", "KG", "RS", "AE")
-    let cis_transit = ["KZ", "AM", "GE", "UZ", "KG", "RS", "AE"];
-    if cis_transit.contains(&country_code.as_str()) {
-        match provider {
-            ProviderId::Anthropic => {
-                return CheckResult::warning(
-                    "ANTHROPIC_TRANSIT_HUB_RISK",
-                    format!(
-                        "Локация {} — транзитный хаб СНГ/Ближнего Востока. Антифрод Claude жестко банит при малейшем несовпадении страны карты или часового пояса.",
-                        country_code
-                    ),
-                    Some(GUIDE_PERSONAL_VPN.to_string()),
-                );
-            }
-            ProviderId::Gemini => {
-                return CheckResult::warning(
-                    "GEMINI_TRANSIT_RESTRICTION",
-                    format!(
-                        "В локации {} могут действовать лимиты бесплатного тарифа Google AI Studio API.",
-                        country_code
-                    ),
-                    Some(GUIDE_PERSONAL_VPN.to_string()),
-                );
-            }
-            ProviderId::Openai => {
-                // OpenAI allows transit hubs cleanly
-            }
         }
     }
 
@@ -561,13 +539,13 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_geo_matrix_turkey_gemini_blocked() {
+    fn test_provider_geo_matrix_turkey_gemini_allowed() {
         let matrix = ProviderMatrix::load_bundled().unwrap();
 
-        // Gemini in Turkey -> Critical
+        // Gemini in Turkey -> Ok (Turkey is officially supported by Gemini web & API)
         let res_gemini = evaluate_provider_geo(&matrix, ProviderId::Gemini, "TR");
-        assert_eq!(res_gemini.status, CheckStatus::Critical);
-        assert!(res_gemini.message.contains("Google Gemini"));
+        assert_eq!(res_gemini.status, CheckStatus::Ok);
+        assert_eq!(res_gemini.code, "GEO_ALLOWED");
 
         // Anthropic in Turkey -> Warning
         let res_anthropic = evaluate_provider_geo(&matrix, ProviderId::Anthropic, "TR");
@@ -576,6 +554,80 @@ mod tests {
         // OpenAI in Turkey -> Ok
         let res_openai = evaluate_provider_geo(&matrix, ProviderId::Openai, "TR");
         assert_eq!(res_openai.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn test_provider_geo_matrix_venezuela_and_anthropic_sanctioned_countries() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+
+        // Venezuela (VE) blocked for Anthropic & OpenAI, allowed for Gemini
+        let ve_anthropic = evaluate_provider_geo(&matrix, ProviderId::Anthropic, "VE");
+        assert_eq!(ve_anthropic.status, CheckStatus::Critical);
+        assert_eq!(ve_anthropic.code, "ANTHROPIC_GEO_BLOCKED");
+
+        let ve_openai = evaluate_provider_geo(&matrix, ProviderId::Openai, "VE");
+        assert_eq!(ve_openai.status, CheckStatus::Critical);
+        assert_eq!(ve_openai.code, "OPENAI_GEO_BLOCKED");
+
+        let ve_gemini = evaluate_provider_geo(&matrix, ProviderId::Gemini, "VE");
+        assert_eq!(ve_gemini.status, CheckStatus::Ok);
+
+        // AF, MM, SD, YE blocked for Anthropic
+        for &country in &["AF", "MM", "SD", "YE"] {
+            let res = evaluate_provider_geo(&matrix, ProviderId::Anthropic, country);
+            assert_eq!(res.status, CheckStatus::Critical, "expected {country} blocked for Anthropic");
+            assert_eq!(res.code, "ANTHROPIC_GEO_BLOCKED");
+        }
+    }
+
+    #[test]
+    fn test_provider_geo_matrix_global_sanctioned_and_regional_notes() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+
+        for &country in &["RU", "BY", "CN", "IR", "HK", "MO"] {
+            for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+                let res = evaluate_provider_geo(&matrix, provider, country);
+                assert_eq!(res.status, CheckStatus::Critical, "{country} for {provider:?}");
+                assert_eq!(res.code, "GLOBAL_SANCTIONED_COUNTRY");
+            }
+        }
+
+        // HK / MO / CN Gemini messages note Gemini web vs AI Studio API
+        for &country in &["HK", "MO", "CN"] {
+            let res = evaluate_provider_geo(&matrix, ProviderId::Gemini, country);
+            assert!(res.message.contains("AI Studio API"), "{country}: {}", res.message);
+            assert!(res.message.contains("Gemini"), "{country}: {}", res.message);
+        }
+
+        // UA has partial restriction warnings for all providers
+        for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+            let res = evaluate_provider_geo(&matrix, provider, "UA");
+            assert_eq!(res.status, CheckStatus::Warning, "UA for {provider:?}");
+            assert!(res.message.contains("оккупированных"), "UA: {}", res.message);
+        }
+    }
+
+    #[test]
+    fn test_provider_geo_matrix_transit_hubs_and_no_dead_warnings() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+
+        // Single source of truth in provider_matrix.json: transit hubs warn for Anthropic & Gemini, Ok for OpenAI
+        for &country in &["KZ", "AM", "GE", "UZ", "KG", "RS", "AE"] {
+            let a = evaluate_provider_geo(&matrix, ProviderId::Anthropic, country);
+            assert_eq!(a.status, CheckStatus::Warning, "Anthropic {country}");
+            let g = evaluate_provider_geo(&matrix, ProviderId::Gemini, country);
+            assert_eq!(g.status, CheckStatus::Warning, "Gemini {country}");
+            let o = evaluate_provider_geo(&matrix, ProviderId::Openai, country);
+            assert_eq!(o.status, CheckStatus::Ok, "OpenAI {country}");
+        }
+
+        // Dead warnings already covered by global_blocked_countries must not remain
+        let openai = matrix.get_provider_rules("openai").unwrap();
+        assert!(!openai.warning_countries.contains_key("IR"));
+        assert!(!openai.warning_countries.contains_key("HK"));
+        let gemini = matrix.get_provider_rules("gemini").unwrap();
+        assert!(!gemini.warning_countries.contains_key("BY"));
+        assert!(!gemini.blocked_countries.contains(&"TR".to_string()));
     }
 
     #[test]

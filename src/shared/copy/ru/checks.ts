@@ -1,4 +1,13 @@
-import type { IpType, UnknownReason } from "../../../types";
+import type { IpType, ProviderId, UnknownReason } from "../../../types";
+
+function pluralPoints(n: number): string {
+  const mod100 = n % 100;
+  const mod10 = n % 10;
+  if (mod100 >= 11 && mod100 <= 14) return `${n} пунктов`;
+  if (mod10 === 1) return `${n} пункт`;
+  if (mod10 >= 2 && mod10 <= 4) return `${n} пункта`;
+  return `${n} пунктов`;
+}
 
 /** Строки экрана «Проверки»; статусы берутся из ./status, здесь не дублируются. */
 export type CheckId =
@@ -21,6 +30,26 @@ export type CheckGroupId = "address" | "stability" | "leaks" | "environment";
 export const checks = {
   /** Подпись над экраном, когда открыт отчёт конкретного сервиса. */
   forService: (name: string) => `Проверки для: ${name}`,
+  providerSwitchLabel: "Выбор ИИ-сервиса",
+  fixHeadline: (n: number) => `Исправьте ${pluralPoints(n)}`,
+  allPassedHeadline: "Все пункты пройдены",
+  partialHeadline: "Часть не проверена",
+  ratioOf: (total: number) => `из ${total}`,
+  providerGuidance: {
+    anthropic: "Для Claude важны все проверки",
+    openai: "Для ChatGPT критичны страна, IPv6, спам-базы и тип адреса",
+    gemini: "Для Gemini критичны страна, IPv6, UDP/WebRTC, DNS и геолокация Wi-Fi",
+  } satisfies Record<ProviderId, string>,
+  priority: {
+    tier1: (name: string) => `Высокий приоритет для ${name}`,
+    tier2: (name: string) => `Средний приоритет для ${name}`,
+    tier3Required: (name: string) => `Низкий приоритет · важно для ${name}`,
+    tier3Advisory: (name: string) => `Совет · не блокирует ${name}`,
+  },
+  passedGroup: {
+    title: "Остальные проверки",
+    badge: (passed: number, total: number) => (passed > 0 ? `${passed} пройдены` : `${total} не применимы`),
+  },
   loadingTitle: "Идёт проверка сети и окружения",
   loadingText: "Это займёт несколько секунд.",
   /** Проверка ещё идёт: не «Чисто», не «Не удалось проверить». */
