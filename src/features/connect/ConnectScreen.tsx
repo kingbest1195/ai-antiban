@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AppStateData, ProviderId, RoutesSnapshot } from "../../types";
 import {
+  DIRECT_ROUTE_ID,
   bindProviderRoute,
   clearUpstreamProxy,
   getRoutesSnapshot,
@@ -552,8 +553,11 @@ export function ConnectScreen({
           <div className="zs-stack gap-3">
             {PROVIDERS.map((p) => {
               const explicitBinding = snapshot?.provider_routes[p.id];
+              const isDirectSentinel = explicitBinding === DIRECT_ROUTE_ID;
               const isDefaultEffective = !explicitBinding && Boolean(snapshot?.default_route_id);
-              const currentValue = explicitBinding || (isDefaultEffective ? "default" : "direct");
+              const currentValue = isDirectSentinel
+                ? "direct"
+                : explicitBinding || (isDefaultEffective ? "default" : "direct");
 
               const selectOptions = [
                 { value: "direct", label: copy.routes.direct },

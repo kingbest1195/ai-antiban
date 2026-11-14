@@ -174,6 +174,17 @@ export interface AppStateData {
   autostart_enabled?: boolean;
   /** Защита от фонового автозапуска ИИ-служб (Windows CoworkVMService / macOS). */
   cowork_guard_enabled?: boolean;
+  /** Режим выборочной маршрутизации VPN (split tunneling / TUN). */
+  split_tunnel_mode?: boolean;
+}
+
+/** Состояние синхронизации системного часового пояса ОС (`os_tz::OsTzSyncStatus`). */
+export interface OsTzSyncStatus {
+  synced: boolean;
+  current_os_tz: string | null;
+  original_os_tz: string | null;
+  synced_target_tz: string | null;
+  auto_restore_pending: boolean;
 }
 
 export type AppStateSnapshot = AppStateData;

@@ -1,7 +1,7 @@
 //! System proxy (PAC), CLI/IDE protection, timezone sync and forced OS cleanup commands.
 
 use crate::sanctions::is_sanctioned_or_blocked_country;
-use crate::{auditor, proxy, state, sysproxy};
+use crate::{auditor, os_tz, proxy, state, sysproxy};
 
 /// Text for a failed (partial) restore: nothing is lost, the records stay in the journal.
 const PARTIAL_RESTORE_TEXT: &str = "Часть системных настроек сейчас восстановить нельзя (например, активный VPN \
@@ -85,6 +85,24 @@ pub async fn toggle_sysproxy(
         enable_sysproxy_with(false, &state, &auditor, &proxy_manager).await
     } else {
         crate::startup::note_user_off(&app);
+        if let Some(dir) = os_tz::resolve_app_data_dir(Some(&app)) {
+            let restore_res =
+                tokio::task::spawn_blocking(move || os_tz::restore_if_synced_on_disable(&dir))
+                    .await;
+            match restore_res {
+                Ok(Ok(true)) => {
+                    eprintln!("Застава: системный часовой пояс ОС восстановлен при выключении защиты.");
+                }
+                Ok(Ok(false)) => {}
+                Ok(Err(err)) => {
+                    crate::diagnostics::record("cmd:os_tz_restore_on_disable", &err);
+                    eprintln!("Застава: не удалось восстановить часовой пояс ОС при выключении защиты: {err}");
+                }
+                Err(err) => {
+                    crate::diagnostics::record("cmd:os_tz_restore_on_disable", &err.to_string());
+                }
+            }
+        }
         let report = sysproxy::cleanup_all_persistent_settings();
         if report.has_failures() {
             crate::diagnostics::record(
@@ -263,6 +281,88 @@ pub async fn sync_ai_agents_timezone(
     Ok(format!(
         "Таймзона {zone} и английская локаль (en_US.UTF-8) синхронизированы для: {targets}."
     ))
+}
+
+async fn resolve_os_tz_target(
+    state: &state::AppState,
+    auditor: &auditor::Auditor,
+    target_tz: Option<String>,
+) -> Result<String, String> {
+    if let Some(raw) = target_tz.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return os_tz::validate_iana_tz(raw);
+    }
+
+    match auditor
+        .resolve_for_provider(auditor::ProviderId::Anthropic, state, false)
+        .await
+    {
+        Ok(tel) => {
+            if is_sanctioned_or_blocked_country(&tel.country_code) {
+                return Err(format!(
+                    "Текущий выходной IP относится к заблокированной стране ({}). Подключите безопасный VPN перед синхронизацией системного часового пояса.",
+                    tel.country_code
+                ));
+            }
+            if let Some(tz) = tel.timezone.as_deref()
+                && let Ok(clean) = os_tz::validate_iana_tz(tz)
+                && !auditor::os_env::is_russian_or_belarusian_timezone(&clean)
+            {
+                return Ok(clean);
+            }
+        }
+        Err(_) => {}
+    }
+
+    if let Some(stored) = state.get_data().await.synced_ai_timezone
+        && let Ok(clean) = os_tz::validate_iana_tz(&stored)
+        && !auditor::os_env::is_russian_or_belarusian_timezone(&clean)
+    {
+        return Ok(clean);
+    }
+
+    Err("Не удалось определить часовой пояс выходного IP. Проверьте подключение или обновите аудит.".to_string())
+}
+
+#[tauri::command]
+pub async fn sync_os_timezone_cmd(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, state::AppState>,
+    auditor: tauri::State<'_, auditor::Auditor>,
+    target_tz: Option<String>,
+) -> Result<os_tz::OsTzSyncStatus, String> {
+    let resolved_tz = resolve_os_tz_target(&state, &auditor, target_tz).await?;
+    let data_dir = os_tz::resolve_app_data_dir(Some(&app))
+        .ok_or_else(|| "Не удалось определить каталог данных приложения.".to_string())?;
+
+    let status = tokio::task::spawn_blocking(move || os_tz::sync_os_timezone(&data_dir, &resolved_tz))
+        .await
+        .map_err(|e| format!("os_tz sync task failed: {e}"))??;
+
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn restore_os_timezone_cmd(
+    app: tauri::AppHandle,
+) -> Result<os_tz::OsTzSyncStatus, String> {
+    let data_dir = os_tz::resolve_app_data_dir(Some(&app))
+        .ok_or_else(|| "Не удалось определить каталог данных приложения.".to_string())?;
+
+    tokio::task::spawn_blocking(move || os_tz::restore_os_timezone(&data_dir))
+        .await
+        .map_err(|e| format!("os_tz restore task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn get_os_timezone_sync_status_cmd(
+    app: tauri::AppHandle,
+) -> Result<os_tz::OsTzSyncStatus, String> {
+    let data_dir = os_tz::resolve_app_data_dir(Some(&app))
+        .ok_or_else(|| "Не удалось определить каталог данных приложения.".to_string())?;
+
+    tokio::task::spawn_blocking(move || os_tz::get_os_timezone_sync_status(&data_dir))
+        .await
+        .map_err(|e| format!("os_tz status task failed: {e}"))?
 }
 
 #[tauri::command]

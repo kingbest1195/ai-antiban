@@ -37,7 +37,7 @@ fn detect_chained(p: &dyn Platform, gateway_port: Option<u16>) -> PResult<Option
     }
     Ok(match p.get_inet(PROXY_SERVER)? {
         Some(RegValue {
-            kind: RegKind::Sz,
+            kind: RegKind::Sz | RegKind::ExpandSz,
             data,
         }) => parse_windows_proxy_server(&data, gateway_port),
         _ => None,
@@ -74,6 +74,10 @@ pub(super) fn enable_inet(
     ) {
         Ok(o) => note(o),
         Err(e) => {
+            crate::diagnostics::record(
+                "sysproxy:windows",
+                &format!("{} write failed: {e}", inet(AUTO_CONFIG_URL).id()),
+            );
             eprintln!("Застава: {} не включён: {e}", inet(AUTO_CONFIG_URL).id());
             return Err("Не удалось включить защиту в настройках Windows.".to_string());
         }
@@ -88,7 +92,13 @@ pub(super) fn enable_inet(
     if has_record || is_enabled_dword(&cur) {
         match j.apply(p, &inet(PROXY_ENABLE), Value::Reg(Some(RegValue::dword(0)))) {
             Ok(o) => note(o),
-            Err(e) => eprintln!("Застава: {} не изменён: {e}", inet(PROXY_ENABLE).id()),
+            Err(e) => {
+                crate::diagnostics::record(
+                    "sysproxy:windows",
+                    &format!("{} write failed: {e}", inet(PROXY_ENABLE).id()),
+                );
+                eprintln!("Застава: {} не изменён: {e}", inet(PROXY_ENABLE).id());
+            }
         }
     }
     report
@@ -282,5 +292,44 @@ mod tests {
         );
         p.seed_inet(PROXY_ENABLE, RegValue::dword(0));
         assert_eq!(detect_chained(&p, None).unwrap(), None);
+
+        // ExpandSz ProxyServer is also recognized.
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        p.seed_inet(PROXY_SERVER, RegValue::expand_sz("127.0.0.1:10808"));
+        assert_eq!(
+            detect_chained(&p, Some(8899)).unwrap().as_deref(),
+            Some("127.0.0.1:10808")
+        );
+    }
+
+    #[test]
+    fn vpn_override_on_windows_rechains_and_heals_pac_and_proxy_enable() {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz(PAC)));
+        p.clear_calls();
+
+        // A VPN client (e.g. Throne/v2rayN/Happ) blanks AutoConfigURL and sets ProxyEnable=1.
+        p.seed_inet(AUTO_CONFIG_URL, RegValue::sz(""));
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        p.seed_inet(PROXY_SERVER, RegValue::sz("127.0.0.1:10808"));
+        assert_eq!(
+            detect_chained(&p, Some(8899)).unwrap().as_deref(),
+            Some("127.0.0.1:10808")
+        );
+
+        let rep = enable_inet(&mut j, &p, PAC).unwrap();
+        assert!(rep.changed);
+        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz(PAC)));
+        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(0)));
+        assert!(p.calls().iter().any(|c| c.starts_with("notify_inet_refresh")));
+
+        // Clean restore brings back the VPN's empty AutoConfigURL and ProxyEnable=1 without
+        // touching ProxyServer.
+        j.restore_all(&p);
+        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz("")));
+        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(1)));
+        assert_eq!(p.inet_of(PROXY_SERVER), Some(RegValue::sz("127.0.0.1:10808")));
     }
 }

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub const COWORK_SERVICE_NAME: &str = "CoworkVMService";
 pub const COWORK_SERVICE_REG_PATH: &str =
     r"HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService";
+#[cfg(target_os = "windows")]
+const COWORK_SERVICE_REG_SUBKEY: &str = r"SYSTEM\CurrentControlSet\Services\CoworkVMService";
 pub const COWORK_TASK_PATH: &str = r"\Zastava\";
 pub const COWORK_TASK_NAME: &str = "CoworkVMServiceManualGuard";
 pub const COWORK_TASK_FULL_NAME: &str = r"Zastava\CoworkVMServiceManualGuard";
@@ -194,12 +196,12 @@ fn run_hidden_cmd(program: &str, args: &[&str]) -> Option<std::process::Output> 
 
 #[cfg(target_os = "windows")]
 fn query_windows_status() -> CoworkGuardStatus {
-    let reg_out = run_hidden_cmd("reg.exe", &["query", COWORK_SERVICE_REG_PATH, "/v", "Start"]);
-    let (service_present, start_type) = match reg_out {
-        Some(ref out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            (true, parse_reg_start_dword(&text))
-        }
+    let (service_present, start_type) = match crate::win_reg::get_dword(
+        crate::win_reg::RootKey::HkeyLocalMachine,
+        COWORK_SERVICE_REG_SUBKEY,
+        "Start",
+    ) {
+        Ok(Some(v)) => (true, Some(v)),
         _ => (false, None),
     };
 

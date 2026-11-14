@@ -21,11 +21,11 @@ pub const GOOGLE_TXT_HOST: &str = "o-o.myaddr.l.google.com";
 pub const MEASURED_VIA: &str = "whoami:akamai+google";
 
 /// Time limit of each whoami lookup (both A-record and TXT run in parallel).
-/// Together with `GEO_TOTAL_LIMIT` (1800 ms) stays under `CHECK_LIMIT_IO` (4000 ms).
-pub const WHOAMI_LIMIT: Duration = Duration::from_millis(2000);
+/// Together with `GEO_TOTAL_LIMIT` (1400 ms) stays under `CHECK_LIMIT_IO` (4000 ms).
+pub const WHOAMI_LIMIT: Duration = Duration::from_millis(2500);
 /// Time limit of one geo request and of the whole geo cascade.
-const GEO_REQUEST_LIMIT: Duration = Duration::from_millis(900);
-const GEO_TOTAL_LIMIT: Duration = Duration::from_millis(1800);
+const GEO_REQUEST_LIMIT: Duration = Duration::from_millis(800);
+const GEO_TOTAL_LIMIT: Duration = Duration::from_millis(1400);
 
 /// What one whoami source gave.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,7 +334,7 @@ pub struct PublicDns {
 
 /// Public resolvers whose whoami egress address is placed by geo services in the country of the
 /// nearest point of presence: comparing that country with the exit country proves nothing.
-pub const PUBLIC_DNS_SERVICES: [PublicDns; 5] = [
+pub const PUBLIC_DNS_SERVICES: &[PublicDns] = &[
     PublicDns {
         name: "Google Public DNS",
         asns: &[15169, 36040, 19527, 396982],
@@ -359,6 +359,21 @@ pub const PUBLIC_DNS_SERVICES: [PublicDns; 5] = [
         name: "AdGuard DNS",
         asns: &[212772],
         org_keywords: &["adguard"],
+    },
+    PublicDns {
+        name: "NextDNS",
+        asns: &[34939],
+        org_keywords: &["nextdns"],
+    },
+    PublicDns {
+        name: "Control D",
+        asns: &[399820],
+        org_keywords: &["control d", "controld"],
+    },
+    PublicDns {
+        name: "Mullvad DNS",
+        asns: &[39351],
+        org_keywords: &["mullvad"],
     },
 ];
 
@@ -498,7 +513,7 @@ pub async fn measure_resolver(
     geo_cache: &TtlCache<Result<GeoInfo, UnknownReason>>,
 ) -> ResolverView {
     let (akamai, google) = tokio::join!(
-        dns.lookup(AKAMAI_HOST, WHOAMI_LIMIT),
+        dns.lookup_uncached(AKAMAI_HOST, WHOAMI_LIMIT),
         dns.lookup_txt(GOOGLE_TXT_HOST, WHOAMI_LIMIT)
     );
     let (akamai, google) = (akamai_reading(&akamai), google_reading(&google));

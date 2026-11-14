@@ -6,7 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
-use crate::auditor::geo_matrix::{CheckResult, UnknownReason};
+use crate::auditor::geo_matrix::{
+    CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo,
+};
+use crate::auditor::rules::ProviderMatrix;
+use crate::auditor::seams::{HttpProbeOutcome, IpProbe};
 use crate::routing::net::resolve_entry_checked;
 use crate::routing::{route_fingerprint, route_id_for_raw_key, Entry, EntryProto, Route};
 use crate::state::UpstreamProxyConfig;
@@ -569,22 +573,14 @@ impl NetworkResolver {
             .map_err(|e| e.to_string())?;
 
         let text = resp.text().await.map_err(|e| e.to_string())?;
-        let mut ip = None;
-        let mut loc = None;
-
-        for line in text.lines() {
-            if let Some(val) = line.strip_prefix("ip=") {
-                ip = Some(val.trim().to_string());
-            } else if let Some(val) = line.strip_prefix("loc=") {
-                loc = Some(val.trim().to_uppercase());
-            }
-        }
-
-        let ip = ip.ok_or("1.1.1.1/cdn-cgi/trace missing 'ip'")?;
-        let country_code = loc.ok_or("1.1.1.1/cdn-cgi/trace missing 'loc'")?;
+        let trace = parse_cloudflare_trace(&text)
+            .ok_or_else(|| "1.1.1.1/cdn-cgi/trace missing 'ip'".to_string())?;
+        let country_code = trace
+            .loc
+            .ok_or_else(|| "1.1.1.1/cdn-cgi/trace missing 'loc'".to_string())?;
 
         Ok(NetworkTelemetry {
-            ip,
+            ip: trace.ip,
             country_code,
             hostname: None,
             asn: None,
@@ -594,6 +590,388 @@ impl NetworkResolver {
             resolved_at: current_timestamp(),
         })
     }
+
+    /// Probes the actual exit observed by the active AI provider (via its bound route if any,
+    /// or the system direct client otherwise) to catch split-tunnel / QUIC / PAC leaks.
+    pub async fn probe_provider_exit(
+        &self,
+        provider: ProviderId,
+        route: Option<&Route>,
+        telemetry: &NetworkTelemetry,
+        matrix: &ProviderMatrix,
+    ) -> CheckResult {
+        self.probe_provider_exit_with_probe(provider, route, telemetry, matrix, None)
+            .await
+    }
+
+    /// Variant of [`Self::probe_provider_exit`] that routes direct (unbound) probes through an
+    /// injected [`IpProbe`] when provided by `Auditor::with_env` tests.
+    pub async fn probe_provider_exit_with_probe(
+        &self,
+        provider: ProviderId,
+        route: Option<&Route>,
+        telemetry: &NetworkTelemetry,
+        matrix: &ProviderMatrix,
+        direct_probe: Option<&dyn IpProbe>,
+    ) -> CheckResult {
+        let url_override = default_exit_probe_url(provider);
+        self.probe_provider_exit_inner(
+            provider,
+            route,
+            telemetry,
+            matrix,
+            url_override,
+            None,
+            direct_probe,
+            Duration::from_millis(REQUEST_TIMEOUT_MS),
+        )
+        .await
+    }
+
+    /// Testable core of [`Self::probe_provider_exit`]: probes `probe_url` directly or through
+    /// `route`'s entry nodes (falling back to `client_override` / custom `timeout` in tests).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn probe_provider_exit_with_url(
+        &self,
+        provider: ProviderId,
+        route: Option<&Route>,
+        telemetry: &NetworkTelemetry,
+        matrix: &ProviderMatrix,
+        probe_url: &str,
+        client_override: Option<&reqwest::Client>,
+        timeout: Duration,
+    ) -> CheckResult {
+        self.probe_provider_exit_inner(
+            provider,
+            route,
+            telemetry,
+            matrix,
+            probe_url,
+            client_override,
+            None,
+            timeout,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn probe_provider_exit_inner(
+        &self,
+        provider: ProviderId,
+        route: Option<&Route>,
+        telemetry: &NetworkTelemetry,
+        matrix: &ProviderMatrix,
+        probe_url: &str,
+        client_override: Option<&reqwest::Client>,
+        direct_probe: Option<&dyn IpProbe>,
+        timeout: Duration,
+    ) -> CheckResult {
+        let via_host = match provider {
+            ProviderId::Anthropic => "claude.ai",
+            ProviderId::Openai => "chatgpt.com",
+            ProviderId::Gemini => "gemini (ipinfo.io)",
+        };
+        let via_label = if route.is_some() {
+            format!("{via_host} (маршрут ключа)")
+        } else {
+            via_host.to_string()
+        };
+
+        if provider == ProviderId::Gemini && route.is_none() {
+            return CheckResult::unknown(
+                "PROVIDER_EXIT_NOT_APPLICABLE",
+                "Выход не проверен напрямую: Google Gemini не отдает /cdn-cgi/trace на прямом маршруте.",
+                UnknownReason::NotApplicable,
+            )
+            .with_measured_via("gemini (без отдельного маршрута)");
+        }
+
+        let response = if let Some(c) = client_override {
+            probe_url_with_client(c, probe_url, timeout).await
+        } else if let Some(r) = route {
+            if r.entries.is_empty() {
+                return CheckResult::unknown(
+                    "PROVIDER_EXIT_NO_ROUTE_ENTRY",
+                    format!(
+                        "Не удалось проверить реальный выход {}: у маршрута нет входных узлов.",
+                        provider.display_name()
+                    ),
+                    UnknownReason::NoData,
+                )
+                .with_measured_via(via_label);
+            }
+            let allow_local = r.allows_local_entries();
+            let gateway_port = self.gateway_port();
+            let mut last_err = ProbeFetchError::Unreachable("no route entry attempted".into());
+            let mut fetched = None;
+            for entry in &r.entries {
+                match build_entry_client(entry, allow_local, gateway_port).await {
+                    Ok(c) => match probe_url_with_client(&c, probe_url, timeout).await {
+                        Ok(payload) => {
+                            fetched = Some(payload);
+                            break;
+                        }
+                        Err(e) => last_err = e,
+                    },
+                    Err(e) => last_err = ProbeFetchError::Unreachable(e),
+                }
+            }
+            match fetched {
+                Some(ok) => Ok(ok),
+                None => Err(last_err),
+            }
+        } else if let Some(probe) = direct_probe {
+            match probe.get(probe_url, timeout).await {
+                HttpProbeOutcome::Response { status, body } => Ok((status, body)),
+                HttpProbeOutcome::Timeout => Err(ProbeFetchError::Timeout),
+                HttpProbeOutcome::ConnectFailed
+                | HttpProbeOutcome::ReadFailed
+                | HttpProbeOutcome::ClientError => {
+                    Err(ProbeFetchError::Unreachable("probe transport error".into()))
+                }
+            }
+        } else {
+            probe_url_with_client(&self.client, probe_url, timeout).await
+        };
+
+        let (status, body) = match response {
+            Ok(pair) => pair,
+            Err(ProbeFetchError::Timeout) => {
+                return CheckResult::unknown(
+                    "PROVIDER_EXIT_TIMEOUT",
+                    format!(
+                        "Таймаут проверки реального выхода {} через {}: источник не ответил вовремя.",
+                        provider.display_name(),
+                        via_host
+                    ),
+                    UnknownReason::Timeout,
+                )
+                .with_measured_via(via_label);
+            }
+            Err(ProbeFetchError::Unreachable(e)) => {
+                return CheckResult::unknown(
+                    "PROVIDER_EXIT_UNREACHABLE",
+                    format!(
+                        "Не удалось проверить реальный выход {} через {}: {e}",
+                        provider.display_name(),
+                        via_host
+                    ),
+                    UnknownReason::NetworkError,
+                )
+                .with_measured_via(via_label);
+            }
+        };
+
+        if status == 403 || !(200..300).contains(&status) || looks_like_html(&body) {
+            return CheckResult::unknown(
+                "PROVIDER_EXIT_REFUSED",
+                format!(
+                    "Источник {} отклонил проверку реального выхода (HTTP {status} или anti-bot страница).",
+                    via_host
+                ),
+                UnknownReason::SourceRefused,
+            )
+            .with_measured_via(via_label);
+        }
+
+        let (exit_ip, trace_loc, colo) = if provider == ProviderId::Gemini {
+            match parse_gemini_exit_probe(&body) {
+                Some((ip, loc)) => (ip, loc, None),
+                None => {
+                    return CheckResult::unknown(
+                        "PROVIDER_EXIT_REFUSED",
+                        format!(
+                            "Не удалось разобрать ответ проверки реального выхода {}.",
+                            via_host
+                        ),
+                        UnknownReason::SourceRefused,
+                    )
+                    .with_measured_via(via_label);
+                }
+            }
+        } else {
+            match parse_cloudflare_trace(&body) {
+                Some(trace) => (trace.ip, trace.loc, trace.colo),
+                None => {
+                    return CheckResult::unknown(
+                        "PROVIDER_EXIT_REFUSED",
+                        format!(
+                            "Ответ {} не содержит корректного поля ip= для проверки выхода.",
+                            via_host
+                        ),
+                        UnknownReason::SourceRefused,
+                    )
+                    .with_measured_via(via_label);
+                }
+            }
+        };
+
+        let effective_cc = trace_loc
+            .as_deref()
+            .filter(|cc| !cc.is_empty() && !matches!(*cc, "XX" | "ZZ"))
+            .unwrap_or(&telemetry.country_code);
+        let geo = evaluate_provider_geo(matrix, provider, effective_cc);
+        if geo.status == CheckStatus::Critical {
+            return CheckResult::critical(
+                "PROVIDER_EXIT_BLOCKED_COUNTRY",
+                format!(
+                    "Реальный выход {} ({}) определен как {} ({exit_ip}): {}",
+                    provider.display_name(),
+                    via_host,
+                    effective_cc,
+                    geo.message
+                ),
+                geo.guide_ref,
+            )
+            .with_measured_via(via_label);
+        }
+
+        if route.is_none() && exit_ip != telemetry.ip {
+            return CheckResult::warning(
+                "PROVIDER_EXIT_SPLIT_MISMATCH",
+                format!(
+                    "Маршрут ИИ ({exit_ip}, {effective_cc}) и общий выход ({}) различаются (split tunnel/PAC) — проверьте настройки прокси и QUIC/DoH.",
+                    telemetry.ip
+                ),
+                geo.guide_ref,
+            )
+            .with_measured_via(via_label);
+        }
+
+        if geo.status == CheckStatus::Warning {
+            return CheckResult::warning(
+                "PROVIDER_EXIT_GEO_WARNING",
+                format!(
+                    "Реальный выход {} ({exit_ip}, {effective_cc}): {}",
+                    via_host, geo.message
+                ),
+                geo.guide_ref,
+            )
+            .with_measured_via(via_label);
+        }
+
+        let colo_note = colo
+            .as_deref()
+            .map(|c| format!(", POP {c}"))
+            .unwrap_or_default();
+        let route_note = if route.is_some() && exit_ip != telemetry.ip {
+            format!("; отличается от общей телеметрии маршрута {}", telemetry.ip)
+        } else {
+            String::new()
+        };
+        CheckResult::ok(
+            "PROVIDER_EXIT_VERIFIED",
+            format!(
+                "Реальный выход {} подтвержден: {exit_ip} ({effective_cc}{colo_note}){route_note}.",
+                provider.display_name()
+            ),
+        )
+        .with_measured_via(via_label)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudflareTrace {
+    pub ip: String,
+    pub loc: Option<String>,
+    pub colo: Option<String>,
+}
+
+/// Parses a Cloudflare `/cdn-cgi/trace` key=value response, validating that `ip=` is a real IP address.
+pub fn parse_cloudflare_trace(text: &str) -> Option<CloudflareTrace> {
+    let mut ip: Option<String> = None;
+    let mut loc: Option<String> = None;
+    let mut colo: Option<String> = None;
+
+    for line in text.lines() {
+        if let Some(val) = line.strip_prefix("ip=") {
+            let trimmed = val.trim();
+            if trimmed.parse::<IpAddr>().is_ok() {
+                ip = Some(trimmed.to_string());
+            }
+        } else if let Some(val) = line.strip_prefix("loc=") {
+            let trimmed = val.trim().to_uppercase();
+            if !trimmed.is_empty() {
+                loc = Some(trimmed);
+            }
+        } else if let Some(val) = line.strip_prefix("colo=") {
+            let trimmed = val.trim().to_uppercase();
+            if !trimmed.is_empty() {
+                colo = Some(trimmed);
+            }
+        }
+    }
+
+    ip.map(|ip| CloudflareTrace { ip, loc, colo })
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with('<')
+        || trimmed
+            .get(..64)
+            .is_some_and(|head| {
+                let lower = head.to_ascii_lowercase();
+                lower.contains("<!doctype") || lower.contains("<html")
+            })
+}
+
+fn parse_gemini_exit_probe(body: &str) -> Option<(String, Option<String>)> {
+    if let Ok(parsed) = serde_json::from_str::<IpInfoResponse>(body)
+        && let Some(ip) = parsed.ip.filter(|s| s.trim().parse::<IpAddr>().is_ok())
+    {
+        let loc = parsed.country.map(|c| c.trim().to_uppercase());
+        return Some((ip.trim().to_string(), loc));
+    }
+    let trimmed = body.trim();
+    if trimmed.parse::<IpAddr>().is_ok() {
+        return Some((trimmed.to_string(), None));
+    }
+    None
+}
+
+fn default_exit_probe_url(provider: ProviderId) -> &'static str {
+    match provider {
+        ProviderId::Anthropic => "https://claude.ai/cdn-cgi/trace",
+        ProviderId::Openai => "https://chatgpt.com/cdn-cgi/trace",
+        ProviderId::Gemini => "https://ipinfo.io/json",
+    }
+}
+
+enum ProbeFetchError {
+    Timeout,
+    Unreachable(String),
+}
+
+async fn probe_url_with_client(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> Result<(u16, String), ProbeFetchError> {
+    let resp = client
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                ProbeFetchError::Timeout
+            } else {
+                ProbeFetchError::Unreachable(e.to_string())
+            }
+        })?;
+    let status = resp.status().as_u16();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                ProbeFetchError::Timeout
+            } else {
+                ProbeFetchError::Unreachable(e.to_string())
+            }
+        })?;
+    Ok((status, body))
 }
 
 /// Gate 10: Evaluates reverse DNS / hostname / ISP / org for suspicious proxy and anonymizer markers.
@@ -1015,5 +1393,249 @@ mod tests {
         resolver.invalidate_route("route-a").await;
         // No entries -> cannot resolve, and never falls back to the direct cache.
         assert!(resolver.resolve_with_route(false, Some(&mk("route-a"))).await.is_err());
+    }
+
+    async fn spawn_http_mock(
+        status: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+        delay: Duration,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{}/cdn-cgi/trace", addr.port())
+    }
+
+    #[tokio::test]
+    async fn probe_provider_exit_matches_telemetry_ip_and_sets_measured_via() {
+        let url = spawn_http_mock(
+            "200 OK",
+            "text/plain",
+            "fl=1\nip=185.10.20.30\nloc=NL\ncolo=AMS\n",
+            Duration::ZERO,
+        )
+        .await;
+        let resolver = NetworkResolver::new();
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let telemetry = NetworkTelemetry {
+            ip: "185.10.20.30".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: Some(20473),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let res = resolver
+            .probe_provider_exit_with_url(
+                ProviderId::Anthropic,
+                None,
+                &telemetry,
+                &matrix,
+                &url,
+                Some(&client),
+                Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(res.status, CheckStatus::Ok);
+        assert_eq!(res.code, "PROVIDER_EXIT_VERIFIED");
+        assert_eq!(res.measured_via.as_deref(), Some("claude.ai"));
+        assert!(res.message.contains("185.10.20.30"));
+        assert!(res.message.contains("AMS"));
+    }
+
+    #[tokio::test]
+    async fn probe_provider_exit_warns_on_split_tunnel_ip_mismatch() {
+        let url = spawn_http_mock(
+            "200 OK",
+            "text/plain",
+            "fl=1\nip=95.10.20.30\nloc=DE\ncolo=FRA\n",
+            Duration::ZERO,
+        )
+        .await;
+        let resolver = NetworkResolver::new();
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let telemetry = NetworkTelemetry {
+            ip: "185.10.20.30".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: Some(20473),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let res = resolver
+            .probe_provider_exit_with_url(
+                ProviderId::Anthropic,
+                None,
+                &telemetry,
+                &matrix,
+                &url,
+                Some(&client),
+                Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(res.status, CheckStatus::Warning);
+        assert_eq!(res.code, "PROVIDER_EXIT_SPLIT_MISMATCH");
+        assert!(res.message.contains("split tunnel/PAC"));
+    }
+
+    #[tokio::test]
+    async fn probe_provider_exit_returns_source_refused_on_403_and_html_challenge() {
+        let url_403 = spawn_http_mock(
+            "403 Forbidden",
+            "text/plain",
+            "Just a moment...",
+            Duration::ZERO,
+        )
+        .await;
+        let url_html = spawn_http_mock(
+            "200 OK",
+            "text/html",
+            "<!doctype html><html><body>Challenge</body></html>",
+            Duration::ZERO,
+        )
+        .await;
+        let resolver = NetworkResolver::new();
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let telemetry = NetworkTelemetry {
+            ip: "185.10.20.30".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: None,
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        for url in [url_403, url_html] {
+            let res = resolver
+                .probe_provider_exit_with_url(
+                    ProviderId::Openai,
+                    None,
+                    &telemetry,
+                    &matrix,
+                    &url,
+                    Some(&client),
+                    Duration::from_secs(2),
+                )
+                .await;
+            assert_eq!(res.status, CheckStatus::Unknown);
+            assert_eq!(res.reason, Some(UnknownReason::SourceRefused));
+            assert_eq!(res.measured_via.as_deref(), Some("chatgpt.com"));
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_provider_exit_returns_timeout_when_server_stalls() {
+        let url = spawn_http_mock(
+            "200 OK",
+            "text/plain",
+            "ip=185.10.20.30\nloc=NL\n",
+            Duration::from_millis(300),
+        )
+        .await;
+        let resolver = NetworkResolver::new();
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let telemetry = NetworkTelemetry {
+            ip: "185.10.20.30".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: None,
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let res = resolver
+            .probe_provider_exit_with_url(
+                ProviderId::Anthropic,
+                None,
+                &telemetry,
+                &matrix,
+                &url,
+                Some(&client),
+                Duration::from_millis(50),
+            )
+            .await;
+        assert_eq!(res.status, CheckStatus::Unknown);
+        assert_eq!(res.reason, Some(UnknownReason::Timeout));
+    }
+
+    #[tokio::test]
+    async fn probe_provider_exit_gemini_direct_is_not_applicable_and_bound_route_uses_route_label() {
+        let url = spawn_http_mock(
+            "200 OK",
+            "application/json",
+            r#"{"ip":"185.55.66.77","country":"DE"}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let resolver = NetworkResolver::new();
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let telemetry = NetworkTelemetry {
+            ip: "185.55.66.77".to_string(),
+            country_code: "DE".to_string(),
+            hostname: None,
+            asn: Some(24940),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        let direct = resolver
+            .probe_provider_exit(ProviderId::Gemini, None, &telemetry, &matrix)
+            .await;
+        assert_eq!(direct.status, CheckStatus::Unknown);
+        assert_eq!(direct.reason, Some(UnknownReason::NotApplicable));
+
+        let route = Route {
+            id: "r1".to_string(),
+            label: "DE VPS".to_string(),
+            country: Some("DE".to_string()),
+            exit_ip: None,
+            expires_at: None,
+            entries: vec![],
+            raw_key: String::new(),
+            enabled: true,
+            added_at: 0,
+        };
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let bound = resolver
+            .probe_provider_exit_with_url(
+                ProviderId::Gemini,
+                Some(&route),
+                &telemetry,
+                &matrix,
+                &url,
+                Some(&client),
+                Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(bound.status, CheckStatus::Ok);
+        assert_eq!(bound.measured_via.as_deref(), Some("gemini (ipinfo.io) (маршрут ключа)"));
     }
 }

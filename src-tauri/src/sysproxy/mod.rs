@@ -13,6 +13,7 @@
 //! process-wide instances of both.
 
 mod ai_cli;
+pub(crate) mod browser_policies;
 mod cleanup;
 mod cli_protection;
 pub mod fs;
@@ -956,6 +957,7 @@ fn enable_with_mode(
     } else {
         enable_system_proxy(j, p, pac_url, false)?
     };
+    let _ = browser_policies::apply_browser_policies(j, p);
     mark_active(st, pac_url);
     Ok(report)
 }

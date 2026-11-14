@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{watch, RwLock};
 
-use crate::routing::{select_route, select_route_id, Route, RouteHealthRegistry, RouteSelection};
+use crate::routing::{
+    select_route, select_route_id, Route, RouteHealthRegistry, RouteSelection, DIRECT_ROUTE_ID,
+};
 
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
 pub const PROVIDER_OPENAI: &str = "openai";
@@ -251,6 +253,10 @@ pub struct AppStateData {
     /// Manual kill-switch ("СТОП СЕТИ"). Restored at launch: a restart must not lift it silently.
     #[serde(default)]
     pub manual_killswitch: bool,
+    /// When true, split-tunnel/PAC routing is expected: IPv6 direct checks and NetworkGuard's
+    /// general-interface exit IP jitter checks do not trigger false leak warnings or locks.
+    #[serde(default)]
+    pub split_tunnel_mode: bool,
     /// Routes of `state.json` this version does not understand (e.g. a future `proto`). They are
     /// skipped (their bindings become `Missing`, i.e. blocked) but written back unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -445,6 +451,7 @@ impl Default for AppStateData {
             legacy_route_id: None,
             profile_route_invalid: None,
             manual_killswitch: false,
+            split_tunnel_mode: false,
             skipped_routes: Vec::new(),
         }
     }
@@ -969,6 +976,18 @@ impl AppState {
         self.save_async().await
     }
 
+    pub async fn is_split_tunnel_mode(&self) -> bool {
+        self.inner.read().await.split_tunnel_mode
+    }
+
+    pub async fn set_split_tunnel_mode(&self, enabled: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.split_tunnel_mode = enabled;
+        }
+        self.save_async().await
+    }
+
     pub async fn set_sysproxy_enabled(&self, _enabled: bool) -> Result<(), StateError> {
         Ok(())
     }
@@ -1121,6 +1140,12 @@ impl AppState {
     /// Adds or replaces (same id) a route; an existing route keeps its `enabled` flag. No
     /// validation here: keys are validated by the parser.
     pub async fn upsert_route(&self, route: Route) -> Result<String, StateError> {
+        if route.id == DIRECT_ROUTE_ID {
+            return Err(StateError::PathError(format!(
+                "reserved route id: {}",
+                route.id
+            )));
+        }
         let id = route.id.clone();
         {
             let mut w = self.inner.write().await;
@@ -1167,7 +1192,8 @@ impl AppState {
         Ok(found)
     }
 
-    /// Binds a provider (canonical id) to a route, or unbinds it with `None`.
+    /// Binds a provider (canonical id) to a route (or [`DIRECT_ROUTE_ID`] to force direct even
+    /// when `default_route_id` is set), or unbinds it with `None` to inherit `default_route_id`.
     pub async fn bind_provider_route(
         &self,
         provider: &str,
@@ -1177,7 +1203,7 @@ impl AppState {
             let mut w = self.inner.write().await;
             match route_id {
                 Some(id) => {
-                    if !w.has_route(id) {
+                    if id != DIRECT_ROUTE_ID && !w.has_route(id) {
                         return Err(StateError::PathError(format!("unknown route id: {id}")));
                     }
                     w.provider_routes.insert(provider.to_string(), id.to_string());
@@ -2200,5 +2226,62 @@ mod tests {
             None,
             "malformed name is never applied"
         );
+    }
+
+    #[tokio::test]
+    async fn direct_route_sentinel_persists_and_overrides_default_route() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState::load_or_default(path.clone());
+        let route = crate::routing::parse_route_key("socks5://1.2.3.4:1080#nl", 1).unwrap();
+        let rid = state.upsert_route(route).await.unwrap();
+        state.set_default_route(Some(&rid)).await.unwrap();
+
+        // Explicit direct overrides default_route_id without failing unknown route check.
+        state
+            .bind_provider_route("gemini", Some(DIRECT_ROUTE_ID))
+            .await
+            .unwrap();
+        let reloaded = AppState::load_or_default(path);
+        let data = reloaded.get_data().await;
+        assert_eq!(
+            select_route_id(&data, "gemini"),
+            None,
+            "gemini must stay direct when bound to DIRECT_ROUTE_ID"
+        );
+        assert_eq!(
+            select_route_id(&data, "openai").as_deref(),
+            Some(rid.as_str()),
+            "openai still inherits default_route_id"
+        );
+
+        // set_default_route still rejects DIRECT_ROUTE_ID.
+        assert!(reloaded.set_default_route(Some(DIRECT_ROUTE_ID)).await.is_err());
+
+        // Passing None clears the explicit override so gemini falls back to default_route_id.
+        reloaded.bind_provider_route("gemini", None).await.unwrap();
+        let data = reloaded.get_data().await;
+        assert_eq!(select_route_id(&data, "gemini").as_deref(), Some(rid.as_str()));
+    }
+
+    #[tokio::test]
+    async fn state_migration_defaults_missing_split_tunnel_mode_to_false_and_persists_updates() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // Legacy state.json without `split_tunnel_mode`.
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"strict_pinning_enabled":true,"auto_update_enabled":true}"#,
+        )
+        .unwrap();
+
+        let state = AppState::load_or_default(path.clone());
+        assert!(!state.is_split_tunnel_mode().await);
+        assert!(!state.get_data().await.split_tunnel_mode);
+
+        state.set_split_tunnel_mode(true).await.unwrap();
+        let reloaded = AppState::load_or_default(path);
+        assert!(reloaded.is_split_tunnel_mode().await);
+        assert!(reloaded.get_data().await.split_tunnel_mode);
     }
 }

@@ -270,6 +270,22 @@ pub async fn get_gateway_stats(
     Ok(state.get_gateway_stats().await)
 }
 
+#[tauri::command]
+pub async fn get_split_tunnel_mode(state: tauri::State<'_, state::AppState>) -> Result<bool, String> {
+    Ok(state.is_split_tunnel_mode().await)
+}
+
+#[tauri::command]
+pub async fn set_split_tunnel_mode(
+    enabled: bool,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    state
+        .set_split_tunnel_mode(enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,7 +336,7 @@ mod tests {
             ipv6_exit: false,
             checks: vec![ok.clone()],
             unknown_count: 0,
-            applicable_count: 13,
+            applicable_count: 14,
             incomplete: false,
         };
 

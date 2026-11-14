@@ -301,7 +301,14 @@ fn plan_physical_pac(
         .to_string());
     }
     if let Some((guard, _)) = heal {
-        guard.network(services.iter().map(ServiceId::key).collect());
+        let mut fingerprint: Vec<String> = services
+            .iter()
+            .map(|s| format!("svc:{}", s.key()))
+            .collect();
+        for name in &vpn_untouched {
+            fingerprint.push(format!("vpn:{name}"));
+        }
+        guard.network(fingerprint);
         services.retain(|s| !guard.is_suspended(&s.key()));
     }
     let gateway_port = parse_gateway_port_from_pac_url(pac_url);
@@ -453,6 +460,20 @@ fn apply_pac(
                 Err(e) => eprintln!("Застава: {} не изменён: {e}", chain_res.id()),
             }
         }
+    }
+    if !report.skipped_vpn.is_empty()
+        && let Ok(eff) = p.effective_proxy()
+        && (eff.pac_enabled != Some(true) || eff.pac_url.as_deref() != Some(pac_url))
+    {
+        crate::diagnostics::record(
+            "sysproxy:macos",
+            &format!(
+                "effective proxy differs while vpn active ({}): pac_enabled={:?}, url_matches={}",
+                report.skipped_vpn.join(","),
+                eff.pac_enabled,
+                eff.pac_url.as_deref() == Some(pac_url)
+            ),
+        );
     }
     if report.configured.is_empty() && (failed > 0 || planned.unreadable > 0) {
         crate::diagnostics::record(
@@ -1679,5 +1700,52 @@ mod tests {
             j.entry(&Resource::Chain { service: wifi() }).unwrap().state,
             EntryState::Applied
         );
+    }
+
+    #[test]
+    fn vpn_disconnect_resets_heal_guard_so_physical_pac_heals_again() {
+        let (fs, p) = setup();
+        let _vpn = p.add_vpn_service("WireGuard", true);
+
+        let mut j = open(&fs);
+        let guard = HealGuard::new();
+        let t0 = Instant::now();
+        enable_pac(&mut j, &p, PAC).unwrap();
+
+        // Simulate VPN rewriting Wi-Fi PAC repeatedly until HealGuard suspends Wi-Fi.
+        for step in 0..HEAL_MAX_REWRITES {
+            p.seed_pac(&wifi(), pac(None, Some(false)));
+            let report =
+                refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(step as u64 + 1))
+                    .unwrap();
+            assert_eq!(report.skipped_vpn, vec!["WireGuard"]);
+        }
+        assert!(guard.is_suspended(&wifi().key()));
+
+        // While the same VPN stays connected, Wi-Fi stays suspended (no ping-pong).
+        p.seed_pac(&wifi(), pac(None, Some(false)));
+        let rep = refresh_pac(
+            &mut j,
+            &p,
+            PAC,
+            &guard,
+            t0 + Duration::from_secs(HEAL_MAX_REWRITES as u64 + 5),
+        )
+        .unwrap();
+        assert!(rep.configured.is_empty());
+
+        // Once the VPN disconnects, fingerprint changes and Wi-Fi PAC heals immediately.
+        p.set_vpn_connection("WireGuard", false);
+        let rep = refresh_pac(
+            &mut j,
+            &p,
+            PAC,
+            &guard,
+            t0 + Duration::from_secs(HEAL_MAX_REWRITES as u64 + 10),
+        )
+        .unwrap();
+        assert!(!guard.is_suspended(&wifi().key()));
+        assert_eq!(rep.configured, vec!["Wi-Fi"]);
+        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some(PAC));
     }
 }

@@ -7,6 +7,32 @@
 
 ---
 
+## [2.1.2] — 2026-11-14
+
+Релиз с жёстким перехватом браузерного ИИ-трафика (включая Google Gemini), синхронизацией системного часового пояса ОС, проверкой реального выхода до ИИ-сервисов и исправлением автозапуска на Windows 11 Pro.
+
+### Добавлено
+* **14-я проверка сети — реальный выход к ИИ-сервису (`claude_exit`, WP-13):** проверяет фактический выходной IP и страну напрямую до `claude.ai/cdn-cgi/trace`, `chatgpt.com/cdn-cgi/trace` и `ipinfo.io/json` через привязанный маршрут Gemini (привязка к провайдеру без маршрута для Gemini помечается «Не применимо»), с выводом `measured_via` на экране «Проверки».
+* **Режим `split_tunnel_mode` в настройках (WP-13):** переключатель «Выборочная маршрутизация VPN (split tunneling)» с подсказкой добавить процесс `zastava` в правила VPN/TUN; в этом режиме не блокируются колебания `1.1.1.1` на общем маршруте и информационные срабатывания IPv6.
+* **Синхронизация системного часового пояса ОС (`os_tz.rs`):** кнопка «Синхронизировать системный TZ» / «Восстановить» в настройках (через UAC `tzutil /s` и службу `tzautoupdate` на Windows; через запрос прав администратора `systemsetup -settimezone` и `com.apple.timezone.auto` на macOS). Исходное состояние сохраняется в `os_tz_baseline.json` и автоматически восстанавливается при выключении, выходе или восстановлении после сбоя; интерфейс напоминает перезапустить браузеры и Claude Desktop.
+* **Журналируемые политики браузеров (`sysproxy/browser_policies.rs`):** при активном системном прокси отключают QUIC (`QuicAllowed = 0`) и встроенный DoH (`DnsOverHttpsMode = "off"` для Chrome/Edge/Brave, `DNSOverHTTPS\Enabled = 0` для Firefox) через общий журнал владения с чистым откатом прежних значений при выключении или выходе.
+* **Расширен справочник публичных DNS-операторов (`auditor/probes/public_dns.rs`):** добавлены диапазоны NextDNS, Control D, Mullvad DNS и дополнительные подсети Google Public DNS и Quad9.
+
+### Изменено
+* **Честный статус часового пояса (`auditor/os_env.rs`):** устранено ложное «зелёное» состояние — если подменены только переменные CLI (`TZ`), а системный пояс ОС не совпадает с поясом выходного IP, возвращается предупреждение `TIMEZONE_SYNCED_CLI_ONLY`.
+* **Зелёный статус на «Обзоре» при временном сбое DNS-резолвера:** временный статус `Unknown` у проверок `dns` (индекс 6) и `dns_country` (индекс 10) не снижает общий балл ниже зелёной зоны и не окрашивает главный экран и строки сервисов в жёлтый цвет (за исключением fake-IP `DNS_WHOAMI_FAKE_IP`).
+* **Таймауты и кэш DNS-пробы (`auditor/probes/whoami.rs`, `auditor/cache.rs`):** `WHOAMI_LIMIT` увеличен до `2500 мс`, `RESOLVER_UNKNOWN_TTL` увеличен с `5 с` до `25 с` (меньше лишних перепроб при временных таймаутах).
+
+### Исправлено
+* **Автозапуск и реестр на Windows 11 Pro (`win_reg.rs`):** все вызовы дочерних процессов `reg` / `reg.exe` заменены на нативный Win32 `advapi32` FFI в `sysproxy/platform.rs`, `auditor/seams.rs`, `cowork_guard.rs` и `autostart.rs` (устранена ошибка `0xc0000142` при автозапуске).
+* **Утечки Google Gemini и перехват маршрутов:**
+  * Синхронизированы все 34 домена Google/Gemini (включая `clients6.google.com`, `gemini.google`, `aisandbox-pa.googleapis.com`, `ai.google.dev`, `bard.google.com`, `deepmind.google`, `jules.google.com`, `accounts.google.com`, `ogs.google.com`, `apis.google.com`) между `rules/provider_matrix.json`, `proxy/pac.rs` и `auditor/geo_matrix.rs`;
+  * Исправлено различие между привязкой «напрямую» и маршрутом по умолчанию (`DIRECT_ROUTE_ID = "__direct__"`);
+  * Повышена надёжность цепочки PAC поверх VPN: сброс `HealGuard` при отключении VPN на macOS (`sysproxy/macos.rs`, `sysproxy/mod.rs`) и корректная цепочка `RegKind::ExpandSz` на Windows (`sysproxy/platform.rs`, `sysproxy/windows.rs`).
+* **Стабильность DNS-пробы (`auditor/probes/whoami.rs`, `auditor/seams.rs`):** запрос A-записи `whoami.akamai.net` выполняется в обход системного кэша (`lookup_uncached`) в паре с TXT-запросом `o-o.myaddr.l.google.com`.
+
+---
+
 ## [2.1.1] — 2026-11-13
 
 Хотфикс по первым отзывам после релиза `2.1.0`.

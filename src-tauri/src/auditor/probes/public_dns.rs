@@ -50,9 +50,11 @@ const RANGES: &[(&str, &str)] = &[
     ("8.8.8.0/24", "Google Public DNS"),
     ("8.8.4.0/24", "Google Public DNS"),
     ("74.125.0.0/16", "Google Public DNS"),
+    ("142.250.0.0/15", "Google Public DNS"),
     ("172.217.0.0/16", "Google Public DNS"),
     ("172.253.0.0/16", "Google Public DNS"),
     ("173.194.0.0/16", "Google Public DNS"),
+    ("209.85.128.0/17", "Google Public DNS"),
     ("2001:4860::/32", "Google Public DNS"),
     ("2404:6800::/32", "Google Public DNS"),
     ("2607:f8b0::/32", "Google Public DNS"),
@@ -61,12 +63,21 @@ const RANGES: &[(&str, &str)] = &[
     ("9.9.9.0/24", "Quad9"),
     ("149.112.112.0/24", "Quad9"),
     ("2620:fe::/48", "Quad9"),
+    ("2620:fe:fe::/48", "Quad9"),
     // Cisco OpenDNS
     ("208.67.216.0/21", "Cisco OpenDNS"),
     // AdGuard DNS
     ("94.140.14.0/24", "AdGuard DNS"),
     ("94.140.15.0/24", "AdGuard DNS"),
     ("2a10:50c0::/32", "AdGuard DNS"),
+    // NextDNS
+    ("45.90.28.0/24", "NextDNS"),
+    ("45.90.30.0/24", "NextDNS"),
+    // Control D
+    ("76.76.2.0/24", "Control D"),
+    ("76.76.10.0/24", "Control D"),
+    // Mullvad DNS
+    ("194.242.2.0/24", "Mullvad DNS"),
 ];
 
 /// Whether `ip` lies in `cidr` (`a.b.c.d/n` or `x::/n`); a malformed or mixed-family entry never matches.
@@ -127,6 +138,12 @@ mod tests {
         assert_eq!(operator_of(ip("9.9.9.9")), Some("Quad9"));
         assert_eq!(operator_of(ip("208.67.222.222")), Some("Cisco OpenDNS"));
         assert_eq!(operator_of(ip("94.140.14.14")), Some("AdGuard DNS"));
+        assert_eq!(operator_of(ip("45.90.28.10")), Some("NextDNS"));
+        assert_eq!(operator_of(ip("45.90.30.10")), Some("NextDNS"));
+        assert_eq!(operator_of(ip("76.76.2.0")), Some("Control D"));
+        assert_eq!(operator_of(ip("194.242.2.2")), Some("Mullvad DNS"));
+        assert_eq!(operator_of(ip("142.250.185.14")), Some("Google Public DNS"));
+        assert_eq!(operator_of(ip("209.85.200.1")), Some("Google Public DNS"));
         // Just outside of 172.64.0.0/13 (172.64.0.0 - 172.71.255.255) and 208.67.216.0/21.
         assert_eq!(operator_of(ip("172.72.0.1")), None);
         assert_eq!(operator_of(ip("208.67.224.1")), None);

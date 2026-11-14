@@ -5,6 +5,7 @@ pub mod bin_checker;
 pub mod commands;
 pub mod cowork_guard;
 pub mod diagnostics;
+pub mod os_tz;
 pub mod popup;
 pub mod proxy;
 pub mod routing;
@@ -14,6 +15,7 @@ pub mod state;
 pub mod sysproxy;
 pub mod tray;
 pub mod updater;
+pub mod win_reg;
 
 // Backward-compatible re-exports: these used to live in the crate root.
 pub use commands::coverage::get_coverage_snapshot;

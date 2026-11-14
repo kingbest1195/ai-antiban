@@ -30,6 +30,8 @@ pub const GEO_TTL: Duration = Duration::from_secs(600);
 pub const UDP_TTL: Duration = Duration::from_secs(60);
 /// How long a failed (`Unknown`) outcome is reused.
 pub const UNKNOWN_TTL: Duration = Duration::from_secs(5);
+/// Cooldown for failed/unmeasured whoami DNS resolver probes so transient VPN flaps don't thrash every 10s.
+pub const RESOLVER_UNKNOWN_TTL: Duration = Duration::from_secs(25);
 
 const MAX_ENTRIES: usize = 64;
 
@@ -66,6 +68,22 @@ impl<V: Clone> TtlCache<V> {
     where
         Fut: std::future::Future<Output = V>,
     {
+        self.get_or_compute_with_unknown_ttl(key, ttl, UNKNOWN_TTL, is_valid, compute)
+            .await
+    }
+
+    /// Like [`Self::get_or_compute`] with an explicit `unknown_ttl` when `is_valid(&value)` is false.
+    pub async fn get_or_compute_with_unknown_ttl<Fut>(
+        &self,
+        key: &str,
+        ttl: Duration,
+        unknown_ttl: Duration,
+        is_valid: impl Fn(&V) -> bool,
+        compute: Fut,
+    ) -> V
+    where
+        Fut: std::future::Future<Output = V>,
+    {
         // Held across `compute` on purpose (single-flight); dropping the future releases it.
         let mut entries = self.entries.lock().await;
         let now = Instant::now();
@@ -84,7 +102,7 @@ impl<V: Clone> TtlCache<V> {
         let ttl = if is_valid(&value) {
             ttl
         } else {
-            UNKNOWN_TTL.min(ttl)
+            unknown_ttl.min(ttl)
         };
         entries.insert(
             key.to_string(),
@@ -238,5 +256,30 @@ mod tests {
             assert!(t.await.unwrap().status.is_ok());
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolver_unknown_ttl_avoids_thrashing_every_few_seconds() {
+        let cache = TtlCache::default();
+        let calls = AtomicUsize::new(0);
+        let run_probe = || {
+            cache.get_or_compute_with_unknown_ttl(
+                "whoami",
+                WHOAMI_TTL,
+                RESOLVER_UNKNOWN_TTL,
+                |r: &CheckResult| !r.is_unknown(),
+                async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    CheckResult::unknown("DNS_WHOAMI_TIMEOUT", "t", UnknownReason::Timeout)
+                },
+            )
+        };
+        run_probe().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        run_probe().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "reused across 10s poll");
+        tokio::time::advance(Duration::from_secs(16)).await;
+        run_probe().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "retried after 25s cooldown");
     }
 }

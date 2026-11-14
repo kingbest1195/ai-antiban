@@ -54,6 +54,7 @@ export interface ChecksScreenProps {
 /** Значок строки: только украшение, статус говорит бейдж. */
 const ICONS: Record<CheckId, IconName> = {
   geo_matrix: "globe",
+  claude_exit: "shield",
   asn: "pulse",
   dnsbl: "shield",
   reverse_dns: "term",
@@ -185,7 +186,15 @@ export function ChecksScreen({
   const passed = counts.ok;
   const failed = counts.warn + counts.crit;
   const unknown = counts.unknown;
-  const worst: Tone | "neutral" = counts.crit > 0 ? "danger" : failed > 0 ? "warn" : unknown > 0 ? "neutral" : "ok";
+  const dnsOnlyUnknown =
+    unknown > 0 &&
+    failed === 0 &&
+    Boolean(activeReport && activeReport.overall_status === "green" && !activeReport.incomplete) &&
+    items
+      .filter((i) => i.cls === "unknown")
+      .every((i) => (i.id === "dns" || i.id === "dns_country") && i.result.code !== "DNS_WHOAMI_FAKE_IP");
+  const worst: Tone | "neutral" =
+    counts.crit > 0 ? "danger" : failed > 0 ? "warn" : unknown > 0 && !dnsOnlyUnknown ? "neutral" : "ok";
   const leak = items.some((i) => LEAK_CHECKS.includes(i.id) && i.cls === "crit");
   const ip = activeReport?.telemetry.ip ?? activePartial?.telemetry?.ip ?? "";
   // Пока отчёта нет, судим по адресу выхода из частичного аудита.
@@ -229,10 +238,18 @@ export function ChecksScreen({
             ) : (
               <>
                 <h2 className="zs-verdict__title">
-                  {failed > 0 ? copy.fixHeadline(failed) : unknown > 0 ? copy.partialHeadline : copy.allPassedHeadline}
+                  {failed > 0
+                    ? copy.fixHeadline(failed)
+                    : unknown > 0 && !dnsOnlyUnknown
+                      ? copy.partialHeadline
+                      : copy.allPassedHeadline}
                 </h2>
                 <p className="zs-verdict__text">{copy.providerGuidance[activeProvider]}</p>
-                {unknown > 0 && <p className="zs-verdict__text">{copy.verdictUnknown(unknown)}</p>}
+                {dnsOnlyUnknown ? (
+                  <p className="zs-verdict__text">{copy.verdictDnsUnknownNote}</p>
+                ) : (
+                  unknown > 0 && <p className="zs-verdict__text">{copy.verdictUnknown(unknown)}</p>
+                )}
                 {failed === 0 && unknown === 0 && <p className="zs-verdict__text">{copy.verdictDisclaimer}</p>}
               </>
             )}
@@ -401,7 +418,14 @@ function CheckRow({ item, providerName, showPriority, view, open, onToggle, onAc
             <p className="zs-check__message">{copy.reasons[item.missing ? "no_data" : (item.result.reason ?? "unknown")]}</p>
           )}
           <p className="zs-check__message">{item.result.message}</p>
-          {item.result.measured_via && <p className="zs-check__label">{copy.source(item.result.measured_via)}</p>}
+          {(item.id === "dns" || item.id === "dns_country") &&
+            item.cls === "unknown" &&
+            item.result.code !== "DNS_WHOAMI_FAKE_IP" && <p className="zs-check__label">{copy.dnsHelp.mutedNote}</p>}
+          {item.result.measured_via && (
+            <p className="zs-check__label">
+              {copy.measuredViaLabel} <Mono>{item.result.measured_via}</Mono>
+            </p>
+          )}
         </div>
       )}
       {sources.length > 0 && (
@@ -420,7 +444,7 @@ function CheckRow({ item, providerName, showPriority, view, open, onToggle, onAc
         <>
           <div>
             <p className="zs-check__label">{copy.detail.why}</p>
-            <p className="zs-check__message">{copy.dnsHelp.intro}</p>
+            {item.help.intro && <p className="zs-check__message">{item.help.intro}</p>}
             <p className="zs-check__message">{item.help.why}</p>
           </div>
           <div>

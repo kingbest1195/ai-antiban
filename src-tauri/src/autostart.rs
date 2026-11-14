@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub const LAUNCH_AGENT_LABEL: &str = "io.zastava.desktop";
 pub const LAUNCH_AGENT_PLIST_NAME: &str = "io.zastava.desktop.plist";
 pub const WINDOWS_RUN_REG_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(target_os = "windows")]
+const WINDOWS_RUN_REG_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const WINDOWS_RUN_VALUE_NAME: &str = "Zastava";
 pub const MINIMIZED_ARG: &str = "--minimized";
 
@@ -112,6 +114,7 @@ pub fn set_launch_agent_in(
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn user_home_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
@@ -126,65 +129,36 @@ fn user_home_dir() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn run_reg_command(args: &[&str]) -> Result<std::process::Output, String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    std::process::Command::new("reg.exe")
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("Не удалось запустить reg.exe: {e}"))
-}
-
-#[cfg(target_os = "windows")]
 fn is_windows_run_installed() -> bool {
-    run_reg_command(&["query", WINDOWS_RUN_REG_KEY, "/v", WINDOWS_RUN_VALUE_NAME])
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    matches!(
+        crate::win_reg::get_string(
+            crate::win_reg::RootKey::HkeyCurrentUser,
+            WINDOWS_RUN_REG_SUBKEY,
+            WINDOWS_RUN_VALUE_NAME,
+        ),
+        Ok(Some(v)) if !v.trim().is_empty()
+    )
 }
 
 #[cfg(target_os = "windows")]
 fn set_windows_run_entry(exe_path: &Path, enabled: bool) -> Result<bool, String> {
     if enabled {
         let value = windows_run_value(exe_path);
-        let out = run_reg_command(&[
-            "add",
-            WINDOWS_RUN_REG_KEY,
-            "/v",
+        crate::win_reg::set_sz(
+            crate::win_reg::RootKey::HkeyCurrentUser,
+            WINDOWS_RUN_REG_SUBKEY,
             WINDOWS_RUN_VALUE_NAME,
-            "/t",
-            "REG_SZ",
-            "/d",
             &value,
-            "/f",
-        ])?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(if err.is_empty() {
-                "Не удалось записать ключ автозапуска в реестр Windows".to_string()
-            } else {
-                format!("Не удалось записать ключ автозапуска: {err}")
-            });
-        }
+        )
+        .map_err(|e| format!("Не удалось записать ключ автозапуска: {e}"))?;
         Ok(true)
     } else {
-        let out = run_reg_command(&[
-            "delete",
-            WINDOWS_RUN_REG_KEY,
-            "/v",
+        crate::win_reg::delete_value(
+            crate::win_reg::RootKey::HkeyCurrentUser,
+            WINDOWS_RUN_REG_SUBKEY,
             WINDOWS_RUN_VALUE_NAME,
-            "/f",
-        ])?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
-            // Absence of the key when disabling is fine.
-            if !err.contains("unable to find") && !err.contains("не удалось найти") {
-                return Err(format!(
-                    "Не удалось удалить ключ автозапуска: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
-        }
+        )
+        .map_err(|e| format!("Не удалось удалить ключ автозапуска: {e}"))?;
         Ok(false)
     }
 }

@@ -35,8 +35,8 @@ export function dataAge(ageMs: number, auditFailed: boolean): number | null {
   return Math.max(1, Math.floor(ageMs / 60_000));
 }
 
-/** Число проверок в отчёте шлюза (места 0..12 в `RiskReport.checks`). */
-export const CHECK_SLOTS = 13;
+/** Число проверок в отчёте шлюза (места 0..13 в `RiskReport.checks`). */
+export const CHECK_SLOTS = 14;
 
 /** Новый идущий аудит: ничего ещё не готово. */
 export function emptyPartial(provider: ProviderId, runId: string): PartialAudit {

@@ -30,6 +30,7 @@
 | Назначение | Куда уходит запрос | Когда | Что становится известно получателю |
 | :--- | :--- | :--- | :--- |
 | **Определение IP, страны и провайдера** | `https://ipwho.is/`, `https://ipinfo.io/json`, `https://freeipapi.com/api/json`, `https://1.1.1.1/cdn-cgi/trace` (`auditor/network.rs`) | При проверках и при смене сети | Ваш адрес выхода в сеть (как адрес подключения) |
+| **Проверка реального выхода к сервису ИИ** | `https://claude.ai/cdn-cgi/trace` (Claude), `https://chatgpt.com/cdn-cgi/trace` (ChatGPT), `https://ipinfo.io/json` (Gemini — только при привязанном маршруте) (`auditor/network.rs`) | При проверках провайдера (через привязанный маршрут или напрямую); для Gemini без отдельного маршрута запрос не отправляется | Адрес выхода в сеть или адрес выхода привязанного маршрута (обычный HTTPS-запрос GET с `User-Agent: Zastava/1.0`, без куки, токенов и промптов) |
 | **Фоновый контроль маршрута** | `https://1.1.1.1/cdn-cgi/trace`, резерв `https://api.ipify.org` (`proxy/guard.rs`) | Пока хотя бы один сервис ИИ работает без выделенного маршрута: примерно раз в секунду | Ваш адрес выхода в сеть |
 | **Проверка DNS-резолвера (`whoami`)** | DNS-запросы `whoami.akamai.net` (A) и `o-o.myaddr.l.google.com` (TXT) через системный резолвер (`auditor/probes/whoami.rs`) | При проверках | Адрес вашего DNS-резолвера (Akamai и Google видят его как источник запроса) |
 | **Страна DNS-резолвера** | `https://ipwho.is/{ip}`, `https://ipinfo.io/{ip}/json`, `https://freeipapi.com/api/json/{ip}` (`auditor/probes/whoami.rs`) | При проверках | Адрес вашего DNS-резолвера |

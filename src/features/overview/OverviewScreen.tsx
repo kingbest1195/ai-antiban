@@ -36,6 +36,8 @@ import { formatNumber } from "../../shared/lib/format";
 import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
 import { openZastavaBot } from "../../utils/opener";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
+import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
+import type { OsTzSyncStatus } from "../../types";
 import { CoverageSection } from "../coverage/CoverageSection";
 import { buildPendingChecks, failedChecks, progressOf } from "../checks/checksModel";
 import { needsForceConfirm, useOverviewModel } from "./useOverviewModel";
@@ -153,6 +155,9 @@ export function OverviewScreen(props: OverviewScreenProps) {
   };
 
   const progress = progressOf(buildPendingChecks(partial ?? null, state));
+  const { osTzStatus, osTzLoading, syncOsTimezone, restoreOsTimezone } = useOsTimezoneSync(
+    activeReport?.telemetry?.timezone,
+  );
 
   const expiringRoute = (() => {
     const routes = props.routesSnapshot?.routes;
@@ -169,7 +174,32 @@ export function OverviewScreen(props: OverviewScreenProps) {
 
   return (
     <>
-      {!loading && !failed && <ProblemBanner kind={model.banner} {...props} />}
+      {!loading && !failed && (
+        <ProblemBanner
+          kind={model.banner}
+          targetTz={activeReport?.telemetry?.timezone}
+          tzCode={activeReport?.timezone_result?.code}
+          osTzStatus={osTzStatus}
+          osTzLoading={osTzLoading}
+          onSyncOsTimezone={() => void syncOsTimezone(activeReport?.telemetry?.timezone)}
+          onRestoreOsTimezone={() => void restoreOsTimezone()}
+          {...props}
+        />
+      )}
+
+      {!loading && !failed && !model.banner && osTzStatus?.synced && (
+        <Banner
+          tone="info"
+          title={copy.banner.timezone.syncedBannerTitle}
+          action={
+            <Button size="sm" variant="secondary" disabled={osTzLoading} onClick={() => void restoreOsTimezone()}>
+              {copy.banner.timezone.restoreOs}
+            </Button>
+          }
+        >
+          {copy.banner.timezone.syncedBannerText(osTzStatus.original_os_tz, osTzStatus.synced_target_tz)}
+        </Banner>
+      )}
 
       {expiringRoute && expiringRoute.expires_at && (
         <Banner
@@ -360,7 +390,24 @@ export function OverviewScreen(props: OverviewScreenProps) {
 
 /* ---------- Баннер: один на экран, одно действие ---------- */
 
-function ProblemBanner({ kind, ...props }: { kind: ReturnType<typeof useOverviewModel>["banner"] } & OverviewScreenProps) {
+function ProblemBanner({
+  kind,
+  targetTz,
+  tzCode,
+  osTzStatus,
+  osTzLoading,
+  onSyncOsTimezone,
+  onRestoreOsTimezone,
+  ...props
+}: {
+  kind: ReturnType<typeof useOverviewModel>["banner"];
+  targetTz?: string;
+  tzCode?: string;
+  osTzStatus: OsTzSyncStatus | null;
+  osTzLoading: boolean;
+  onSyncOsTimezone: () => void;
+  onRestoreOsTimezone: () => void;
+} & OverviewScreenProps) {
   if (!kind) return null;
   const openChecks = (
     <Button size="sm" onClick={props.onOpenChecks}>
@@ -386,20 +433,41 @@ function ProblemBanner({ kind, ...props }: { kind: ReturnType<typeof useOverview
           {copy.banner.leak.text}
         </Banner>
       );
-    case "timezone":
+    case "timezone": {
+      const cliOnly = tzCode === "TIMEZONE_SYNCED_CLI_ONLY";
+      const title = cliOnly ? copy.banner.timezone.cliOnlyTitle : copy.banner.timezone.title;
+      const baseText = cliOnly ? copy.banner.timezone.cliOnlyText : copy.banner.timezone.text;
+      const text = osTzStatus?.synced ? `${baseText} ${copy.banner.timezone.restartHint}` : baseText;
       return (
         <Banner
           tone="warn"
-          title={copy.banner.timezone.title}
+          title={title}
           action={
-            <Button size="sm" onClick={props.onOpenTimezone}>
-              {copy.banner.timezone.action}
-            </Button>
+            <div className="zs-banner__actions">
+              {osTzStatus?.synced ? (
+                <Button size="sm" variant="secondary" disabled={osTzLoading} onClick={onRestoreOsTimezone}>
+                  {copy.banner.timezone.restoreOs}
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={osTzLoading || !targetTz}
+                  onClick={onSyncOsTimezone}
+                >
+                  {osTzLoading ? copy.banner.timezone.syncingOs : copy.banner.timezone.syncOs}
+                </Button>
+              )}
+              <Button size="sm" variant="secondary" onClick={props.onOpenTimezone}>
+                {copy.banner.timezone.action}
+              </Button>
+            </div>
           }
         >
-          {copy.banner.timezone.text}
+          {text}
         </Banner>
       );
+    }
     case "review":
       return (
         <Banner tone="warn" title={copy.banner.review.title} action={openChecks}>

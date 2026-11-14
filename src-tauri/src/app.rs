@@ -2,7 +2,7 @@
 
 use crate::tray::update_tray_from_report;
 use crate::startup::{self, StartupSink, StartupSnapshot, StartupState, StartupSteps};
-use crate::{auditor, bin_checker, commands, cowork_guard, proxy, state, sysproxy, tray, updater};
+use crate::{auditor, bin_checker, commands, cowork_guard, os_tz, proxy, state, sysproxy, tray, updater};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -39,6 +39,7 @@ pub fn run() {
             let data_dir = match app.path().app_data_dir() {
                 Ok(dir) => {
                     sysproxy::set_data_dir(dir.clone());
+                    os_tz::set_data_dir(dir.clone());
                     Some(dir)
                 }
                 Err(_) => None,
@@ -140,6 +141,9 @@ pub fn run() {
             commands::sysproxy::disable_cli_protection,
             commands::sysproxy::check_cli_protection_status,
             commands::sysproxy::sync_ai_agents_timezone,
+            commands::sysproxy::sync_os_timezone_cmd,
+            commands::sysproxy::restore_os_timezone_cmd,
+            commands::sysproxy::get_os_timezone_sync_status_cmd,
             commands::sysproxy::get_cli_settings,
             commands::sysproxy::set_cli_mode,
             commands::sysproxy::set_sync_ai_tz_enabled,
@@ -185,6 +189,8 @@ pub fn run() {
             commands::routes::test_route,
             commands::payment::set_warmup_timer,
             commands::audit::get_gateway_stats,
+            commands::audit::get_split_tunnel_mode,
+            commands::audit::set_split_tunnel_mode,
             commands::sysproxy::force_clean_os_proxy_cmd,
             commands::interception::toggle_network_killswitch_cmd,
             commands::interception::get_network_killswitch_status_cmd,
@@ -208,6 +214,7 @@ pub fn run() {
                 if sysproxy::cleanup_all_persistent_settings().restore_deferred_by_vpn_dns() {
                     sysproxy::notify_restore_deferred();
                 }
+                os_tz::restore_on_exit_once(Some(app_handle));
             }
             _ => {}
         });
@@ -310,10 +317,13 @@ impl StartupSteps for RealSteps {
     /// 1.3.x signature cleanup. Fail closed (logged, nothing is guessed).
     fn recover(&self) {
         match &self.data_dir {
-            Some(dir) => match sysproxy::recover_ownership_on_start(dir) {
-                Ok(report) => eprintln!("Застава: {}", report.summary()),
-                Err(e) => eprintln!("Застава: восстановление отложено, {e}"),
-            },
+            Some(dir) => {
+                match sysproxy::recover_ownership_on_start(dir) {
+                    Ok(report) => eprintln!("Застава: {}", report.summary()),
+                    Err(e) => eprintln!("Застава: восстановление отложено, {e}"),
+                }
+                os_tz::recover_baseline_on_start(dir);
+            }
             None => eprintln!("Застава: каталог данных недоступен, восстановление отложено"),
         }
     }

@@ -17,6 +17,7 @@
 //! Values (PAC URLs, proxy hosts, credentials) live only in the 0600 journal file; errors, reports
 //! and the `Debug` output name resources, never values.
 
+use super::browser_policies::{PolicyStore, PolicyValue, RealPolicyStore};
 use super::fs::{Fs, FsLock, LockError, WriteMode};
 use super::jsonc;
 use super::platform::{
@@ -70,6 +71,8 @@ pub enum Resource {
     /// A file Zastava may have created. Restoring a baseline of "absent" removes it only while
     /// its content is still the bare `skeleton` it was created with.
     File { file: String, skeleton: String },
+    /// Per-user browser policy setting (QUIC / DoH) keyed by domain/subkey and preference/value name.
+    BrowserPolicy { domain: String, key: String },
 }
 
 /// Last path components, for logs: names a file without the user's home directory. A path that
@@ -101,6 +104,7 @@ impl Resource {
             }
             Resource::TextBlock { file } => format!("block:{}", file_label(file)),
             Resource::File { file, .. } => format!("file:{}", file_label(file)),
+            Resource::BrowserPolicy { domain, key } => format!("policy:{domain}:{key}"),
         }
     }
 
@@ -143,6 +147,8 @@ pub enum Value {
     Present(bool),
     /// The text of the Zastava block (line ends normalised to `\n`); `None` = no block.
     Block(Option<String>),
+    /// Per-user browser policy value; `None` = key/value absent before Zastava touched it.
+    Policy(Option<PolicyValue>),
 }
 
 impl fmt::Debug for Value {
@@ -160,6 +166,7 @@ impl fmt::Debug for Value {
             Value::Json(v) => write!(f, "Json({})", shown(v.is_some())),
             Value::Block(v) => write!(f, "Block({})", shown(v.is_some())),
             Value::Present(b) => write!(f, "Present({b})"),
+            Value::Policy(v) => write!(f, "Policy({v:?})"),
         }
     }
 }
@@ -177,6 +184,7 @@ impl Value {
                 | (Value::Present(_), Resource::JsonObject { .. })
                 | (Value::Present(_), Resource::File { .. })
                 | (Value::Block(_), Resource::TextBlock { .. })
+                | (Value::Policy(_), Resource::BrowserPolicy { .. })
         )
     }
 }
@@ -493,13 +501,19 @@ pub fn panic_flagged() -> bool {
     PANICKED.load(Ordering::SeqCst)
 }
 
-fn read_value(fs: &dyn Fs, platform: &dyn Platform, res: &Resource) -> PResult<Value> {
+fn read_value(
+    fs: &dyn Fs,
+    platform: &dyn Platform,
+    policies: &dyn PolicyStore,
+    res: &Resource,
+) -> PResult<Value> {
     Ok(match res {
         Resource::Pac { service } => Value::Pac(platform.get_pac(service)?),
         Resource::Chain { service } => Value::Chain(platform.get_chain(service)?),
         Resource::Bypass { service } => Value::Bypass(platform.get_proxy_bypass_domains(service)?),
         Resource::UserEnv { name } => Value::Env(platform.get_user_env(name)?),
         Resource::Inet { name } => Value::Reg(platform.get_inet(name)?),
+        Resource::BrowserPolicy { domain, key } => Value::Policy(policies.read(domain, key)?),
         Resource::JsonKey { .. }
         | Resource::JsonObject { .. }
         | Resource::TextBlock { .. }
@@ -527,7 +541,8 @@ fn notify(platform: &dyn Platform, res: &Resource) -> Notified {
         | Resource::JsonKey { .. }
         | Resource::JsonObject { .. }
         | Resource::TextBlock { .. }
-        | Resource::File { .. } => Ok(()),
+        | Resource::File { .. }
+        | Resource::BrowserPolicy { .. } => Ok(()),
     };
     match r {
         Ok(()) | Err(PlatformError::Unsupported(_)) => Notified::Yes,
@@ -540,6 +555,7 @@ fn notify(platform: &dyn Platform, res: &Resource) -> Notified {
 fn write_value(
     fs: &dyn Fs,
     platform: &dyn Platform,
+    policies: &dyn PolicyStore,
     res: &Resource,
     v: &Value,
 ) -> PResult<Notified> {
@@ -565,6 +581,12 @@ fn write_value(
         (Resource::UserEnv { name }, Value::Env(None)) => platform.unset_user_env(name)?,
         (Resource::Inet { name }, Value::Reg(Some(r))) => platform.set_inet(name, r)?,
         (Resource::Inet { name }, Value::Reg(None)) => platform.delete_inet(name)?,
+        (Resource::BrowserPolicy { domain, key }, Value::Policy(Some(val))) => {
+            policies.write(domain, key, val)?
+        }
+        (Resource::BrowserPolicy { domain, key }, Value::Policy(None)) => {
+            policies.delete(domain, key)?
+        }
         _ => return Err(PlatformError::Unsupported("kind_mismatch")),
     }
     Ok(notify(platform, res))
@@ -734,6 +756,7 @@ fn write_file_value(fs: &dyn Fs, res: &Resource, v: &Value) -> PResult<()> {
 /// The ownership journal. Holds the inter-process lock for as long as it lives.
 pub struct Journal {
     fs: Arc<dyn Fs>,
+    policy_store: Arc<dyn PolicyStore>,
     root: PathBuf,
     entries: Vec<Entry>,
     marks: Vec<String>,
@@ -804,12 +827,23 @@ impl Journal {
         };
         Ok(Journal {
             fs,
+            policy_store: Arc::new(RealPolicyStore),
             root,
             entries,
             marks,
             backup_excluded: false,
             _lock: lock,
         })
+    }
+
+    pub(super) fn policy_store_arc(&self) -> Arc<dyn PolicyStore> {
+        Arc::clone(&self.policy_store)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_policy_store(mut self, policy_store: Arc<dyn PolicyStore>) -> Self {
+        self.policy_store = policy_store;
+        self
     }
 
     /// The file system the journal (and its file resources) works on.
@@ -876,7 +910,7 @@ impl Journal {
         if !new.matches(res) {
             return Err(JournalError::KindMismatch);
         }
-        let cur = read_value(&*self.fs, platform, res)?;
+        let cur = read_value(&*self.fs, platform, &*self.policy_store, res)?;
         // `previous` = what the resource holds when nothing of this write has landed yet;
         // `before` = the record as it was on disk, for an exact in-memory rollback.
         let previous = cur.clone();
@@ -968,7 +1002,7 @@ impl Journal {
         // What the OS holds now is what restore will compare against: the OS may normalise a
         // URL or a port, and the value we asked for would then never be found again. If the
         // read fails, or shows the old baseline (the write is not visible yet), `new` stays.
-        let stored = match read_value(&*self.fs, platform, &prep.res) {
+        let stored = match read_value(&*self.fs, platform, &*self.policy_store, &prep.res) {
             Ok(v) if v.matches(&prep.res) && v != self.entries[i].baseline => v,
             _ => prep.new,
         };
@@ -1004,7 +1038,7 @@ impl Journal {
             self.put_back(res, prep.before);
             return Err(err);
         }
-        let notified = match write_value(&*self.fs, platform, res, &prep.new) {
+        let notified = match write_value(&*self.fs, platform, &*self.policy_store, res, &prep.new) {
             Ok(n) => n,
             Err(werr) => {
                 self.settle_failed_write(platform, res, &prep.previous, prep.before);
@@ -1104,9 +1138,11 @@ impl Journal {
         previous: &Value,
         before: Option<Entry>,
     ) {
-        let clean = match read_value(&*self.fs, platform, res) {
+        let clean = match read_value(&*self.fs, platform, &*self.policy_store, res) {
             Ok(v) if &v == previous => true,
-            Ok(_) => write_value(&*self.fs, platform, res, previous).is_ok(),
+            Ok(_) => {
+                write_value(&*self.fs, platform, &*self.policy_store, res, previous).is_ok()
+            }
             Err(_) => false,
         };
         if clean {
@@ -1168,7 +1204,7 @@ impl Journal {
             return Outcome::AlreadyRestored;
         };
         let entry = self.entries[i].clone();
-        let outcome = match read_value(&*self.fs, platform, res) {
+        let outcome = match read_value(&*self.fs, platform, &*self.policy_store, res) {
             Err(PlatformError::NotFound(_)) => Outcome::TargetGone,
             Err(_) => return Outcome::Failed("read"),
             Ok(cur) => {
@@ -1183,14 +1219,15 @@ impl Journal {
                     Outcome::ExternalChange
                 } else {
                     // Narrow the window for a concurrent change: read once more right before writing.
-                    match read_value(&*self.fs, platform, res) {
+                    match read_value(&*self.fs, platform, &*self.policy_store, res) {
                         Ok(again) if again == cur => {}
                         Ok(_) => {
                             return self.release(platform, res, Outcome::ExternalChange, report);
                         }
                         Err(_) => return Outcome::Failed("read"),
                     }
-                    match write_value(&*self.fs, platform, res, &entry.baseline) {
+                    match write_value(&*self.fs, platform, &*self.policy_store, res, &entry.baseline)
+                    {
                         Ok(Notified::Yes) => Outcome::Restored,
                         Ok(Notified::Failed) => {
                             // The baseline is back; keep the record so the notification is retried.

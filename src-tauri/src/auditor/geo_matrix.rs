@@ -128,13 +128,22 @@ impl ProviderId {
         // 3. Google Gemini / AI Studio / Vertex AI / Cloud AI Companion (Antigravity, Orca, Cloud Code) / NotebookLM / Labs
         const GEMINI_DOMAINS: &[&str] = &[
             "gemini.google.com",
+            "gemini.google",
+            "clients6.google.com",
             "aistudio.google.com",
             "makersuite.google.com",
             "generativelanguage.googleapis.com",
+            "aisandbox-pa.googleapis.com",
             "aiplatform.googleapis.com",
             "cloudaicompanion.googleapis.com",
-            "clients6.google.com",
             "alkalimakersuite-pa.clients6.google.com",
+            "ai.google.dev",
+            "bard.google.com",
+            "deepmind.google",
+            "jules.google.com",
+            "accounts.google.com",
+            "ogs.google.com",
+            "apis.google.com",
             "daily-cloudcode-pa.googleapis.com",
             "cloudcode-pa.googleapis.com",
             "daily-cloudcode-pa.sandbox.googleapis.com",
@@ -147,7 +156,6 @@ impl ProviderId {
             "antigravity.google",
             "antigravity.google.com",
             "share.gemini.google",
-            "gemini.google",
             "notebooklm.google",
             "notebooklm.google.com",
             "idx.google.com",
@@ -669,6 +677,42 @@ mod tests {
         assert_eq!(ProviderId::from_host("notebooklm.google"), Some(ProviderId::Gemini));
         assert_eq!(ProviderId::from_host("notebooklm.google.com"), Some(ProviderId::Gemini));
         assert_eq!(ProviderId::from_host("idx.google.com"), Some(ProviderId::Gemini));
+    }
+
+    #[test]
+    fn test_gemini_full_domain_coverage_and_subdomains() {
+        for host in [
+            "gemini.google.com",
+            "gemini.google",
+            "clients6.google.com",
+            "waa-pa.clients6.google.com",
+            "signaler-pa.clients6.google.com",
+            "peoplestack-pa.clients6.google.com",
+            "proactivebackend-pa.clients6.google.com",
+            "alkalimakersuite-pa.clients6.google.com",
+            "generativelanguage.googleapis.com",
+            "aisandbox-pa.googleapis.com",
+            "aistudio.google.com",
+            "makersuite.google.com",
+            "ai.google.dev",
+            "bard.google.com",
+            "deepmind.google",
+            "jules.google.com",
+            "accounts.google.com",
+            "ogs.google.com",
+            "apis.google.com",
+        ] {
+            assert_eq!(
+                ProviderId::from_host(host),
+                Some(ProviderId::Gemini),
+                "expected {host} to match Gemini"
+            );
+            assert_eq!(
+                ProviderId::from_host_with_custom(host, &["custom-ai.corp".to_string()]),
+                Some(ProviderId::Gemini),
+                "expected {host} with custom domains to match Gemini"
+            );
+        }
     }
 
     #[test]

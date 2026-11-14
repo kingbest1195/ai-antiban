@@ -109,7 +109,19 @@ export const overview = {
     },
     timezone: {
       title: "Часовой пояс не совпадает со страной IP",
+      cliOnlyTitle: "Системный пояс ОС отличается от IP",
       text: "Это повышает риск дополнительных проверок у ИИ-сервисов.",
+      cliOnlyText:
+        "CLI и IDE уже синхронизированы, но браузеры и Claude Desktop по-прежнему видят системный пояс ОС.",
+      restartHint: "Перезапустите браузер и Claude Desktop, чтобы они применили новый часовой пояс.",
+      syncedBannerTitle: "Системный часовой пояс синхронизирован",
+      syncedBannerText: (orig: string | null, target: string | null) =>
+        orig && target
+          ? `Пояс ОС изменён (${orig} -> ${target}). Перезапустите браузер и Claude Desktop, чтобы они применили новый часовой пояс.`
+          : "Перезапустите браузер и Claude Desktop, чтобы они применили новый часовой пояс.",
+      syncOs: "Синхронизировать системный TZ",
+      syncingOs: "Синхронизируем ОС…",
+      restoreOs: "Восстановить системный TZ",
       action: "Настроить часовой пояс",
     },
     review: {

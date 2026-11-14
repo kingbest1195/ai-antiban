@@ -38,6 +38,7 @@
     "anthropic": {
       "id": "anthropic",
       "display_name": "Claude (Anthropic)",
+      "exit_probe_url": "https://claude.ai/cdn-cgi/trace",
       "domains": [
         "claude.ai",
         "claude.com",
@@ -76,6 +77,7 @@
     "openai": {
       "id": "openai",
       "display_name": "ChatGPT (OpenAI)",
+      "exit_probe_url": "https://chatgpt.com/cdn-cgi/trace",
       "domains": [
         "chatgpt.com",
         "openai.com",
@@ -120,12 +122,22 @@
       "display_name": "Google Gemini / AI Studio",
       "domains": [
         "gemini.google.com",
+        "gemini.google",
+        "clients6.google.com",
         "aistudio.google.com",
         "makersuite.google.com",
         "generativelanguage.googleapis.com",
+        "aisandbox-pa.googleapis.com",
         "aiplatform.googleapis.com",
         "cloudaicompanion.googleapis.com",
         "alkalimakersuite-pa.clients6.google.com",
+        "ai.google.dev",
+        "bard.google.com",
+        "deepmind.google",
+        "jules.google.com",
+        "accounts.google.com",
+        "ogs.google.com",
+        "apis.google.com",
         "daily-cloudcode-pa.googleapis.com",
         "cloudcode-pa.googleapis.com",
         "daily-cloudcode-pa.sandbox.googleapis.com",

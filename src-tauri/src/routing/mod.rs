@@ -34,6 +34,10 @@ pub const MAX_ENTRIES: usize = 8;
 /// key failed validation (see [`RouteSelection::Invalid`]). It never exists in `routes`.
 pub const INVALID_PROFILE_ROUTE_ID: &str = "profile:invalid";
 
+/// Sentinel stored in `provider_routes[provider]` to force direct (system/VPN) routing even when
+/// `default_route_id` is configured. Unbinding (`None` / deleting the key) inherits `default_route_id`.
+pub const DIRECT_ROUTE_ID: &str = "__direct__";
+
 fn default_true() -> bool {
     true
 }
@@ -322,10 +326,15 @@ pub fn select_route_id(data: &AppStateData, provider: &str) -> Option<String> {
         }
     }
     if let Some(id) = data.provider_routes.get(provider) {
+        if id == DIRECT_ROUTE_ID {
+            return None;
+        }
         return Some(id.clone());
     }
     if let Some(id) = data.default_route_id.as_ref() {
-        return Some(id.clone());
+        if id != DIRECT_ROUTE_ID {
+            return Some(id.clone());
+        }
     }
     None
 }
@@ -569,6 +578,9 @@ fn dangling_bindings(data: &AppStateData) -> Vec<DanglingBinding> {
     let mut providers: Vec<(&String, &String)> = data.provider_routes.iter().collect();
     providers.sort();
     for (p, id) in providers {
+        if id == DIRECT_ROUTE_ID {
+            continue;
+        }
         if !data.routes.iter().any(|r| r.id == *id) {
             out.push(DanglingBinding {
                 kind: "provider".into(),
@@ -790,5 +802,29 @@ mod tests {
         d.provider_routes.insert("openai".into(), "oa".into());
         assert_eq!(select_route_id(&d, "openai").as_deref(), Some("oa"));
         assert_eq!(select_route_id(&d, "gemini"), None);
+    }
+
+    #[test]
+    fn test_explicit_direct_sentinel_overrides_default_without_dangling() {
+        let mut d = AppStateData::default();
+        d.routes = vec![route("a")];
+        d.default_route_id = Some("a".into());
+        d.provider_routes.insert("gemini".into(), DIRECT_ROUTE_ID.into());
+
+        // Gemini stays explicitly Direct while OpenAI/Anthropic inherit default "a".
+        assert_eq!(select_route_id(&d, "gemini"), None);
+        assert_eq!(select_route(&d, "gemini"), RouteSelection::Direct);
+        assert_eq!(select_route_id(&d, "openai").as_deref(), Some("a"));
+        assert_eq!(select_route_id(&d, "anthropic").as_deref(), Some("a"));
+
+        // DIRECT_ROUTE_ID is not flagged as a dangling binding.
+        let snap = snapshot(&d, &RouteHealthRegistry::default(), 1);
+        assert!(snap.dangling.is_empty(), "unexpected dangling: {:?}", snap.dangling);
+        assert_eq!(snap.effective.get("gemini").and_then(|v| v.as_deref()), None);
+        assert_eq!(snap.effective.get("openai").and_then(|v| v.as_deref()), Some("a"));
+
+        // Removing the explicit direct override returns Gemini to default "a".
+        d.provider_routes.remove("gemini");
+        assert_eq!(select_route_id(&d, "gemini").as_deref(), Some("a"));
     }
 }

@@ -12,6 +12,7 @@ import {
   getCustomAiDomains,
   getInterceptionBehavior,
   getPopupPosition,
+  getSplitTunnelMode,
   installOrRepairCoworkGuard,
   onCoworkGuardStatus,
   removeCustomAiDomain,
@@ -19,8 +20,10 @@ import {
   setCliMode,
   setInterceptionBehavior,
   setPopupPosition,
+  setSplitTunnelMode,
   setSyncAiTzEnabled,
 } from "../../utils/api";
+import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
 import { openExternal } from "../../utils/opener";
 import { Badge, Banner, Button, ConfirmModal, Field, Link, Modal, Mono, Row, Rows, Section, Segmented, Switch } from "../../ui";
 import type { SegmentedOption } from "../../ui";
@@ -81,6 +84,10 @@ export function SettingsModal({
   const [cliMode, setCliModeState] = useState<CliMode>("ai_only");
   const [syncTz, setSyncTz] = useState(false);
   const [terminalBusy, setTerminalBusy] = useState(false);
+  const [splitTunnelMode, setSplitTunnelModeState] = useState(false);
+  const [splitTunnelBusy, setSplitTunnelBusy] = useState(false);
+  const { osTzStatus, osTzLoading, osTzError, syncOsTimezone, restoreOsTimezone, refreshOsTzStatus } =
+    useOsTimezoneSync();
   const [confirmGlobal, setConfirmGlobal] = useState(false);
   const [proxyResult, setProxyResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [autostartStatus, setAutostartStatus] = useState<AutostartStatus | null>(null);
@@ -109,6 +116,10 @@ export function SettingsModal({
         setSyncTz(cli.sync_ai_tz_enabled);
       })
       .catch(() => {});
+    getSplitTunnelMode()
+      .then(setSplitTunnelModeState)
+      .catch(() => {});
+    void refreshOsTzStatus();
     getAutostartStatus()
       .then(setAutostartStatus)
       .catch(() => {});
@@ -189,6 +200,24 @@ export function SettingsModal({
       await onToggleAutoUpdate(!autoUpdateEnabled);
     } finally {
       setUpdatingToggle(false);
+    }
+  };
+
+  /** Тумблер выборочной маршрутизации VPN (split tunneling). */
+  const handleToggleSplitTunnel = async () => {
+    if (splitTunnelBusy) return;
+    const next = !splitTunnelMode;
+    setSplitTunnelBusy(true);
+    try {
+      await setSplitTunnelMode(next);
+      setSplitTunnelModeState(next);
+      onStateUpdated?.();
+      if (next) onToast?.(copy.splitTunnel.toastOnTitle, copy.splitTunnel.toastOnText, "success");
+      else onToast?.(copy.splitTunnel.toastOffTitle, copy.splitTunnel.toastOffText, "info");
+    } catch (err) {
+      onToast?.(copy.splitTunnel.error, errText(err), "warning");
+    } finally {
+      setSplitTunnelBusy(false);
     }
   };
 
@@ -349,6 +378,25 @@ export function SettingsModal({
             )}
           </Section>
 
+          {/* Выборочная маршрутизация VPN (split tunneling) */}
+          <Section title={copy.splitTunnel.section}>
+            <Rows className="zs-settings__rows">
+              <Row
+                icon="shield"
+                title={copy.splitTunnel.title}
+                sub={copy.splitTunnel.sub}
+                trail={
+                  <Switch
+                    checked={splitTunnelMode}
+                    disabled={splitTunnelBusy}
+                    onChange={handleToggleSplitTunnel}
+                    aria-label={copy.splitTunnel.label}
+                  />
+                }
+              />
+            </Rows>
+          </Section>
+
           {/* Терминал и редакторы: режим покрытия CLI и подмена часового пояса */}
           <Section title={copy.terminal.section}>
             <p className="zs-settings__label">{copy.terminal.mode.title}</p>
@@ -375,7 +423,42 @@ export function SettingsModal({
                   />
                 }
               />
+              <Row
+                icon="globe"
+                title={copy.terminal.osTz.title}
+                sub={
+                  osTzStatus?.synced
+                    ? `${copy.terminal.osTz.synced(osTzStatus.original_os_tz, osTzStatus.synced_target_tz)} — ${copy.terminal.osTz.restartHint}`
+                    : copy.terminal.osTz.notSynced(osTzStatus?.current_os_tz ?? null)
+                }
+                trail={
+                  osTzStatus?.synced ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={osTzLoading}
+                      onClick={() => void restoreOsTimezone()}
+                    >
+                      {osTzLoading ? copy.terminal.osTz.restoringAction : copy.terminal.osTz.restoreAction}
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={osTzLoading}
+                      onClick={() => void syncOsTimezone()}
+                    >
+                      {osTzLoading ? copy.terminal.osTz.syncingAction : copy.terminal.osTz.syncAction}
+                    </Button>
+                  )
+                }
+              />
             </Rows>
+            {osTzError && (
+              <p className="zs-settings__hint" role="alert">
+                {osTzError}
+              </p>
+            )}
           </Section>
 
           {/* Сервисы ИИ и свои домены */}

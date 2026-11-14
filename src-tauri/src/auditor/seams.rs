@@ -47,6 +47,16 @@ pub enum TxtOutcome {
 pub trait DnsLookup: Send + Sync {
     fn lookup<'a>(&'a self, host: &'a str, limit: Duration) -> BoxFuture<'a, LookupOutcome>;
 
+    /// Cache-bypassing A/address lookup (falls back to [`Self::lookup`] for fakes/implementations
+    /// without a separate uncached path).
+    fn lookup_uncached<'a>(
+        &'a self,
+        host: &'a str,
+        limit: Duration,
+    ) -> BoxFuture<'a, LookupOutcome> {
+        self.lookup(host, limit)
+    }
+
     /// TXT records of `host` (asked from the resolver configured in the OS).
     fn lookup_txt<'a>(&'a self, host: &'a str, limit: Duration) -> BoxFuture<'a, TxtOutcome> {
         let _ = (host, limit);
@@ -54,7 +64,7 @@ pub trait DnsLookup: Send + Sync {
     }
 }
 
-/// The operating system resolver (`getaddrinfo`).
+/// The operating system resolver (`getaddrinfo`) and cache-bypassing DNS queries.
 pub struct SystemDns;
 
 impl DnsLookup for SystemDns {
@@ -73,6 +83,29 @@ impl DnsLookup for SystemDns {
                 Ok(Err(e)) if is_name_not_found(&e) => LookupOutcome::NotFound,
                 Ok(Err(_)) => LookupOutcome::Failed,
             }
+        })
+    }
+
+    fn lookup_uncached<'a>(
+        &'a self,
+        host: &'a str,
+        limit: Duration,
+    ) -> BoxFuture<'a, LookupOutcome> {
+        Box::pin(async move {
+            let started = std::time::Instant::now();
+            let outcome = tokio::time::timeout(limit, system_a_lookup(host, limit))
+                .await
+                .unwrap_or(LookupOutcome::Timeout);
+            if matches!(outcome, LookupOutcome::Addrs(_) | LookupOutcome::NotFound) {
+                return outcome;
+            }
+            // Fall back to OS getaddrinfo only on transport/config failure with time remaining
+            // (e.g. local stub that blocks raw UDP/TCP 53), not when the uncached query timed out.
+            let remaining = limit.saturating_sub(started.elapsed());
+            if matches!(outcome, LookupOutcome::Failed) && remaining >= Duration::from_millis(250) {
+                return self.lookup(host, remaining).await;
+            }
+            outcome
         })
     }
 
@@ -223,11 +256,15 @@ async fn macos_scutil_nameservers() -> Vec<IpAddr> {
 }
 
 #[cfg(target_os = "windows")]
-async fn windows_native_txt_lookup(host: &str, limit: Duration) -> Option<TxtOutcome> {
+async fn windows_native_lookup<T: Send + 'static>(
+    host: &str,
+    limit: Duration,
+    query: fn(&str) -> Option<T>,
+) -> Option<T> {
     let host_fqdn = format!("{}.", host.trim_end_matches('.'));
     tokio::time::timeout(
         limit,
-        tokio::task::spawn_blocking(move || win_dns::query_txt(&host_fqdn)),
+        tokio::task::spawn_blocking(move || query(&host_fqdn)),
     )
     .await
     .ok()
@@ -237,9 +274,11 @@ async fn windows_native_txt_lookup(host: &str, limit: Duration) -> Option<TxtOut
 
 #[cfg(target_os = "windows")]
 mod win_dns {
-    use super::TxtOutcome;
+    use super::{LookupOutcome, TxtOutcome};
     use core::ffi::c_void;
+    use std::net::{IpAddr, Ipv4Addr};
 
+    const DNS_TYPE_A: u16 = 0x0001;
     const DNS_TYPE_TEXT: u16 = 0x0010;
     const DNS_QUERY_BYPASS_CACHE: u32 = 0x0000_0008;
     const DNS_QUERY_TREAT_AS_FQDN: u32 = 0x0000_1000;
@@ -250,6 +289,12 @@ mod win_dns {
 
     #[repr(C)]
     #[derive(Copy, Clone)]
+    struct DnsAData {
+        ip_address: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
     struct DnsTxtDataW {
         dw_string_count: u32,
         p_string_array: [*const u16; 1],
@@ -257,6 +302,7 @@ mod win_dns {
 
     #[repr(C)]
     union DnsRecordData {
+        a: DnsAData,
         txt: DnsTxtDataW,
         _pad: [usize; 8],
     }
@@ -300,13 +346,18 @@ mod win_dns {
         }
     }
 
-    pub fn query_txt(host_fqdn: &str) -> Option<TxtOutcome> {
+    enum QueryList {
+        NotFound,
+        Records(*mut DnsRecordW),
+    }
+
+    fn query_raw(host_fqdn: &str, record_type: u16) -> Option<QueryList> {
         let wide: Vec<u16> = host_fqdn.encode_utf16().chain(core::iter::once(0)).collect();
         let mut head: *mut DnsRecordW = core::ptr::null_mut();
         let status = unsafe {
             DnsQuery_W(
                 wide.as_ptr(),
-                DNS_TYPE_TEXT,
+                record_type,
                 DNS_QUERY_BYPASS_CACHE | DNS_QUERY_TREAT_AS_FQDN,
                 core::ptr::null_mut(),
                 &mut head,
@@ -317,21 +368,58 @@ mod win_dns {
             if !head.is_null() {
                 unsafe { DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST) };
             }
-            return Some(TxtOutcome::NotFound);
+            return Some(QueryList::NotFound);
         }
         if status == ERROR_TIMEOUT {
             if !head.is_null() {
                 unsafe { DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST) };
             }
-            return None; // fall through to hickory retry
+            return None;
         }
         if status != 0 || head.is_null() {
             if !head.is_null() {
                 unsafe { DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST) };
             }
-            crate::diagnostics::record("auditor:dns", &format!("DnsQuery_W failed status={status}"));
+            crate::diagnostics::record(
+                "auditor:dns",
+                &format!("DnsQuery_W(type={record_type}) failed status={status}"),
+            );
             return None;
         }
+        Some(QueryList::Records(head))
+    }
+
+    pub fn query_a(host_fqdn: &str) -> Option<LookupOutcome> {
+        let head = match query_raw(host_fqdn, DNS_TYPE_A)? {
+            QueryList::NotFound => return Some(LookupOutcome::NotFound),
+            QueryList::Records(h) => h,
+        };
+        let mut addrs = Vec::new();
+        let mut cur: *const DnsRecordW = head;
+        unsafe {
+            while !cur.is_null() {
+                let w_type = core::ptr::addr_of!((*cur).w_type).read();
+                let next = core::ptr::addr_of!((*cur).p_next).read();
+                if w_type == DNS_TYPE_A {
+                    let ip_raw = core::ptr::addr_of!((*cur).data.a.ip_address).read();
+                    addrs.push(IpAddr::V4(Ipv4Addr::from(ip_raw.to_ne_bytes())));
+                }
+                cur = next;
+            }
+            DnsRecordListFree(head.cast(), DNS_FREE_RECORD_LIST);
+        }
+        if addrs.is_empty() {
+            Some(LookupOutcome::NotFound)
+        } else {
+            Some(LookupOutcome::Addrs(addrs))
+        }
+    }
+
+    pub fn query_txt(host_fqdn: &str) -> Option<TxtOutcome> {
+        let head = match query_raw(host_fqdn, DNS_TYPE_TEXT)? {
+            QueryList::NotFound => return Some(TxtOutcome::NotFound),
+            QueryList::Records(h) => h,
+        };
 
         let mut records = Vec::new();
         let mut cur: *const DnsRecordW = head;
@@ -369,16 +457,13 @@ mod win_dns {
     }
 }
 
-async fn hickory_txt_query(
-    host_fqdn: &str,
+fn build_hickory_resolver(
     per_try_timeout: Duration,
     explicit_servers: Option<&[IpAddr]>,
-) -> TxtOutcome {
+) -> Option<hickory_resolver::TokioResolver> {
     use hickory_resolver::TokioResolver;
     use hickory_resolver::config::{NameServerConfig, ResolveHosts, ResolverConfig};
     use hickory_resolver::net::runtime::TokioRuntimeProvider;
-    use hickory_resolver::net::{DnsError, NetError};
-    use hickory_resolver::proto::rr::{RData, RecordType};
 
     let cfg = if let Some(ips) = explicit_servers {
         let usable: Vec<NameServerConfig> = ips
@@ -388,21 +473,18 @@ async fn hickory_txt_query(
             .map(NameServerConfig::udp_and_tcp)
             .collect();
         if usable.is_empty() {
-            return TxtOutcome::Failed;
+            return None;
         }
         ResolverConfig::from_parts(None, vec![], usable)
     } else {
-        let Ok((mut sys_cfg, _)) = hickory_resolver::system_conf::read_system_conf() else {
-            return TxtOutcome::Failed;
-        };
+        let (mut sys_cfg, _) = hickory_resolver::system_conf::read_system_conf().ok()?;
         sys_cfg.name_servers.retain(|ns| is_usable_nameserver(&ns.ip));
         if sys_cfg.name_servers.is_empty() {
-            return TxtOutcome::Failed;
+            return None;
         }
         sys_cfg
     };
     let mut builder = TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default());
-
     {
         let opts = builder.options_mut();
         opts.cache_size = 0;
@@ -411,7 +493,51 @@ async fn hickory_txt_query(
         opts.use_hosts_file = ResolveHosts::Never;
         opts.num_concurrent_reqs = 2;
     }
-    let Ok(resolver) = builder.build() else {
+    builder.build().ok()
+}
+
+async fn hickory_a_query(
+    host_fqdn: &str,
+    per_try_timeout: Duration,
+    explicit_servers: Option<&[IpAddr]>,
+) -> LookupOutcome {
+    use hickory_resolver::net::{DnsError, NetError};
+    use hickory_resolver::proto::rr::{RData, RecordType};
+
+    let Some(resolver) = build_hickory_resolver(per_try_timeout, explicit_servers) else {
+        return LookupOutcome::Failed;
+    };
+    match resolver.lookup(host_fqdn, RecordType::A).await {
+        Ok(lookup) => {
+            let addrs: Vec<IpAddr> = lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::A(a) => Some(IpAddr::V4(a.0)),
+                    _ => None,
+                })
+                .collect();
+            if addrs.is_empty() {
+                LookupOutcome::NotFound
+            } else {
+                LookupOutcome::Addrs(addrs)
+            }
+        }
+        Err(NetError::Timeout) => LookupOutcome::Timeout,
+        Err(NetError::Dns(DnsError::NoRecordsFound(_))) => LookupOutcome::NotFound,
+        Err(_) => LookupOutcome::Failed,
+    }
+}
+
+async fn hickory_txt_query(
+    host_fqdn: &str,
+    per_try_timeout: Duration,
+    explicit_servers: Option<&[IpAddr]>,
+) -> TxtOutcome {
+    use hickory_resolver::net::{DnsError, NetError};
+    use hickory_resolver::proto::rr::{RData, RecordType};
+
+    let Some(resolver) = build_hickory_resolver(per_try_timeout, explicit_servers) else {
         return TxtOutcome::Failed;
     };
     match resolver.lookup(host_fqdn, RecordType::TXT).await {
@@ -441,16 +567,60 @@ async fn hickory_txt_query(
     }
 }
 
+/// One cache-bypassing A query through the OS resolvers (`DnsQuery_W` on Windows,
+/// `scutil --dns` / system configuration on macOS), matching `system_txt_lookup` so both whoami
+/// probes hit the same live resolver.
+async fn system_a_lookup(host: &str, limit: Duration) -> LookupOutcome {
+    let name = format!("{}.", host.trim_end_matches('.'));
+    let started = std::time::Instant::now();
+    let per_try = Duration::from_millis((limit.as_millis() as u64 / 2).clamp(800, 1250));
+
+    #[cfg(target_os = "windows")]
+    if let Some(outcome) =
+        windows_native_lookup(&name, per_try.max(Duration::from_millis(1200)), win_dns::query_a)
+            .await
+    {
+        if matches!(outcome, LookupOutcome::Addrs(_) | LookupOutcome::NotFound) {
+            return outcome;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let scutil_ips = macos_scutil_nameservers().await;
+        if !scutil_ips.is_empty() {
+            let outcome = hickory_a_query(&name, per_try, Some(&scutil_ips)).await;
+            if matches!(outcome, LookupOutcome::Addrs(_) | LookupOutcome::NotFound) {
+                return outcome;
+            }
+            let remaining = limit.saturating_sub(started.elapsed());
+            if remaining < Duration::from_millis(250) {
+                return outcome;
+            }
+        }
+    }
+
+    let remaining = limit.saturating_sub(started.elapsed());
+    let fallback_try = Duration::from_millis((remaining.as_millis() as u64 / 2).clamp(400, 1000));
+    hickory_a_query(&name, fallback_try, None).await
+}
+
 /// One TXT query through the resolvers of the OS configuration (`DnsQuery_W` on Windows,
 /// `scutil --dns` / system configuration on macOS), without cache and without search domains.
 async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
     // The trailing dot makes the name absolute (no search-domain suffixes are tried).
     let name = format!("{}.", host.trim_end_matches('.'));
     let started = std::time::Instant::now();
-    let per_try = Duration::from_millis((limit.as_millis() as u64 / 3).clamp(400, 750));
+    let per_try = Duration::from_millis((limit.as_millis() as u64 / 2).clamp(800, 1250));
 
     #[cfg(target_os = "windows")]
-    if let Some(outcome) = windows_native_txt_lookup(&name, per_try.max(Duration::from_millis(1000))).await {
+    if let Some(outcome) = windows_native_lookup(
+        &name,
+        per_try.max(Duration::from_millis(1200)),
+        win_dns::query_txt,
+    )
+    .await
+    {
         if matches!(outcome, TxtOutcome::Records(_) | TxtOutcome::NotFound) {
             return outcome;
         }
@@ -479,7 +649,7 @@ async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
     }
 
     let remaining = limit.saturating_sub(started.elapsed());
-    let fallback_try = Duration::from_millis((remaining.as_millis() as u64 / 2).clamp(250, 750));
+    let fallback_try = Duration::from_millis((remaining.as_millis() as u64 / 2).clamp(400, 1000));
     let outcome = hickory_txt_query(&name, fallback_try, None).await;
     if !matches!(outcome, TxtOutcome::Records(_)) {
         crate::diagnostics::record(
@@ -824,23 +994,22 @@ impl SystemInfo for RealSystem {
     #[cfg(target_os = "windows")]
     fn os_locales(&self) -> Result<Vec<String>, SystemReadError> {
         let mut found = Vec::new();
-        for (key, value) in [
-            (r"HKCU\Control Panel\International", "LocaleName"),
-            (
-                r"HKCU\Control Panel\International\User Profile",
-                "Languages",
-            ),
-        ] {
-            let out = crate::sysproxy::silent_command("reg")
-                .args(["query", key, "/v", value])
-                .output()
-                .ok()
-                .filter(|o| o.status.success());
-            if let Some(out) = out {
-                found.extend(parse_reg_string_values(&String::from_utf8_lossy(
-                    &out.stdout,
-                )));
+        if let Ok(Some(locale)) = crate::win_reg::get_string(
+            crate::win_reg::RootKey::HkeyCurrentUser,
+            r"Control Panel\International",
+            "LocaleName",
+        ) {
+            let trimmed = locale.trim();
+            if !trimmed.is_empty() {
+                found.push(trimmed.to_string());
             }
+        }
+        if let Ok(Some(langs)) = crate::win_reg::get_multi_sz(
+            crate::win_reg::RootKey::HkeyCurrentUser,
+            r"Control Panel\International\User Profile",
+            "Languages",
+        ) {
+            found.extend(langs);
         }
         if found.is_empty() {
             Err(SystemReadError::Failed)
@@ -873,12 +1042,21 @@ impl SystemInfo for RealSystem {
     // Not built locally (cfg(windows)): verified by the Windows CI only.
     #[cfg(target_os = "windows")]
     fn location_consent(&self, machine_wide: bool) -> Result<String, SystemReadError> {
-        let key = if machine_wide {
-            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location"
+        let (root, subkey) = if machine_wide {
+            (
+                crate::win_reg::RootKey::HkeyLocalMachine,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
+            )
         } else {
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location"
+            (
+                crate::win_reg::RootKey::HkeyCurrentUser,
+                r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location",
+            )
         };
-        run_for_text(crate::sysproxy::silent_command("reg").args(["query", key, "/v", "Value"]))
+        match crate::win_reg::get_string(root, subkey, "Value") {
+            Ok(Some(val)) if !val.trim().is_empty() => Ok(val),
+            _ => Err(SystemReadError::Failed),
+        }
     }
 
     #[cfg(not(target_os = "windows"))]

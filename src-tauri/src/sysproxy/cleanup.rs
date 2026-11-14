@@ -1531,4 +1531,47 @@ mod tests {
         let rep = restore_with(&mut j, &p, Scope::All);
         assert_eq!(rep.restored(), 1, "quit must not leave our PAC behind");
     }
+
+    #[test]
+    fn cleanup_scope_all_restores_journaled_browser_policies_while_scope_user_env_leaves_them() {
+        use super::super::browser_policies::{
+            FakePolicyStore, PolicySpec, PolicyValue, apply_policy_specs,
+        };
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let store = FakePolicyStore::new();
+        store.preset("com.google.Chrome", "QuicAllowed", PolicyValue::Bool(true));
+
+        let mut j = open(&fs).with_policy_store(store.clone());
+        let specs = vec![
+            PolicySpec::new("com.google.Chrome", "QuicAllowed", PolicyValue::Bool(false)),
+            PolicySpec::new(
+                "com.google.Chrome",
+                "DnsOverHttpsMode",
+                PolicyValue::Sz("off".to_string()),
+            ),
+        ];
+        apply_policy_specs(&mut j, &p, &specs);
+        assert_eq!(
+            store.get("com.google.Chrome", "QuicAllowed"),
+            Some(PolicyValue::Bool(false))
+        );
+
+        // Scope::UserEnv (disabling CLI protection) must not remove browser policies.
+        let env_rep = restore_with(&mut j, &p, Scope::UserEnv);
+        assert!(env_rep.items.is_empty());
+        assert_eq!(
+            store.get("com.google.Chrome", "QuicAllowed"),
+            Some(PolicyValue::Bool(false))
+        );
+
+        // Scope::All (disable sysproxy / quit / crash recovery) restores baseline.
+        let all_rep = restore_with(&mut j, &p, Scope::All);
+        assert_eq!(all_rep.restored(), 2);
+        assert_eq!(
+            store.get("com.google.Chrome", "QuicAllowed"),
+            Some(PolicyValue::Bool(true))
+        );
+        assert_eq!(store.get("com.google.Chrome", "DnsOverHttpsMode"), None);
+        assert!(j.is_empty());
+    }
 }

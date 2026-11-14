@@ -119,3 +119,43 @@ describe("ADMIN_AUTH_REQUIRED и умное снятие блока", () => {
     expect(await toggleSysproxyPrivileged()).toBe(true);
   });
 });
+
+describe("Обзор: неизвестный DNS-резолвер не красит главный экран в жёлтый", () => {
+  const unknown = (code: string): CheckResult => ({
+    status: "unknown",
+    code,
+    message: "u",
+    reason: "timeout",
+  });
+
+  it("когда unknown только в проверках DNS (6 и 10), вердикт и сервисы остаются зелёными", () => {
+    const r = report({ overall_status: "green", trust_score: 100, incomplete: false });
+    r.checks[6] = unknown("DNS_WHOAMI_TIMEOUT");
+    r.checks[10] = unknown("DNS_WHOAMI_DISAGREE");
+
+    const m = model({
+      reports: { anthropic: r, openai: r, gemini: r },
+      activeReport: r,
+      sysproxyActive: true,
+    });
+    expect(m.tone).toBe("ok");
+    expect(m.verdict).toBe(copy.verdict.ok);
+    expect(m.banner).toBeNull();
+    expect(m.services.every((s) => s.status === "ok")).toBe(true);
+  });
+
+  it("когда unknown в другой проверке (например, UDP STUN на 12), экран остаётся жёлтым", () => {
+    const r = report({ overall_status: "green", trust_score: 94 });
+    r.checks[12] = unknown("UDP_STUN_TIMEOUT");
+
+    const m = model({
+      reports: { anthropic: r },
+      activeReport: r,
+      sysproxyActive: true,
+    });
+    expect(m.tone).toBe("warn");
+    expect(m.verdict).toBe(copy.verdict.partial);
+    expect(m.banner).toBe("incomplete");
+    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("warn");
+  });
+});

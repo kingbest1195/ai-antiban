@@ -729,7 +729,12 @@ impl NetworkGuard {
     }
 
     /// First part of a tick, under the `inner` lock (no network I/O).
-    async fn plan_tick(&self, current_fp: String, unrouted: &[&'static str]) -> TickPlan {
+    async fn plan_tick(
+        &self,
+        current_fp: String,
+        unrouted: &[&'static str],
+        split_tunnel_mode: bool,
+    ) -> TickPlan {
         let mut inner = self.inner.lock().await;
         let dirty = std::mem::take(&mut inner.route_dirty);
         let dirty_since = inner.dirty_since.take();
@@ -758,6 +763,21 @@ impl NetworkGuard {
                 self.set_gate(Gate::Open);
             }
             return TickPlan::Done;
+        }
+
+        if split_tunnel_mode {
+            // In split-tunnel / PAC mode, general interface / 1.1.1.1 jitter is expected:
+            // never freeze the gate to Pending, only run telemetry probes on regular cadence.
+            inner.last_route_fp = Some(current_fp.clone());
+            if self.gate() != Gate::Open {
+                self.set_gate(Gate::Open);
+            }
+            if let Some(t) = inner.last_probe
+                && t.elapsed() < Duration::from_millis(PROBE_MIN_GAP_MS)
+            {
+                return TickPlan::Done;
+            }
+            return TickPlan::ProbeRegular(current_fp);
         }
 
         let route_changed = if inner.baseline.is_some() {
@@ -805,11 +825,14 @@ impl NetworkGuard {
         // governed by the gate, and the probe below measures the direct egress only.
         let current_fp = compute_local_route_fingerprint(None);
         let unrouted = env.state.unrouted_providers().await;
+        let st_data = env.state.get_data().await;
         // Capture before `plan_tick` transitions `Gate::Blocked -> Gate::Pending` on route change.
-        let was_blocked = self.gate() == Gate::Blocked
-            || !env.state.get_data().await.blocked_providers.is_empty();
+        let was_blocked = self.gate() == Gate::Blocked || !st_data.blocked_providers.is_empty();
 
-        match self.plan_tick(current_fp, &unrouted).await {
+        match self
+            .plan_tick(current_fp, &unrouted, st_data.split_tunnel_mode)
+            .await
+        {
             TickPlan::Done => {}
             TickPlan::ProbeChanged(t0, planned_fp) => {
                 // 2. Probe external IP (no lock held: other tasks keep working meanwhile)
@@ -969,6 +992,25 @@ impl NetworkGuard {
             return; // offline: nothing to compare
         };
         inner.observed_ip = Some(ip.clone());
+
+        if env.state.is_split_tunnel_mode().await {
+            if let Some(b) = inner.baseline.as_mut() {
+                b.ip = ip;
+                b.trusted = true;
+            } else {
+                inner.baseline = Some(Baseline {
+                    ip,
+                    country: None,
+                    trusted: true,
+                });
+            }
+            inner.handled_ip = None;
+            inner.pending = None;
+            if !self.is_manual_killswitch() && self.gate() != Gate::Open {
+                self.set_gate(Gate::Open);
+            }
+            return;
+        }
 
         let Some((baseline_ip, baseline_trusted)) = inner
             .baseline
@@ -1913,7 +1955,7 @@ mod tests {
             ipv6_exit: false,
             checks: vec![ok],
             unknown_count: 0,
-            applicable_count: 13,
+            applicable_count: 14,
             incomplete: false,
         }
     }
@@ -3081,6 +3123,33 @@ mod tests {
         assert_eq!(
             effective_tray_report(&report, true, &st).overall_status,
             OverallStatus::Red
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_split_tunnel_mode_ignores_1_1_1_1_exit_ip_jitter() {
+        let h = harness(
+            slow_audit(Duration::from_millis(10), "5.5.5.5", OverallStatus::Red),
+            "9.9.9.9",
+        )
+        .await;
+        h.state.set_split_tunnel_mode(true).await.unwrap();
+        {
+            let mut inner = h.guard.inner.lock().await;
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+            inner.route_dirty = true;
+        }
+
+        // Baseline is "1.1.1.1", fake probe returns "9.9.9.9" + route_dirty:
+        // split_tunnel_mode must NOT trip, show alert popup, block providers, or freeze the gate.
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
+        assert_eq!(h.io.count("interceptor://risk-detected"), 0);
+        assert!(h.state.get_data().await.blocked_providers.is_empty());
+        assert_eq!(
+            h.guard.inner.lock().await.observed_ip.as_deref(),
+            Some("9.9.9.9")
         );
     }
 }

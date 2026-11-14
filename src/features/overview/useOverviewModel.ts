@@ -32,6 +32,19 @@ export interface OverviewModel {
 
 const PROVIDER_IDS: ProviderId[] = ["anthropic", "openai", "gemini"];
 
+/** Позиции проверок DNS-резолвера в `RiskReport.checks` (`dns` = 6, `dns_country` = 10). */
+const DNS_RESOLVER_CHECK_INDICES = new Set([6, 10]);
+
+/** Сколько непройденных `unknown`-проверок есть за вычетом сбоя DNS-резолвера (не красим из-за него главную в жёлтый). */
+function nonDnsUnknownCount(report: RiskReport | null | undefined, checks: CheckResult[]): number {
+  const hasIndexedChecks = Boolean(report?.checks && report.checks.length > 0);
+  return checks.filter((c, i) => {
+    if (classify(c) !== "unknown") return false;
+    if (hasIndexedChecks && DNS_RESOLVER_CHECK_INDICES.has(i)) return false;
+    return true;
+  }).length;
+}
+
 function checksOf(report: RiskReport | null): CheckResult[] {
   if (!report) return [];
   if (report.checks && report.checks.length > 0) return report.checks;
@@ -89,7 +102,7 @@ export function useOverviewModel({
 
     const checks = checksOf(activeReport);
     const counts = countChecks(checks);
-    const incomplete = Boolean(activeReport?.incomplete) || counts.unknown > 0;
+    const incomplete = Boolean(activeReport?.incomplete) || nonDnsUnknownCount(activeReport, checks) > 0;
 
     let verdict: string = copy.verdict.ok;
     let tone: HeroTone = "ok";
@@ -138,8 +151,11 @@ export function useOverviewModel({
       const isAllowed = state?.session_allowed_providers?.includes(id);
       const list = checksOf(report ?? null);
       const hasCritical = list.some((c) => classify(c) === "crit");
-      // Непроверенное не считаем чистым: сервис получает статус «Нужна проверка».
-      const hasWarning = list.some((c) => classify(c) === "warn" || classify(c) === "unknown") || Boolean(report?.incomplete);
+      // Непроверенное не считаем чистым (кроме сбоя самого DNS-резолвера): сервис получает статус «Нужна проверка».
+      const hasWarning =
+        list.some((c) => classify(c) === "warn") ||
+        nonDnsUnknownCount(report, list) > 0 ||
+        Boolean(report?.incomplete);
 
       let status: ServiceStatus = "ok";
       if (isBlocked) status = "critical";

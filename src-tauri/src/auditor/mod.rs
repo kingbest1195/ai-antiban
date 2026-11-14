@@ -20,7 +20,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cache::{CheckCache, DNSBL_TTL, IPV6_TTL, OS_TTL, UDP_TTL, WHOAMI_TTL, cached_check};
+use cache::{
+    CheckCache, DNSBL_TTL, IPV6_TTL, OS_TTL, RESOLVER_UNKNOWN_TTL, UDP_TTL, WHOAMI_TTL,
+    cached_check,
+};
 use probes::whoami::{self, ResolverView, evaluate_dns_country};
 use probes::stun;
 use run_check::{blocking_check, run_check};
@@ -31,7 +34,8 @@ pub use ip_type::{ExitIdentity, IpType, TorLookup, evaluate_ip_reputation, looku
 pub use geo_matrix::{CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo};
 pub use history::{evaluate_impossible_travel, evaluate_ip_pinning};
 pub use leaks::{
-    check_dns_leak, check_dns_leak_with, check_ipv6_leak, check_ipv6_leak_with, evaluate_dns_resolver,
+    check_dns_leak, check_dns_leak_with, check_ipv6_leak, check_ipv6_leak_with,
+    check_ipv6_leak_with_split, evaluate_dns_resolver,
 };
 pub use network::{
     build_upstream_client, evaluate_dns_country_consistency, evaluate_reverse_dns_ptr,
@@ -134,9 +138,10 @@ const CORE_CHECKS: [usize; 2] = [0, 2];
 async fn resolver_view(env: &AuditEnv, cache: &CheckCache) -> ResolverView {
     cache
         .resolver
-        .get_or_compute(
+        .get_or_compute_with_unknown_ttl(
             "whoami",
             WHOAMI_TTL,
+            RESOLVER_UNKNOWN_TTL,
             |v| v.is_located(),
             whoami::measure_resolver(&*env.dns, &*env.probe, &cache.geo),
         )
@@ -161,14 +166,46 @@ pub fn count_checks(checks: &[CheckResult]) -> (u8, u8) {
     (unknown.min(255) as u8, applicable.min(255) as u8)
 }
 
+/// Failed/timed-out/disagreeing DNS resolver probes (indices 6 and 10) must not cap the trust
+/// score at 94 or flip the report into `incomplete`/yellow when every other check is clean.
+/// `DNS_WHOAMI_FAKE_IP` (active local TUN DNS stub) is intentionally NOT exempted here.
+fn is_exempt_dns_unknown(index: usize, check: &CheckResult) -> bool {
+    if !matches!(index, 6 | 10) || !check.is_unknown() || check.is_not_applicable() {
+        return false;
+    }
+    matches!(
+        check.code.as_str(),
+        "DNS_WHOAMI_TIMEOUT"
+            | "DNS_WHOAMI_UNREACHABLE"
+            | "DNS_WHOAMI_UNSUPPORTED"
+            | "DNS_WHOAMI_EMPTY"
+            | "DNS_WHOAMI_SINGLE_SOURCE"
+            | "DNS_WHOAMI_DISAGREE"
+            | "DNS_RESOLVER_GEO_UNAVAILABLE"
+            | "DNS_COUNTRY_NO_EXIT"
+            | "DNS_UNSUPPORTED_OS"
+            | "DNS_RESOLVERS_UNREADABLE"
+            | "DNS_RESOLVERS_EMPTY"
+            | "CHECK_TIMEOUT"
+            | "CHECK_INTERNAL_ERROR"
+    )
+}
+
 /// Critical -40, Warning -15, Unknown -5 (the sum of the Unknown penalties is capped at -15);
-/// not-applicable checks cost nothing. With any Unknown the score never exceeds 94.
+/// not-applicable checks cost nothing. With any non-exempt Unknown the score never exceeds 94.
 pub fn score_checks(checks: &[CheckResult], is_pinned: bool) -> Verdict {
     const UNKNOWN_PENALTY: i32 = 5;
     const UNKNOWN_PENALTY_CAP: i32 = 15;
     const MAX_SCORE_WITH_UNKNOWN: i32 = 94;
 
     let (unknown_count, applicable_count) = count_checks(checks);
+    let scoring_unknown_count = checks
+        .iter()
+        .enumerate()
+        .filter(|(idx, c)| {
+            c.is_unknown() && !c.is_not_applicable() && !is_exempt_dns_unknown(*idx, c)
+        })
+        .count();
     let mut score: i32 = 100;
     let mut has_critical = false;
     let mut has_warning = false;
@@ -186,7 +223,7 @@ pub fn score_checks(checks: &[CheckResult], is_pinned: bool) -> Verdict {
             CheckStatus::Ok | CheckStatus::Unknown => {}
         }
     }
-    score -= (i32::from(unknown_count) * UNKNOWN_PENALTY).min(UNKNOWN_PENALTY_CAP);
+    score -= (scoring_unknown_count as i32 * UNKNOWN_PENALTY).min(UNKNOWN_PENALTY_CAP);
 
     // A core check that could not be performed can never end in an automatic "green".
     let core_unknown = CORE_CHECKS
@@ -197,7 +234,7 @@ pub fn score_checks(checks: &[CheckResult], is_pinned: bool) -> Verdict {
     if is_pinned && !has_critical {
         score = (score + 10).min(100);
     }
-    if unknown_count > 0 {
+    if scoring_unknown_count > 0 {
         score = score.min(MAX_SCORE_WITH_UNKNOWN);
     }
 
@@ -210,7 +247,7 @@ pub fn score_checks(checks: &[CheckResult], is_pinned: bool) -> Verdict {
     } else {
         score = score.clamp(
             86,
-            if unknown_count > 0 {
+            if scoring_unknown_count > 0 {
                 MAX_SCORE_WITH_UNKNOWN
             } else {
                 100
@@ -224,7 +261,7 @@ pub fn score_checks(checks: &[CheckResult], is_pinned: bool) -> Verdict {
         trust_score: score as u8,
         unknown_count,
         applicable_count,
-        incomplete: unknown_count > 0,
+        incomplete: scoring_unknown_count > 0,
     }
 }
 
@@ -234,6 +271,9 @@ pub struct Auditor {
     pub resolver: NetworkResolver,
     /// DNS, HTTP probe and host reads of the checks (replaceable in tests).
     env: AuditEnv,
+    /// In `Auditor::with_env` tests, route direct `claude_exit` probes through `env.probe`
+    /// so offline fake tests never touch the network; production uses `NetworkResolver`.
+    use_env_probe_for_direct: bool,
     /// Last logged set of unfinished checks per provider (the journal gets a line on change only).
     incomplete_logged: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -252,6 +292,7 @@ impl Auditor {
             rules,
             resolver,
             env: AuditEnv::real(),
+            use_env_probe_for_direct: false,
             incomplete_logged: Arc::default(),
         })
     }
@@ -260,6 +301,7 @@ impl Auditor {
     pub fn with_env(env: AuditEnv) -> Result<Self, String> {
         Ok(Self {
             env,
+            use_env_probe_for_direct: true,
             ..Self::new()?
         })
     }
@@ -330,7 +372,7 @@ impl Auditor {
         Ok(tel)
     }
 
-    /// Evaluates the complete 13-point risk assessment for the target AI provider,
+    /// Evaluates the complete 14-point risk assessment for the target AI provider,
     /// on the egress of that provider's route (or the direct egress).
     pub async fn evaluate_all(
         &self,
@@ -471,17 +513,24 @@ impl Auditor {
             }
         }));
         let ipv6 = tracked(&sink, 5, run_check("IPv6 Leak", CHECK_LIMIT_IO, {
-            let (cache, matrix, country, env) =
-                (cache.clone(), matrix.clone(), country.clone(), env.clone());
+            let (cache, matrix, country, env, split_tunnel_mode) = (
+                cache.clone(),
+                matrix.clone(),
+                country.clone(),
+                env.clone(),
+                state_data.split_tunnel_mode,
+            );
             async move {
-                cached_check(&cache.ipv6, &country, IPV6_TTL, async {
-                    check_ipv6_leak_with(
+                let key = format!("{country}|split={split_tunnel_mode}");
+                cached_check(&cache.ipv6, &key, IPV6_TTL, async {
+                    check_ipv6_leak_with_split(
                         &*env.probe,
                         &*env.system,
                         leaks::IPV6_CHECK_URL,
                         Duration::from_millis(leaks::IPV6_CHECK_TIMEOUT_MS),
                         &country,
                         &matrix.global_blocked_countries,
+                        split_tunnel_mode,
                     )
                     .await
                 })
@@ -576,6 +625,29 @@ impl Auditor {
             }
         }));
 
+        // Real AI provider exit verification (index 13, 14th check).
+        let claude_exit = tracked(&sink, 13, run_check("Provider Exit", CHECK_LIMIT_IO, {
+            let resolver = self.resolver.clone();
+            let bound_route = match selection {
+                RouteSelection::Route(r) => Some(r.clone()),
+                _ => None,
+            };
+            let tel = telemetry.clone();
+            let matrix = matrix.clone();
+            let probe = self.use_env_probe_for_direct.then(|| env.probe.clone());
+            async move {
+                resolver
+                    .probe_provider_exit_with_probe(
+                        provider,
+                        bound_route.as_ref(),
+                        &tel,
+                        &matrix,
+                        probe.as_deref(),
+                    )
+                    .await
+            }
+        }));
+
         let (
             geo_result,
             pinning_result,
@@ -590,6 +662,7 @@ impl Auditor {
             dns_country_result,
             locale_result,
             udp_stun_result,
+            claude_exit_result,
         ) = tokio::join!(
             geo,
             pinning,
@@ -603,7 +676,8 @@ impl Auditor {
             reverse_dns,
             dns_country,
             locale,
-            udp_stun
+            udp_stun,
+            claude_exit
         );
         let dnsbl_clean_count = dnsbl_label
             .lock()
@@ -625,6 +699,8 @@ impl Auditor {
             locale_result,
             // Index 12: not a core check.
             udp_stun_result,
+            // Index 13 (`claude_exit`): provider-specific exit verification.
+            claude_exit_result,
         ];
         let verdict = score_checks(&checks, is_pinned);
         self.journal_incomplete(provider, &checks);
@@ -711,7 +787,7 @@ mod tests {
     fn na() -> CheckResult {
         CheckResult::unknown("NA", "na", UnknownReason::NotApplicable)
     }
-    /// The 13 results of a report in order, `ok()` everywhere except the given positions.
+    /// The 14 results of a report in order, `ok()` everywhere except the given positions.
     fn all_checks(over: &[(usize, CheckResult)]) -> Vec<CheckResult> {
         let mut v: Vec<CheckResult> = (0..CHECK_COUNT).map(|_| ok()).collect();
         for (i, r) in over {
@@ -720,8 +796,8 @@ mod tests {
         v
     }
 
-    /// Number of checks in a report (`udp_stun` is the 13th, index 12).
-    const CHECK_COUNT: usize = 13;
+    /// Number of checks in a report (`claude_exit` is the 14th, index 13).
+    const CHECK_COUNT: usize = 14;
 
     #[test]
     fn score_twelve_ok_and_one_unknown_is_below_100_and_green() {
@@ -733,13 +809,13 @@ mod tests {
     }
 
     #[test]
-    fn score_thirteen_ok_is_100() {
+    fn score_fourteen_ok_is_100() {
         let v = score_checks(&all_checks(&[]), false);
         assert_eq!(
             (v.trust_score, v.overall_status),
             (100, OverallStatus::Green)
         );
-        assert!(!v.incomplete && v.unknown_count == 0 && v.applicable_count == 13);
+        assert!(!v.incomplete && v.unknown_count == 0 && v.applicable_count == 14);
     }
 
     #[test]
@@ -768,7 +844,7 @@ mod tests {
         let v = score_checks(&all_checks(&[(8, na())]), false);
         assert_eq!(v.trust_score, 100);
         assert!(!v.incomplete);
-        assert_eq!((v.unknown_count, v.applicable_count), (0, 12));
+        assert_eq!((v.unknown_count, v.applicable_count), (0, 13));
     }
 
     #[test]
@@ -789,8 +865,8 @@ mod tests {
             false,
         );
         assert_eq!(v.unknown_count, 2);
-        assert_eq!(v.applicable_count, 11);
-        assert_eq!(count_checks(&all_checks(&[(2, unk())])), (1, 13));
+        assert_eq!(v.applicable_count, 12);
+        assert_eq!(count_checks(&all_checks(&[(2, unk())])), (1, 14));
     }
 
     #[test]
@@ -802,7 +878,7 @@ mod tests {
             assert!(!v.overall_status.is_allowed_by_default());
         }
         // The auxiliary ones keep the automatic admit (fail-open), but are reported.
-        for aux in [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
+        for aux in [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] {
             let v = score_checks(&all_checks(&[(aux, unk())]), false);
             assert_eq!(v.overall_status, OverallStatus::Green, "aux check {aux}");
             assert!(v.incomplete);
@@ -855,7 +931,7 @@ mod tests {
             ipv6_exit: false,
             checks: vec![ok()],
             unknown_count: 0,
-            applicable_count: 13,
+            applicable_count: 14,
             incomplete: false,
         }
     }
@@ -933,9 +1009,28 @@ mod tests {
         )
     }
 
-    /// The geo services place every address in `country`; the IPv6 probe reports NL.
+    /// Attaches healthy direct AI trace responses matching `rich_telemetry()`.
+    fn with_ai_traces(probe: FakeProbe) -> FakeProbe {
+        probe
+            .with_route(
+                "claude.ai/cdn-cgi/trace",
+                HttpProbeOutcome::Response {
+                    status: 200,
+                    body: "fl=1\nip=203.0.113.9\nloc=NL\ncolo=AMS\n".into(),
+                },
+            )
+            .with_route(
+                "chatgpt.com/cdn-cgi/trace",
+                HttpProbeOutcome::Response {
+                    status: 200,
+                    body: "fl=1\nip=203.0.113.9\nloc=NL\ncolo=AMS\n".into(),
+                },
+            )
+    }
+
+    /// The geo services place the resolver in `country`; IPv6 and provider-exit probes report NL.
     fn probe_locating(country: &str) -> FakeProbe {
-        with_tor_list(FakeProbe::body(200, "loc=NL\n")).with_route(
+        with_ai_traces(with_tor_list(FakeProbe::body(200, "loc=NL\n"))).with_route(
             "ipwho.is",
             HttpProbeOutcome::Response {
                 status: 200,
@@ -991,7 +1086,7 @@ mod tests {
             rich_telemetry(),
         )
         .await;
-        assert_eq!(report.checks.len(), 13);
+        assert_eq!(report.checks.len(), 14);
         assert!(report.dnsbl_result.is_unknown());
         assert_eq!(report.dnsbl_result.reason, Some(UnknownReason::Timeout));
         assert!(report.ipv6_result.is_unknown());
@@ -1025,6 +1120,7 @@ mod tests {
         )
         .await;
         let names = [
+            (13, "claude exit"),
             (12, "udp stun"),
             (3, "dnsbl"),
             (4, "asn"),
@@ -1043,9 +1139,9 @@ mod tests {
         for i in [1, 2, 8] {
             assert!(report.checks[i].is_not_applicable(), "check {i}: {:?}", report.checks[i]);
         }
-        assert_eq!(report.checks.len(), 13);
-        assert_eq!(report.unknown_count, 9);
-        assert_eq!(report.applicable_count, 10);
+        assert_eq!(report.checks.len(), 14);
+        assert_eq!(report.unknown_count, 10);
+        assert_eq!(report.applicable_count, 11);
         assert!(report.incomplete && report.trust_score <= 94);
     }
 
@@ -1075,7 +1171,7 @@ mod tests {
         assert!(report.incomplete);
     }
 
-    /// The progress sink gets the exit address first and every one of the 13 checks exactly once,
+    /// The progress sink gets the exit address first and every one of the 14 checks exactly once,
     /// with the very result that ends up in the final report.
     #[tokio::test]
     async fn evaluate_all_progress_reports_telemetry_and_each_check_once() {
@@ -1115,23 +1211,30 @@ mod tests {
     #[tokio::test]
     async fn evaluate_all_healthy_sources_state_verified_facts() {
         let report = audit(healthy_env(), rich_telemetry()).await;
-        assert_eq!(report.checks.len(), 13);
+        assert_eq!(report.checks.len(), 14);
         assert!(report.dnsbl_result.status.is_ok());
         assert!(report.dnsbl_result.message.contains("Ответили 5 из 5"), "{}", report.dnsbl_result.message);
         assert_eq!(report.dnsbl_clean_count, "Ответили 5 из 5 баз");
         assert_eq!(report.ipv6_result.code, "IPV6_ENCAPSULATED");
         assert_eq!(report.timezone_result.code, "TIMEZONE_MATCH");
-        // The three checks of the real DNS resolver and of UDP rest on measurements now.
-        let (dns, dns_country, udp) = (&report.checks[6], &report.checks[10], &report.checks[12]);
+        // The checks of the real DNS resolver, UDP and provider exit rest on measurements now.
+        let (dns, dns_country, udp, exit) = (
+            &report.checks[6],
+            &report.checks[10],
+            &report.checks[12],
+            &report.checks[13],
+        );
         assert_eq!(dns.code, "DNS_CLEAN");
         assert_eq!(dns_country.code, "DNS_COUNTRY_CONSISTENT");
         assert_eq!(udp.code, "UDP_STUN_MATCH");
+        assert_eq!(exit.code, "PROVIDER_EXIT_VERIFIED");
         assert_eq!(dns.measured_via.as_deref(), Some("whoami:akamai+google"));
         assert_eq!(dns_country.measured_via.as_deref(), Some("whoami:akamai+google"));
         assert_eq!(udp.measured_via.as_deref(), Some("stun:cloudflare+google"));
+        assert_eq!(exit.measured_via.as_deref(), Some("claude.ai"));
         // Only pinning, first session and location do not apply: everything else was verified.
         assert_eq!(report.unknown_count, 0);
-        assert_eq!(report.applicable_count, 10);
+        assert_eq!(report.applicable_count, 11);
         assert!(!report.incomplete);
         assert_eq!(
             (report.trust_score, report.overall_status),
@@ -1252,7 +1355,7 @@ mod tests {
     /// counted, not penalised), so the report is complete and Green-100.
     #[tokio::test]
     async fn evaluate_all_public_resolver_is_ok_and_its_country_not_applicable() {
-        let probe = with_tor_list(FakeProbe::body(200, "loc=NL\n")).with_route(
+        let probe = with_ai_traces(with_tor_list(FakeProbe::body(200, "loc=NL\n"))).with_route(
             "ipwho.is",
             HttpProbeOutcome::Response {
                 status: 200,
@@ -1272,7 +1375,7 @@ mod tests {
         assert_eq!(report.checks[6].code, "DNS_PUBLIC_RESOLVER");
         assert!(report.checks[6].status.is_ok());
         assert!(report.checks[10].is_not_applicable(), "{:?}", report.checks[10]);
-        assert_eq!((report.unknown_count, report.applicable_count), (0, 9));
+        assert_eq!((report.unknown_count, report.applicable_count), (0, 10));
         assert!(!report.incomplete);
         assert_eq!((report.trust_score, report.overall_status), (100, OverallStatus::Green));
     }
@@ -1296,7 +1399,11 @@ mod tests {
             let r = auditor.evaluate_all(provider, &state, false).await.unwrap();
             assert_eq!(r.asn_result, first.asn_result);
         }
-        assert_eq!(probe.calls(), calls_after_first, "every later audit reuses the cached answers");
+        assert_eq!(
+            probe.calls(),
+            calls_after_first + 1,
+            "only OpenAI probes chatgpt.com/cdn-cgi/trace; Tor list, IPv6 and ipwho.is reuse cache"
+        );
     }
 
     /// An exit over IPv6: the report says so, the spam-list and Tor checks are "not applicable"
@@ -1318,7 +1425,7 @@ mod tests {
             .await
             .unwrap();
         assert!(report.ipv6_exit);
-        assert_eq!(report.checks.len(), 13);
+        assert_eq!(report.checks.len(), 14);
         assert!(report.dnsbl_result.is_not_applicable(), "{:?}", report.dnsbl_result);
         assert_eq!(report.dnsbl_result.code, "DNSBL_IPV6_UNSUPPORTED");
         assert!(report.asn_result.is_not_applicable(), "{:?}", report.asn_result);
@@ -1371,5 +1478,48 @@ mod tests {
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["ipv6_exit"], false);
         assert_eq!(json["asn_result"]["detail"]["ip_type"], "unknown");
+    }
+
+    #[test]
+    fn dns_resolver_transient_unknown_keeps_score_100_and_green() {
+        let dns_timeout = CheckResult::unknown("DNS_WHOAMI_TIMEOUT", "t", UnknownReason::Timeout);
+        let dns_disagree = CheckResult::unknown("DNS_WHOAMI_DISAGREE", "d", UnknownReason::NoData);
+        let v = score_checks(&all_checks(&[(6, dns_timeout), (10, dns_disagree)]), false);
+        assert_eq!(v.overall_status, OverallStatus::Green);
+        assert_eq!(v.trust_score, 100);
+        assert!(!v.incomplete);
+        assert_eq!(v.unknown_count, 2);
+
+        // Another unknown check (e.g. udp_stun at 12) still caps at 94 and marks incomplete.
+        let v_other = score_checks(
+            &all_checks(&[
+                (6, CheckResult::unknown("DNS_WHOAMI_TIMEOUT", "t", UnknownReason::Timeout)),
+                (12, unk()),
+            ]),
+            false,
+        );
+        assert_eq!(v_other.overall_status, OverallStatus::Green);
+        assert_eq!(v_other.trust_score, 94);
+        assert!(v_other.incomplete);
+        assert_eq!(v_other.unknown_count, 2);
+    }
+
+    #[tokio::test]
+    async fn evaluate_all_whoami_timeout_keeps_report_green_100() {
+        let env = env_with_udp(
+            zones_answering(FakeDns::new(LookupOutcome::Timeout)),
+            probe_locating("NL"),
+            FakeSystem {
+                global_ipv6: Some(true),
+                ..FakeSystem::healthy()
+            },
+            udp_exiting_as("203.0.113.9"),
+        );
+        let report = audit(env, rich_telemetry()).await;
+        assert!(report.checks[6].is_unknown());
+        assert!(report.checks[10].is_unknown());
+        assert_eq!(report.overall_status, OverallStatus::Green);
+        assert_eq!(report.trust_score, 100);
+        assert!(!report.incomplete);
     }
 }

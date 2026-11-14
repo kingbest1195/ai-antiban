@@ -605,7 +605,7 @@ pub fn reg_read_outcome(
 /// One value of `HKEY_CURRENT_USER\<subkey>`, read through the registry API.
 #[cfg(target_os = "windows")]
 fn registry_get(subkey: &str, name: &str, op: &'static str) -> PResult<Option<RegValue>> {
-    let r = ffi::reg_get_hkcu(subkey, name);
+    let r = crate::win_reg::read_raw(crate::win_reg::RootKey::HkeyCurrentUser, subkey, name);
     reg_read_outcome(r.status, r.kind, &r.data, op)
 }
 
@@ -618,15 +618,90 @@ fn registry_get(_subkey: &str, _name: &str, op: &'static str) -> PResult<Option<
 /// valid UTF-16 is left out (it cannot be one of ours).
 #[cfg(target_os = "windows")]
 fn registry_names(subkey: &str, op: &'static str) -> PResult<Vec<String>> {
-    let names = ffi::reg_names_hkcu(subkey).map_err(|_| PlatformError::Failed(op))?;
-    Ok(names
-        .into_iter()
-        .filter_map(|n| String::from_utf16(&n).ok())
-        .collect())
+    crate::win_reg::enum_value_names(crate::win_reg::RootKey::HkeyCurrentUser, subkey).map_err(
+        |err| {
+            let summary = format!("{op}: {err}");
+            crate::diagnostics::record("sysproxy", &summary);
+            set_last_os_error(Some(summary));
+            PlatformError::Failed(op)
+        },
+    )
 }
 
 #[cfg(not(target_os = "windows"))]
 fn registry_names(_subkey: &str, op: &'static str) -> PResult<Vec<String>> {
+    Err(PlatformError::Unsupported(op))
+}
+
+#[cfg(target_os = "windows")]
+fn record_reg_error(op: &'static str, err: &str) -> PlatformError {
+    let summary = format!("{op}: {err}");
+    crate::diagnostics::record("sysproxy", &summary);
+    set_last_os_error(Some(summary));
+    PlatformError::Failed(op)
+}
+
+#[cfg(target_os = "windows")]
+fn registry_set_sz(subkey: &str, name: &str, value: &str, op: &'static str) -> PResult<()> {
+    crate::win_reg::set_sz(
+        crate::win_reg::RootKey::HkeyCurrentUser,
+        subkey,
+        name,
+        value,
+    )
+    .map(|()| clear_last_os_error())
+    .map_err(|err| record_reg_error(op, &err))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn registry_set_sz(_subkey: &str, _name: &str, _value: &str, op: &'static str) -> PResult<()> {
+    Err(PlatformError::Unsupported(op))
+}
+
+#[cfg(target_os = "windows")]
+fn registry_set_value(
+    subkey: &str,
+    name: &str,
+    value: &RegValue,
+    op: &'static str,
+) -> PResult<()> {
+    let root = crate::win_reg::RootKey::HkeyCurrentUser;
+    let res = match value.kind {
+        RegKind::Sz => crate::win_reg::set_sz(root, subkey, name, &value.data),
+        RegKind::ExpandSz => crate::win_reg::set_expand_sz(root, subkey, name, &value.data),
+        RegKind::Dword => {
+            let n = value
+                .data
+                .trim()
+                .parse::<u32>()
+                .map_err(|e| format!("invalid REG_DWORD value for {name}: {e}"))
+                .map_err(|err| record_reg_error(op, &err))?;
+            crate::win_reg::set_dword(root, subkey, name, n)
+        }
+    };
+    res.map(|()| clear_last_os_error())
+        .map_err(|err| record_reg_error(op, &err))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn registry_set_value(
+    _subkey: &str,
+    _name: &str,
+    _value: &RegValue,
+    op: &'static str,
+) -> PResult<()> {
+    Err(PlatformError::Unsupported(op))
+}
+
+#[cfg(target_os = "windows")]
+fn registry_delete(subkey: &str, name: &str, op: &'static str) -> PResult<()> {
+    crate::win_reg::delete_value(crate::win_reg::RootKey::HkeyCurrentUser, subkey, name)
+        .map(|()| clear_last_os_error())
+        .map_err(|err| record_reg_error(op, &err))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn registry_delete(_subkey: &str, _name: &str, op: &'static str) -> PResult<()> {
     Err(PlatformError::Unsupported(op))
 }
 
@@ -818,13 +893,7 @@ where
 // RealPlatform
 // ---------------------------------------------------------------------------------------------
 
-/// `reg add` / `reg delete` spelling of the keys (writes still go through `reg.exe`; its
-/// arguments are UTF-16 on the command line, so non-ASCII values survive).
-const INET_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings";
-const ENV_KEY: &str = r"HKCU\Environment";
-/// The same keys below `HKEY_CURRENT_USER`, as the registry API wants them. Reads go through the
-/// API: `reg.exe` prints in the OEM code page (cp866 on a Russian Windows), which turns a profile
-/// path like `C:\Users\Иван` into garbage, and its exit code was never checked.
+/// Registry keys below `HKEY_CURRENT_USER`, accessed through Win32 `advapi32` FFI (`crate::win_reg`).
 const INET_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 const ENV_SUBKEY: &str = "Environment";
 
@@ -1261,11 +1330,7 @@ impl Platform for RealPlatform {
         if cfg!(target_os = "macos") {
             run_ok("launchctl", &["setenv", key, value], "set_user_env")
         } else if cfg!(target_os = "windows") {
-            run_ok(
-                "reg",
-                &["add", ENV_KEY, "/v", key, "/t", "REG_SZ", "/d", value, "/f"],
-                "set_user_env",
-            )
+            registry_set_sz(ENV_SUBKEY, key, value, "set_user_env")
         } else {
             Err(PlatformError::Unsupported("set_user_env"))
         }
@@ -1281,11 +1346,7 @@ impl Platform for RealPlatform {
             if self.get_user_env(key)?.is_none() {
                 return Ok(());
             }
-            run_ok(
-                "reg",
-                &["delete", ENV_KEY, "/v", key, "/f"],
-                "unset_user_env",
-            )
+            registry_delete(ENV_SUBKEY, key, "unset_user_env")
         } else {
             Err(PlatformError::Unsupported("unset_user_env"))
         }
@@ -1308,26 +1369,7 @@ impl Platform for RealPlatform {
         if !write_gate("reg:add")? {
             return Ok(());
         }
-        let ty = match value.kind {
-            RegKind::Sz => "REG_SZ",
-            RegKind::ExpandSz => "REG_EXPAND_SZ",
-            RegKind::Dword => "REG_DWORD",
-        };
-        run_ok(
-            "reg",
-            &[
-                "add",
-                INET_KEY,
-                "/v",
-                name,
-                "/t",
-                ty,
-                "/d",
-                &value.data,
-                "/f",
-            ],
-            "set_inet",
-        )
+        registry_set_value(INET_SUBKEY, name, value, "set_inet")
     }
 
     fn delete_inet(&self, name: &str) -> PResult<()> {
@@ -1338,11 +1380,7 @@ impl Platform for RealPlatform {
         if self.get_inet(name)?.is_none() {
             return Ok(());
         }
-        run_ok(
-            "reg",
-            &["delete", INET_KEY, "/v", name, "/f"],
-            "delete_inet",
-        )
+        registry_delete(INET_SUBKEY, name, "delete_inet")
     }
 
     fn notify_inet_refresh(&self) -> PResult<()> {
@@ -1381,186 +1419,10 @@ impl Platform for RealPlatform {
     }
 }
 
-/// Windows FFI: the WinINet refresh, the environment broadcast and the registry reads.
-/// Compiled and verified only by the Windows CI job.
+/// Windows FFI: the WinINet refresh, the environment broadcast, and clipboard writes
+/// (registry operations live in `crate::win_reg`). Compiled and verified only by the Windows CI job.
 #[cfg(target_os = "windows")]
 mod ffi {
-    use core::ffi::c_void;
-
-    /// What `RegGetValueW` answered: its status code, the value type and the raw data.
-    pub struct RegRead {
-        pub status: u32,
-        pub kind: u32,
-        pub data: Vec<u8>,
-    }
-
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn RegGetValueW(
-            hkey: *mut c_void,
-            lp_sub_key: *const u16,
-            lp_value: *const u16,
-            dw_flags: u32,
-            pdw_type: *mut u32,
-            pv_data: *mut c_void,
-            pcb_data: *mut u32,
-        ) -> i32;
-        fn RegOpenKeyExW(
-            hkey: *mut c_void,
-            lp_sub_key: *const u16,
-            ul_options: u32,
-            sam_desired: u32,
-            phk_result: *mut *mut c_void,
-        ) -> i32;
-        fn RegEnumValueW(
-            hkey: *mut c_void,
-            dw_index: u32,
-            lp_value_name: *mut u16,
-            lpcch_value_name: *mut u32,
-            lp_reserved: *mut u32,
-            lp_type: *mut u32,
-            lp_data: *mut u8,
-            lpcb_data: *mut u32,
-        ) -> i32;
-        fn RegCloseKey(hkey: *mut c_void) -> i32;
-    }
-
-    /// `HKEY_CURRENT_USER` (0x80000001, sign-extended like the SDK does).
-    const HKEY_CURRENT_USER: *mut c_void = (-2147483647_i32) as isize as *mut c_void;
-    /// `RRF_RT_ANY`: accept every value type. `RRF_NOEXPAND`: leave `REG_EXPAND_SZ` unexpanded
-    /// (the type stays visible and the text is the one that was stored).
-    const RRF_RT_ANY: u32 = 0x0000_ffff;
-    const RRF_NOEXPAND: u32 = 0x1000_0000;
-    const KEY_READ: u32 = 0x0002_0019;
-    const ERROR_MORE_DATA: u32 = 234;
-    const ERROR_NO_MORE_ITEMS: u32 = 259;
-    /// Longest value name the registry allows (16383 characters) plus the terminator.
-    const MAX_VALUE_NAME: usize = 16384;
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    /// Reads one value of `HKEY_CURRENT_USER\<subkey>` with its type. The status is the Win32
-    /// error code (`0` = success, `2` / `3` = not found).
-    pub fn reg_get_hkcu(subkey: &str, name: &str) -> RegRead {
-        let sub = wide(subkey);
-        let nm = wide(name);
-        let flags = RRF_RT_ANY | RRF_NOEXPAND;
-        let mut kind = 0u32;
-        let mut size = 0u32;
-        // SAFETY: both strings are NUL-terminated and outlive the call; a null data pointer asks
-        // for the size only.
-        let st = unsafe {
-            RegGetValueW(
-                HKEY_CURRENT_USER,
-                sub.as_ptr(),
-                nm.as_ptr(),
-                flags,
-                &mut kind,
-                core::ptr::null_mut(),
-                &mut size,
-            )
-        };
-        if st != 0 {
-            return RegRead {
-                status: st as u32,
-                kind: 0,
-                data: Vec::new(),
-            };
-        }
-        // The value can grow between the two calls: retry a few times on ERROR_MORE_DATA.
-        for _ in 0..4 {
-            if size == 0 {
-                return RegRead {
-                    status: 0,
-                    kind,
-                    data: Vec::new(),
-                };
-            }
-            let mut buf = vec![0u8; size as usize];
-            let mut cb = size;
-            // SAFETY: `buf` holds `cb` writable bytes; the strings are NUL-terminated.
-            let st = unsafe {
-                RegGetValueW(
-                    HKEY_CURRENT_USER,
-                    sub.as_ptr(),
-                    nm.as_ptr(),
-                    flags,
-                    &mut kind,
-                    buf.as_mut_ptr().cast(),
-                    &mut cb,
-                )
-            };
-            match st as u32 {
-                0 => {
-                    buf.truncate(cb as usize);
-                    return RegRead {
-                        status: 0,
-                        kind,
-                        data: buf,
-                    };
-                }
-                ERROR_MORE_DATA => size = cb.max(size.saturating_add(2)),
-                other => {
-                    return RegRead {
-                        status: other,
-                        kind: 0,
-                        data: Vec::new(),
-                    };
-                }
-            }
-        }
-        RegRead {
-            status: ERROR_MORE_DATA,
-            kind: 0,
-            data: Vec::new(),
-        }
-    }
-
-    /// Names of all values of `HKEY_CURRENT_USER\<subkey>` (UTF-16, without the terminator).
-    pub fn reg_names_hkcu(subkey: &str) -> Result<Vec<Vec<u16>>, u32> {
-        let sub = wide(subkey);
-        let mut key: *mut c_void = core::ptr::null_mut();
-        // SAFETY: `sub` is NUL-terminated; `key` receives the handle.
-        let st = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_READ, &mut key) };
-        if st != 0 {
-            return Err(st as u32);
-        }
-        let mut names = Vec::new();
-        let mut buf = vec![0u16; MAX_VALUE_NAME];
-        let mut result = Ok(());
-        for index in 0u32.. {
-            let mut len = buf.len() as u32;
-            // SAFETY: `buf` has room for `len` UTF-16 units; the other outputs are not wanted.
-            let st = unsafe {
-                RegEnumValueW(
-                    key,
-                    index,
-                    buf.as_mut_ptr(),
-                    &mut len,
-                    core::ptr::null_mut(),
-                    core::ptr::null_mut(),
-                    core::ptr::null_mut(),
-                    core::ptr::null_mut(),
-                )
-            };
-            match st as u32 {
-                0 => names.push(buf[..len as usize].to_vec()),
-                ERROR_NO_MORE_ITEMS => break,
-                other => {
-                    result = Err(other);
-                    break;
-                }
-            }
-        }
-        // SAFETY: `key` was opened above and is closed exactly once.
-        unsafe {
-            RegCloseKey(key);
-        }
-        result.map(|()| names)
-    }
-
     pub fn inet_refresh() {
         #[link(name = "wininet")]
         unsafe extern "system" {
@@ -1754,6 +1616,7 @@ mod fake {
         inet: BTreeMap<String, RegValue>,
         temp_dns: bool,
         vpn: Vec<VpnConnection>,
+        service_kinds: BTreeMap<String, ServiceKind>,
         effective: Option<EffectiveProxy>,
         calls: Vec<String>,
         os_writes: usize,
@@ -1857,6 +1720,19 @@ mod fake {
 
         pub fn set_temp_dns(&self, on: bool) {
             self.st.lock().unwrap().temp_dns = on;
+        }
+
+        /// Overrides [`Platform::service_kind`] for `svc` (test helper).
+        /// For VPN kinds, also updates `vpn_connections` so `classify_services` sees the state.
+        pub fn set_service_kind(&self, svc: &ServiceId, kind: ServiceKind) {
+            self.st
+                .lock()
+                .unwrap()
+                .service_kinds
+                .insert(svc.key(), kind);
+            if let ServiceKind::Vpn { connected } = kind {
+                self.set_vpn_connection(&svc.name, connected);
+            }
         }
 
         pub fn pac_of(&self, svc: &ServiceId) -> PacState {
@@ -2095,6 +1971,14 @@ mod fake {
         fn vpn_connections(&self) -> PResult<Vec<VpnConnection>> {
             self.enter(PlatOp::VpnList, "vpn_connections", "", false)?;
             Ok(self.st.lock().unwrap().vpn.clone())
+        }
+
+        fn service_kind(&self, svc: &ServiceId) -> ServiceKind {
+            if let Some(&kind) = self.st.lock().unwrap().service_kinds.get(&svc.key()) {
+                return kind;
+            }
+            let nc = self.vpn_connections().ok();
+            classify_service(svc, nc.as_deref())
         }
 
         fn effective_proxy(&self) -> PResult<EffectiveProxy> {

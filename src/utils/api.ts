@@ -37,6 +37,7 @@ import {
   EnrichedPayload,
   AutostartStatus,
   CoworkGuardStatus,
+  OsTzSyncStatus,
   RouteUnavailablePayload,
 } from "../types";
 
@@ -56,6 +57,7 @@ let mockState: AppStateData = {
   // Как в шлюзе: подмена включена по умолчанию, применяется только при известной зоне.
   sync_ai_tz_enabled: true,
   cli_mode: "ai_only",
+  split_tunnel_mode: false,
 };
 
 let mockKillswitchStatus = false;
@@ -63,6 +65,10 @@ let mockKillswitchStatus = false;
 let mockCliProtection = true;
 let mockCliMode: CliMode = "ai_only";
 let mockSyncAiTz = true;
+let mockSplitTunnelMode = false;
+let mockOsTzCurrent = "Europe/Moscow";
+let mockOsTzOriginal: string | null = null;
+let mockOsTzTarget: string | null = null;
 /** Сколько раз нажали «Проверить снова»: мок продвигает статусы по шагам. */
 let mockCoverageStage = 0;
 /** Сценарий VPN в моке «Покрытия»: нет VPN, VPN перебивает системный PAC, VPN подключён, но PAC действует. */
@@ -207,7 +213,7 @@ export const MOCK_STARTUP_EVENT = "mock-startup-phase";
 
 /** Через сколько мс после запуска мок-аудита приходит каждая проверка (место в отчёте → задержка). */
 const SLOW_AUDIT_SCHEDULE: Record<number, number> = {
-  0: 3000, 1: 3000, 2: 3000, 4: 3200, 9: 3200, 5: 3800, 3: 4600, 7: 5200, 8: 5200, 11: 5600, 10: 6400, 6: 6400, 12: 8000,
+  0: 3000, 1: 3000, 2: 3000, 4: 3200, 9: 3200, 5: 3800, 3: 4600, 7: 5200, 8: 5200, 11: 5600, 10: 6400, 6: 6400, 12: 8000, 13: 8200,
 };
 const SLOW_AUDIT_TELEMETRY_MS = 3000;
 const SLOW_START_MS = 6000;
@@ -675,6 +681,30 @@ function buildMockReport(provider: ProviderId): RiskReport {
         guide_ref: null,
         measured_via: "stun:cloudflare+google",
       },
+      provider === "gemini"
+        ? {
+            status: "unknown",
+            code: "PROVIDER_EXIT_NOT_APPLICABLE",
+            message: "Выход не проверен напрямую: Google Gemini не отдает /cdn-cgi/trace на прямом маршруте.",
+            reason: "not_applicable",
+            guide_ref: null,
+            measured_via: "gemini (без отдельного маршрута)",
+          }
+        : isRu
+        ? {
+            status: "critical",
+            code: "PROVIDER_EXIT_BLOCKED_COUNTRY",
+            message: `Реальный выход ${provider === "anthropic" ? "Claude (Anthropic)" : "ChatGPT (OpenAI)"} определен как RU (${currentIp}).`,
+            guide_ref: "01-personal-vpn-15min",
+            measured_via: provider === "anthropic" ? "claude.ai" : "chatgpt.com",
+          }
+        : {
+            status: "ok",
+            code: "PROVIDER_EXIT_VERIFIED",
+            message: `Реальный выход ${provider === "anthropic" ? "Claude (Anthropic)" : "ChatGPT (OpenAI)"} подтвержден: ${currentIp} (${country}, POP AMS).`,
+            guide_ref: null,
+            measured_via: provider === "anthropic" ? "claude.ai" : "chatgpt.com",
+          },
     ],
   };
   // Счётчики как у шлюза: «не применимо» не входит ни в unknown_count, ни в applicable_count.
@@ -780,7 +810,7 @@ function mockAlertReport(): RiskReport {
     overall_status: "red",
     trust_score: 28,
     unknown_count: 1,
-    applicable_count: 13,
+    applicable_count: 14,
     incomplete: true,
     telemetry: {
       ip: "185.220.101.5",
@@ -958,7 +988,79 @@ export async function syncAiAgentsTimezone(timezone: string): Promise<string> {
   if (!mockSyncAiTz) {
     return `Зона ${timezone} сохранена, но подмена часового пояса и локали выключена.`;
   }
-  return `Таймзона ${timezone} и en_US.UTF-8 синхронизированы в браузере и окружении.`;
+  return `Таймзона ${timezone} и английская локаль (en_US.UTF-8) синхронизированы для: терминала и редакторов кода (браузеры и Claude Desktop используют системный пояс ОС).`;
+}
+
+function currentMockOsTzStatus(): OsTzSyncStatus {
+  return {
+    synced: Boolean(mockOsTzOriginal),
+    current_os_tz: mockOsTzCurrent,
+    original_os_tz: mockOsTzOriginal,
+    synced_target_tz: mockOsTzTarget,
+    auto_restore_pending: Boolean(mockOsTzOriginal),
+  };
+}
+
+export async function getOsTimezoneSyncStatus(): Promise<OsTzSyncStatus> {
+  if (isTauri()) {
+    return await invoke<OsTzSyncStatus>("get_os_timezone_sync_status_cmd");
+  }
+  return currentMockOsTzStatus();
+}
+
+export async function syncOsTimezone(targetTz?: string): Promise<OsTzSyncStatus> {
+  if (isTauri()) {
+    return await invoke<OsTzSyncStatus>("sync_os_timezone_cmd", {
+      targetTz: targetTz ?? null,
+    });
+  }
+  const cleanTarget =
+    targetTz?.trim() ||
+    (currentMockScenario === "turkey"
+      ? "Europe/Istanbul"
+      : currentMockScenario === "ru"
+      ? ""
+      : "Europe/Amsterdam");
+  if (!cleanTarget) {
+    throw new Error(
+      "Текущий выходной IP относится к заблокированной стране (RU). Подключите безопасный VPN перед синхронизацией системного часового пояса.",
+    );
+  }
+  if (!mockOsTzOriginal && mockOsTzCurrent !== cleanTarget) {
+    mockOsTzOriginal = mockOsTzCurrent;
+  }
+  if (mockOsTzOriginal) {
+    mockOsTzCurrent = cleanTarget;
+    mockOsTzTarget = cleanTarget;
+  }
+  return currentMockOsTzStatus();
+}
+
+export async function restoreOsTimezone(): Promise<OsTzSyncStatus> {
+  if (isTauri()) {
+    return await invoke<OsTzSyncStatus>("restore_os_timezone_cmd");
+  }
+  if (mockOsTzOriginal) {
+    mockOsTzCurrent = mockOsTzOriginal;
+  }
+  mockOsTzOriginal = null;
+  mockOsTzTarget = null;
+  return currentMockOsTzStatus();
+}
+
+export async function getSplitTunnelMode(): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("get_split_tunnel_mode");
+  }
+  return mockSplitTunnelMode;
+}
+
+export async function setSplitTunnelMode(enabled: boolean): Promise<void> {
+  if (isTauri()) {
+    return await invoke<void>("set_split_tunnel_mode", { enabled });
+  }
+  mockSplitTunnelMode = enabled;
+  mockState.split_tunnel_mode = enabled;
 }
 
 const mockCliSettings = (): CliSettings => ({
@@ -1409,11 +1511,7 @@ export async function bindRouteToClaudeProfile(
   const active = mockProfiles.find((p) => p.is_active);
   if (active?.id === profileId) {
     mockRoutesSnapshot.profile_route_id = route ? route.id : null;
-    mockRoutesSnapshot.effective.anthropic =
-      route?.id ??
-      mockRoutesSnapshot.provider_routes.anthropic ??
-      mockRoutesSnapshot.default_route_id ??
-      null;
+    recomputeMockEffective();
   }
   return await listClaudeProfiles();
 }
@@ -1649,6 +1747,7 @@ export async function upsertRoute(
     for (const r of mockRoutesSnapshot.routes) {
       r.is_default = r.id === newRoute.id;
     }
+    recomputeMockEffective();
   }
 
   return newRoute;
@@ -1670,6 +1769,7 @@ export async function removeRoute(routeId: string): Promise<RoutesSnapshot> {
       delete mockRoutesSnapshot.provider_routes[p];
     }
   }
+  recomputeMockEffective();
   return getRoutesSnapshot();
 }
 
@@ -1692,6 +1792,31 @@ export async function setRouteEnabled(
   return getRoutesSnapshot();
 }
 
+const PROVIDERS_FOR_MOCK: ProviderId[] = ["anthropic", "openai", "gemini"];
+
+export const DIRECT_ROUTE_ID = "__direct__";
+
+function recomputeMockEffective() {
+  for (const r of mockRoutesSnapshot.routes) {
+    r.bound_providers = Object.entries(mockRoutesSnapshot.provider_routes)
+      .filter(([_, rid]) => rid === r.id)
+      .map(([p]) => p);
+  }
+  for (const p of PROVIDERS_FOR_MOCK) {
+    if (p === "anthropic" && mockRoutesSnapshot.profile_route_id) {
+      mockRoutesSnapshot.effective[p] = mockRoutesSnapshot.profile_route_id;
+      continue;
+    }
+    const bound = mockRoutesSnapshot.provider_routes[p];
+    if (bound === DIRECT_ROUTE_ID) {
+      mockRoutesSnapshot.effective[p] = null;
+    } else {
+      mockRoutesSnapshot.effective[p] =
+        bound ?? mockRoutesSnapshot.default_route_id ?? null;
+    }
+  }
+}
+
 export async function setDefaultRoute(
   routeId: string | null
 ): Promise<RoutesSnapshot> {
@@ -1705,6 +1830,7 @@ export async function setDefaultRoute(
   for (const r of mockRoutesSnapshot.routes) {
     r.is_default = r.id === routeId;
   }
+  recomputeMockEffective();
   return getRoutesSnapshot();
 }
 
@@ -1712,7 +1838,12 @@ export async function bindProviderRoute(
   provider: ProviderId,
   target: string
 ): Promise<RoutesSnapshot> {
-  const routeId = target === "direct" || target === "default" ? null : target;
+  const routeId =
+    target === "default"
+      ? null
+      : target === "direct" || target === DIRECT_ROUTE_ID
+      ? DIRECT_ROUTE_ID
+      : target;
   if (isTauri()) {
     return await invoke<RoutesSnapshot>("bind_provider_route", {
       provider,
@@ -1720,20 +1851,13 @@ export async function bindProviderRoute(
     });
   }
 
-  if (!routeId) {
+  if (routeId === null) {
     delete mockRoutesSnapshot.provider_routes[provider];
   } else {
     mockRoutesSnapshot.provider_routes[provider] = routeId;
   }
 
-  for (const r of mockRoutesSnapshot.routes) {
-    r.bound_providers = Object.entries(mockRoutesSnapshot.provider_routes)
-      .filter(([_, rid]) => rid === r.id)
-      .map(([p]) => p);
-  }
-
-  mockRoutesSnapshot.effective[provider] =
-    routeId ?? mockRoutesSnapshot.default_route_id ?? null;
+  recomputeMockEffective();
 
   return getRoutesSnapshot();
 }

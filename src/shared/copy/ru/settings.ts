@@ -33,6 +33,17 @@ export const settings = {
       top_center: "Окно будет появляться сверху по центру.",
     },
   },
+  splitTunnel: {
+    section: "Сеть и маршрутизация",
+    title: "Выборочная маршрутизация VPN (split tunneling)",
+    sub: "Включите, если VPN пропускает только выбранные приложения. Чтобы аудит видел тот же IP, добавьте процесс zastava в правила TUN/split-tunneling, а не только браузер/Claude.",
+    label: "Выборочная маршрутизация VPN (split tunneling)",
+    toastOnTitle: "Режим split tunneling включён",
+    toastOnText: "Проверки IPv6 и смены общего интерфейса учитывают выборочную маршрутизацию.",
+    toastOffTitle: "Режим split tunneling выключен",
+    toastOffText: "Предполагается, что весь трафик идёт через единый туннель.",
+    error: "Не удалось переключить split tunneling",
+  },
   terminal: {
     section: "Терминал и редакторы",
     tz: {
@@ -44,6 +55,18 @@ export const settings = {
       toastOffTitle: "Подмена выключена",
       toastOffText: "Прежние значения возвращены.",
       error: "Не удалось переключить подмену",
+    },
+    osTz: {
+      title: "Системный пояс ОС (браузеры и Claude Desktop)",
+      notSynced: (current: string | null) =>
+        current ? `Текущий пояс ОС: ${current}. Не синхронизирован с IP.` : "Системный пояс ОС не синхронизирован.",
+      synced: (orig: string | null, target: string | null) =>
+        orig && target ? `Синхронизирован: ${orig} -> ${target}` : `Синхронизирован (${target ?? "ОС"})`,
+      restartHint: "Перезапустите браузер и Claude Desktop, чтобы они применили новый часовой пояс.",
+      syncAction: "Синхронизировать системный TZ",
+      syncingAction: "Синхронизируем…",
+      restoreAction: "Восстановить",
+      restoringAction: "Восстанавливаем…",
     },
     mode: {
       label: "Режим покрытия терминала",

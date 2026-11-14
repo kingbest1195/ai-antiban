@@ -31,13 +31,24 @@ pub fn evaluate_system_timezone_with_synced(
 
 /// Checks for dual-stack IPv6 leaks by pinging Cloudflare IPv6-only CDN trace endpoint.
 pub async fn check_ipv6_leak(ipv4_country: &str, global_blocked: &[String]) -> CheckResult {
-    check_ipv6_leak_with(
+    check_ipv6_leak_split(ipv4_country, global_blocked, false).await
+}
+
+/// Checks for dual-stack IPv6 leaks; in `split_tunnel_mode` an active host IPv6 stack is reported
+/// as informational `Ok` instead of blocking/warning on direct-OS IPv6 mismatch.
+pub async fn check_ipv6_leak_split(
+    ipv4_country: &str,
+    global_blocked: &[String],
+    split_tunnel_mode: bool,
+) -> CheckResult {
+    check_ipv6_leak_with_split(
         &ReqwestProbe,
         &RealSystem,
         IPV6_CHECK_URL,
         Duration::from_millis(IPV6_CHECK_TIMEOUT_MS),
         ipv4_country,
         global_blocked,
+        split_tunnel_mode,
     )
     .await
 }
@@ -53,10 +64,29 @@ pub async fn check_ipv6_leak_with(
     ipv4_country: &str,
     global_blocked: &[String],
 ) -> CheckResult {
+    check_ipv6_leak_with_split(probe, system, url, limit, ipv4_country, global_blocked, false).await
+}
+
+/// Testable [`check_ipv6_leak_split`] implementation.
+pub async fn check_ipv6_leak_with_split(
+    probe: &dyn IpProbe,
+    system: &dyn SystemInfo,
+    url: &str,
+    limit: Duration,
+    ipv4_country: &str,
+    global_blocked: &[String],
+    split_tunnel_mode: bool,
+) -> CheckResult {
     if system.has_global_ipv6() == Some(false) {
         return CheckResult::ok(
             "IPV6_NOT_CONFIGURED",
             "IPv6 не настроен: у этого компьютера нет глобального IPv6-адреса, утечка по IPv6 невозможна.",
+        );
+    }
+    if split_tunnel_mode {
+        return CheckResult::ok(
+            "IPV6_SPLIT_TUNNEL_INFO",
+            "Режим раздельного туннеля: системный IPv6 носит информационный характер и не блокирует трафик ИИ через PAC/маршрут.",
         );
     }
 
@@ -472,6 +502,24 @@ mod tests {
         let probe = FakeProbe::new(HttpProbeOutcome::Timeout);
         assert_eq!(ipv6(&probe, &sys, "NL", &[]).await.status, CheckStatus::Unknown);
         assert_eq!(probe.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn ipv6_split_tunnel_mode_returns_informational_ok() {
+        let probe = FakeProbe::body(200, "ip=2a00::1\nloc=RU\n");
+        let r = check_ipv6_leak_with_split(
+            &probe,
+            &v6_host(),
+            "http://v6.test",
+            Duration::from_millis(10),
+            "NL",
+            &["RU".to_string()],
+            true,
+        )
+        .await;
+        assert_eq!(r.status, CheckStatus::Ok);
+        assert_eq!(r.code, "IPV6_SPLIT_TUNNEL_INFO");
+        assert_eq!(probe.calls(), 0);
     }
 
     fn kws() -> Vec<String> {

@@ -36,6 +36,7 @@ export interface CheckItem {
 
 /** Почему так бывает и что сделать (тексты — в copy/ru/checks.ts). */
 export interface CheckHelp {
+  intro?: string | null;
   why: string;
   steps: string[];
   /** Есть надёжная ссылка на настройки сети ОС: можно показать «Открыть настройки DNS». */
@@ -111,6 +112,7 @@ function countItems(items: CheckItem[]): CheckCounts {
 /** Порядок задан шлюзом: report.checks содержит эти проверки на этих местах; всё, что дальше, показываем обобщённой строкой. */
 const ORDER: { id: CheckId; group: CheckGroupId; index: number }[] = [
   { id: "geo_matrix", group: "address", index: 0 },
+  { id: "claude_exit", group: "address", index: 13 },
   { id: "asn", group: "address", index: 4 },
   { id: "dnsbl", group: "address", index: 3 },
   { id: "reverse_dns", group: "address", index: 9 },
@@ -232,13 +234,29 @@ function adviceFor(id: CheckId, cls: CheckClass, result: CheckResult): string | 
 /** Коды проверки DNS, для которых показываем разбор: источники не дали вывода. */
 const DNS_UNRESOLVED = /^DNS_(WHOAMI_|RESOLVER_GEO_)/;
 
-/** Пояснение и шаги для «DNS-серверов», когда резолвер определить не удалось. */
+/** Пояснение и шаги для «DNS-серверов», когда резолвер определить не удалось, и для «Выхода к ИИ». */
 function helpFor(id: string, result: CheckResult, cls: CheckClass): CheckHelp | null {
+  if (id === "claude_exit" && (cls === "warn" || cls === "crit")) {
+    if (result.code === "PROVIDER_EXIT_SPLIT_MISMATCH") {
+      return {
+        why: copy.claudeExitHelp.splitMismatch.why,
+        steps: [...copy.claudeExitHelp.splitMismatch.steps],
+        canOpenNetworkSettings: false,
+      };
+    }
+    if (result.code === "PROVIDER_EXIT_BLOCKED_COUNTRY") {
+      return {
+        why: copy.claudeExitHelp.blockedCountry.why,
+        steps: [...copy.claudeExitHelp.blockedCountry.steps],
+        canOpenNetworkSettings: false,
+      };
+    }
+  }
   if (cls !== "unknown" || (id !== "dns" && id !== "dns_country")) return null;
   if (!DNS_UNRESOLVED.test(result.code)) return null;
   const by = copy.dnsHelp.byCode as Record<string, { why: string; steps: readonly string[] } | undefined>;
   const entry = by[result.code] ?? copy.dnsHelp.fallback;
-  return { why: entry.why, steps: [...entry.steps], canOpenNetworkSettings: true };
+  return { intro: copy.dnsHelp.intro, why: entry.why, steps: [...entry.steps], canOpenNetworkSettings: true };
 }
 
 /** Заглушка для проверки, которой нет в отчёте: не пропадает из счёта, а считается «не удалось проверить». */
@@ -387,20 +405,20 @@ export interface ProviderPrioritySpec {
 /** Приоритет и важность каждой из 13 проверок в разрезе конкретного ИИ-провайдера. */
 export const PROVIDER_CHECK_MATRIX: Record<ProviderId, ProviderPrioritySpec> = {
   anthropic: {
-    tier1: ["geo_matrix", "travel", "ipv6", "dnsbl", "asn"],
+    tier1: ["geo_matrix", "claude_exit", "travel", "ipv6", "dnsbl", "asn"],
     tier2: ["pinning", "timezone", "locale_hygiene", "dns", "dns_country", "udp_stun", "reverse_dns"],
     tier3: ["wifi_geo"],
     tier3Advisory: false,
   },
   openai: {
-    tier1: ["geo_matrix", "ipv6", "dnsbl", "asn"],
+    tier1: ["geo_matrix", "claude_exit", "ipv6", "dnsbl", "asn"],
     tier2: ["dns", "dns_country", "udp_stun", "pinning", "travel", "timezone"],
     tier3: ["locale_hygiene", "reverse_dns", "wifi_geo"],
     tier3Advisory: true,
   },
   gemini: {
     tier1: ["geo_matrix", "ipv6", "udp_stun", "dns", "dns_country", "asn", "wifi_geo"],
-    tier2: ["timezone", "pinning", "travel", "dnsbl"],
+    tier2: ["claude_exit", "timezone", "pinning", "travel", "dnsbl"],
     tier3: ["locale_hygiene", "reverse_dns"],
     tier3Advisory: true,
   },

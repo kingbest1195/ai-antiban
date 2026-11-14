@@ -48,12 +48,22 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "chat.mistral.ai",
     // Google Gemini / AI Studio / Cloud Code / Antigravity / Labs
     "gemini.google.com",
+    "gemini.google",
+    "clients6.google.com",
     "aistudio.google.com",
     "makersuite.google.com",
     "generativelanguage.googleapis.com",
+    "aisandbox-pa.googleapis.com",
     "aiplatform.googleapis.com",
     "cloudaicompanion.googleapis.com",
     "alkalimakersuite-pa.clients6.google.com",
+    "ai.google.dev",
+    "bard.google.com",
+    "deepmind.google",
+    "jules.google.com",
+    "accounts.google.com",
+    "ogs.google.com",
+    "apis.google.com",
     "daily-cloudcode-pa.googleapis.com",
     "cloudcode-pa.googleapis.com",
     "daily-cloudcode-pa.sandbox.googleapis.com",
@@ -263,5 +273,49 @@ mod tests {
         };
         assert_eq!(cut(&with), cut(&without));
         assert!(without.contains("return \"PROXY 127.0.0.1:8899\";"));
+    }
+
+    #[test]
+    fn gemini_domains_match_across_matrix_and_pac_defaults() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let matrix_gemini = &matrix.providers["gemini"].domains;
+        let all_domains = get_all_ai_domains(&matrix);
+        let pac = generate_pac_script(&all_domains, "127.0.0.1:8899", None);
+
+        let expected = [
+            "gemini.google.com",
+            "gemini.google",
+            "clients6.google.com",
+            "alkalimakersuite-pa.clients6.google.com",
+            "generativelanguage.googleapis.com",
+            "aisandbox-pa.googleapis.com",
+            "aistudio.google.com",
+            "makersuite.google.com",
+            "ai.google.dev",
+            "bard.google.com",
+            "deepmind.google",
+            "jules.google.com",
+            "accounts.google.com",
+            "ogs.google.com",
+            "apis.google.com",
+        ];
+
+        for domain in expected {
+            assert!(
+                matrix_gemini.iter().any(|d| d == domain),
+                "provider_matrix.json missing Gemini domain {domain}"
+            );
+            assert!(
+                DEFAULT_AI_DOMAINS.contains(&domain),
+                "DEFAULT_AI_DOMAINS missing Gemini domain {domain}"
+            );
+            assert!(
+                all_domains.iter().any(|d| d == domain),
+                "get_all_ai_domains missing {domain}"
+            );
+            assert!(pac.contains(&format!("\"{domain}\"")), "PAC missing {domain}");
+        }
+        // Subdomains like waa-pa.clients6.google.com are matched via wildcard shExpMatch("*." + d).
+        assert!(pac.contains(r#"if (host === d || shExpMatch(host, "*." + d))"#));
     }
 }
