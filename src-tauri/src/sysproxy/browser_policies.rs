@@ -399,7 +399,7 @@ pub fn default_policy_specs() -> Vec<PolicySpec> {
 /// Production [`PolicyStore`] backed by `crate::win_reg` on Windows and `defaults` on macOS.
 pub struct RealPolicyStore;
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn macos_app_bundles_for_domain(domain: &str) -> &'static [&'static str] {
     CHROMIUM_BROWSERS
         .iter()
@@ -1032,7 +1032,9 @@ pub fn browser_prefs_files_in(browser: &ChromiumBrowserDef, ctx: &FileCtx, os: O
 /// Finds the `.app` bundle path on macOS (`/Applications` or `~/Applications`) via `ctx.fs`.
 pub fn find_macos_app_bundle_in(browser: &ChromiumBrowserDef, ctx: &FileCtx) -> Option<PathBuf> {
     for app_name in browser.macos_bundles {
-        let sys_app = PathBuf::from("/Applications").join(app_name);
+        // Build the POSIX `/Applications/<app>` path directly so simulated `Os::Macos` calls on
+        // Windows do not insert a `\` separator via `PathBuf::join`.
+        let sys_app = PathBuf::from(format!("/Applications/{app_name}"));
         if ctx.fs.exists(&sys_app) {
             return Some(sys_app);
         }
@@ -1486,7 +1488,13 @@ pub fn relaunch_browsers_with_pac_with(
         }
 
         let mut open_args = if let Some(app_path) = find_macos_app_bundle_in(browser, ctx) {
-            vec!["-a".to_string(), app_path.to_string_lossy().into_owned()]
+            let raw = app_path.to_string_lossy().into_owned();
+            let posix = if cfg!(windows) {
+                raw.replace('\\', "/")
+            } else {
+                raw
+            };
+            vec!["-a".to_string(), posix]
         } else {
             vec!["-b".to_string(), browser.id.to_string()]
         };
@@ -2683,5 +2691,40 @@ mod tests {
                 format!("--proxy-pac-url={pac}"),
             ]
         );
+    }
+
+    #[test]
+    fn relaunch_browsers_with_pac_returns_unsupported_on_windows() {
+        let pac = "http://127.0.0.1:8899/proxy.pac";
+        let fs = Arc::new(FakeFs::new());
+        let plat = FakePlatform::new();
+        let store = FakePolicyStore::new();
+        let ctx = test_ctx(&fs);
+        let probe = StubProbe::fixed(Some(""));
+        let launcher = StubLauncher::default();
+        let mut j = Journal::open(fs.clone(), Path::new(DIR))
+            .unwrap()
+            .with_policy_store(store);
+        let timing = QuitTiming {
+            timeout: Duration::from_millis(10),
+            interval: Duration::from_millis(5),
+        };
+
+        let summary = relaunch_browsers_with_pac_with(
+            &mut j,
+            &plat,
+            pac,
+            &ctx,
+            Os::Windows,
+            &probe,
+            &launcher,
+            timing,
+        );
+
+        assert!(summary.unsupported);
+        assert!(summary.restarted.is_empty());
+        assert!(summary.skipped.is_empty());
+        assert!(summary.failed.is_empty());
+        assert!(launcher.calls.lock().unwrap().is_empty());
     }
 }

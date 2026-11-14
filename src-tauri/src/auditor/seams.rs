@@ -140,6 +140,7 @@ pub(crate) fn is_usable_nameserver(ip: &IpAddr) -> bool {
 /// Parses active reachable DNS nameservers from macOS `scutil --dns` output.
 /// Global default resolvers (before `DNS configuration (for scoped queries)` and without a `domain :` filter)
 /// come first; scoped default resolvers come second as fallback.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn parse_scutil_dns_nameservers(output: &str) -> Vec<IpAddr> {
     let mut global_ips = Vec::new();
     let mut scoped_ips = Vec::new();
