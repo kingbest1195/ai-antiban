@@ -25,10 +25,14 @@ pub mod platform;
 mod shell_rc;
 mod windows;
 
+pub use browser_policies::PolicyApplyReport;
 pub use cleanup::{
-    cleaned_components, cleanup_all_persistent_settings, force_clean_all_os_proxy_traces,
-    legacy_env_plan, legacy_env_plan_with_gateway, register_clean_exit_guard,
-    spawn_signal_cleanup_watcher,
+    SHUTDOWN_PROGRESS_EVENT, SHUTDOWN_PROGRESS_TOTAL, ShutdownCleanupGuard,
+    ShutdownProgressPayload, cleaned_components, cleanup_all_persistent_settings,
+    cleanup_on_shutdown_after_step1, cleanup_on_shutdown_once, force_clean_all_os_proxy_traces,
+    is_shutdown_cleanup_completed, legacy_env_plan, legacy_env_plan_with_gateway,
+    register_clean_exit_guard, reset_shutdown_cleanup_guard, spawn_signal_cleanup_watcher,
+    try_claim_async_shutdown,
 };
 pub use cli_protection::{
     CliApplied, apply_cli_settings, disable_cli_and_ide_runtime_settings, disable_cli_protection,
@@ -506,6 +510,9 @@ pub(crate) struct EnableReport {
     pub changed: bool,
     /// Connected (or unclassifiable) VPN services that were left alone, by display name.
     pub skipped_vpn: Vec<String>,
+    /// macOS `networksetup` PAC writes were skipped because temporary VPN DNS overrides are
+    /// present (or DNS state could not be verified); browser policies and CLI protection still ran.
+    pub os_pac_deferred: bool,
 }
 
 /// Outcome of a journal-backed operation against the real OS.
@@ -616,15 +623,24 @@ pub(crate) struct FileCtx {
     pub fs: Arc<dyn fs::Fs>,
     pub home: PathBuf,
     pub ide_roots: Vec<PathBuf>,
+    pub local_appdata: PathBuf,
 }
 
 impl FileCtx {
     pub(crate) fn new(fs: Arc<dyn fs::Fs>, home: PathBuf, ide_roots: Vec<PathBuf>) -> Self {
+        let local_appdata = home.join("AppData").join("Local");
         Self {
             fs,
             home,
             ide_roots,
+            local_appdata,
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn with_local_appdata(mut self, local_appdata: PathBuf) -> Self {
+        self.local_appdata = local_appdata;
+        self
     }
 
     /// The real file system with the real per-user locations (the scratch home in dry-run).
@@ -641,7 +657,17 @@ impl FileCtx {
         let roots: Vec<PathBuf> = user_appdata_dir().into_iter().collect();
         #[cfg(all(unix, not(target_os = "macos")))]
         let roots = vec![home.join(".config")];
-        Some(Self::new(fs, home, roots))
+        let ctx = Self::new(fs, home, roots);
+        #[cfg(target_os = "windows")]
+        let ctx = if let Some(local) = std::env::var_os("LOCALAPPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+        {
+            ctx.with_local_appdata(local)
+        } else {
+            ctx
+        };
+        Some(ctx)
     }
 
     pub(crate) fn claude_settings(&self) -> PathBuf {
@@ -857,6 +883,10 @@ pub struct SysproxyStatus {
     /// Connected (or unclassifiable) VPN services that were deliberately not changed.
     #[serde(default)]
     pub vpn_untouched: Vec<String>,
+    /// `true` on macOS when system `networksetup` PAC was deferred due to temporary VPN DNS
+    /// (browser PAC policies and CLI/IDE protection are active).
+    #[serde(default)]
+    pub os_pac_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -882,9 +912,10 @@ pub fn disable_all_sysproxy() {
 }
 
 /// Enables systemic PAC proxy with the given PAC URL (e.g. "http://127.0.0.1:8899/proxy.pac").
-/// Every touched setting is recorded in the journal first; a refusal (temporary VPN DNS,
-/// incompatible upstream, unusable journal) happens before any system write and returns the
-/// Russian text for the user.
+/// Every touched setting is recorded in the journal first; when a VPN holds temporary DNS on
+/// macOS, `networksetup` PAC writes are gracefully deferred (`os_pac_deferred = true`) while
+/// browser PAC policies still apply. Incompatible upstreams or unusable journals fail closed
+/// before any write and return Russian text for the user.
 pub fn enable_sysproxy(pac_url: &str) -> Result<SysproxyStatus, String> {
     enable_sysproxy_inner(pac_url, false)
 }
@@ -899,26 +930,28 @@ pub fn enable_sysproxy_privileged(pac_url: &str) -> Result<SysproxyStatus, Strin
 fn enable_sysproxy_inner(pac_url: &str, privileged: bool) -> Result<SysproxyStatus, String> {
     register_clean_exit_guard();
 
-    let (configured, vpn_untouched) = match with_journal("enable_sysproxy", |j, p| {
-        enable_with_mode(state(), j, p, pac_url, privileged)
-    }) {
-        Run::Blocked => {
-            // Dry-run: nothing was written, the flags still follow the call.
-            mark_active(state(), pac_url);
-            (Vec::new(), Vec::new())
-        }
-        Run::Failed(e) => return Err(journal_failure_text(&e)),
-        Run::Done(r) => {
-            let r = r?;
-            (r.configured, r.skipped_vpn)
-        }
-    };
+    let (configured, vpn_untouched, os_pac_deferred) =
+        match with_journal("enable_sysproxy", |j, p| {
+            enable_with_mode(state(), j, p, pac_url, privileged)
+        }) {
+            Run::Blocked => {
+                // Dry-run: nothing was written, the flags still follow the call.
+                mark_active(state(), pac_url);
+                (Vec::new(), Vec::new(), false)
+            }
+            Run::Failed(e) => return Err(journal_failure_text(&e)),
+            Run::Done(r) => {
+                let r = r?;
+                (r.configured, r.skipped_vpn, r.os_pac_deferred)
+            }
+        };
 
     Ok(SysproxyStatus {
         enabled: true,
         pac_url: Some(pac_url.to_string()),
         services_configured: configured,
         vpn_untouched,
+        os_pac_deferred,
     })
 }
 
@@ -957,9 +990,127 @@ fn enable_with_mode(
     } else {
         enable_system_proxy(j, p, pac_url, false)?
     };
-    let _ = browser_policies::apply_browser_policies(j, p);
+    let _ = browser_policies::apply_browser_policies_with_pac(j, p, Some(pac_url));
     mark_active(st, pac_url);
     Ok(report)
+}
+
+/// Re-applies and verifies browser policies (QUIC, DoH, and PAC URL) through the ownership
+/// journal without re-running `networksetup` (useful when a VPN overrides `scutil --proxy`).
+pub fn reapply_browser_policies(pac_url: Option<&str>) -> Result<PolicyApplyReport, String> {
+    let resolved_pac = pac_url
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .or_else(|| state().last_pac_url());
+    match with_journal("reapply_browser_policies", |j, p| {
+        browser_policies::apply_browser_policies_with_pac(j, p, resolved_pac.as_deref())
+    }) {
+        Run::Blocked => Ok(PolicyApplyReport::default()),
+        Run::Failed(e) => Err(journal_failure_text(&e)),
+        Run::Done(rep) => Ok(rep),
+    }
+}
+
+/// Removes stale Zastava `127.0.0.1:<any>/proxy.pac` entries from non-running Chromium profile
+/// `Preferences` files (used at startup when protection is OFF).
+pub fn clear_stale_browser_pac_prefs() -> usize {
+    if !os_effects_enabled() {
+        note_dry_run_blocked("clear_stale_browser_pac_prefs");
+        return 0;
+    }
+    let Some(ctx) = FileCtx::real() else {
+        return 0;
+    };
+    browser_policies::clear_stale_browser_pac_prefs_in(
+        &ctx,
+        crate::proxy::coverage::Os::current(),
+        &crate::proxy::coverage::RealProbe,
+    )
+}
+
+/// Reconciles Chromium `Preferences` for browsers that have exited since protection was toggled:
+/// when protection is ON, injects `"proxy"` into newly exited browsers; when protection is OFF,
+/// restores any deferred journaled `BrowserPacPref` entries and clears stale Zastava PAC prefs.
+pub fn reconcile_browser_pac_prefs(pac_url: Option<&str>) -> bool {
+    if !os_effects_enabled() {
+        note_dry_run_blocked("reconcile_browser_pac_prefs");
+        return false;
+    }
+    let os = crate::proxy::coverage::Os::current();
+    let probe = crate::proxy::coverage::RealProbe;
+    let st = state();
+    if st.sys_proxy_active() {
+        let resolved_pac = pac_url
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
+            .or_else(|| st.last_pac_url());
+        let Some(url) = resolved_pac else {
+            return false;
+        };
+        let Some(ctx) = FileCtx::real() else {
+            return false;
+        };
+        if !browser_policies::any_non_running_browser_needs_pac_sync_in(&ctx, os, &probe, &url) {
+            return false;
+        }
+        matches!(
+            with_files("reconcile_browser_pac_prefs", |j, p, file_ctx| {
+                browser_policies::reconcile_browser_pac_prefs_in(
+                    j,
+                    p,
+                    Some(&url),
+                    file_ctx,
+                    os,
+                    &probe,
+                )
+            }),
+            Run::Done(true)
+        )
+    } else {
+        let has_journal_entries = data_dir().is_some_and(|dir| {
+            journal_base_dir(&dir)
+                .join("ownership")
+                .join("journal.json")
+                .exists()
+        });
+        if has_journal_entries {
+            matches!(
+                with_files("reconcile_browser_pac_prefs_off", |j, p, file_ctx| {
+                    browser_policies::reconcile_browser_pac_prefs_in(
+                        j, p, None, file_ctx, os, &probe,
+                    )
+                }),
+                Run::Done(true)
+            )
+        } else {
+            clear_stale_browser_pac_prefs() > 0
+        }
+    }
+}
+
+/// Gracefully quits running Chromium browsers that still need PAC, patches all their profile
+/// `Preferences` files via the journal, and relaunches them with `--proxy-pac-url=<pac_url>`.
+pub fn relaunch_browsers_with_pac(
+    pac_url: &str,
+) -> Result<browser_policies::RelaunchSummary, String> {
+    let os = crate::proxy::coverage::Os::current();
+    let probe = crate::proxy::coverage::RealProbe;
+    let launcher = crate::commands::restart_app::RealLauncher;
+    let timing = crate::commands::restart_app::QuitTiming {
+        timeout: browser_policies::BROWSER_QUIT_TIMEOUT,
+        interval: browser_policies::BROWSER_QUIT_POLL_INTERVAL,
+    };
+    match with_files("relaunch_browsers_with_pac", |j, p, ctx| {
+        browser_policies::relaunch_browsers_with_pac_with(
+            j, p, pac_url, ctx, os, &probe, &launcher, timing,
+        )
+    }) {
+        Run::Blocked => Ok(browser_policies::RelaunchSummary::default()),
+        Run::Failed(e) => Err(journal_failure_text(&e)),
+        Run::Done(summary) => Ok(summary),
+    }
 }
 
 /// The refresh pass, run inside the `OS_OPS` lock. The flag is read here, under the lock: a
@@ -1553,16 +1704,75 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_enable_does_not_raise_the_flag() {
+    fn enable_with_temporary_vpn_dns_defers_os_pac_applies_browser_policies_and_recovers_later() {
         if !cfg!(target_os = "macos") {
-            return; // the temporary-DNS refusal is a macOS rule
+            return; // the temporary-DNS deferral is a macOS rule
         }
+        use browser_policies::{FakePolicyStore, KEY_PROXY_MODE, KEY_PROXY_PAC_URL, PolicyValue};
+        let (st, fs, p) = fixture();
+        let happ = p.add_vpn_service("Happ Plus", true);
+        p.set_temp_dns(true);
+        let store = FakePolicyStore::new();
+        let mut j = journal(&fs).with_policy_store(store.clone());
+
+        // Enable succeeds cleanly: OS networksetup writes are deferred, browser policies & flag are on.
+        let rep = enable_with(&st, &mut j, &p, PAC).unwrap();
+        assert!(rep.os_pac_deferred);
+        assert!(!rep.changed);
+        assert_eq!(rep.skipped_vpn, vec!["Happ Plus".to_string()]);
+        assert_eq!(
+            p.os_writes(),
+            0,
+            "no networksetup writes while temp_dns is set"
+        );
+        assert!(st.sys_proxy_active());
+        assert_eq!(st.last_pac_url().as_deref(), Some(PAC));
+        assert_eq!(
+            store.get("com.google.Chrome", KEY_PROXY_MODE),
+            Some(PolicyValue::Sz("pac_script".to_string()))
+        );
+        assert_eq!(
+            store.get("com.google.Chrome", KEY_PROXY_PAC_URL),
+            Some(PolicyValue::Sz(PAC.to_string()))
+        );
+
+        // While VPN still holds temporary DNS, self-heal stays a clean no-op.
+        let still_vpn = refresh_with(&st, &mut j, &p).unwrap();
+        assert!(still_vpn.os_pac_deferred);
+        assert!(!still_vpn.changed);
+        assert_eq!(p.os_writes(), 0);
+
+        // Once the VPN disconnects and releases temporary DNS, refresh_with applies OS PAC.
+        p.set_vpn_connection(&happ.name, false);
+        p.set_temp_dns(false);
+        let healed = refresh_with(&st, &mut j, &p).unwrap();
+        assert!(!healed.os_pac_deferred);
+        assert!(healed.changed);
+        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some(PAC));
+        assert_eq!(p.pac_of(&wifi()).enabled, Some(true));
+    }
+
+    #[test]
+    fn disabling_after_temp_dns_deferred_enable_restores_browser_policies_without_deferral_error() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        use browser_policies::{FakePolicyStore, KEY_PROXY_PAC_URL};
         let (st, fs, p) = fixture();
         p.set_temp_dns(true);
-        let mut j = journal(&fs);
-        assert!(enable_with(&st, &mut j, &p, PAC).is_err());
-        assert!(!st.sys_proxy_active());
-        assert_eq!(st.last_pac_url(), None);
+        let store = FakePolicyStore::new();
+        let mut j = journal(&fs).with_policy_store(store.clone());
+
+        let rep = enable_with(&st, &mut j, &p, PAC).unwrap();
+        assert!(rep.os_pac_deferred);
+
+        // Disabling even while temp_dns is still true has no OS PAC entries to defer: clean restore.
+        let restore_rep = restore_pass(&st, &mut j, &p, |j, p| {
+            cleanup::restore_with(j, p, cleanup::Scope::All)
+        });
+        assert!(!restore_rep.has_failures());
+        assert!(!restore_rep.restore_deferred_by_vpn_dns());
+        assert_eq!(store.get("com.google.Chrome", KEY_PROXY_PAC_URL), None);
     }
 
     #[test]
@@ -1670,5 +1880,41 @@ mod tests {
         assert_eq!(local_journal_base(Some(PathBuf::new()), roaming), roaming);
         #[cfg(not(target_os = "windows"))]
         assert_eq!(journal_base_dir(roaming), roaming);
+    }
+
+    #[test]
+    fn enable_with_applies_browser_pac_policies_and_restore_cleans_them() {
+        use browser_policies::{FakePolicyStore, KEY_PROXY_MODE, KEY_PROXY_PAC_URL, PolicyValue};
+        let (st, fs, p) = fixture();
+        let store = FakePolicyStore::new();
+        let mut j = journal(&fs).with_policy_store(store.clone());
+
+        enable_with(&st, &mut j, &p, PAC).unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                store.get("com.google.Chrome", KEY_PROXY_MODE),
+                Some(PolicyValue::Sz("pac_script".to_string()))
+            );
+            assert_eq!(
+                store.get("com.google.Chrome", KEY_PROXY_PAC_URL),
+                Some(PolicyValue::Sz(PAC.to_string()))
+            );
+            assert_eq!(
+                store.get("company.thebrowser.Browser", KEY_PROXY_PAC_URL),
+                Some(PolicyValue::Sz(PAC.to_string()))
+            );
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(
+                store.get(r"Software\Policies\Google\Chrome", KEY_PROXY_PAC_URL),
+                Some(PolicyValue::Sz(PAC.to_string()))
+            );
+        }
+
+        let rep = restore_pass(&st, &mut j, &p, |j, p| {
+            cleanup::restore_with(j, p, cleanup::Scope::All)
+        });
+        assert!(!rep.has_failures());
+        assert_eq!(store.get("com.google.Chrome", KEY_PROXY_MODE), None);
+        assert_eq!(store.get("com.google.Chrome", KEY_PROXY_PAC_URL), None);
     }
 }

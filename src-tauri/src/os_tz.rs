@@ -439,7 +439,10 @@ pub fn validate_iana_tz(raw: &str) -> Result<String, String> {
     let clean = crate::sysproxy::sanitize_timezone(raw)
         .ok_or_else(|| format!("Недопустимое имя часового пояса: {}", raw.trim()))?;
     // Allowlist characters already enforced by sanitize_timezone; verify no dots in path segments
-    if clean.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+    if clean
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+    {
         return Err(format!("Недопустимый формат часового пояса: {clean}"));
     }
     Ok(clean)
@@ -448,7 +451,10 @@ pub fn validate_iana_tz(raw: &str) -> Result<String, String> {
 fn zones_equivalent(a: &str, b: &str) -> bool {
     let ca = canonicalize_iana_tz(a);
     let cb = canonicalize_iana_tz(b);
-    ca.eq_ignore_ascii_case(cb) || ca.replace('_', " ").eq_ignore_ascii_case(&cb.replace('_', " "))
+    ca.eq_ignore_ascii_case(cb)
+        || ca
+            .replace('_', " ")
+            .eq_ignore_ascii_case(&cb.replace('_', " "))
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -760,7 +766,11 @@ impl OsTzPlatform for RealOsTzPlatform {
                 return Ok(None);
             }
             let out = crate::sysproxy::silent_command("/usr/bin/defaults")
-                .args(["read", "/Library/Preferences/com.apple.timezone.auto", "Active"])
+                .args([
+                    "read",
+                    "/Library/Preferences/com.apple.timezone.auto",
+                    "Active",
+                ])
                 .output();
             match out {
                 Ok(o) if o.status.success() => {
@@ -820,8 +830,8 @@ impl OsTzPlatform for RealOsTzPlatform {
             if !os_tz_effects_enabled() {
                 return Ok(());
             }
-            let need_disable_auto = disable_auto_tz
-                && matches!(self.is_auto_tz_enabled(), Ok(Some(true)));
+            let need_disable_auto =
+                disable_auto_tz && matches!(self.is_auto_tz_enabled(), Ok(Some(true)));
             if !need_disable_auto && run_windows_tzutil_set(safe_win_tz).is_ok() {
                 return Ok(());
             }
@@ -831,7 +841,10 @@ impl OsTzPlatform for RealOsTzPlatform {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (target_iana, disable_auto_tz);
-            Err("Синхронизация системного часового пояса поддерживается только на Windows и macOS.".to_string())
+            Err(
+                "Синхронизация системного часового пояса поддерживается только на Windows и macOS."
+                    .to_string(),
+            )
         }
     }
 
@@ -1112,12 +1125,14 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::TempDir;
 
+    type RestoreCall = (String, Option<String>, Option<bool>);
+
     struct FakeOsTzPlatform {
         current_iana: Mutex<String>,
         current_win: Mutex<Option<String>>,
         auto_tz: Mutex<Option<bool>>,
         apply_calls: Mutex<Vec<(String, bool)>>,
-        restore_calls: Mutex<Vec<(String, Option<String>, Option<bool>)>>,
+        restore_calls: Mutex<Vec<RestoreCall>>,
         fail_apply: Mutex<Option<String>>,
         fail_restore: Mutex<Option<String>>,
     }
@@ -1192,40 +1207,127 @@ mod tests {
 
     #[test]
     fn iana_windows_mapping_covers_common_zones_and_aliases() {
-        assert_eq!(iana_to_windows_tz("Europe/Paris"), Some("Romance Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Madrid"), Some("Romance Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Warsaw"), Some("Central European Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Berlin"), Some("W. Europe Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Amsterdam"), Some("W. Europe Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/London"), Some("GMT Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Helsinki"), Some("FLE Standard Time"));
+        assert_eq!(
+            iana_to_windows_tz("Europe/Paris"),
+            Some("Romance Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Madrid"),
+            Some("Romance Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Warsaw"),
+            Some("Central European Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Berlin"),
+            Some("W. Europe Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Amsterdam"),
+            Some("W. Europe Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/London"),
+            Some("GMT Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Helsinki"),
+            Some("FLE Standard Time")
+        );
         assert_eq!(iana_to_windows_tz("Europe/Kyiv"), Some("FLE Standard Time"));
         assert_eq!(iana_to_windows_tz("Europe/Kiev"), Some("FLE Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Bucharest"), Some("GTB Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Moscow"), Some("Russian Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Minsk"), Some("Belarus Standard Time"));
-        assert_eq!(iana_to_windows_tz("Europe/Istanbul"), Some("Turkey Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Dubai"), Some("Arabian Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Tbilisi"), Some("Georgian Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Yerevan"), Some("Caucasus Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Almaty"), Some("West Asia Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Calcutta"), Some("India Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Tokyo"), Some("Tokyo Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Singapore"), Some("Singapore Standard Time"));
-        assert_eq!(iana_to_windows_tz("Asia/Hong_Kong"), Some("China Standard Time"));
-        assert_eq!(iana_to_windows_tz("America/New_York"), Some("Eastern Standard Time"));
-        assert_eq!(iana_to_windows_tz("America/Chicago"), Some("Central Standard Time"));
-        assert_eq!(iana_to_windows_tz("America/Denver"), Some("Mountain Standard Time"));
-        assert_eq!(iana_to_windows_tz("America/Los_Angeles"), Some("Pacific Standard Time"));
-        assert_eq!(iana_to_windows_tz("America/Sao_Paulo"), Some("E. South America Standard Time"));
-        assert_eq!(iana_to_windows_tz("Australia/Sydney"), Some("AUS Eastern Standard Time"));
+        assert_eq!(
+            iana_to_windows_tz("Europe/Bucharest"),
+            Some("GTB Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Moscow"),
+            Some("Russian Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Minsk"),
+            Some("Belarus Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Europe/Istanbul"),
+            Some("Turkey Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Dubai"),
+            Some("Arabian Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Tbilisi"),
+            Some("Georgian Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Yerevan"),
+            Some("Caucasus Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Almaty"),
+            Some("West Asia Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Calcutta"),
+            Some("India Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Tokyo"),
+            Some("Tokyo Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Singapore"),
+            Some("Singapore Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Asia/Hong_Kong"),
+            Some("China Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("America/New_York"),
+            Some("Eastern Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("America/Chicago"),
+            Some("Central Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("America/Denver"),
+            Some("Mountain Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("America/Los_Angeles"),
+            Some("Pacific Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("America/Sao_Paulo"),
+            Some("E. South America Standard Time")
+        );
+        assert_eq!(
+            iana_to_windows_tz("Australia/Sydney"),
+            Some("AUS Eastern Standard Time")
+        );
         assert_eq!(iana_to_windows_tz("UTC"), Some("UTC"));
         assert_eq!(iana_to_windows_tz("Etc/UTC"), Some("UTC"));
 
-        assert_eq!(windows_to_iana_tz("Romance Standard Time"), Some("Europe/Paris"));
-        assert_eq!(windows_to_iana_tz("Russian Standard Time"), Some("Europe/Moscow"));
-        assert_eq!(windows_to_iana_tz("W. Europe Standard Time"), Some("Europe/Berlin"));
-        assert_eq!(windows_to_iana_tz("Eastern Standard Time"), Some("America/New_York"));
+        assert_eq!(
+            windows_to_iana_tz("Romance Standard Time"),
+            Some("Europe/Paris")
+        );
+        assert_eq!(
+            windows_to_iana_tz("Russian Standard Time"),
+            Some("Europe/Moscow")
+        );
+        assert_eq!(
+            windows_to_iana_tz("W. Europe Standard Time"),
+            Some("Europe/Berlin")
+        );
+        assert_eq!(
+            windows_to_iana_tz("Eastern Standard Time"),
+            Some("America/New_York")
+        );
         assert!(allowlisted_windows_tz_id("Romance Standard Time").is_some());
         assert!(allowlisted_windows_tz_id("Romance Standard Time; rm -rf").is_none());
     }
@@ -1238,7 +1340,8 @@ mod tests {
     #[test]
     fn sync_writes_atomic_baseline_preserves_original_on_resync_and_restores() {
         let dir = TempDir::new().unwrap();
-        let fake = FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(true));
+        let fake =
+            FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(true));
 
         let status = sync_os_timezone_with(&fake, dir.path(), "Europe/Amsterdam").unwrap();
         assert!(status.synced);
@@ -1249,7 +1352,10 @@ mod tests {
 
         let saved = read_baseline(dir.path()).unwrap().unwrap();
         assert_eq!(saved.original_iana, "Europe/Moscow");
-        assert_eq!(saved.original_windows_id.as_deref(), Some("Russian Standard Time"));
+        assert_eq!(
+            saved.original_windows_id.as_deref(),
+            Some("Russian Standard Time")
+        );
         assert_eq!(saved.original_auto_tz, Some(true));
         assert_eq!(saved.synced_iana, "Europe/Amsterdam");
 
@@ -1280,7 +1386,8 @@ mod tests {
     #[test]
     fn sync_refuses_sanctioned_tz_and_cleans_up_on_elevation_cancel() {
         let dir = TempDir::new().unwrap();
-        let fake = FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
+        let fake =
+            FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
 
         // Refuse syncing TO a Russian/Belarusian timezone.
         let err = sync_os_timezone_with(&fake, dir.path(), "Europe/Minsk").unwrap_err();
@@ -1288,8 +1395,7 @@ mod tests {
         assert!(read_baseline(dir.path()).unwrap().is_none());
 
         // Elevation cancelled leaves OS unchanged and removes newly created baseline.
-        *fake.fail_apply.lock().unwrap() =
-            Some("OS_TZ_ELEVATION_CANCELLED: cancelled".to_string());
+        *fake.fail_apply.lock().unwrap() = Some("OS_TZ_ELEVATION_CANCELLED: cancelled".to_string());
         let err = sync_os_timezone_with(&fake, dir.path(), "Europe/Berlin").unwrap_err();
         assert!(err.starts_with("OS_TZ_ELEVATION_CANCELLED:"), "{err}");
         assert!(read_baseline(dir.path()).unwrap().is_none());
@@ -1299,7 +1405,8 @@ mod tests {
     #[test]
     fn restore_failure_preserves_baseline_for_retry_and_startup_recovery() {
         let dir = TempDir::new().unwrap();
-        let fake = FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
+        let fake =
+            FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
 
         sync_os_timezone_with(&fake, dir.path(), "Europe/London").unwrap();
 

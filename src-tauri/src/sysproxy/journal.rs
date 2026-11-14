@@ -73,6 +73,8 @@ pub enum Resource {
     File { file: String, skeleton: String },
     /// Per-user browser policy setting (QUIC / DoH) keyed by domain/subkey and preference/value name.
     BrowserPolicy { domain: String, key: String },
+    /// Chromium profile `Preferences` JSON `"proxy"` key, keyed by browser domain/id and file path.
+    BrowserPacPref { domain: String, file: String },
 }
 
 /// Last path components, for logs: names a file without the user's home directory. A path that
@@ -105,6 +107,9 @@ impl Resource {
             Resource::TextBlock { file } => format!("block:{}", file_label(file)),
             Resource::File { file, .. } => format!("file:{}", file_label(file)),
             Resource::BrowserPolicy { domain, key } => format!("policy:{domain}:{key}"),
+            Resource::BrowserPacPref { domain, file } => {
+                format!("browser_pac_pref:{domain}:{}", file_label(file))
+            }
         }
     }
 
@@ -185,6 +190,7 @@ impl Value {
                 | (Value::Present(_), Resource::File { .. })
                 | (Value::Block(_), Resource::TextBlock { .. })
                 | (Value::Policy(_), Resource::BrowserPolicy { .. })
+                | (Value::Json(_), Resource::BrowserPacPref { .. })
         )
     }
 }
@@ -277,16 +283,30 @@ fn same_as_written(res: &Resource, known: &Value, cur: &Value) -> bool {
         {
             a.kind == b.kind && urls_equivalent(&a.data, &b.data)
         }
+        (
+            Resource::BrowserPolicy { key, .. },
+            Value::Policy(Some(PolicyValue::Sz(a))),
+            Value::Policy(Some(PolicyValue::Sz(b))),
+        ) if key == super::browser_policies::KEY_PROXY_PAC_URL => urls_equivalent(a, b),
+        (Resource::BrowserPacPref { .. }, Value::Json(Some(a)), Value::Json(Some(b))) => {
+            super::browser_policies::same_browser_proxy_json(a, b)
+        }
         _ => false,
     }
 }
 
-/// The PAC URL a value carries (`Pac` of a service, `AutoConfigURL` of WinINet), if any.
+/// The PAC URL a value carries (`Pac` of a service, `AutoConfigURL` of WinINet, or browser
+/// `ProxyPacUrl` policy), if any.
 fn pac_url_of<'a>(res: &Resource, v: &'a Value) -> Option<&'a str> {
     match (res, v) {
         (Resource::Pac { .. }, Value::Pac(p)) => p.url.as_deref(),
         (Resource::Inet { name }, Value::Reg(Some(r))) if name == "AutoConfigURL" => {
             Some(r.data.as_str())
+        }
+        (Resource::BrowserPolicy { key, .. }, Value::Policy(Some(PolicyValue::Sz(u))))
+            if key == super::browser_policies::KEY_PROXY_PAC_URL =>
+        {
+            Some(u.as_str())
         }
         _ => None,
     }
@@ -296,6 +316,14 @@ fn pac_url_of<'a>(res: &Resource, v: &'a Value) -> Option<&'a str> {
 /// value being written (`new`). Such a value is never "somebody else's": it must not become the
 /// baseline, or a restore would put Zastava's own PAC back.
 fn carries_zastava_signature(res: &Resource, cur: &Value, new: &Value) -> bool {
+    if let (Resource::BrowserPacPref { .. }, Value::Json(Some(cur_s)), Value::Json(Some(new_s))) =
+        (res, cur, new)
+    {
+        let port = super::browser_policies::extract_pac_url_from_proxy_json(new_s)
+            .and_then(|u| super::parse_gateway_port_from_pac_url(&u));
+        return super::browser_policies::extract_pac_url_from_proxy_json(cur_s)
+            .is_some_and(|u| super::cleanup::is_zastava_pac_signature(&u, port));
+    }
     let port = pac_url_of(res, new).and_then(super::parse_gateway_port_from_pac_url);
     pac_url_of(res, cur).is_some_and(|u| super::cleanup::is_zastava_pac_signature(u, port))
 }
@@ -514,6 +542,9 @@ fn read_value(
         Resource::UserEnv { name } => Value::Env(platform.get_user_env(name)?),
         Resource::Inet { name } => Value::Reg(platform.get_inet(name)?),
         Resource::BrowserPolicy { domain, key } => Value::Policy(policies.read(domain, key)?),
+        Resource::BrowserPacPref { file, .. } => Value::Json(
+            super::browser_policies::read_browser_proxy_pref(fs, Path::new(file))?,
+        ),
         Resource::JsonKey { .. }
         | Resource::JsonObject { .. }
         | Resource::TextBlock { .. }
@@ -542,7 +573,8 @@ fn notify(platform: &dyn Platform, res: &Resource) -> Notified {
         | Resource::JsonObject { .. }
         | Resource::TextBlock { .. }
         | Resource::File { .. }
-        | Resource::BrowserPolicy { .. } => Ok(()),
+        | Resource::BrowserPolicy { .. }
+        | Resource::BrowserPacPref { .. } => Ok(()),
     };
     match r {
         Ok(()) | Err(PlatformError::Unsupported(_)) => Notified::Yes,
@@ -586,6 +618,9 @@ fn write_value(
         }
         (Resource::BrowserPolicy { domain, key }, Value::Policy(None)) => {
             policies.delete(domain, key)?
+        }
+        (Resource::BrowserPacPref { file, .. }, Value::Json(val)) => {
+            super::browser_policies::write_browser_proxy_pref(fs, Path::new(file), val.as_deref())?;
         }
         _ => return Err(PlatformError::Unsupported("kind_mismatch")),
     }
@@ -887,7 +922,6 @@ impl Journal {
     fn index_of(&self, res: &Resource) -> Option<usize> {
         self.entries.iter().position(|e| &e.resource == res)
     }
-
 }
 
 struct PreparedApply {
@@ -921,13 +955,31 @@ impl Journal {
                 // A PAC with our own address and no record is a leftover of a build without a
                 // journal (2.0.0). It is never the baseline (a restore would put our PAC back);
                 // the state before Zastava is taken as "off", the same as the legacy cleanup does.
-                let leftover = matches!(res, Resource::Pac { .. })
+                let leftover_pac = matches!(res, Resource::Pac { .. })
                     && carries_zastava_signature(res, &cur, &new);
-                if leftover && same_as_written(res, &cur, &new) {
+                let leftover_policy = matches!(
+                    res,
+                    Resource::BrowserPolicy { key, .. }
+                        if key == super::browser_policies::KEY_PROXY_PAC_URL
+                ) && carries_zastava_signature(res, &cur, &new);
+                let leftover_browser_pref = matches!(res, Resource::BrowserPacPref { .. })
+                    && carries_zastava_signature(res, &cur, &new);
+                let neutral_baseline = if leftover_policy {
+                    Some(Value::Policy(None))
+                } else if leftover_browser_pref {
+                    Some(Value::Json(None))
+                } else if leftover_pac {
+                    Some(neutral_pac_baseline())
+                } else {
+                    None
+                };
+                if same_as_written(res, &cur, &new)
+                    && let Some(baseline) = neutral_baseline
+                {
                     // Already what we want: adopt it without a single OS write.
                     self.entries.push(Entry {
                         resource: res.clone(),
-                        baseline: neutral_pac_baseline(),
+                        baseline,
                         expected: Some(cur),
                         pending: None,
                         state: EntryState::Applied,
@@ -941,7 +993,7 @@ impl Journal {
                 }
                 self.entries.push(Entry {
                     resource: res.clone(),
-                    baseline: if leftover { neutral_pac_baseline() } else { cur },
+                    baseline: neutral_baseline.unwrap_or(cur),
                     expected: None,
                     pending: Some(new.clone()),
                     state: EntryState::Pending,
@@ -1140,9 +1192,7 @@ impl Journal {
     ) {
         let clean = match read_value(&*self.fs, platform, &*self.policy_store, res) {
             Ok(v) if &v == previous => true,
-            Ok(_) => {
-                write_value(&*self.fs, platform, &*self.policy_store, res, previous).is_ok()
-            }
+            Ok(_) => write_value(&*self.fs, platform, &*self.policy_store, res, previous).is_ok(),
             Err(_) => false,
         };
         if clean {
@@ -1226,8 +1276,13 @@ impl Journal {
                         }
                         Err(_) => return Outcome::Failed("read"),
                     }
-                    match write_value(&*self.fs, platform, &*self.policy_store, res, &entry.baseline)
-                    {
+                    match write_value(
+                        &*self.fs,
+                        platform,
+                        &*self.policy_store,
+                        res,
+                        &entry.baseline,
+                    ) {
                         Ok(Notified::Yes) => Outcome::Restored,
                         Ok(Notified::Failed) => {
                             // The baseline is back; keep the record so the notification is retried.

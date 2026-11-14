@@ -81,6 +81,14 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "idx.google.com",
     "opal.google.com",
     "labs.google",
+    "www.google.com",
+    "play.google.com",
+    "footprints-pa.googleapis.com",
+    "people-pa.googleapis.com",
+    "signaler-pa.googleapis.com",
+    "jnn-pa.googleapis.com",
+    "myactivity.google.com",
+    "myaccount.google.com",
 ];
 
 /// Collects all configured AI domains from the matrix.
@@ -102,10 +110,17 @@ pub fn get_all_ai_domains(matrix: &ProviderMatrix) -> Vec<String> {
 }
 
 /// Collects all configured AI domains from the matrix merged with user-defined custom domains.
-pub fn get_all_ai_domains_with_custom(matrix: &ProviderMatrix, custom_domains: &[String]) -> Vec<String> {
+pub fn get_all_ai_domains_with_custom(
+    matrix: &ProviderMatrix,
+    custom_domains: &[String],
+) -> Vec<String> {
     let mut domains = get_all_ai_domains(matrix);
     for cd in custom_domains {
-        let clean = cd.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+        let clean = cd
+            .trim()
+            .trim_start_matches("*.")
+            .trim_start_matches('.')
+            .to_lowercase();
         if !clean.is_empty() && !domains.iter().any(|d| d.eq_ignore_ascii_case(&clean)) {
             domains.push(clean);
         }
@@ -195,10 +210,7 @@ mod tests {
 
     #[test]
     fn test_pac_file_generation_with_chained_proxy() {
-        let domains = vec![
-            "claude.ai".to_string(),
-            "chatgpt.com".to_string(),
-        ];
+        let domains = vec!["claude.ai".to_string(), "chatgpt.com".to_string()];
         let pac = generate_pac_script(&domains, "127.0.0.1:8899", Some("127.0.0.1:10808"));
 
         assert!(pac.contains("function FindProxyForURL(url, host)"));
@@ -298,6 +310,14 @@ mod tests {
             "accounts.google.com",
             "ogs.google.com",
             "apis.google.com",
+            "www.google.com",
+            "play.google.com",
+            "footprints-pa.googleapis.com",
+            "people-pa.googleapis.com",
+            "signaler-pa.googleapis.com",
+            "jnn-pa.googleapis.com",
+            "myactivity.google.com",
+            "myaccount.google.com",
         ];
 
         for domain in expected {
@@ -313,9 +333,70 @@ mod tests {
                 all_domains.iter().any(|d| d == domain),
                 "get_all_ai_domains missing {domain}"
             );
-            assert!(pac.contains(&format!("\"{domain}\"")), "PAC missing {domain}");
+            assert!(
+                pac.contains(&format!("\"{domain}\"")),
+                "PAC missing {domain}"
+            );
         }
         // Subdomains like waa-pa.clients6.google.com are matched via wildcard shExpMatch("*." + d).
         assert!(pac.contains(r#"if (host === d || shExpMatch(host, "*." + d))"#));
+    }
+
+    #[test]
+    fn browser_extension_ai_api_hosts_and_matrix_stay_in_sync() {
+        use crate::auditor::geo_matrix::ProviderId;
+
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let all_domains = get_all_ai_domains(&matrix);
+        let pac = generate_pac_script(&all_domains, "127.0.0.1:8899", None);
+
+        let pac_matches = |host: &str| -> bool {
+            all_domains
+                .iter()
+                .any(|d| host == d || host.ends_with(&format!(".{d}")))
+        };
+
+        for host in [
+            "api.anthropic.com",
+            "claude.ai",
+            "api.openai.com",
+            "chatgpt.com",
+            "gemini.google.com",
+            "generativelanguage.googleapis.com",
+            "clients6.google.com",
+            "aistudio.google.com",
+            "www.google.com",
+            "play.google.com",
+            "footprints-pa.googleapis.com",
+            "people-pa.googleapis.com",
+            "signaler-pa.googleapis.com",
+            "jnn-pa.googleapis.com",
+            "myactivity.google.com",
+            "myaccount.google.com",
+        ] {
+            assert!(pac_matches(host), "PAC missing extension/AI host {host}");
+            assert!(
+                ProviderId::from_host(host).is_some(),
+                "ProviderId::from_host missing {host}"
+            );
+        }
+
+        // Every domain in bundled provider_matrix.json must be in DEFAULT_AI_DOMAINS and ProviderId::from_host.
+        for (provider_id, rules) in &matrix.providers {
+            for domain in &rules.domains {
+                assert!(
+                    DEFAULT_AI_DOMAINS.contains(&domain.as_str()),
+                    "DEFAULT_AI_DOMAINS missing {provider_id} domain {domain}"
+                );
+                assert!(
+                    ProviderId::from_host(domain).is_some(),
+                    "ProviderId::from_host missing {provider_id} domain {domain}"
+                );
+                assert!(
+                    pac.contains(&format!("\"{domain}\"")),
+                    "PAC missing {provider_id} domain {domain}"
+                );
+            }
+        }
     }
 }

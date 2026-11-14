@@ -1,4 +1,4 @@
-import type { AppCoverageItem, AppCoverageStatus, CliMode, CliProtectionReport, CoverageSnapshot, RestartOutcome } from "../../types";
+import type { AppCoverageItem, AppCoverageStatus, CliMode, CliProtectionReport, CoverageSnapshot, OsTzSyncStatus, RelaunchBrowsersResult, RestartOutcome } from "../../types";
 import { coverage as copy } from "../../shared/copy/ru";
 
 /** Опрос при наличии неподтверждённых приложений и без них. */
@@ -88,27 +88,94 @@ export function uncoveredAiApps(snapshot: Pick<CoverageSnapshot, "apps" | "cli_m
 
 /**
  * Замечание для жёлтой точки на «Обзоре»: есть неохваченное ИИ-приложение либо системный PAC не действует из-за VPN
- * (`system_proxy_effective === false`, пока защита включена). Красные состояния учитывает вызывающий: они приоритетнее.
+ * (`system_proxy_effective === false`, пока защита включена и браузеры не привязаны управляемой PAC-политикой или не подтверждены).
+ * Красные состояния учитывает вызывающий: они приоритетнее.
  */
 export function coverageNeedsAttention(
-  snapshot: Pick<CoverageSnapshot, "apps" | "cli_mode" | "sysproxy_enabled" | "system_proxy_effective"> | null | undefined,
+  snapshot:
+    | Pick<CoverageSnapshot, "apps" | "cli_mode" | "sysproxy_enabled" | "system_proxy_effective" | "browser_pac_policy_active" | "browsers_needing_restart">
+    | null
+    | undefined,
 ): boolean {
   if (!snapshot) return false;
-  if (snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false) return true;
+  const needingRestart = (snapshot.browsers_needing_restart ?? []).some((n) => n.trim() !== "");
+  const browserCoveredByPolicy =
+    Boolean(snapshot.browser_pac_policy_active) ||
+    snapshot.apps.some((a) => a.category === "browser" && a.status === "confirmed");
+  if (snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false && (needingRestart || !browserCoveredByPolicy)) {
+    return true;
+  }
   return uncoveredAiApps(snapshot).length > 0;
 }
 
-/** Что сказать о подключённых VPN-службах: имена и перебивает ли VPN наш системный PAC. null — подключённых нет. */
+/** Что сказать о подключённых VPN-службах: имена, перебит ли системный PAC и привязаны ли браузеры политикой. */
 export interface VpnNotice {
   names: string;
   /** Системный PAC записан на физических службах, но глобально не действует. */
   overridden: boolean;
+  /** Управляемые PAC-политики браузеров активны (обходят конфликт с TUN-режимом VPN). */
+  pacPolicyActive: boolean;
 }
 
-export function vpnNotice(snapshot: Pick<CoverageSnapshot, "sysproxy_enabled" | "system_proxy_effective" | "vpn_connected">): VpnNotice | null {
+export function vpnNotice(
+  snapshot: Pick<CoverageSnapshot, "sysproxy_enabled" | "system_proxy_effective" | "vpn_connected" | "browser_pac_policy_active">,
+): VpnNotice | null {
   const names = (snapshot.vpn_connected ?? []).filter((n) => n.trim() !== "");
   if (names.length === 0) return null;
-  return { names: names.join(", "), overridden: snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false };
+  return {
+    names: names.join(", "),
+    overridden: snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false,
+    pacPolicyActive: Boolean(snapshot.browser_pac_policy_active),
+  };
+}
+
+/** Состояние PAC-политик браузеров при перебитом или отложенном системном прокси. */
+export interface BrowserPacStatus {
+  pacOverridden: boolean;
+  pacPolicyActive: boolean;
+  browsersPacActive: string[];
+  browsersNeedingRestart: string[];
+}
+
+export function browserPacStatus(
+  snapshot: Pick<
+    CoverageSnapshot,
+    "sysproxy_enabled" | "system_proxy_effective" | "browser_pac_policy_active" | "browsers_pac_active" | "browsers_needing_restart"
+  >,
+): BrowserPacStatus {
+  const clean = (items?: string[]) => (items ?? []).map((s) => s.trim()).filter(Boolean);
+  return {
+    pacOverridden: snapshot.sysproxy_enabled && snapshot.system_proxy_effective === false,
+    pacPolicyActive: Boolean(snapshot.browser_pac_policy_active),
+    browsersPacActive: clean(snapshot.browsers_pac_active),
+    browsersNeedingRestart: clean(snapshot.browsers_needing_restart),
+  };
+}
+
+/** Итог 1-клик перезапуска браузеров с PAC для баннера и тоста. */
+export function relaunchBrowsersResult(res: RelaunchBrowsersResult): ProtectionResult {
+  const t = copy.vpn.restartNeeded;
+  if (res.needs_automation_permission) {
+    return { tone: "warn", title: t.automationTitle, text: t.automationText };
+  }
+  if (res.unsupported) {
+    return { tone: "warn", title: t.unsupportedTitle, text: t.unsupportedText };
+  }
+  if (res.failed.length > 0) {
+    const failed = res.failed.join(", ");
+    if (res.restarted.length > 0) {
+      return {
+        tone: "warn",
+        title: t.partialTitle,
+        text: t.partialText(res.restarted.join(", "), failed),
+      };
+    }
+    return { tone: "danger", title: t.failedTitle, text: t.failedText(failed) };
+  }
+  if (res.restarted.length > 0) {
+    return { tone: "ok", title: t.restartedTitle, text: t.restartedText(res.restarted.join(", ")) };
+  }
+  return { tone: "ok", title: t.nothingToRestartTitle, text: t.nothingToRestartText };
 }
 
 // ---- Кнопка защиты в карточке приложения ----
@@ -181,6 +248,32 @@ export function canRestartAntigravity(app: AppCoverageItem, view: CoverageView, 
     Boolean(snapshot.gateway_addr) &&
     view !== "confirmed"
   );
+}
+
+/**
+ * Есть ли обнаруженный или настроенный трафик ИИ через браузер или браузерное расширение.
+ */
+export function hasBrowserTraffic(
+  apps: readonly Pick<AppCoverageItem, "category" | "status" | "ai_requests">[] | null | undefined,
+): boolean {
+  if (!apps) return false;
+  return apps.some(
+    (app) =>
+      app.category === "browser" &&
+      (app.status === "confirmed" || app.status === "configured" || app.ai_requests > 0),
+  );
+}
+
+/**
+ * Показывать ли спокойную подсказку про часовой пояс ОС для браузеров и расширений:
+ * только когда есть браузерный трафик/покрытие, статус ОС загружен и пояс ОС ещё не синхронизирован.
+ */
+export function shouldShowBrowserTimezoneHint(
+  apps: readonly Pick<AppCoverageItem, "category" | "status" | "ai_requests">[] | null | undefined,
+  osTzStatus: Pick<OsTzSyncStatus, "synced"> | null | undefined,
+): boolean {
+  if (!osTzStatus || osTzStatus.synced) return false;
+  return hasBrowserTraffic(apps);
 }
 
 /** Итог перезапуска для строки и тоста: текст и «что делать» из словаря. */

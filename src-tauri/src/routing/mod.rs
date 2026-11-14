@@ -23,7 +23,7 @@ use std::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{AppStateData, UpstreamProxyConfig, PROVIDER_ANTHROPIC};
+use crate::state::{AppStateData, PROVIDER_ANTHROPIC, UpstreamProxyConfig};
 
 pub use key::parse_route_key;
 
@@ -120,7 +120,10 @@ impl Entry {
     }
 
     pub fn tls_server_name(&self) -> &str {
-        self.sni.as_deref().filter(|s| !s.is_empty()).unwrap_or(&self.host)
+        self.sni
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.host)
     }
 }
 
@@ -250,7 +253,11 @@ impl Route {
     /// Converts a v1.3.x single upstream config. No validation: the user already accepted it.
     pub fn from_legacy(cfg: &UpstreamProxyConfig, now: u64) -> Option<Route> {
         let proto = EntryProto::from_scheme(&cfg.protocol)?;
-        let host = cfg.host.trim().trim_matches(|c| c == '[' || c == ']').to_string();
+        let host = cfg
+            .host
+            .trim()
+            .trim_matches(|c| c == '[' || c == ']')
+            .to_string();
         if host.is_empty() || cfg.port == 0 {
             return None;
         }
@@ -297,7 +304,10 @@ impl Route {
 /// Stable id for keys that do not carry their own: `r-` + 24 hex chars of SHA-256(raw key).
 pub fn route_id_for_raw_key(raw_key: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, raw_key.trim().as_bytes());
-    let hex: String = digest.as_ref()[..12].iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = digest.as_ref()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     format!("r-{hex}")
 }
 
@@ -320,10 +330,8 @@ pub fn select_route_id(data: &AppStateData, provider: &str) -> Option<String> {
         data.profile_route_id.clone()
     };
     let is_claude = provider == PROVIDER_ANTHROPIC;
-    if is_claude {
-        if let Some(id) = profile.as_ref() {
-            return Some(id.clone());
-        }
+    if is_claude && let Some(id) = profile.as_ref() {
+        return Some(id.clone());
     }
     if let Some(id) = data.provider_routes.get(provider) {
         if id == DIRECT_ROUTE_ID {
@@ -331,10 +339,10 @@ pub fn select_route_id(data: &AppStateData, provider: &str) -> Option<String> {
         }
         return Some(id.clone());
     }
-    if let Some(id) = data.default_route_id.as_ref() {
-        if id != DIRECT_ROUTE_ID {
-            return Some(id.clone());
-        }
+    if let Some(id) = data.default_route_id.as_ref()
+        && id != DIRECT_ROUTE_ID
+    {
+        return Some(id.clone());
     }
     None
 }
@@ -353,9 +361,9 @@ pub enum RouteSelection {
 pub fn select_route(data: &AppStateData, provider: &str) -> RouteSelection {
     match select_route_id(data, provider) {
         None => RouteSelection::Direct,
-        Some(id) if id == INVALID_PROFILE_ROUTE_ID => RouteSelection::Invalid(
-            data.profile_route_invalid.clone().unwrap_or_default(),
-        ),
+        Some(id) if id == INVALID_PROFILE_ROUTE_ID => {
+            RouteSelection::Invalid(data.profile_route_invalid.clone().unwrap_or_default())
+        }
         Some(id) => match data.routes.iter().find(|r| r.id == id) {
             Some(r) => RouteSelection::Route(r.clone()),
             None => RouteSelection::Missing(id),
@@ -589,15 +597,23 @@ fn dangling_bindings(data: &AppStateData) -> Vec<DanglingBinding> {
             });
         }
     }
-    if let Some(id) = data.default_route_id.as_ref() {
-        if !data.routes.iter().any(|r| r.id == *id) {
-            out.push(DanglingBinding { kind: "default".into(), provider: None, route_id: id.clone() });
-        }
+    if let Some(id) = data.default_route_id.as_ref()
+        && !data.routes.iter().any(|r| r.id == *id)
+    {
+        out.push(DanglingBinding {
+            kind: "default".into(),
+            provider: None,
+            route_id: id.clone(),
+        });
     }
-    if let Some(id) = data.profile_route_id.as_ref() {
-        if !data.routes.iter().any(|r| r.id == *id) {
-            out.push(DanglingBinding { kind: "profile".into(), provider: None, route_id: id.clone() });
-        }
+    if let Some(id) = data.profile_route_id.as_ref()
+        && !data.routes.iter().any(|r| r.id == *id)
+    {
+        out.push(DanglingBinding {
+            kind: "profile".into(),
+            provider: None,
+            route_id: id.clone(),
+        });
     }
     out
 }
@@ -631,7 +647,11 @@ pub fn route_view(
                 host: e.host.clone(),
                 port: e.port,
                 username: e.username.as_deref().map(mask_secret),
-                has_password: e.password.as_deref().map(|p| !p.is_empty()).unwrap_or(false),
+                has_password: e
+                    .password
+                    .as_deref()
+                    .map(|p| !p.is_empty())
+                    .unwrap_or(false),
                 sni: e.sni.clone(),
             })
             .collect(),
@@ -675,7 +695,10 @@ pub async fn apply_profile_key(
 ) -> Result<(), String> {
     match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => match parse_route_key(k, crate::auditor::network::current_timestamp()) {
-            Ok(route) => state.apply_profile_route(route).await.map_err(|e| e.to_string()),
+            Ok(route) => state
+                .apply_profile_route(route)
+                .await
+                .map_err(|e| e.to_string()),
             Err(msg) => {
                 state
                     .invalidate_profile_route(msg.clone())
@@ -684,7 +707,10 @@ pub async fn apply_profile_key(
                 Err(msg)
             }
         },
-        None => state.set_profile_route(None).await.map_err(|e| e.to_string()),
+        None => state
+            .set_profile_route(None)
+            .await
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -715,8 +741,10 @@ mod tests {
 
     #[test]
     fn test_selection_priority_profile_provider_default() {
-        let mut d = AppStateData::default();
-        d.routes = vec![route("a"), route("b"), route("c")];
+        let mut d = AppStateData {
+            routes: vec![route("a"), route("b"), route("c")],
+            ..Default::default()
+        };
         assert_eq!(select_route(&d, "openai"), RouteSelection::Direct);
 
         d.default_route_id = Some("a".into());
@@ -732,7 +760,10 @@ mod tests {
         assert_eq!(select_route_id(&d, "openai").as_deref(), Some("a"));
 
         d.provider_routes.insert("gemini".into(), "zzz".into());
-        assert_eq!(select_route(&d, "gemini"), RouteSelection::Missing("zzz".into()));
+        assert_eq!(
+            select_route(&d, "gemini"),
+            RouteSelection::Missing("zzz".into())
+        );
     }
 
     #[test]
@@ -743,10 +774,19 @@ mod tests {
         assert!(r.check_usable(now).is_ok());
 
         let h = RouteHealthRegistry::default();
-        assert_eq!(h.record_exit("a", "185.10.10.9", "NL", r.exit_ip.as_deref()), Some(false));
-        assert_eq!(compute_status(&r, h.get("a").as_ref(), now), RouteStatus::ExitIpMismatch);
+        assert_eq!(
+            h.record_exit("a", "185.10.10.9", "NL", r.exit_ip.as_deref()),
+            Some(false)
+        );
+        assert_eq!(
+            compute_status(&r, h.get("a").as_ref(), now),
+            RouteStatus::ExitIpMismatch
+        );
         h.mark_unreachable("a", "refused");
-        assert_eq!(compute_status(&r, h.get("a").as_ref(), now), RouteStatus::Unreachable);
+        assert_eq!(
+            compute_status(&r, h.get("a").as_ref(), now),
+            RouteStatus::Unreachable
+        );
 
         r.expires_at = Some(now);
         assert_eq!(compute_status(&r, None, now), RouteStatus::Expired);
@@ -758,8 +798,10 @@ mod tests {
 
     #[test]
     fn test_view_and_debug_hide_secrets() {
-        let mut d = AppStateData::default();
-        d.routes = vec![route("a")];
+        let d = AppStateData {
+            routes: vec![route("a")],
+            ..Default::default()
+        };
         let snap = snapshot(&d, &RouteHealthRegistry::default(), 1);
         let json = serde_json::to_string(&snap).unwrap();
         assert!(!json.contains("s3cret"));
@@ -780,9 +822,11 @@ mod tests {
 
     #[test]
     fn test_profile_route_does_not_leak_to_other_providers() {
-        let mut d = AppStateData::default();
-        d.routes = vec![route("p1"), route("oa")];
-        d.profile_route_id = Some("p1".into());
+        let mut d = AppStateData {
+            routes: vec![route("p1"), route("oa")],
+            profile_route_id: Some("p1".into()),
+            ..Default::default()
+        };
         // `default_route_id` is None: Claude uses the profile route, while OpenAI and Gemini
         // stay Direct unless explicitly bound via `provider_routes` or `default_route_id`.
         assert_eq!(select_route_id(&d, "anthropic").as_deref(), Some("p1"));
@@ -793,7 +837,10 @@ mod tests {
 
         // Even when profile route is invalid, other providers are unaffected.
         d.profile_route_invalid = Some("bad key".into());
-        assert_eq!(select_route(&d, "anthropic"), RouteSelection::Invalid("bad key".into()));
+        assert_eq!(
+            select_route(&d, "anthropic"),
+            RouteSelection::Invalid("bad key".into())
+        );
         assert_eq!(select_route(&d, "openai"), RouteSelection::Direct);
         assert_eq!(select_route(&d, "gemini"), RouteSelection::Direct);
 
@@ -806,10 +853,13 @@ mod tests {
 
     #[test]
     fn test_explicit_direct_sentinel_overrides_default_without_dangling() {
-        let mut d = AppStateData::default();
-        d.routes = vec![route("a")];
-        d.default_route_id = Some("a".into());
-        d.provider_routes.insert("gemini".into(), DIRECT_ROUTE_ID.into());
+        let mut d = AppStateData {
+            routes: vec![route("a")],
+            default_route_id: Some("a".into()),
+            ..Default::default()
+        };
+        d.provider_routes
+            .insert("gemini".into(), DIRECT_ROUTE_ID.into());
 
         // Gemini stays explicitly Direct while OpenAI/Anthropic inherit default "a".
         assert_eq!(select_route_id(&d, "gemini"), None);
@@ -819,9 +869,19 @@ mod tests {
 
         // DIRECT_ROUTE_ID is not flagged as a dangling binding.
         let snap = snapshot(&d, &RouteHealthRegistry::default(), 1);
-        assert!(snap.dangling.is_empty(), "unexpected dangling: {:?}", snap.dangling);
-        assert_eq!(snap.effective.get("gemini").and_then(|v| v.as_deref()), None);
-        assert_eq!(snap.effective.get("openai").and_then(|v| v.as_deref()), Some("a"));
+        assert!(
+            snap.dangling.is_empty(),
+            "unexpected dangling: {:?}",
+            snap.dangling
+        );
+        assert_eq!(
+            snap.effective.get("gemini").and_then(|v| v.as_deref()),
+            None
+        );
+        assert_eq!(
+            snap.effective.get("openai").and_then(|v| v.as_deref()),
+            Some("a")
+        );
 
         // Removing the explicit direct override returns Gemini to default "a".
         d.provider_routes.remove("gemini");

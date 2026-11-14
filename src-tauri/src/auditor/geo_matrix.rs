@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::auditor::ip_type::IpType;
 use crate::auditor::rules::ProviderMatrix;
+use serde::{Deserialize, Serialize};
 
 pub const GUIDE_PERSONAL_VPN: &str = "01-personal-vpn-15min";
 pub const GUIDE_PAYMENT_CARDS: &str = "02-safe-payment-cards";
@@ -60,7 +60,10 @@ impl ProviderId {
         }
 
         let matches_domain = |h: &str, d: &str| -> bool {
-            h == d || (h.len() > d.len() && h.ends_with(d) && h.as_bytes()[h.len() - d.len() - 1] == b'.')
+            h == d
+                || (h.len() > d.len()
+                    && h.ends_with(d)
+                    && h.as_bytes()[h.len() - d.len() - 1] == b'.')
         };
 
         // 1. Anthropic / Claude / Cursor / OpenRouter / Perplexity
@@ -161,6 +164,14 @@ impl ProviderId {
             "idx.google.com",
             "opal.google.com",
             "labs.google",
+            "www.google.com",
+            "play.google.com",
+            "footprints-pa.googleapis.com",
+            "people-pa.googleapis.com",
+            "signaler-pa.googleapis.com",
+            "jnn-pa.googleapis.com",
+            "myactivity.google.com",
+            "myaccount.google.com",
         ];
         for d in GEMINI_DOMAINS {
             if matches_domain(&host, d) {
@@ -195,7 +206,11 @@ impl ProviderId {
         }
 
         for d in custom_domains {
-            let clean = d.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+            let clean = d
+                .trim()
+                .trim_start_matches("*.")
+                .trim_start_matches('.')
+                .to_lowercase();
             if !clean.is_empty() && (host == clean || host.ends_with(&format!(".{clean}"))) {
                 return Some(ProviderId::Anthropic);
             }
@@ -427,19 +442,35 @@ pub fn evaluate_provider_geo(
     if matrix.global_blocked_countries.contains(&country_code) {
         let msg = match country_code.as_str() {
             "HK" => match provider {
-                ProviderId::Gemini => "Гонконг (HK) заблокирован для веб-версии Google Gemini (gemini.google.com) и ограничен для Google AI Studio API (в отличие от части платных проектов Vertex AI). Также HK глобально заблокирован в Claude и OpenAI. Переключитесь на NL, DE или US.",
-                _ => "Гонконг (HK) глобально заблокирован в Claude, OpenAI и веб-версии Google Gemini (а для AI Studio API действуют строгие ограничения). Многие ставят HK как «быстрый узел», что ведет к мгновенному бану аккаунта. Переключитесь на NL, DE или US.",
+                ProviderId::Gemini => {
+                    "Гонконг (HK) заблокирован для веб-версии Google Gemini (gemini.google.com) и ограничен для Google AI Studio API (в отличие от части платных проектов Vertex AI). Также HK глобально заблокирован в Claude и OpenAI. Переключитесь на NL, DE или US."
+                }
+                _ => {
+                    "Гонконг (HK) глобально заблокирован в Claude, OpenAI и веб-версии Google Gemini (а для AI Studio API действуют строгие ограничения). Многие ставят HK как «быстрый узел», что ведет к мгновенному бану аккаунта. Переключитесь на NL, DE или US."
+                }
             },
             "MO" => match provider {
-                ProviderId::Gemini => "Макао (MO) заблокирован для веб-версии Google Gemini (gemini.google.com) и ограничен для Google AI Studio API. Переключитесь на NL, DE или US.",
-                _ => "Макао (MO) глобально заблокирован в Claude, OpenAI и Google Gemini. Переключитесь на NL, DE или US.",
+                ProviderId::Gemini => {
+                    "Макао (MO) заблокирован для веб-версии Google Gemini (gemini.google.com) и ограничен для Google AI Studio API. Переключитесь на NL, DE или US."
+                }
+                _ => {
+                    "Макао (MO) глобально заблокирован в Claude, OpenAI и Google Gemini. Переключитесь на NL, DE или US."
+                }
             },
             "CN" => match provider {
-                ProviderId::Gemini => "Материковый Китай (CN) заблокирован как для веб-версии Google Gemini, так и для Google AI Studio API. Переключитесь на NL, DE или US.",
-                _ => "Материковый Китай (CN) заблокирован всеми основными ИИ-провайдерами (включая Claude, OpenAI, Google Gemini web и AI Studio API). Соединение остановлено для защиты аккаунта.",
+                ProviderId::Gemini => {
+                    "Материковый Китай (CN) заблокирован как для веб-версии Google Gemini, так и для Google AI Studio API. Переключитесь на NL, DE или US."
+                }
+                _ => {
+                    "Материковый Китай (CN) заблокирован всеми основными ИИ-провайдерами (включая Claude, OpenAI, Google Gemini web и AI Studio API). Соединение остановлено для защиты аккаунта."
+                }
             },
-            "RU" | "BY" => "Подключение идет из неподдерживаемого региона. Прямой доступ к сервису ограничен политиками платформы в этой юрисдикции. Переключитесь на доверенный рабочий шлюз (NL, DE, US).",
-            _ => "Доступ из этой юрисдикции заблокирован всеми основными ИИ-провайдерами. Соединение остановлено для защиты аккаунта.",
+            "RU" | "BY" => {
+                "Подключение идет из неподдерживаемого региона. Прямой доступ к сервису ограничен политиками платформы в этой юрисдикции. Переключитесь на доверенный рабочий шлюз (NL, DE, US)."
+            }
+            _ => {
+                "Доступ из этой юрисдикции заблокирован всеми основными ИИ-провайдерами. Соединение остановлено для защиты аккаунта."
+            }
         };
 
         return CheckResult::critical(
@@ -500,7 +531,11 @@ mod tests {
     #[test]
     fn test_provider_geo_matrix_russia_blocked() {
         let matrix = ProviderMatrix::load_bundled().unwrap();
-        for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+        for &provider in &[
+            ProviderId::Anthropic,
+            ProviderId::Openai,
+            ProviderId::Gemini,
+        ] {
             let res = evaluate_provider_geo(&matrix, provider, "RU");
             assert_eq!(res.status, CheckStatus::Critical);
             assert_eq!(res.code, "GLOBAL_SANCTIONED_COUNTRY");
@@ -510,7 +545,11 @@ mod tests {
     #[test]
     fn test_provider_geo_non_country_codes_are_never_allowed() {
         let matrix = ProviderMatrix::load_bundled().unwrap();
-        for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+        for &provider in &[
+            ProviderId::Anthropic,
+            ProviderId::Openai,
+            ProviderId::Gemini,
+        ] {
             for raw in ["", "  ", "XX", "xx", "ZZ", "N", "NLD", "1A"] {
                 let res = evaluate_provider_geo(&matrix, provider, raw);
                 assert_eq!(res.status, CheckStatus::Unknown, "{raw:?}");
@@ -538,7 +577,11 @@ mod tests {
     #[test]
     fn test_provider_geo_matrix_hongkong_blocked() {
         let matrix = ProviderMatrix::load_bundled().unwrap();
-        for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+        for &provider in &[
+            ProviderId::Anthropic,
+            ProviderId::Openai,
+            ProviderId::Gemini,
+        ] {
             let res = evaluate_provider_geo(&matrix, provider, "HK");
             assert_eq!(res.status, CheckStatus::Critical);
             assert_eq!(res.code, "GLOBAL_SANCTIONED_COUNTRY");
@@ -583,7 +626,11 @@ mod tests {
         // AF, MM, SD, YE blocked for Anthropic
         for &country in &["AF", "MM", "SD", "YE"] {
             let res = evaluate_provider_geo(&matrix, ProviderId::Anthropic, country);
-            assert_eq!(res.status, CheckStatus::Critical, "expected {country} blocked for Anthropic");
+            assert_eq!(
+                res.status,
+                CheckStatus::Critical,
+                "expected {country} blocked for Anthropic"
+            );
             assert_eq!(res.code, "ANTHROPIC_GEO_BLOCKED");
         }
     }
@@ -593,9 +640,17 @@ mod tests {
         let matrix = ProviderMatrix::load_bundled().unwrap();
 
         for &country in &["RU", "BY", "CN", "IR", "HK", "MO"] {
-            for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+            for &provider in &[
+                ProviderId::Anthropic,
+                ProviderId::Openai,
+                ProviderId::Gemini,
+            ] {
                 let res = evaluate_provider_geo(&matrix, provider, country);
-                assert_eq!(res.status, CheckStatus::Critical, "{country} for {provider:?}");
+                assert_eq!(
+                    res.status,
+                    CheckStatus::Critical,
+                    "{country} for {provider:?}"
+                );
                 assert_eq!(res.code, "GLOBAL_SANCTIONED_COUNTRY");
             }
         }
@@ -603,15 +658,27 @@ mod tests {
         // HK / MO / CN Gemini messages note Gemini web vs AI Studio API
         for &country in &["HK", "MO", "CN"] {
             let res = evaluate_provider_geo(&matrix, ProviderId::Gemini, country);
-            assert!(res.message.contains("AI Studio API"), "{country}: {}", res.message);
+            assert!(
+                res.message.contains("AI Studio API"),
+                "{country}: {}",
+                res.message
+            );
             assert!(res.message.contains("Gemini"), "{country}: {}", res.message);
         }
 
         // UA has partial restriction warnings for all providers
-        for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+        for &provider in &[
+            ProviderId::Anthropic,
+            ProviderId::Openai,
+            ProviderId::Gemini,
+        ] {
             let res = evaluate_provider_geo(&matrix, provider, "UA");
             assert_eq!(res.status, CheckStatus::Warning, "UA for {provider:?}");
-            assert!(res.message.contains("оккупированных"), "UA: {}", res.message);
+            assert!(
+                res.message.contains("оккупированных"),
+                "UA: {}",
+                res.message
+            );
         }
     }
 
@@ -642,7 +709,11 @@ mod tests {
     fn test_provider_geo_matrix_netherlands_allowed() {
         let matrix = ProviderMatrix::load_bundled().unwrap();
         for &country in &["NL", "DE", "US", "FI"] {
-            for &provider in &[ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+            for &provider in &[
+                ProviderId::Anthropic,
+                ProviderId::Openai,
+                ProviderId::Gemini,
+            ] {
                 let res = evaluate_provider_geo(&matrix, provider, country);
                 assert_eq!(res.status, CheckStatus::Ok);
                 assert_eq!(res.code, "GEO_ALLOWED");
@@ -652,31 +723,91 @@ mod tests {
 
     #[test]
     fn test_provider_from_host_matching() {
-        assert_eq!(ProviderId::from_host("claude.ai:443"), Some(ProviderId::Anthropic));
-        assert_eq!(ProviderId::from_host("api.anthropic.com"), Some(ProviderId::Anthropic));
-        assert_eq!(ProviderId::from_host("chatgpt.com"), Some(ProviderId::Openai));
-        assert_eq!(ProviderId::from_host("gemini.google.com:443"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("aistudio.google.com"), Some(ProviderId::Gemini));
+        assert_eq!(
+            ProviderId::from_host("claude.ai:443"),
+            Some(ProviderId::Anthropic)
+        );
+        assert_eq!(
+            ProviderId::from_host("api.anthropic.com"),
+            Some(ProviderId::Anthropic)
+        );
+        assert_eq!(
+            ProviderId::from_host("chatgpt.com"),
+            Some(ProviderId::Openai)
+        );
+        assert_eq!(
+            ProviderId::from_host("gemini.google.com:443"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("aistudio.google.com"),
+            Some(ProviderId::Gemini)
+        );
         assert_eq!(ProviderId::from_host("example.com"), None);
     }
 
     #[test]
     fn test_antigravity_and_cloudcode_endpoints_match_gemini() {
-        assert_eq!(ProviderId::from_host("daily-cloudcode-pa.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("cloudcode-pa.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("daily-cloudcode-pa.sandbox.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("autopush-cloudcode-pa.sandbox.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("preprod-daily-cloudcode-pa.sandbox.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("aicode.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("autopush-aicode.sandbox.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("preprod-aicode.sandbox.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("alkalimakersuiteapplets.pa.googleapis.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("antigravity.google"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("antigravity.google.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("share.gemini.google"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("notebooklm.google"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("notebooklm.google.com"), Some(ProviderId::Gemini));
-        assert_eq!(ProviderId::from_host("idx.google.com"), Some(ProviderId::Gemini));
+        assert_eq!(
+            ProviderId::from_host("daily-cloudcode-pa.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("cloudcode-pa.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("daily-cloudcode-pa.sandbox.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("autopush-cloudcode-pa.sandbox.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("preprod-daily-cloudcode-pa.sandbox.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("aicode.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("autopush-aicode.sandbox.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("preprod-aicode.sandbox.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("alkalimakersuiteapplets.pa.googleapis.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("antigravity.google"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("antigravity.google.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("share.gemini.google"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("notebooklm.google"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("notebooklm.google.com"),
+            Some(ProviderId::Gemini)
+        );
+        assert_eq!(
+            ProviderId::from_host("idx.google.com"),
+            Some(ProviderId::Gemini)
+        );
     }
 
     #[test]
@@ -701,6 +832,14 @@ mod tests {
             "accounts.google.com",
             "ogs.google.com",
             "apis.google.com",
+            "www.google.com",
+            "play.google.com",
+            "footprints-pa.googleapis.com",
+            "people-pa.googleapis.com",
+            "signaler-pa.googleapis.com",
+            "jnn-pa.googleapis.com",
+            "myactivity.google.com",
+            "myaccount.google.com",
         ] {
             assert_eq!(
                 ProviderId::from_host(host),
@@ -718,21 +857,54 @@ mod tests {
     #[test]
     fn test_extended_domains_and_custom_domains_matching() {
         // Anthropic / Cursor / Perplexity
-        assert_eq!(ProviderId::from_host("cursor.sh"), Some(ProviderId::Anthropic));
-        assert_eq!(ProviderId::from_host("api2.cursor.sh:443"), Some(ProviderId::Anthropic));
-        assert_eq!(ProviderId::from_host("perplexity.ai"), Some(ProviderId::Anthropic));
-        assert_eq!(ProviderId::from_host("openrouter.ai"), Some(ProviderId::Anthropic));
+        assert_eq!(
+            ProviderId::from_host("cursor.sh"),
+            Some(ProviderId::Anthropic)
+        );
+        assert_eq!(
+            ProviderId::from_host("api2.cursor.sh:443"),
+            Some(ProviderId::Anthropic)
+        );
+        assert_eq!(
+            ProviderId::from_host("perplexity.ai"),
+            Some(ProviderId::Anthropic)
+        );
+        assert_eq!(
+            ProviderId::from_host("openrouter.ai"),
+            Some(ProviderId::Anthropic)
+        );
 
         // OpenAI / Copilot / DeepSeek / Mistral
-        assert_eq!(ProviderId::from_host("copilot.microsoft.com:443"), Some(ProviderId::Openai));
-        assert_eq!(ProviderId::from_host("githubcopilot.com"), Some(ProviderId::Openai));
-        assert_eq!(ProviderId::from_host("api.githubcopilot.com"), Some(ProviderId::Openai));
-        assert_eq!(ProviderId::from_host("deepseek.com"), Some(ProviderId::Openai));
-        assert_eq!(ProviderId::from_host("api.deepseek.com"), Some(ProviderId::Openai));
-        assert_eq!(ProviderId::from_host("mistral.ai"), Some(ProviderId::Openai));
+        assert_eq!(
+            ProviderId::from_host("copilot.microsoft.com:443"),
+            Some(ProviderId::Openai)
+        );
+        assert_eq!(
+            ProviderId::from_host("githubcopilot.com"),
+            Some(ProviderId::Openai)
+        );
+        assert_eq!(
+            ProviderId::from_host("api.githubcopilot.com"),
+            Some(ProviderId::Openai)
+        );
+        assert_eq!(
+            ProviderId::from_host("deepseek.com"),
+            Some(ProviderId::Openai)
+        );
+        assert_eq!(
+            ProviderId::from_host("api.deepseek.com"),
+            Some(ProviderId::Openai)
+        );
+        assert_eq!(
+            ProviderId::from_host("mistral.ai"),
+            Some(ProviderId::Openai)
+        );
 
         // Custom domain matching
-        let custom = vec!["internal-ai.corp".to_string(), "custom-agent.dev".to_string()];
+        let custom = vec![
+            "internal-ai.corp".to_string(),
+            "custom-agent.dev".to_string(),
+        ];
         assert_eq!(
             ProviderId::from_host_with_custom("internal-ai.corp:8443", &custom),
             Some(ProviderId::Anthropic)

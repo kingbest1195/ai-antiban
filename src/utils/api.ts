@@ -27,7 +27,9 @@ import {
   PopupPosition,
   ProfileSwitchResult,
   ProviderId,
+  RelaunchBrowsersResult,
   RiskReport,
+  RollbackReleaseInfo,
   RouteTestResult,
   RouteView,
   RoutesSnapshot,
@@ -37,12 +39,17 @@ import {
   EnrichedPayload,
   AutostartStatus,
   CoworkGuardStatus,
+  GuardPauseStatus,
   OsTzSyncStatus,
+  PolicyApplyReport,
+  ProtectionChangePreviewItem,
   RouteUnavailablePayload,
+  ShutdownProgressPayload,
 } from "../types";
 
 let mockState: AppStateData = {
   pinned_ip: "185.212.102.40",
+  pinned_ips: { default: "185.212.102.40" },
   strict_pinning_enabled: true,
   ip_history: {},
   session_allowed_providers: [],
@@ -58,6 +65,7 @@ let mockState: AppStateData = {
   sync_ai_tz_enabled: true,
   cli_mode: "ai_only",
   split_tunnel_mode: false,
+  hide_ip_mode: false,
 };
 
 let mockKillswitchStatus = false;
@@ -71,6 +79,7 @@ let mockOsTzOriginal: string | null = null;
 let mockOsTzTarget: string | null = null;
 /** Сколько раз нажали «Проверить снова»: мок продвигает статусы по шагам. */
 let mockCoverageStage = 0;
+let mockPacPolicyApplied = false;
 /** Сценарий VPN в моке «Покрытия»: нет VPN, VPN перебивает системный PAC, VPN подключён, но PAC действует. */
 export type MockVpnScenario = "none" | "overrides" | "effective";
 let mockVpnScenario: MockVpnScenario = "none";
@@ -715,18 +724,53 @@ function buildMockReport(provider: ProviderId): RiskReport {
   return report;
 }
 
-export async function pinCurrentIp(ip: string): Promise<void> {
+export async function pinCurrentIp(ip: string, provider?: string): Promise<void> {
   if (isTauri()) {
-    return await invoke("pin_current_ip", { ip });
+    return await invoke("pin_current_ip", { ip, provider: provider ?? null });
   }
-  mockState.pinned_ip = ip;
+  const key = provider || "default";
+  mockState.pinned_ips = { ...(mockState.pinned_ips ?? {}), [key]: ip };
+  if (key === "default" || !mockState.pinned_ip) {
+    mockState.pinned_ip = ip;
+  }
 }
 
-export async function unpinIp(): Promise<void> {
+export async function unpinIp(provider?: string): Promise<void> {
   if (isTauri()) {
-    return await invoke("unpin_ip");
+    return await invoke("unpin_ip", { provider: provider ?? null });
   }
-  mockState.pinned_ip = null;
+  if (!provider) {
+    mockState.pinned_ip = null;
+    mockState.pinned_ips = {};
+    return;
+  }
+  const next = { ...(mockState.pinned_ips ?? {}) };
+  delete next[provider];
+  mockState.pinned_ips = next;
+  if (provider === "default") {
+    mockState.pinned_ip = null;
+  }
+}
+
+export async function getPinnedIps(): Promise<Record<string, string>> {
+  if (isTauri()) {
+    return await invoke<Record<string, string>>("get_pinned_ips");
+  }
+  return { ...(mockState.pinned_ips ?? {}) };
+}
+
+export async function getHideIpMode(): Promise<boolean> {
+  if (isTauri()) {
+    return await invoke<boolean>("get_hide_ip_mode");
+  }
+  return Boolean(mockState.hide_ip_mode);
+}
+
+export async function setHideIpMode(enabled: boolean): Promise<void> {
+  if (isTauri()) {
+    return await invoke("set_hide_ip_mode", { enabled });
+  }
+  mockState.hide_ip_mode = enabled;
 }
 
 export async function toggleStrictPinning(enabled: boolean): Promise<void> {
@@ -784,6 +828,22 @@ export async function resolveInterception(
     });
   }
   if (mockPendingAlert?.id === id) mockPendingAlert = null;
+}
+
+export async function pauseUntilNetworkChange(reason?: string | null): Promise<GuardPauseStatus> {
+  if (isTauri()) {
+    return await invoke<GuardPauseStatus>("pause_until_network_change_cmd", {
+      reason: reason ?? null,
+    });
+  }
+  mockKillswitchStatus = true;
+  return {
+    paused: true,
+    mode: "until_network_change",
+    gate: null,
+    gate_reason: reason ?? "Пауза до следующей смены сети",
+    manual_killswitch: false,
+  };
 }
 
 /** Текущий активный алерт (для окна, открытого после события). В браузере-моке — последний смоделированный. */
@@ -857,6 +917,7 @@ function runMockAlert(provider: ProviderId, scenario: MockAlertScenario) {
     ttl_seconds: 60,
     is_simulation: true,
     scope: "provider",
+    gate_reason: "Демо: адрес выхода сменился на неподдерживаемый регион (RU).",
     detected_at_ms: Date.now(),
     phase: "ready",
     network_change: { old_ip: "185.212.102.40", old_country: "NL", new_ip: "185.220.101.5", new_country: "RU" },
@@ -879,6 +940,7 @@ function runMockAlert(provider: ProviderId, scenario: MockAlertScenario) {
         phase: "ready",
         report: base.report,
         network_change: base.network_change!,
+        gate_reason: base.gate_reason,
       };
       mockPendingAlert = { ...base };
       emitMock(MOCK_ALERT_ENRICHED_EVENT, enriched);
@@ -1179,6 +1241,41 @@ export async function installUpdate(): Promise<InstallUpdateResult> {
   return {
     success: true,
     message: "Обновление готово к установке.",
+    will_restart: true,
+  };
+}
+
+/** Список предыдущих стабильных релизов на GitHub, доступных для отката. */
+export async function listRollbackVersions(): Promise<RollbackReleaseInfo[]> {
+  if (isTauri()) {
+    return await invoke<RollbackReleaseInfo[]>("list_rollback_versions");
+  }
+  return [
+    {
+      version: "2.1.2",
+      tag: "v2.1.2",
+      name: "Zastava v2.1.2",
+      published_at: "2026-11-10T12:00:00Z",
+      notes_url: "https://github.com/kingbest1195/ai-antiban/releases/tag/v2.1.2",
+    },
+    {
+      version: "2.1.1",
+      tag: "v2.1.1",
+      name: "Zastava v2.1.1",
+      published_at: "2026-11-05T12:00:00Z",
+      notes_url: "https://github.com/kingbest1195/ai-antiban/releases/tag/v2.1.1",
+    },
+  ];
+}
+
+/** Установка выбранной предыдущей версии (откат через подписанный latest.json релиза). */
+export async function installRollbackVersion(version: string): Promise<InstallUpdateResult> {
+  if (isTauri()) {
+    return await invoke<InstallUpdateResult>("install_rollback_version", { version });
+  }
+  return {
+    success: true,
+    message: `Откат на v${version} готов к установке.`,
     will_restart: true,
   };
 }
@@ -1979,6 +2076,9 @@ function mockCoverageSnapshot(): CoverageSnapshot {
     apps,
     system_proxy_effective: sys ? vpn !== "overrides" : null,
     vpn_connected: vpn === "none" ? [] : ["V2BOX Pro"],
+    browser_pac_policy_active: sys ? vpn === "effective" || mockPacPolicyApplied : false,
+    browsers_pac_active: sys && (vpn === "effective" || mockPacPolicyApplied) ? ["Google Chrome"] : [],
+    browsers_needing_restart: sys && vpn === "overrides" && !mockPacPolicyApplied ? ["Google Chrome"] : [],
   };
 }
 
@@ -1996,6 +2096,38 @@ export async function recheckCoverage(): Promise<CoverageSnapshot> {
   }
   mockCoverageStage = Math.min(mockCoverageStage + 1, 2);
   return mockCoverageSnapshot();
+}
+
+/** Принудительно применяет управляемые политики браузеров (Chrome/Edge/Brave/Firefox) на локальный PAC. */
+export async function reapplyBrowserPolicies(): Promise<PolicyApplyReport> {
+  if (isTauri()) {
+    return await invoke<PolicyApplyReport>("reapply_browser_policies_cmd");
+  }
+  mockPacPolicyApplied = true;
+  return {
+    applied: 1,
+    unchanged: 0,
+    skipped: 0,
+    failed: 0,
+    pac_policy_active: true,
+  };
+}
+
+/** Закрывает запущенные браузеры без PAC, патчит их профили и перезапускает с `--proxy-pac-url`. */
+export async function relaunchBrowsersWithPac(): Promise<RelaunchBrowsersResult> {
+  if (isTauri()) {
+    return await invoke<RelaunchBrowsersResult>("relaunch_browsers_with_pac_cmd");
+  }
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  mockPacPolicyApplied = true;
+  return {
+    restarted: ["Google Chrome"],
+    skipped: [],
+    failed: [],
+    needs_automation_permission: false,
+    unsupported: false,
+    snapshot: mockCoverageSnapshot(),
+  };
 }
 
 /**
@@ -2118,5 +2250,82 @@ export async function onRouteUnavailable(
   return await listen<RouteUnavailablePayload>("route://unavailable", (event) => {
     handler(event.payload);
   });
+}
+
+export async function onShutdownProgress(
+  handler: (payload: ShutdownProgressPayload) => void
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  return await listen<ShutdownProgressPayload>("app://shutdown-progress", (event) => {
+    handler(event.payload);
+  });
+}
+
+/** Экспортирует очищенный JSON-отчёт диагностики без прокси-ключей, токенов и IP-адресов. */
+export async function exportDiagnosticBundle(): Promise<string> {
+  if (isTauri()) {
+    return await invoke<string>("export_diagnostic_bundle_cmd");
+  }
+  return JSON.stringify(
+    {
+      app_version: "2.2.0",
+      os: "macos",
+      arch: "aarch64",
+      sysproxy_enabled: mockSysproxyActive,
+      cli_protection_enabled: mockCliProtection,
+      cli_mode: mockCliMode,
+      split_tunnel_mode: mockSplitTunnelMode,
+      sync_ai_tz_enabled: mockSyncAiTz,
+      provider_routes: [],
+      audits: {},
+      note: "mock diagnostic bundle (IPs and credentials redacted)",
+    },
+    null,
+    2,
+  );
+}
+
+/** Возвращает список системных настроек и файлов, которыми управляет Застава. */
+export async function previewProtectionChanges(): Promise<ProtectionChangePreviewItem[]> {
+  if (isTauri()) {
+    return await invoke<ProtectionChangePreviewItem[]>("preview_protection_changes_cmd");
+  }
+  return [
+    {
+      category: "system_pac",
+      target: "Системный прокси ОС (PAC)",
+      action: "Автонастройка прокси на активных сетевых интерфейсах",
+      description: "Направляет только домены ИИ на локальный шлюз 127.0.0.1.",
+      reversible: true,
+    },
+    {
+      category: "browser_policy",
+      target: "Политики браузеров (Chrome / Edge / Brave / Firefox)",
+      action: "ProxyMode, ProxyPacUrl, QuicAllowed, DnsOverHttpsMode",
+      description: "Обеспечивает работу маршрутов даже поверх TUN VPN.",
+      reversible: true,
+    },
+    {
+      category: "shell_rc",
+      target: "~/.zshrc, ~/.bash_profile",
+      action: "Блок # >>> zastava ... # <<< zastava",
+      description: "Настройка переменных прокси для ИИ-инструментов и часового пояса.",
+      reversible: true,
+    },
+    {
+      category: "cli_settings",
+      target: "~/.claude/settings.json, ~/.gemini/settings.json",
+      action: "Параметры прокси и TZ",
+      description: "Безопасное окружение только для CLI-клиентов ИИ.",
+      reversible: true,
+    },
+    {
+      category: "ide_settings",
+      target: "VS Code / Cursor / Windsurf / Antigravity",
+      action: "Локальная конфигурация прокси для расширений ИИ",
+      description: "Оставляет npm, git и brew напрямую.",
+      reversible: true,
+    },
+  ];
 }
 

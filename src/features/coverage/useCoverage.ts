@@ -39,6 +39,15 @@ export function useCoverage(initial?: CoverageSnapshot | null) {
     setWaiting((prev) => resolveWaiting(prev, snap.apps));
   }, []);
 
+  /** Немедленно применяет готовый снимок (например, из ответа relaunch_browsers_with_pac_cmd). */
+  const applySnapshot = useCallback(
+    (snap: CoverageSnapshot) => {
+      const id = ++seq.current;
+      apply(snap, id);
+    },
+    [apply],
+  );
+
   const refresh = useCallback(async () => {
     const id = ++seq.current;
     try {
@@ -120,5 +129,5 @@ export function useCoverage(initial?: CoverageSnapshot | null) {
     return () => window.clearInterval(timer);
   }, [interval, refresh]);
 
-  return { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup };
+  return { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup, applySnapshot };
 }

@@ -1,13 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 
 use crate::routing::{
-    select_route, select_route_id, Route, RouteHealthRegistry, RouteSelection, DIRECT_ROUTE_ID,
+    DIRECT_ROUTE_ID, INVALID_PROFILE_ROUTE_ID, Route, RouteHealthRegistry, RouteSelection,
+    select_route, select_route_id,
 };
 
 pub const PROVIDER_ANTHROPIC: &str = "anthropic";
@@ -84,11 +85,7 @@ where
         }
 
         fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
-            if v >= 0 {
-                Ok(Some(v as u32))
-            } else {
-                Ok(None)
-            }
+            if v >= 0 { Ok(Some(v as u32)) } else { Ok(None) }
         }
 
         fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -183,7 +180,10 @@ impl std::fmt::Debug for UpstreamProxyConfig {
             .field("protocol", &self.protocol)
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("username", &self.username.as_deref().map(crate::routing::mask_secret))
+            .field(
+                "username",
+                &self.username.as_deref().map(crate::routing::mask_secret),
+            )
             .field("password", &self.password.as_ref().map(|_| "***"))
             .field("label", &self.label)
             .finish()
@@ -197,8 +197,16 @@ pub struct AppStateData {
     pub schema_version: u32,
     #[serde(default)]
     pub pinned_ip: Option<String>,
+    /// Per-provider pinned exit IPs (`"anthropic"`, `"openai"`, `"gemini"`, and `"default"` for
+    /// the Direct/VPN path). Keeps `pinned_ip` synchronized with `"default"` for backwards compat.
+    #[serde(default)]
+    pub pinned_ips: HashMap<String, String>,
     #[serde(default)]
     pub strict_pinning_enabled: bool,
+    #[serde(default)]
+    pub onboarding_v2_2_done: bool,
+    #[serde(default)]
+    pub hide_ip_mode: bool,
     #[serde(default)]
     pub ip_history: HashMap<String, Vec<IpHistoryEntry>>,
     #[serde(default)]
@@ -269,7 +277,10 @@ impl std::fmt::Debug for AppStateData {
         f.debug_struct("AppStateData")
             .field("schema_version", &self.schema_version)
             .field("pinned_ip", &self.pinned_ip)
+            .field("pinned_ips", &self.pinned_ips)
             .field("strict_pinning_enabled", &self.strict_pinning_enabled)
+            .field("onboarding_v2_2_done", &self.onboarding_v2_2_done)
+            .field("hide_ip_mode", &self.hide_ip_mode)
             .field("ip_history", &self.ip_history)
             .field("session_allowed_providers", &self.session_allowed_providers)
             .field("blocked_providers", &self.blocked_providers)
@@ -291,7 +302,10 @@ impl std::fmt::Debug for AppStateData {
             .field("legacy_route_id", &self.legacy_route_id)
             .field("profile_route_invalid", &self.profile_route_invalid)
             .field("manual_killswitch", &self.manual_killswitch)
-            .field("skipped_routes", &format_args!("<{} not shown>", self.skipped_routes.len()))
+            .field(
+                "skipped_routes",
+                &format_args!("<{} not shown>", self.skipped_routes.len()),
+            )
             .finish()
     }
 }
@@ -300,25 +314,63 @@ impl AppStateData {
     /// Upgrades data loaded from an older `state.json`. Returns true if anything changed.
     pub fn migrate(&mut self, now: u64) -> bool {
         let before = self.clone();
-        if self.schema_version < 2 {
-            if let Some(cfg) = self.upstream_proxy.clone() {
-                if let Some(route) = Route::from_legacy(&cfg, now) {
-                    let id = route.id.clone();
-                    if !self.routes.iter().any(|r| r.id == id) {
-                        self.routes.push(route);
-                    }
-                    self.legacy_route_id = Some(id.clone());
-                    if cfg.enabled {
-                        self.default_route_id = Some(id);
-                    }
-                }
+        if self.schema_version < 2
+            && let Some(cfg) = self.upstream_proxy.clone()
+            && let Some(route) = Route::from_legacy(&cfg, now)
+        {
+            let id = route.id.clone();
+            if !self.routes.iter().any(|r| r.id == id) {
+                self.routes.push(route);
+            }
+            self.legacy_route_id = Some(id.clone());
+            if cfg.enabled {
+                self.default_route_id = Some(id);
             }
         }
         self.schema_version = self.schema_version.max(CURRENT_SCHEMA_VERSION);
+        if let Some(ref ip) = self.pinned_ip {
+            let trimmed = ip.trim();
+            if !trimmed.is_empty() && !self.pinned_ips.contains_key("default") {
+                self.pinned_ips
+                    .insert("default".to_string(), trimmed.to_string());
+            }
+        }
         // Dangling references are deliberately kept: a binding to a missing route is `Missing`
         // (blocked), never silently "direct".
         self.sync_legacy_mirror();
         *self != before
+    }
+
+    /// Returns the pinned IP that applies to `provider`.
+    ///
+    /// When `is_routed` is `true` (provider is routed via a bound Zastava key), only an explicit
+    /// entry in `pinned_ips[provider]` is returned — it never falls back to `"default"` or the
+    /// global `pinned_ip`. When `is_routed` is `false` (Direct / VPN), it checks
+    /// `pinned_ips[provider]`, then `pinned_ips["default"]`, then legacy `pinned_ip`.
+    pub fn pinned_ip_for_provider(&self, provider: &str, is_routed: bool) -> Option<&str> {
+        if let Some(ip) = self
+            .pinned_ips
+            .get(provider)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(ip);
+        }
+        if is_routed {
+            return None;
+        }
+        self.pinned_ips
+            .get("default")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.pinned_ip
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
     }
 
     fn has_route(&self, id: &str) -> bool {
@@ -397,6 +449,38 @@ impl AppStateData {
             .collect()
     }
 
+    /// Key into `ip_history` for `provider` under `selection`.
+    pub fn ip_history_key_for_selection(
+        &self,
+        provider: &str,
+        selection: &RouteSelection,
+    ) -> String {
+        ip_history_key_for_selection(provider, selection)
+    }
+
+    /// Key into `ip_history` for `provider` using its current route selection.
+    pub fn ip_history_key_for_provider(&self, provider: &str) -> String {
+        let selection = select_route(self, provider);
+        ip_history_key_for_selection(provider, &selection)
+    }
+
+    /// Returns the scoped IP history slice for `(provider, selection)`.
+    /// Does not fall back to legacy unscoped keys so switching routes never inherits stale hops.
+    pub fn ip_history_for_selection(
+        &self,
+        provider: &str,
+        selection: &RouteSelection,
+    ) -> Vec<IpHistoryEntry> {
+        let key = ip_history_key_for_selection(provider, selection);
+        self.ip_history.get(&key).cloned().unwrap_or_default()
+    }
+
+    /// Returns the scoped IP history for `provider` under its active route selection.
+    pub fn ip_history_for_provider(&self, provider: &str) -> Vec<IpHistoryEntry> {
+        let key = self.ip_history_key_for_provider(provider);
+        self.ip_history.get(&key).cloned().unwrap_or_default()
+    }
+
     /// Removes the route itself. Bindings that point to it stay (and become `Missing`, i.e. the
     /// providers are blocked until the user rebinds or unbinds them); only the legacy slot, which
     /// is not a routing reference, is cleared.
@@ -429,7 +513,10 @@ impl Default for AppStateData {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             pinned_ip: None,
+            pinned_ips: HashMap::new(),
             strict_pinning_enabled: false,
+            onboarding_v2_2_done: false,
+            hide_ip_mode: false,
             ip_history,
             session_allowed_providers: HashSet::new(),
             blocked_providers: HashSet::new(),
@@ -503,7 +590,9 @@ pub struct TunnelGuard {
 
 impl Drop for TunnelGuard {
     fn drop(&mut self) {
-        self.tracker.active_ai_tunnels.fetch_sub(1, Ordering::SeqCst);
+        self.tracker
+            .active_ai_tunnels
+            .fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -573,7 +662,11 @@ impl GatewayStatsTracker {
         if let Ok(mut g) = self.recent_events.write() {
             if let Some(last) = g.back_mut() {
                 let is_direct = last.action.eq_ignore_ascii_case("direct")
-                    || last.kind.as_deref().map(|k| k.eq_ignore_ascii_case("direct")).unwrap_or(false);
+                    || last
+                        .kind
+                        .as_deref()
+                        .map(|k| k.eq_ignore_ascii_case("direct"))
+                        .unwrap_or(false);
                 if is_direct && last.host == host {
                     last.timestamp = now;
                     return;
@@ -733,10 +826,8 @@ impl AppState {
         // Session allowances are ephemeral per app launch and must not carry over across restarts
         data.session_allowed_providers.clear();
 
-        if needs_save {
-            if let Err(e) = Self::save_data_to_file(&data, &storage_path) {
-                eprintln!("Warning: could not rewrite {}: {e}", storage_path.display());
-            }
+        if needs_save && let Err(e) = Self::save_data_to_file(&data, &storage_path) {
+            eprintln!("Warning: could not rewrite {}: {e}", storage_path.display());
         }
 
         Self::new(data, Some(storage_path))
@@ -768,7 +859,9 @@ impl AppState {
                 candidates = items.into_iter().chain(candidates).collect();
             }
             Some(_) => {
-                return Err(StateError::PathError("`routes` is not an array".to_string()));
+                return Err(StateError::PathError(
+                    "`routes` is not an array".to_string(),
+                ));
             }
         }
         for (i, item) in candidates.into_iter().enumerate() {
@@ -869,10 +962,10 @@ impl AppState {
             f.sync_all()?;
         }
         #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
         }
         Ok(())
     }
@@ -923,7 +1016,83 @@ impl AppState {
     pub async fn set_pinned_ip(&self, ip: Option<String>) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
-            w.pinned_ip = ip;
+            let cleaned = ip
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            w.pinned_ip = cleaned.clone();
+            match cleaned {
+                Some(val) => {
+                    w.pinned_ips.insert("default".to_string(), val);
+                }
+                None => {
+                    w.pinned_ips.remove("default");
+                }
+            }
+        }
+        self.save_async().await
+    }
+
+    pub async fn get_pinned_ips(&self) -> HashMap<String, String> {
+        self.inner.read().await.pinned_ips.clone()
+    }
+
+    /// Sets or clears a pinned IP for a specific scope (`"default"` or provider ID such as
+    /// `"anthropic"`, `"openai"`, `"gemini"`). Updating `"default"` keeps `pinned_ip` in sync
+    /// for backwards compatibility.
+    pub async fn set_pinned_ip_for(&self, key: &str, ip: Option<String>) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            let cleaned = ip
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            match cleaned.clone() {
+                Some(val) => {
+                    w.pinned_ips.insert(key.to_string(), val);
+                }
+                None => {
+                    w.pinned_ips.remove(key);
+                }
+            }
+            if key == "default" {
+                w.pinned_ip = cleaned;
+            }
+        }
+        self.save_async().await
+    }
+
+    pub async fn clear_all_pinned_ips(&self) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.pinned_ip = None;
+            w.pinned_ips.clear();
+        }
+        self.save_async().await
+    }
+
+    pub async fn is_onboarding_v2_2_done(&self) -> bool {
+        self.inner.read().await.onboarding_v2_2_done
+    }
+
+    pub async fn set_onboarding_v2_2_done(&self, done: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.onboarding_v2_2_done = done;
+        }
+        self.save_async().await
+    }
+
+    pub async fn is_hide_ip_mode(&self) -> bool {
+        self.inner.read().await.hide_ip_mode
+    }
+
+    pub async fn set_hide_ip_mode(&self, enabled: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.hide_ip_mode = enabled;
         }
         self.save_async().await
     }
@@ -1009,9 +1178,10 @@ impl AppState {
         &self,
         proxy: Option<UpstreamProxyConfig>,
     ) -> Result<(), StateError> {
-        match proxy.as_ref().and_then(|cfg| {
-            Route::from_legacy(cfg, crate::auditor::network::current_timestamp())
-        }) {
+        match proxy
+            .as_ref()
+            .and_then(|cfg| Route::from_legacy(cfg, crate::auditor::network::current_timestamp()))
+        {
             Some(route) => self.install_legacy_route(route).await,
             None => self.clear_legacy_route().await,
         }
@@ -1098,10 +1268,8 @@ impl AppState {
                 if w.default_route_id.as_deref() == Some(id.as_str()) {
                     w.default_route_id = None;
                 }
-                if !shared {
-                    if let Some(r) = w.routes.iter_mut().find(|r| r.id == id) {
-                        r.enabled = false;
-                    }
+                if !shared && let Some(r) = w.routes.iter_mut().find(|r| r.id == id) {
+                    r.enabled = false;
                 }
             }
             w.legacy_route_id = Some(id);
@@ -1134,7 +1302,13 @@ impl AppState {
     }
 
     pub async fn get_route(&self, id: &str) -> Option<Route> {
-        self.inner.read().await.routes.iter().find(|r| r.id == id).cloned()
+        self.inner
+            .read()
+            .await
+            .routes
+            .iter()
+            .find(|r| r.id == id)
+            .cloned()
     }
 
     /// Adds or replaces (same id) a route; an existing route keeps its `enabled` flag. No
@@ -1206,7 +1380,8 @@ impl AppState {
                     if id != DIRECT_ROUTE_ID && !w.has_route(id) {
                         return Err(StateError::PathError(format!("unknown route id: {id}")));
                     }
-                    w.provider_routes.insert(provider.to_string(), id.to_string());
+                    w.provider_routes
+                        .insert(provider.to_string(), id.to_string());
                 }
                 None => {
                     w.provider_routes.remove(provider);
@@ -1220,10 +1395,10 @@ impl AppState {
     pub async fn set_default_route(&self, route_id: Option<&str>) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
-            if let Some(id) = route_id {
-                if !w.has_route(id) {
-                    return Err(StateError::PathError(format!("unknown route id: {id}")));
-                }
+            if let Some(id) = route_id
+                && !w.has_route(id)
+            {
+                return Err(StateError::PathError(format!("unknown route id: {id}")));
             }
             w.default_route_id = route_id.map(str::to_string);
             w.sync_legacy_mirror();
@@ -1236,7 +1411,11 @@ impl AppState {
     pub async fn set_profile_route(&self, route_id: Option<String>) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
-            if route_id.as_deref().map(|id| !w.has_route(id)).unwrap_or(false) {
+            if route_id
+                .as_deref()
+                .map(|id| !w.has_route(id))
+                .unwrap_or(false)
+            {
                 return Err(StateError::PathError("unknown route id".to_string()));
             }
             w.profile_route_id = route_id;
@@ -1371,7 +1550,10 @@ impl AppState {
         self.inner.read().await.interception_behavior
     }
 
-    pub async fn set_interception_behavior(&self, b: InterceptionBehavior) -> Result<(), StateError> {
+    pub async fn set_interception_behavior(
+        &self,
+        b: InterceptionBehavior,
+    ) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
             w.interception_behavior = b;
@@ -1384,7 +1566,10 @@ impl AppState {
     }
 
     pub fn get_popup_position_sync(&self) -> PopupPosition {
-        self.inner.try_read().map(|d| d.popup_position).unwrap_or_default()
+        self.inner
+            .try_read()
+            .map(|d| d.popup_position)
+            .unwrap_or_default()
     }
 
     pub async fn set_popup_position(&self, p: PopupPosition) -> Result<(), StateError> {
@@ -1402,7 +1587,11 @@ impl AppState {
     }
 
     pub async fn add_custom_ai_domain(&self, domain: String) -> Result<Vec<String>, StateError> {
-        let clean = domain.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+        let clean = domain
+            .trim()
+            .trim_start_matches("*.")
+            .trim_start_matches('.')
+            .to_lowercase();
         let updated = {
             let mut w = self.inner.write().await;
             if !clean.is_empty() && !w.custom_ai_domains.iter().any(|d| d == &clean) {
@@ -1415,7 +1604,11 @@ impl AppState {
     }
 
     pub async fn remove_custom_ai_domain(&self, domain: &str) -> Result<Vec<String>, StateError> {
-        let clean = domain.trim().trim_start_matches("*.").trim_start_matches('.').to_lowercase();
+        let clean = domain
+            .trim()
+            .trim_start_matches("*.")
+            .trim_start_matches('.')
+            .to_lowercase();
         let updated = {
             let mut w = self.inner.write().await;
             w.custom_ai_domains.retain(|d| d != &clean);
@@ -1465,6 +1658,17 @@ impl AppState {
         }
     }
 
+    /// Appends an IP history entry scoped to `(provider, selection)`.
+    pub async fn record_ip_history_for_selection(
+        &self,
+        provider: &str,
+        selection: &RouteSelection,
+        entry: IpHistoryEntry,
+    ) -> Result<(), StateError> {
+        let key = ip_history_key_for_selection(provider, selection);
+        self.record_ip_history(&key, entry).await
+    }
+
     pub async fn get_ip_history(&self, provider: &str) -> Vec<IpHistoryEntry> {
         self.inner
             .read()
@@ -1473,6 +1677,15 @@ impl AppState {
             .get(provider)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub async fn get_ip_history_for_selection(
+        &self,
+        provider: &str,
+        selection: &RouteSelection,
+    ) -> Vec<IpHistoryEntry> {
+        let key = ip_history_key_for_selection(provider, selection);
+        self.get_ip_history(&key).await
     }
 
     pub async fn get_last_ip_history(&self, provider: &str) -> Option<IpHistoryEntry> {
@@ -1555,11 +1768,36 @@ impl AppState {
     pub async fn clear_ip_history_for_provider(&self, provider: &str) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
-            if let Some(h) = w.ip_history.get_mut(provider) {
-                h.clear();
+            let prefix = format!("{provider}::");
+            for (k, h) in w.ip_history.iter_mut() {
+                if k == provider || k.starts_with(&prefix) {
+                    h.clear();
+                }
             }
         }
         self.save_async().await
+    }
+}
+
+/// Returns the canonical `AppStateData::ip_history` key for `(provider, route_id)`.
+/// Direct / VPN traffic (`None` or `DIRECT_ROUTE_ID`) uses `"{provider}::direct"`;
+/// routed traffic uses `"{provider}::route:{route_id}"`.
+pub fn ip_history_scope_key(provider: &str, route_id: Option<&str>) -> String {
+    match route_id.filter(|id| !id.is_empty() && *id != DIRECT_ROUTE_ID) {
+        Some(id) => format!("{provider}::route:{id}"),
+        None => format!("{provider}::direct"),
+    }
+}
+
+/// Returns the canonical `AppStateData::ip_history` key for `(provider, selection)`.
+pub fn ip_history_key_for_selection(provider: &str, selection: &RouteSelection) -> String {
+    match selection {
+        RouteSelection::Direct => ip_history_scope_key(provider, None),
+        RouteSelection::Route(r) => ip_history_scope_key(provider, Some(&r.id)),
+        RouteSelection::Missing(id) => ip_history_scope_key(provider, Some(id)),
+        RouteSelection::Invalid(_) => {
+            ip_history_scope_key(provider, Some(INVALID_PROFILE_ROUTE_ID))
+        }
     }
 }
 
@@ -1585,9 +1823,11 @@ mod tests {
 
     #[test]
     fn test_state_serialization_deserialization() {
-        let mut original = AppStateData::default();
-        original.pinned_ip = Some("185.220.101.5".to_string());
-        original.strict_pinning_enabled = true;
+        let mut original = AppStateData {
+            pinned_ip: Some("185.220.101.5".to_string()),
+            strict_pinning_enabled: true,
+            ..Default::default()
+        };
         original
             .session_allowed_providers
             .insert("anthropic".to_string());
@@ -1601,8 +1841,7 @@ mod tests {
             .push(entry.clone());
 
         let json = serde_json::to_string_pretty(&original).expect("serialize failed");
-        let deserialized: AppStateData =
-            serde_json::from_str(&json).expect("deserialize failed");
+        let deserialized: AppStateData = serde_json::from_str(&json).expect("deserialize failed");
 
         assert_eq!(original, deserialized);
         assert_eq!(deserialized.pinned_ip.as_deref(), Some("185.220.101.5"));
@@ -1733,7 +1972,10 @@ mod tests {
 
         assert!(!state.is_provider_blocked("gemini").await);
 
-        state.block_provider("gemini").await.expect("block provider");
+        state
+            .block_provider("gemini")
+            .await
+            .expect("block provider");
         assert!(state.is_provider_blocked("gemini").await);
 
         // Blocking should revoke session allowed status if present
@@ -1754,7 +1996,10 @@ mod tests {
         assert!(!state.is_provider_blocked("openai").await);
         assert!(state.is_provider_session_allowed("openai").await);
 
-        state.unblock_provider("gemini").await.expect("unblock gemini");
+        state
+            .unblock_provider("gemini")
+            .await
+            .expect("unblock gemini");
         assert!(!state.is_provider_blocked("gemini").await);
 
         state.block_provider("anthropic").await.unwrap();
@@ -1780,16 +2025,28 @@ mod tests {
             label: Some("Custom".to_string()),
         };
 
-        state.set_upstream_proxy(Some(cfg.clone())).await.expect("set upstream proxy");
+        state
+            .set_upstream_proxy(Some(cfg.clone()))
+            .await
+            .expect("set upstream proxy");
         assert_eq!(state.get_upstream_proxy().await, Some(cfg));
 
-        state.set_warmup_started_at(Some(1730000000)).await.expect("set warmup timer");
+        state
+            .set_warmup_started_at(Some(1730000000))
+            .await
+            .expect("set warmup timer");
         assert_eq!(state.get_warmup_started_at().await, Some(1730000000));
 
-        state.set_upstream_proxy(None).await.expect("clear upstream proxy");
+        state
+            .set_upstream_proxy(None)
+            .await
+            .expect("clear upstream proxy");
         assert_eq!(state.get_upstream_proxy().await, None);
 
-        state.set_warmup_started_at(None).await.expect("clear warmup timer");
+        state
+            .set_warmup_started_at(None)
+            .await
+            .expect("clear warmup timer");
         assert_eq!(state.get_warmup_started_at().await, None);
 
         // Synced AI timezone
@@ -1829,7 +2086,10 @@ mod tests {
         tracker.record_protected("api.anthropic.com", "anthropic", "GB");
         let snap1 = state.get_gateway_stats().await;
         assert_eq!(snap1.protected_ai_requests, 1);
-        assert_eq!(snap1.last_protected_host.as_deref(), Some("api.anthropic.com"));
+        assert_eq!(
+            snap1.last_protected_host.as_deref(),
+            Some("api.anthropic.com")
+        );
         assert_eq!(snap1.recent_events.len(), 1);
         assert_eq!(snap1.recent_events[0].action, "PROTECTED");
         assert_eq!(snap1.recent_events[0].host, "api.anthropic.com");
@@ -1881,7 +2141,10 @@ mod tests {
         tracker.record_direct_bypassed_host("registry.npmjs.org");
         let snap6 = state.get_gateway_stats().await;
         assert_eq!(snap6.direct_bypassed_requests, prev_direct + 3);
-        assert_eq!(snap6.recent_events.last().unwrap().host, "registry.npmjs.org");
+        assert_eq!(
+            snap6.recent_events.last().unwrap().host,
+            "registry.npmjs.org"
+        );
     }
 
     #[tokio::test]
@@ -1889,39 +2152,75 @@ mod tests {
         let state = AppState::new_in_memory();
 
         // Defaults
-        assert_eq!(state.get_interception_behavior().await, InterceptionBehavior::AskPopup);
+        assert_eq!(
+            state.get_interception_behavior().await,
+            InterceptionBehavior::AskPopup
+        );
         assert_eq!(state.get_popup_position().await, PopupPosition::TopRight);
         assert!(state.get_custom_ai_domains().await.is_empty());
 
         // Update interception behavior
-        state.set_interception_behavior(InterceptionBehavior::AutoLockSilent).await.unwrap();
-        assert_eq!(state.get_interception_behavior().await, InterceptionBehavior::AutoLockSilent);
+        state
+            .set_interception_behavior(InterceptionBehavior::AutoLockSilent)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.get_interception_behavior().await,
+            InterceptionBehavior::AutoLockSilent
+        );
 
-        state.set_interception_behavior(InterceptionBehavior::AutoAllowTrusted).await.unwrap();
-        assert_eq!(state.get_interception_behavior().await, InterceptionBehavior::AutoAllowTrusted);
+        state
+            .set_interception_behavior(InterceptionBehavior::AutoAllowTrusted)
+            .await
+            .unwrap();
+        assert_eq!(
+            state.get_interception_behavior().await,
+            InterceptionBehavior::AutoAllowTrusted
+        );
 
         // Update popup position
-        state.set_popup_position(PopupPosition::TopCenter).await.unwrap();
+        state
+            .set_popup_position(PopupPosition::TopCenter)
+            .await
+            .unwrap();
         assert_eq!(state.get_popup_position().await, PopupPosition::TopCenter);
 
         // Custom AI domains management
-        let domains = state.add_custom_ai_domain("my-local-llm.internal".to_string()).await.unwrap();
+        let domains = state
+            .add_custom_ai_domain("my-local-llm.internal".to_string())
+            .await
+            .unwrap();
         assert_eq!(domains, vec!["my-local-llm.internal".to_string()]);
-        assert_eq!(state.get_custom_ai_domains().await, vec!["my-local-llm.internal".to_string()]);
+        assert_eq!(
+            state.get_custom_ai_domains().await,
+            vec!["my-local-llm.internal".to_string()]
+        );
 
         // Trimming, leading wildcard normalization, and deduplication
-        let domains = state.add_custom_ai_domain(" *.Custom-Model.ai ".to_string()).await.unwrap();
+        let domains = state
+            .add_custom_ai_domain(" *.Custom-Model.ai ".to_string())
+            .await
+            .unwrap();
         assert_eq!(domains.len(), 2);
         assert_eq!(domains[1], "custom-model.ai");
 
         // Duplicate addition is idempotent
-        let domains = state.add_custom_ai_domain("custom-model.ai".to_string()).await.unwrap();
+        let domains = state
+            .add_custom_ai_domain("custom-model.ai".to_string())
+            .await
+            .unwrap();
         assert_eq!(domains.len(), 2);
 
         // Removal
-        let domains = state.remove_custom_ai_domain("my-local-llm.internal").await.unwrap();
+        let domains = state
+            .remove_custom_ai_domain("my-local-llm.internal")
+            .await
+            .unwrap();
         assert_eq!(domains, vec!["custom-model.ai".to_string()]);
-        assert_eq!(state.get_custom_ai_domains().await, vec!["custom-model.ai".to_string()]);
+        assert_eq!(
+            state.get_custom_ai_domains().await,
+            vec!["custom-model.ai".to_string()]
+        );
     }
 
     /// state.json exactly as written by v1.3.1 (no schema_version, single upstream_proxy).
@@ -1979,14 +2278,19 @@ mod tests {
         // Legacy mirror keeps the v1.3.1 shape for the current frontend.
         let mirror = state.get_upstream_proxy().await.expect("mirror");
         assert!(mirror.enabled);
-        assert_eq!(mirror.raw_key, "socks5://alice:s3cret@185.10.10.2:1080#NL Gate");
+        assert_eq!(
+            mirror.raw_key,
+            "socks5://alice:s3cret@185.10.10.2:1080#NL Gate"
+        );
         assert_eq!(mirror.protocol, "socks5");
         assert_eq!(mirror.port, 1080);
         assert_eq!(mirror.label.as_deref(), Some("NL Gate"));
 
         // Every AI provider without a binding now uses the migrated route.
         for p in KNOWN_PROVIDERS {
-            assert!(matches!(state.route_selection(p).await, RouteSelection::Route(ref r) if r.id == expected_id));
+            assert!(
+                matches!(state.route_selection(p).await, RouteSelection::Route(ref r) if r.id == expected_id)
+            );
         }
 
         // Migrated file was rewritten; a second load is stable (id does not change).
@@ -2042,15 +2346,24 @@ mod tests {
         // Toggle off: route kept, default detached -> unbound providers go direct (v1.3.x semantics).
         let off = state.toggle_legacy_upstream(false).await.unwrap().unwrap();
         assert!(!off.enabled);
-        assert_eq!(state.route_selection("openai").await, RouteSelection::Direct);
+        assert_eq!(
+            state.route_selection("openai").await,
+            RouteSelection::Direct
+        );
         assert_eq!(state.get_routes().await.len(), 1);
 
         let on = state.toggle_legacy_upstream(true).await.unwrap().unwrap();
         assert!(on.enabled);
-        assert!(matches!(state.route_selection("openai").await, RouteSelection::Route(_)));
+        assert!(matches!(
+            state.route_selection("openai").await,
+            RouteSelection::Route(_)
+        ));
 
         // Explicit binding survives replacing the legacy key, and is fail-closed when disabled.
-        state.bind_provider_route("gemini", Some(&id)).await.unwrap();
+        state
+            .bind_provider_route("gemini", Some(&id))
+            .await
+            .unwrap();
         let mut cfg2 = cfg.clone();
         cfg2.raw_key = "socks5://185.2.2.2:1080".into();
         cfg2.host = "185.2.2.2".into();
@@ -2105,7 +2418,10 @@ mod tests {
 
         // A fresh state.json is created 0600.
         let state = AppState::load_or_default(path.clone());
-        state.set_pinned_ip(Some("95.217.1.1".to_string())).await.unwrap();
+        state
+            .set_pinned_ip(Some("95.217.1.1".to_string()))
+            .await
+            .unwrap();
         assert_eq!(mode_of(&path), 0o600, "new state.json");
 
         // An existing world-readable v1 file is tightened on load, and its backup is 0600 too.
@@ -2113,7 +2429,11 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let _ = AppState::load_or_default(path.clone());
         assert_eq!(mode_of(&path), 0o600, "loaded state.json");
-        assert_eq!(mode_of(&dir.path().join(STATE_V1_BACKUP_NAME)), 0o600, "backup_v1");
+        assert_eq!(
+            mode_of(&dir.path().join(STATE_V1_BACKUP_NAME)),
+            0o600,
+            "backup_v1"
+        );
 
         // An unreadable file leaves a 0600 corrupt copy.
         std::fs::write(&path, "{ not json").unwrap();
@@ -2122,7 +2442,11 @@ mod tests {
         let corrupt: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("state.corrupt-"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("state.corrupt-")
+            })
             .collect();
         assert_eq!(corrupt.len(), 1);
         assert_eq!(mode_of(&corrupt[0].path()), 0o600, "state.corrupt copy");
@@ -2256,12 +2580,20 @@ mod tests {
         );
 
         // set_default_route still rejects DIRECT_ROUTE_ID.
-        assert!(reloaded.set_default_route(Some(DIRECT_ROUTE_ID)).await.is_err());
+        assert!(
+            reloaded
+                .set_default_route(Some(DIRECT_ROUTE_ID))
+                .await
+                .is_err()
+        );
 
         // Passing None clears the explicit override so gemini falls back to default_route_id.
         reloaded.bind_provider_route("gemini", None).await.unwrap();
         let data = reloaded.get_data().await;
-        assert_eq!(select_route_id(&data, "gemini").as_deref(), Some(rid.as_str()));
+        assert_eq!(
+            select_route_id(&data, "gemini").as_deref(),
+            Some(rid.as_str())
+        );
     }
 
     #[tokio::test]
@@ -2283,5 +2615,164 @@ mod tests {
         let reloaded = AppState::load_or_default(path);
         assert!(reloaded.is_split_tunnel_mode().await);
         assert!(reloaded.get_data().await.split_tunnel_mode);
+    }
+
+    #[tokio::test]
+    async fn per_provider_pinned_ips_and_v22_flags_persist_and_isolate_routes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":2,"pinned_ip":"145.241.193.245","strict_pinning_enabled":true}"#,
+        )
+        .unwrap();
+
+        let state = AppState::load_or_default(path.clone());
+        let data = state.get_data().await;
+        // Legacy pinned_ip migrates into pinned_ips["default"].
+        assert_eq!(
+            data.pinned_ips.get("default").map(String::as_str),
+            Some("145.241.193.245")
+        );
+        assert!(!data.onboarding_v2_2_done);
+        assert!(!data.hide_ip_mode);
+        // Direct providers see the default VPN pinned IP; routed providers do NOT fall back to it.
+        assert_eq!(
+            data.pinned_ip_for_provider("anthropic", false),
+            Some("145.241.193.245")
+        );
+        assert_eq!(data.pinned_ip_for_provider("gemini", true), None);
+
+        // Pinning a specific routed provider does not overwrite default/pinned_ip.
+        state
+            .set_pinned_ip_for("gemini", Some("136.244.114.42".to_string()))
+            .await
+            .unwrap();
+        state.set_onboarding_v2_2_done(true).await.unwrap();
+        state.set_hide_ip_mode(true).await.unwrap();
+
+        let reloaded = AppState::load_or_default(path);
+        let d2 = reloaded.get_data().await;
+        assert_eq!(d2.pinned_ip.as_deref(), Some("145.241.193.245"));
+        assert_eq!(
+            d2.pinned_ip_for_provider("anthropic", false),
+            Some("145.241.193.245")
+        );
+        assert_eq!(
+            d2.pinned_ip_for_provider("gemini", true),
+            Some("136.244.114.42")
+        );
+        assert!(reloaded.is_onboarding_v2_2_done().await);
+        assert!(reloaded.is_hide_ip_mode().await);
+    }
+
+    #[tokio::test]
+    async fn scoped_ip_history_isolates_routes_and_preserves_legacy_state_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // Legacy state.json with unscoped FR entry on "anthropic".
+        std::fs::write(
+            &path,
+            r#"{
+              "schema_version": 2,
+              "ip_history": {
+                "anthropic": [{"ip":"136.244.114.42","country_code":"FR","asn":16276,"timestamp":1730745600}],
+                "openai": [],
+                "gemini": []
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let state = AppState::load_or_default(path.clone());
+        let fr_route =
+            crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+        let fr_sel = RouteSelection::Route(fr_route.clone());
+        let fr_id = state.upsert_route(fr_route).await.unwrap();
+        state
+            .bind_provider_route("gemini", Some(&fr_id))
+            .await
+            .unwrap();
+
+        let now = 1_730_746_000;
+        // Record FR on Gemini's route and on an Anthropic route, plus GB on Direct for Claude & ChatGPT.
+        state
+            .record_ip_history_for_selection(
+                "gemini",
+                &fr_sel,
+                IpHistoryEntry::new("136.244.114.42", "FR", Some(16276), now),
+            )
+            .await
+            .unwrap();
+        state
+            .record_ip_history_for_selection(
+                "anthropic",
+                &fr_sel,
+                IpHistoryEntry::new("136.244.114.42", "FR", Some(16276), now),
+            )
+            .await
+            .unwrap();
+        state
+            .record_ip_history_for_selection(
+                "anthropic",
+                &RouteSelection::Direct,
+                IpHistoryEntry::new("203.0.113.10", "GB", Some(5089), now + 60),
+            )
+            .await
+            .unwrap();
+        state
+            .record_ip_history_for_selection(
+                "openai",
+                &RouteSelection::Direct,
+                IpHistoryEntry::new("203.0.113.10", "GB", Some(5089), now + 60),
+            )
+            .await
+            .unwrap();
+
+        let data = state.get_data().await;
+        // Direct history never picks up FR from a route scope OR from legacy unscoped "anthropic".
+        let anthropic_direct = data.ip_history_for_selection("anthropic", &RouteSelection::Direct);
+        assert_eq!(anthropic_direct.len(), 1);
+        assert_eq!(anthropic_direct[0].country_code, "GB");
+
+        let openai_direct = data.ip_history_for_selection("openai", &RouteSelection::Direct);
+        assert_eq!(openai_direct.len(), 1);
+        assert_eq!(openai_direct[0].country_code, "GB");
+
+        let gemini_routed = data.ip_history_for_provider("gemini");
+        assert_eq!(gemini_routed.len(), 1);
+        assert_eq!(gemini_routed[0].country_code, "FR");
+        assert!(
+            data.ip_history_for_selection("gemini", &RouteSelection::Direct)
+                .is_empty()
+        );
+
+        // Clearing anthropic wipes both legacy and scoped keys for anthropic, leaving openai/gemini intact.
+        state
+            .clear_ip_history_for_provider("anthropic")
+            .await
+            .unwrap();
+        let data = state.get_data().await;
+        assert!(
+            data.ip_history_for_selection("anthropic", &RouteSelection::Direct)
+                .is_empty()
+        );
+        assert!(
+            data.ip_history_for_selection("anthropic", &fr_sel)
+                .is_empty()
+        );
+        assert!(data.ip_history["anthropic"].is_empty());
+        assert_eq!(data.ip_history_for_provider("gemini").len(), 1);
+        assert_eq!(
+            data.ip_history_for_selection("openai", &RouteSelection::Direct)
+                .len(),
+            1
+        );
+
+        let reloaded = AppState::load_or_default(path);
+        assert_eq!(
+            reloaded.get_data().await.ip_history_for_provider("gemini")[0].country_code,
+            "FR"
+        );
     }
 }

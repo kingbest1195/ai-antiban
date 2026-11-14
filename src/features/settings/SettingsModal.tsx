@@ -1,10 +1,22 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { AutostartStatus, CliMode, CoworkGuardStatus, InterceptionBehavior, PopupPosition } from "../../types";
+import type {
+  AutostartStatus,
+  CliMode,
+  CoworkGuardStatus,
+  InterceptionBehavior,
+  PopupPosition,
+  ProtectionChangePreviewItem,
+  RollbackReleaseInfo,
+  UpdateProgressPayload,
+  UpdateStatusPayload,
+} from "../../types";
 import type { ShowToast } from "../../shared/hooks";
 import { parseTempDnsDeferredError } from "../../shared/hooks/useProtectionToggles";
 import {
   addCustomAiDomain,
+  copyTextToClipboard,
+  exportDiagnosticBundle,
   forceCleanOsProxy,
   getAutostartStatus,
   getCliSettings,
@@ -15,6 +27,7 @@ import {
   getSplitTunnelMode,
   installOrRepairCoworkGuard,
   onCoworkGuardStatus,
+  previewProtectionChanges,
   removeCustomAiDomain,
   setAutostartEnabled,
   setCliMode,
@@ -24,8 +37,25 @@ import {
   setSyncAiTzEnabled,
 } from "../../utils/api";
 import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
+import { APP_VERSION } from "../../shared/version";
 import { openExternal } from "../../utils/opener";
-import { Badge, Banner, Button, ConfirmModal, Field, Link, Modal, Mono, Row, Rows, Section, Segmented, Switch } from "../../ui";
+import {
+  Badge,
+  Banner,
+  Button,
+  ConfirmModal,
+  ExpandRow,
+  Field,
+  Link,
+  Modal,
+  Mono,
+  Progress,
+  Row,
+  Rows,
+  Section,
+  Segmented,
+  Switch,
+} from "../../ui";
 import type { SegmentedOption } from "../../ui";
 import { settings as copy } from "../../shared/copy/ru";
 
@@ -43,6 +73,17 @@ export interface SettingsModalProps {
   customAiDomains?: string[];
   onStateUpdated?: () => void;
   onToast?: ShowToast;
+  appVersion?: string;
+  rollbackReleases?: RollbackReleaseInfo[];
+  rollbackLoading?: boolean;
+  rollbackLoaded?: boolean;
+  rollbackError?: string | null;
+  rollingBackVersion?: string | null;
+  installingUpdate?: boolean;
+  updateProgress?: UpdateProgressPayload | null;
+  updaterStatus?: UpdateStatusPayload | null;
+  onLoadRollbackVersions?: () => Promise<void>;
+  onInstallRollback?: (version: string) => Promise<void>;
 }
 
 const BEHAVIOR_OPTIONS: SegmentedOption<InterceptionBehavior>[] = (
@@ -72,6 +113,17 @@ export function SettingsModal({
   customAiDomains: propCustomDomains,
   onStateUpdated,
   onToast,
+  appVersion = APP_VERSION,
+  rollbackReleases = [],
+  rollbackLoading = false,
+  rollbackLoaded = false,
+  rollbackError = null,
+  rollingBackVersion = null,
+  installingUpdate = false,
+  updateProgress = null,
+  updaterStatus = null,
+  onLoadRollbackVersions,
+  onInstallRollback,
 }: SettingsModalProps) {
   const [updatingToggle, setUpdatingToggle] = useState(false);
   const [behavior, setBehavior] = useState<InterceptionBehavior>(propBehavior || "ask_popup");
@@ -94,6 +146,19 @@ export function SettingsModal({
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [coworkStatus, setCoworkStatus] = useState<CoworkGuardStatus | null>(null);
   const [coworkBusy, setCoworkBusy] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [previewItems, setPreviewItems] = useState<ProtectionChangePreviewItem[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [confirmRollbackVersion, setConfirmRollbackVersion] = useState<string | null>(null);
+
+  const formatReleaseDate = (iso: string | null) => {
+    if (!iso) return "";
+    const parsed = new Date(iso);
+    if (Number.isNaN(parsed.getTime())) return iso;
+    return parsed.toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+  };
 
   // При открытии окна подтягиваем сохранённые значения из шлюза.
   useEffect(() => {
@@ -126,7 +191,17 @@ export function SettingsModal({
     getCoworkGuardStatus()
       .then(setCoworkStatus)
       .catch(() => {});
+    setPreviewLoading(true);
+    setPreviewError(null);
+    previewProtectionChanges()
+      .then((items) => setPreviewItems(items))
+      .catch((err) => setPreviewError(errText(err)))
+      .finally(() => setPreviewLoading(false));
     setProxyResult(null);
+    setConfirmRollbackVersion(null);
+    if (!rollbackLoaded && !rollbackLoading && onLoadRollbackVersions) {
+      void onLoadRollbackVersions();
+    }
 
     let unlisten: (() => void) | undefined;
     let active = true;
@@ -144,6 +219,28 @@ export function SettingsModal({
       unlisten?.();
     };
   }, [open, propBehavior, propPosition, propCustomDomains]);
+
+  const handleExportDiagnostics = async () => {
+    if (exportBusy) return;
+    setExportBusy(true);
+    try {
+      const bundle = await exportDiagnosticBundle();
+      const copied =
+        (await copyTextToClipboard(bundle)) ||
+        (typeof navigator !== "undefined" && navigator.clipboard?.writeText
+          ? await navigator.clipboard.writeText(bundle).then(
+              () => true,
+              () => false,
+            )
+          : false);
+      if (!copied) throw new Error("Clipboard unavailable");
+      onToast?.(copy.diagnostics.exportToast, undefined, "success");
+    } catch (err) {
+      onToast?.(copy.diagnostics.exportError, errText(err), "error");
+    } finally {
+      setExportBusy(false);
+    }
+  };
 
   const handleToggleAutostart = async () => {
     if (autostartBusy) return;
@@ -324,6 +421,10 @@ export function SettingsModal({
   const handleCleanOsProxy = async () => {
     setCleaningProxy(true);
     setProxyResult(null);
+    setConfirmRollbackVersion(null);
+    if (!rollbackLoaded && !rollbackLoading && onLoadRollbackVersions) {
+      void onLoadRollbackVersions();
+    }
     try {
       const results = await forceCleanOsProxy();
       setProxyResult({ ok: true, text: results.length > 0 ? results.join(" · ") : copy.proxy.doneDefault });
@@ -536,6 +637,144 @@ export function SettingsModal({
             </Rows>
           </Section>
 
+          {/* Версия и откат */}
+          <Section title={copy.rollback.section}>
+            <Rows>
+              <Row
+                icon="info"
+                title={
+                  <>
+                    {copy.rollback.currentTitle}: <Mono>v{appVersion}</Mono>
+                  </>
+                }
+                sub={copy.rollback.currentSub}
+                trail={
+                  onLoadRollbackVersions ? (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={rollbackLoading || installingUpdate}
+                      onClick={() => {
+                        setConfirmRollbackVersion(null);
+                        void onLoadRollbackVersions();
+                      }}
+                    >
+                      {rollbackLoading
+                        ? copy.rollback.loadingAction
+                        : rollbackLoaded
+                          ? copy.rollback.refreshAction
+                          : copy.rollback.loadAction}
+                    </Button>
+                  ) : undefined
+                }
+              />
+            </Rows>
+
+            {installingUpdate && rollingBackVersion && (
+              <div className="zs-settings__rows">
+                <Progress
+                  label={
+                    updaterStatus?.message ||
+                    updateProgress?.phase ||
+                    copy.rollback.installing(rollingBackVersion)
+                  }
+                  value={updateProgress && updateProgress.total_bytes > 0 ? updateProgress.percent : undefined}
+                />
+              </div>
+            )}
+
+            {rollbackError && (
+              <div className="zs-settings__result">
+                <Banner tone="warn" title={copy.rollback.errorTitle}>
+                  {rollbackError}
+                </Banner>
+              </div>
+            )}
+
+            {rollbackLoading && rollbackReleases.length === 0 && (
+              <p className="zs-settings__hint">{copy.rollback.loading}</p>
+            )}
+
+            {rollbackLoaded && !rollbackLoading && rollbackReleases.length === 0 && !rollbackError && (
+              <p className="zs-settings__empty">{copy.rollback.empty}</p>
+            )}
+
+            {rollbackReleases.length > 0 && (
+              <Rows className="zs-settings__rows">
+                {rollbackReleases.map((rel) => {
+                  const isConfirming = confirmRollbackVersion === rel.version;
+                  const isActiveRollback = installingUpdate && rollingBackVersion === rel.version;
+                  const dateLabel = formatReleaseDate(rel.published_at);
+                  const subParts = [dateLabel, rel.name && rel.name !== rel.tag ? rel.name : null].filter(Boolean);
+                  return (
+                    <Row
+                      key={rel.version}
+                      icon="refresh"
+                      title={
+                        <span className="zs-settings__rollback-title">
+                          <Mono>{rel.tag || `v${rel.version}`}</Mono>
+                          {rel.notes_url && (
+                            <Button
+                              size="sm"
+                              variant="quiet"
+                              onClick={() => openExternal(rel.notes_url!)}
+                            >
+                              {copy.rollback.releaseNotes}
+                            </Button>
+                          )}
+                        </span>
+                      }
+                      sub={
+                        isConfirming
+                          ? copy.rollback.confirmQuestion(rel.version)
+                          : subParts.join(" · ") || undefined
+                      }
+                      trail={
+                        isConfirming ? (
+                          <div className="zs-settings__rollback-actions">
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={installingUpdate}
+                              onClick={() => {
+                                if (!onInstallRollback) return;
+                                setConfirmRollbackVersion(null);
+                                void onInstallRollback(rel.version);
+                              }}
+                            >
+                              {isActiveRollback
+                                ? copy.rollback.installing(rel.version)
+                                : copy.rollback.confirmAction(rel.version)}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="quiet"
+                              disabled={installingUpdate}
+                              onClick={() => setConfirmRollbackVersion(null)}
+                            >
+                              {copy.rollback.cancelAction}
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={installingUpdate}
+                            onClick={() => setConfirmRollbackVersion(rel.version)}
+                          >
+                            {isActiveRollback
+                              ? copy.rollback.installing(rel.version)
+                              : copy.rollback.rollbackAction}
+                          </Button>
+                        )
+                      }
+                    />
+                  );
+                })}
+              </Rows>
+            )}
+          </Section>
+
           {/* Автозапуск ОС */}
           <Section title={copy.autostart.section}>
             <Rows>
@@ -662,6 +901,48 @@ export function SettingsModal({
                 </div>
               </>
             )}
+          </Section>
+
+          {/* Диагностика и прозрачность */}
+          <Section title={copy.diagnostics.section}>
+            <p className="zs-t-body zs-settings__lead">{copy.diagnostics.text}</p>
+            <div className="zs-settings__form">
+              <Button variant="secondary" disabled={exportBusy} onClick={() => void handleExportDiagnostics()}>
+                {exportBusy ? copy.diagnostics.exportBusy : copy.diagnostics.exportAction}
+              </Button>
+            </div>
+            <Rows className="zs-settings__rows">
+              <ExpandRow
+                icon="shield"
+                title={copy.diagnostics.previewTitle}
+                sub={previewLoading ? copy.diagnostics.previewSubLoading : copy.diagnostics.previewSub(previewItems.length)}
+                open={previewOpen}
+                onToggle={() => setPreviewOpen((v) => !v)}
+                detailLabel={copy.diagnostics.previewTitle}
+              >
+                {previewError ? (
+                  <Banner tone="warn" title={copy.diagnostics.previewError}>
+                    {previewError}
+                  </Banner>
+                ) : previewItems.length === 0 ? (
+                  <p className="zs-settings__empty">{copy.diagnostics.previewEmpty}</p>
+                ) : (
+                  <Rows>
+                    {previewItems.map((item) => (
+                      <Row
+                        key={`${item.category}:${item.target}`}
+                        icon="term"
+                        title={item.target}
+                        sub={`${item.action} — ${item.description}`}
+                        trail={
+                          item.reversible ? <Badge tone="ok">{copy.diagnostics.reversibleBadge}</Badge> : undefined
+                        }
+                      />
+                    ))}
+                  </Rows>
+                )}
+              </ExpandRow>
+            </Rows>
           </Section>
 
           {/* Приватность */}

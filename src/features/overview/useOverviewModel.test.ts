@@ -158,4 +158,23 @@ describe("Обзор: неизвестный DNS-резолвер не крас�
     expect(m.banner).toBe("incomplete");
     expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("warn");
   });
+
+  it("попровайдерный пин в state.pinned_ips определяет pinState для активного сервиса", () => {
+    const gpt = report({ provider: "openai", telemetry: { ip: "3.3.3.3", country_code: "NL", resolved_at: 1 } });
+    const m = model({
+      reports: { openai: gpt },
+      activeReport: gpt,
+      currentIp: "3.3.3.3",
+      sysproxyActive: true,
+      state: {
+        pinned_ip: "1.1.1.1",
+        pinned_ips: { default: "1.1.1.1", openai: "3.3.3.3" },
+        strict_pinning_enabled: true,
+        ip_history: {},
+        session_allowed_providers: [],
+        blocked_providers: [],
+      },
+    });
+    expect(m.pinState).toBe("pinned");
+  });
 });

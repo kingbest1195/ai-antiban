@@ -36,9 +36,11 @@ async fn release_routed_blocks(state: &AppContext, guard: &proxy::NetworkGuard) 
     if guard.is_manual_killswitch() || state.is_manual_killswitch_saved().await {
         return;
     }
-    for p in state.routed_providers().await {
+    let routed = state.routed_providers().await;
+    for p in &routed {
         let _ = state.unblock_provider(p).await;
     }
+    guard.open_routed_providers(&routed);
 }
 
 fn canonical_provider(provider: &str) -> Result<&'static str, String> {
@@ -154,7 +156,10 @@ pub async fn test_route(
 ) -> Result<RouteTestResult, String> {
     // The manual kill-switch stops everything: a test must not open a tunnel either.
     if guard.is_manual_killswitch() {
-        return Err("Включён «СТОП СЕТИ»: проверка маршрута отключена, пока блокировка не снята".to_string());
+        return Err(
+            "Включён «СТОП СЕТИ»: проверка маршрута отключена, пока блокировка не снята"
+                .to_string(),
+        );
     }
     let route = state
         .get_route(&id)

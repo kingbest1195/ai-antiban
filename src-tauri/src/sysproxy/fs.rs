@@ -52,6 +52,10 @@ pub trait Fs: Send + Sync {
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     /// Non-blocking exclusive inter-process lock on `path` (created if missing).
     fn try_lock(&self, path: &Path) -> Result<FsLock, LockError>;
+    /// Direct child paths of `dir` (best effort; empty when missing or unreadable).
+    fn list_dir(&self, _dir: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
     /// Removes the temp files of [`Fs::write_atomic`] that a killed process left in `dir`
     /// (`.<name>.zastava-tmp.<pid>.<n>`). Best effort; returns how many were removed. Call it
     /// only while holding the lock of the files in `dir`, so no writer of ours is mid-write.
@@ -265,6 +269,15 @@ impl Fs for RealFs {
             })
             .filter(|e| std::fs::remove_file(e.path()).is_ok())
             .count()
+    }
+
+    fn list_dir(&self, dir: &Path) -> Vec<PathBuf> {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        out.sort();
+        out
     }
 }
 
@@ -567,6 +580,20 @@ mod fake {
                 s.files.remove(&p);
             }
             removed
+        }
+
+        fn list_dir(&self, dir: &Path) -> Vec<PathBuf> {
+            let resolved = self.resolve(dir);
+            let s = self.st.lock().unwrap();
+            let mut children = BTreeSet::new();
+            for p in s.files.keys().chain(s.dirs.keys()) {
+                if let Ok(rel) = p.strip_prefix(&resolved)
+                    && let Some(first) = rel.components().next()
+                {
+                    children.insert(resolved.join(first.as_os_str()));
+                }
+            }
+            children.into_iter().collect()
         }
     }
 }

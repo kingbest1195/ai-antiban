@@ -154,7 +154,15 @@
         "notebooklm.google.com",
         "idx.google.com",
         "opal.google.com",
-        "labs.google"
+        "labs.google",
+        "www.google.com",
+        "play.google.com",
+        "footprints-pa.googleapis.com",
+        "people-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "jnn-pa.googleapis.com",
+        "myactivity.google.com",
+        "myaccount.google.com"
       ],
       "blocked_countries": [
         "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU"

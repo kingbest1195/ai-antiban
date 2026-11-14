@@ -1,9 +1,9 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use serde::Serialize;
 use tauri::Emitter;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -12,22 +12,22 @@ use uuid::Uuid;
 
 use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::{Auditor, OverallStatus};
-use crate::proxy::guard::{gate_closed, wait_open, Gate, NetworkGuard};
+use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, wait_open};
 use crate::proxy::hold_queue::{
     DEFAULT_HOLD_TTL_SECS, HoldQueue, HoldResolution, PHASE_READY, RiskInterceptPayload,
+    build_gate_reason,
 };
 use crate::proxy::http_forward::{
-    find_head_end, parse_request, relay_exchange, split_authority, ParsedRequest, RequestForm,
-    MAX_HEAD_BYTES,
+    MAX_HEAD_BYTES, ParsedRequest, RequestForm, find_head_end, parse_request, relay_exchange,
+    split_authority,
 };
 use crate::proxy::pac::generate_pac_script;
 use crate::proxy::route_watch::RouteWatch;
 use crate::proxy::transit::Transit;
 use crate::proxy::upstream::{
-    connect_chained_tcp, connect_via_chained_proxy, connect_via_route, ChainedError,
-    UpstreamStream,
+    ChainedError, UpstreamStream, connect_chained_tcp, connect_via_chained_proxy, connect_via_route,
 };
-use crate::routing::{Route, RouteDownReason, RouteSelection, INVALID_PROFILE_ROUTE_ID};
+use crate::routing::{INVALID_PROFILE_ROUTE_ID, Route, RouteDownReason, RouteSelection};
 use crate::state::{AppState, IpHistoryEntry};
 
 pub const DEFAULT_PROXY_PORT: u16 = 8899;
@@ -270,7 +270,10 @@ impl ProxyServer {
 
         let gateway_port = self.bound_addr.port();
         let chained_proxy = crate::sysproxy::get_chained_proxy().filter(|cp| {
-            let port = cp.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok()).unwrap_or(0);
+            let port = cp
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+                .unwrap_or(0);
             port != gateway_port && port != 0
         });
 
@@ -344,7 +347,12 @@ impl ProxyServer {
                 break n;
             }
             if buf.len() >= MAX_HEAD_BYTES {
-                return send_status(client, "431 Request Header Fields Too Large", "Request head is too large.").await;
+                return send_status(
+                    client,
+                    "431 Request Header Fields Too Large",
+                    "Request head is too large.",
+                )
+                .await;
             }
             let mut chunk = [0u8; 4096];
             let n = match tokio::time::timeout(
@@ -375,7 +383,11 @@ impl ProxyServer {
         let (host, port) = (req.host.clone(), req.port);
 
         // A request for the gateway's own address: the info page, never a forward (no loop).
-        let own_authority = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+        let own_authority = if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
         if self.is_gateway_authority(&own_authority) {
             return send_gateway_info(client).await;
         }
@@ -389,7 +401,9 @@ impl ProxyServer {
 
         let custom_domains = self.state.get_custom_ai_domains().await;
         if let Some(provider) = ProviderId::from_host_with_custom(&host, &custom_domains) {
-            self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
+            self.state
+                .stats()
+                .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
             return send_forbidden(
                 client,
                 "AI services are reachable over HTTPS only: Zastava does not forward plain HTTP requests to them.",
@@ -398,7 +412,8 @@ impl ProxyServer {
         }
 
         self.state.stats().record_direct_bypassed_host(&host);
-        self.forward_plain_http(client, &req, &buf[head_end..]).await
+        self.forward_plain_http(client, &req, &buf[head_end..])
+            .await
     }
 
     /// Connects to the chained proxy and sends the absolute-form request head. `None` when there
@@ -416,7 +431,9 @@ impl ProxyServer {
         )
         .await
         .ok()?;
-        s.write_all(&req.build_head(RequestForm::Absolute)).await.ok()?;
+        s.write_all(&req.build_head(RequestForm::Absolute))
+            .await
+            .ok()?;
         Some(s)
     }
 
@@ -448,7 +465,8 @@ impl ProxyServer {
                 let mut s = match connected {
                     Ok(s) => s,
                     Err(e) => {
-                        let msg = format!("Failed to connect to target {}:{}: {e}", req.host, req.port);
+                        let msg =
+                            format!("Failed to connect to target {}:{}: {e}", req.host, req.port);
                         send_bad_gateway(client, &msg).await?;
                         return Err(e);
                     }
@@ -529,7 +547,15 @@ impl ProxyServer {
             RouteSelection::Direct => None,
             RouteSelection::Missing(id) => {
                 return self
-                    .refuse_route_down(client, &host, provider, id, RouteDownReason::Missing, None, is_canary)
+                    .refuse_route_down(
+                        client,
+                        &host,
+                        provider,
+                        id,
+                        RouteDownReason::Missing,
+                        None,
+                        is_canary,
+                    )
                     .await;
             }
             RouteSelection::Invalid(why) => {
@@ -559,7 +585,9 @@ impl ProxyServer {
             // Fixed exit IP: local network / VPN changes do not concern this provider.
             // Only the manual kill-switch ("СТОП СЕТИ") stops it.
             if self.guard.is_manual_killswitch() {
-                self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
+                self.state
+                    .stats()
+                    .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
                 if is_canary {
                     return send_canary_intercepted(client).await;
                 }
@@ -570,60 +598,87 @@ impl ProxyServer {
                 .await;
             }
         } else {
-        // Step 0: Fast Kernel Route Check & Network guard — a sudden IP change freezes every connection until the
-        // user confirms the new network (or the old IP comes back).
-        if self.guard.check_route_fingerprint_sync(None) {
-            self.auditor.resolver.invalidate_cache().await;
-        }
+            // Step 0: Fast Kernel Route Check & Network guard — a sudden IP change freezes every connection until the
+            // user confirms the new network (or the old IP comes back).
+            if self.guard.check_route_fingerprint_sync(None) {
+                self.auditor.resolver.invalidate_cache().await;
+                self.guard
+                    .clear_pause_on_network_change(Some(&self.state), false)
+                    .await;
+            }
 
-        self.guard.ensure_fresh().await;
-        match self.guard.gate() {
-            Gate::Open => {}
-            Gate::Pending => {
-                self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
-                if is_canary {
-                    return send_canary_intercepted(client).await;
-                }
-                if self.guard.await_decision().await != Gate::Open {
-                    return send_forbidden(
+            self.guard.ensure_fresh().await;
+            match self.guard.gate_for(provider) {
+                Gate::Open => {}
+                Gate::Pending => {
+                    self.state.stats().record_intercepted(
+                        &host,
+                        provider.as_str(),
+                        "BLOCKED",
+                        "??",
+                    );
+                    if is_canary {
+                        return send_canary_intercepted(client).await;
+                    }
+                    if self.guard.await_decision_for(provider).await != Gate::Open {
+                        return send_forbidden(
                         client,
                         "Network change blocked by Zastava Risk Auditor: connection was not confirmed.",
                     )
                     .await;
+                    }
                 }
-            }
-            Gate::Blocked => {
-                self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
-                if is_canary {
-                    return send_canary_intercepted(client).await;
-                }
-                return send_forbidden(
+                Gate::Blocked => {
+                    self.state.stats().record_intercepted(
+                        &host,
+                        provider.as_str(),
+                        "BLOCKED",
+                        "??",
+                    );
+                    if is_canary {
+                        return send_canary_intercepted(client).await;
+                    }
+                    return send_forbidden(
                     client,
                     "Network change blocked by Zastava Risk Auditor: switch back to the trusted IP or confirm the new network.",
                 )
                 .await;
+                }
             }
-        }
         }
 
         // Step 1: Check if provider is blocked
         if self.state.is_provider_blocked(provider.as_str()).await {
-            self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
+            self.state
+                .stats()
+                .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
             if is_canary {
                 return send_canary_intercepted(client).await;
             }
-            return send_forbidden(client, "Requests to this provider are blocked until network change.").await;
+            return send_forbidden(
+                client,
+                "Requests to this provider are blocked until network change.",
+            )
+            .await;
         }
 
         // Step 2: Check if provider has active session allowance
-        if self.state.is_provider_session_allowed(provider.as_str()).await {
+        if self
+            .state
+            .is_provider_session_allowed(provider.as_str())
+            .await
+        {
             if is_canary {
                 return self
                     .canary_protected(client, &host, provider, route.as_ref(), "ALLOWED")
                     .await;
             }
-            self.state.stats().record_protected(&host, provider.as_str(), "ALLOWED");
-            return self.tunnel_to_target(client, &host, port, Some(provider), &selection).await;
+            self.state
+                .stats()
+                .record_protected(&host, provider.as_str(), "ALLOWED");
+            return self
+                .tunnel_to_target(client, &host, port, Some(provider), &selection)
+                .await;
         }
 
         // Step 3: Run comprehensive risk audit (on this provider's own egress)
@@ -636,12 +691,22 @@ impl ProxyServer {
             Err(e) if route.is_some() => {
                 let r = route.as_ref().expect("checked");
                 return self
-                    .refuse_route_down(client, &host, provider, &r.id, RouteDownReason::Unreachable, Some(&e), is_canary)
+                    .refuse_route_down(
+                        client,
+                        &host,
+                        provider,
+                        &r.id,
+                        RouteDownReason::Unreachable,
+                        Some(&e),
+                        is_canary,
+                    )
                     .await;
             }
             Err(e) => {
                 eprintln!("Auditor evaluation failed: {e}");
-                self.state.stats().record_intercepted(&host, provider.as_str(), "ERROR", "??");
+                self.state
+                    .stats()
+                    .record_intercepted(&host, provider.as_str(), "ERROR", "??");
                 if is_canary {
                     return send_canary_intercepted(client).await;
                 }
@@ -654,7 +719,13 @@ impl ProxyServer {
         if report.overall_status == OverallStatus::Green {
             if is_canary {
                 return self
-                    .canary_protected(client, &host, provider, route.as_ref(), &report.telemetry.country_code)
+                    .canary_protected(
+                        client,
+                        &host,
+                        provider,
+                        route.as_ref(),
+                        &report.telemetry.country_code,
+                    )
                     .await;
             }
             let entry = IpHistoryEntry::new(
@@ -663,28 +734,50 @@ impl ProxyServer {
                 report.telemetry.asn,
                 report.telemetry.resolved_at,
             );
-            let _ = self.state.record_ip_history(provider.as_str(), entry).await;
-            self.state.stats().record_protected(&host, provider.as_str(), &report.telemetry.country_code);
-            return self.tunnel_to_target(client, &host, port, Some(provider), &selection).await;
+            let _ = self
+                .state
+                .record_ip_history_for_selection(provider.as_str(), &selection, entry)
+                .await;
+            self.state.stats().record_protected(
+                &host,
+                provider.as_str(),
+                &report.telemetry.country_code,
+            );
+            return self
+                .tunnel_to_target(client, &host, port, Some(provider), &selection)
+                .await;
         }
 
         // If not Green and is canary test, immediately return intercepted status (<5ms response)
         if is_canary {
-            self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", &report.telemetry.country_code);
+            self.state.stats().record_intercepted(
+                &host,
+                provider.as_str(),
+                "BLOCKED",
+                &report.telemetry.country_code,
+            );
             return send_canary_intercepted(client).await;
         }
 
         // Step 5: If verdict is Yellow or Red -> check preset InterceptionBehavior
         match self.state.get_interception_behavior().await {
             crate::state::InterceptionBehavior::AutoLockSilent => {
-                self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", &report.telemetry.country_code);
+                self.state.stats().record_intercepted(
+                    &host,
+                    provider.as_str(),
+                    "BLOCKED",
+                    &report.telemetry.country_code,
+                );
                 let _ = self.state.block_provider(provider.as_str()).await;
                 return send_forbidden(client, "Auto-locked by Zastava silent rule").await;
             }
             crate::state::InterceptionBehavior::AutoAllowTrusted => {
                 let matrix = self.auditor.rules.provider_matrix.read().await;
                 let cc = report.telemetry.country_code.trim().to_uppercase();
-                let is_sanctioned = matrix.global_blocked_countries.iter().any(|b| b.eq_ignore_ascii_case(&cc));
+                let is_sanctioned = matrix
+                    .global_blocked_countries
+                    .iter()
+                    .any(|b| b.eq_ignore_ascii_case(&cc));
                 if !is_sanctioned {
                     let entry = IpHistoryEntry::new(
                         report.telemetry.ip.clone(),
@@ -692,13 +785,31 @@ impl ProxyServer {
                         report.telemetry.asn,
                         report.telemetry.resolved_at,
                     );
-                    let _ = self.state.record_ip_history(provider.as_str(), entry).await;
-                    self.state.stats().record_protected(&host, provider.as_str(), &report.telemetry.country_code);
-                    return self.tunnel_to_target(client, &host, port, Some(provider), &selection).await;
+                    let _ = self
+                        .state
+                        .record_ip_history_for_selection(provider.as_str(), &selection, entry)
+                        .await;
+                    self.state.stats().record_protected(
+                        &host,
+                        provider.as_str(),
+                        &report.telemetry.country_code,
+                    );
+                    return self
+                        .tunnel_to_target(client, &host, port, Some(provider), &selection)
+                        .await;
                 } else {
-                    self.state.stats().record_intercepted(&host, provider.as_str(), "BLOCKED", &report.telemetry.country_code);
+                    self.state.stats().record_intercepted(
+                        &host,
+                        provider.as_str(),
+                        "BLOCKED",
+                        &report.telemetry.country_code,
+                    );
                     let _ = self.state.block_provider(provider.as_str()).await;
-                    return send_forbidden(client, "Auto-locked by Zastava silent rule (sanctioned country)").await;
+                    return send_forbidden(
+                        client,
+                        "Auto-locked by Zastava silent rule (sanctioned country)",
+                    )
+                    .await;
                 }
             }
             crate::state::InterceptionBehavior::AskPopup => {
@@ -706,9 +817,17 @@ impl ProxyServer {
             }
         }
 
-        self.state.stats().record_intercepted(&host, provider.as_str(), "HELD", &report.telemetry.country_code);
+        self.state.stats().record_intercepted(
+            &host,
+            provider.as_str(),
+            "HELD",
+            &report.telemetry.country_code,
+        );
         let hold_id = Uuid::new_v4().to_string();
-        let rx = self.hold_queue.register(hold_id.clone(), provider.as_str()).await;
+        let rx = self
+            .hold_queue
+            .register(hold_id.clone(), provider.as_str())
+            .await;
 
         let payload = RiskInterceptPayload {
             id: hold_id.clone(),
@@ -724,6 +843,7 @@ impl ProxyServer {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
             phase: PHASE_READY.to_string(),
+            gate_reason: Some(build_gate_reason(Some(&report), None, false)),
         };
 
         // Emit event to UI and bring emergency modal to front
@@ -734,10 +854,7 @@ impl ProxyServer {
         }
 
         // Wait up to 60 seconds for user action
-        let resolution = tokio::time::timeout(
-            Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
-            rx,
-        ).await;
+        let resolution = tokio::time::timeout(Duration::from_secs(DEFAULT_HOLD_TTL_SECS), rx).await;
 
         match resolution {
             Ok(Ok(HoldResolution::Allow)) => {
@@ -747,16 +864,25 @@ impl ProxyServer {
                     report.telemetry.asn,
                     report.telemetry.resolved_at,
                 );
-                let _ = self.state.record_ip_history(provider.as_str(), entry).await;
-                self.state.stats().record_protected(&host, provider.as_str(), &report.telemetry.country_code);
-                self.tunnel_to_target(client, &host, port, Some(provider), &selection).await
+                let _ = self
+                    .state
+                    .record_ip_history_for_selection(provider.as_str(), &selection, entry)
+                    .await;
+                self.state.stats().record_protected(
+                    &host,
+                    provider.as_str(),
+                    &report.telemetry.country_code,
+                );
+                self.tunnel_to_target(client, &host, port, Some(provider), &selection)
+                    .await
             }
             _ => {
                 self.hold_queue.remove(&hold_id).await;
                 send_forbidden(
                     client,
                     "Connection held and blocked by Zastava Risk Auditor.",
-                ).await
+                )
+                .await
             }
         }
     }
@@ -771,7 +897,11 @@ impl ProxyServer {
     /// Outbound connection for a transit (non-AI) CONNECT: through the chained proxy when there is
     /// one, with a single fallback to a direct connection if the proxy cannot be reached (not if
     /// it answers with an error status).
-    async fn connect_transit(&self, host: &str, port: u16) -> Result<UpstreamStream, std::io::Error> {
+    async fn connect_transit(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<UpstreamStream, std::io::Error> {
         let gateway_port = self.bound_addr.port();
         if let Some(cp) = self.transit.chained_proxy(gateway_port) {
             match connect_via_chained_proxy(
@@ -793,7 +923,9 @@ impl ProxyServer {
                 Err(ChainedError::Unreachable(_)) => {} // fall back to direct, once
             }
         }
-        self.connect_direct(host, port).await.map(UpstreamStream::Plain)
+        self.connect_direct(host, port)
+            .await
+            .map(UpstreamStream::Plain)
     }
 
     /// Transit (non-AI) CONNECT: no audit, no gate. The relay never looks at the guard, so a
@@ -818,7 +950,10 @@ impl ProxyServer {
             )
             .await
             .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream redirect connect timeout")
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "upstream redirect connect timeout",
+                )
             })
             .and_then(|r| r)
             .map(UpstreamStream::Plain)
@@ -901,10 +1036,10 @@ impl ProxyServer {
             let Ok(mut alerts) = self.route_alerts.lock() else {
                 return;
             };
-            if let Some(last) = alerts.get(route_id) {
-                if now.duration_since(*last) < Duration::from_secs(ROUTE_ALERT_THROTTLE_SECS) {
-                    return;
-                }
+            if let Some(last) = alerts.get(route_id)
+                && now.duration_since(*last) < Duration::from_secs(ROUTE_ALERT_THROTTLE_SECS)
+            {
+                return;
             }
             alerts.insert(route_id.to_string(), now);
         }
@@ -913,7 +1048,11 @@ impl ProxyServer {
                 route_id: route_id.to_string(),
                 provider: provider.as_str().to_string(),
                 reason: reason.as_str().to_string(),
-                message: detail.unwrap_or(reason.message_ru()).chars().take(300).collect(),
+                message: detail
+                    .unwrap_or(reason.message_ru())
+                    .chars()
+                    .take(300)
+                    .collect(),
             };
             let _ = app.emit("route://unavailable", &payload);
         }
@@ -942,12 +1081,22 @@ impl ProxyServer {
                 Err(e) => {
                     let detail = e.to_string();
                     return self
-                        .refuse_route_down(client, host, provider, &r.id, RouteDownReason::Unreachable, Some(&detail), true)
+                        .refuse_route_down(
+                            client,
+                            host,
+                            provider,
+                            &r.id,
+                            RouteDownReason::Unreachable,
+                            Some(&detail),
+                            true,
+                        )
                         .await;
                 }
             }
         }
-        self.state.stats().record_protected(host, provider.as_str(), country);
+        self.state
+            .stats()
+            .record_protected(host, provider.as_str(), country);
         send_canary_protected(client).await
     }
 
@@ -969,18 +1118,19 @@ impl ProxyServer {
             RouteSelection::Route(r) => Some(r),
             _ => None,
         };
-        let _tunnel_guard = if route.is_some() || provider.is_some() || ProviderId::from_host(host).is_some() {
-            Some(self.state.stats().enter_tunnel())
-        } else {
-            None
-        };
+        let _tunnel_guard =
+            if route.is_some() || provider.is_some() || ProviderId::from_host(host).is_some() {
+                Some(self.state.stats().enter_tunnel())
+            } else {
+                None
+            };
 
         // Subscribe first, then verify: nothing can change unnoticed from here on.
         let watch = provider.map(|p| RouteWatch::new(&self.state, p, selection.clone()));
-        if let Some(w) = &watch {
-            if w.is_stale().await {
-                return send_routing_changed(client).await;
-            }
+        if let Some(w) = &watch
+            && w.is_stale().await
+        {
+            return send_routing_changed(client).await;
         }
 
         if let Some(r) = route {
@@ -1000,7 +1150,15 @@ impl ProxyServer {
                         .unwrap_or(ProviderId::Anthropic);
                     let detail = e.to_string();
                     return self
-                        .refuse_route_down(client, host, provider, &r.id, RouteDownReason::Unreachable, Some(&detail), false)
+                        .refuse_route_down(
+                            client,
+                            host,
+                            provider,
+                            &r.id,
+                            RouteDownReason::Unreachable,
+                            Some(&detail),
+                            false,
+                        )
                         .await;
                 }
             };
@@ -1009,16 +1167,24 @@ impl ProxyServer {
             if self.guard.is_manual_killswitch() {
                 return send_forbidden(client, "Network kill-switch is engaged in Zastava.").await;
             }
-            if let Some(w) = &watch {
-                if w.is_stale().await {
-                    return send_routing_changed(client).await;
-                }
+            if let Some(w) = &watch
+                && w.is_stale().await
+            {
+                return send_routing_changed(client).await;
             }
             client
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 .await?;
             client.flush().await?;
-            return pump(client, &mut target, &self.guard, TunnelPolicy::KillSwitchOnly, watch).await;
+            return pump(
+                client,
+                &mut target,
+                &self.guard,
+                TunnelPolicy::KillSwitchOnly,
+                provider,
+                watch,
+            )
+            .await;
         }
 
         let connect_res = if let Some(redirect_addr) = self.upstream_redirect {
@@ -1048,10 +1214,10 @@ impl ProxyServer {
             }
         };
 
-        if let Some(w) = &watch {
-            if w.is_stale().await {
-                return send_routing_changed(client).await;
-            }
+        if let Some(w) = &watch
+            && w.is_stale().await
+        {
+            return send_routing_changed(client).await;
         }
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -1059,7 +1225,15 @@ impl ProxyServer {
         client.flush().await?;
 
         let mut target = UpstreamStream::Plain(target_stream);
-        pump(client, &mut target, &self.guard, TunnelPolicy::FollowGate, watch).await
+        pump(
+            client,
+            &mut target,
+            &self.guard,
+            TunnelPolicy::FollowGate,
+            provider,
+            watch,
+        )
+        .await
     }
 }
 
@@ -1086,7 +1260,9 @@ fn killswitch_stopped() -> std::io::Error {
 }
 
 fn is_absolute_http_target(target: &str) -> bool {
-    target.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("http://"))
+    target
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
 }
 
 /// A peer that went away mid-transfer is the normal end of a transit connection, not an error.
@@ -1106,7 +1282,11 @@ async fn send_gateway_info(client: &mut TcpStream) -> Result<(), std::io::Error>
     client.flush().await
 }
 
-async fn send_status(client: &mut TcpStream, status: &str, reason: &str) -> Result<(), std::io::Error> {
+async fn send_status(
+    client: &mut TcpStream,
+    status: &str,
+    reason: &str,
+) -> Result<(), std::io::Error> {
     let resp = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
         reason.len(),
@@ -1126,7 +1306,8 @@ async fn send_bad_gateway(client: &mut TcpStream, reason: &str) -> Result<(), st
 }
 
 async fn send_routing_changed(client: &mut TcpStream) -> Result<(), std::io::Error> {
-    let reason = "Zastava routing for this service changed while the connection was being set up: retry.";
+    let reason =
+        "Zastava routing for this service changed while the connection was being set up: retry.";
     let resp = format!(
         "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         reason.len(),
@@ -1157,9 +1338,10 @@ async fn pump(
     target: &mut UpstreamStream,
     guard: &Arc<NetworkGuard>,
     policy: TunnelPolicy,
+    provider: Option<ProviderId>,
     watch: Option<RouteWatch>,
 ) -> Result<(), std::io::Error> {
-    let relay = relay(client, target, guard, policy);
+    let relay = relay(client, target, guard, policy, provider);
     match watch {
         Some(mut w) => {
             tokio::select! {
@@ -1176,20 +1358,21 @@ async fn relay(
     target: &mut UpstreamStream,
     guard: &Arc<NetworkGuard>,
     policy: TunnelPolicy,
+    provider: Option<ProviderId>,
 ) -> Result<(), std::io::Error> {
     let (mut cr, mut cw) = client.split();
     match target {
         // Zero-overhead split for plain TCP (direct, SOCKS5, HTTP entries).
         UpstreamStream::Plain(tcp) => {
             let (mut tr, mut tw) = tcp.split();
-            let c2t = forward(&mut cr, &mut tw, guard, policy);
-            let t2c = forward(&mut tr, &mut cw, guard, policy);
+            let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
+            let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
             tokio::try_join!(c2t, t2c)?;
         }
         UpstreamStream::Tls(tls) => {
             let (mut tr, mut tw) = tokio::io::split(tls.as_mut());
-            let c2t = forward(&mut cr, &mut tw, guard, policy);
-            let t2c = forward(&mut tr, &mut cw, guard, policy);
+            let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
+            let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
             tokio::try_join!(c2t, t2c)?;
         }
     }
@@ -1215,13 +1398,14 @@ async fn forward<R, W>(
     writer: &mut W,
     guard: &Arc<NetworkGuard>,
     policy: TunnelPolicy,
+    provider: Option<ProviderId>,
 ) -> Result<(), std::io::Error>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     match policy {
-        TunnelPolicy::FollowGate => forward_follow_gate(reader, writer, guard).await,
+        TunnelPolicy::FollowGate => forward_follow_gate(reader, writer, guard, provider).await,
         TunnelPolicy::KillSwitchOnly => forward_killswitch_only(reader, writer, guard).await,
     }
 }
@@ -1230,12 +1414,16 @@ async fn forward_follow_gate<R, W>(
     reader: &mut R,
     writer: &mut W,
     guard: &Arc<NetworkGuard>,
+    provider: Option<ProviderId>,
 ) -> Result<(), std::io::Error>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut rx = guard.subscribe();
+    let mut rx = match provider {
+        Some(p) => guard.subscribe_for(p),
+        None => guard.subscribe(),
+    };
     let mut abort_rx = guard.subscribe_tunnel_abort();
     let mut kill_rx = guard.subscribe_killswitch();
     let mut buf = vec![0u8; 16 * 1024];
@@ -1271,7 +1459,11 @@ where
         }
 
         // Data read right before the freeze is held back until the user decides.
-        if !wait_open(&mut rx).await || guard.gate() != Gate::Open || guard.is_manual_killswitch() {
+        let current_gate = match provider {
+            Some(p) => guard.gate_for(p),
+            None => guard.gate(),
+        };
+        if !wait_open(&mut rx).await || current_gate != Gate::Open || guard.is_manual_killswitch() {
             return Err(tunnel_stalled());
         }
         writer.write_all(&buf[..n]).await?;
@@ -1316,14 +1508,14 @@ where
 
 pub fn parse_host_port(target: &str) -> (String, u16) {
     let trimmed = target.trim();
-    if let Some(rest) = trimmed.strip_prefix('[') {
-        if let Some((ipv6_host, after_bracket)) = rest.split_once(']') {
-            let port = after_bracket
-                .strip_prefix(':')
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(443);
-            return (ipv6_host.trim().to_string(), port);
-        }
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some((ipv6_host, after_bracket)) = rest.split_once(']')
+    {
+        let port = after_bracket
+            .strip_prefix(':')
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(443);
+        return (ipv6_host.trim().to_string(), port);
     }
 
     // If there are multiple colons (unbracketed IPv6 literal without port)
@@ -1476,10 +1668,12 @@ pub fn validate_tunnel_target(
         return Err("SSRF Protection: local and internal hostnames are forbidden.");
     }
 
-    if let Ok(ip) = h.parse::<IpAddr>() {
-        if is_forbidden_ip(&ip) {
-            return Err("SSRF Protection: direct connections to loopback or private IPs are forbidden.");
-        }
+    if let Ok(ip) = h.parse::<IpAddr>()
+        && is_forbidden_ip(&ip)
+    {
+        return Err(
+            "SSRF Protection: direct connections to loopback or private IPs are forbidden.",
+        );
     }
 
     Ok(())
@@ -1505,6 +1699,7 @@ mod coverage_count_tests {
     use crate::proxy::coverage::{CoverageEnv, PacSource};
     use crate::proxy::hold_queue::HoldQueue;
     use crate::state::AppState;
+    use crate::sysproxy::browser_policies::FakePolicyStore;
     use crate::sysproxy::platform::FakePlatform;
 
     async fn started() -> Arc<ProxyServer> {
@@ -1548,8 +1743,10 @@ mod coverage_count_tests {
         let _ = request(addr, "GET / HTTP/1.1\r\nUser-Agent: curl/8.7.1\r\n\r\n").await;
 
         let platform = FakePlatform::new();
+        let policy_store = FakePolicyStore::new();
         let env = CoverageEnv {
             platform: &platform,
+            policy_store: &*policy_store,
             files: None,
             pac_source: PacSource::Services,
             sysproxy_enabled: false,
@@ -1567,5 +1764,148 @@ mod coverage_count_tests {
         );
         assert_eq!(snap.gateway_addr, Some(addr.to_string()));
         assert_eq!(snap.pac_url, Some(format!("http://{addr}/proxy.pac")));
+    }
+
+    #[tokio::test]
+    async fn browser_extension_connect_and_ws_tunnel_for_ai_apis_succeeds() {
+        let echo_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let echo_addr = echo_listener.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 512];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        crate::sysproxy::force_os_dry_run();
+        let auditor = Auditor::new().expect("auditor");
+        let state = AppState::new_in_memory();
+        for p in ["anthropic", "openai", "gemini"] {
+            state.allow_provider_for_session(p).await.unwrap();
+        }
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(
+                auditor,
+                state,
+                Arc::new(HoldQueue::new()),
+                Some(echo_addr),
+            )
+            .await
+            .expect("bind"),
+        );
+        let addr = server.bound_addr;
+        let srv = Arc::clone(&server);
+        let srv_task = tokio::spawn(async move { srv.run().await });
+
+        let cases = [
+            (
+                "api.anthropic.com",
+                "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            ),
+            (
+                "claude.ai",
+                "moz-extension://12345678-1234-1234-1234-123456789abc",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
+            ),
+            (
+                "api.openai.com",
+                "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            ),
+            (
+                "chatgpt.com",
+                "chrome-extension://cccccccccccccccccccccccccccccccc",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            ),
+            (
+                "gemini.google.com",
+                "chrome-extension://dddddddddddddddddddddddddddddddd",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            ),
+            (
+                "generativelanguage.googleapis.com",
+                "moz-extension://87654321-4321-4321-4321-cba987654321",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
+            ),
+            (
+                "clients6.google.com",
+                "chrome-extension://eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            ),
+            (
+                "aistudio.google.com",
+                "chrome-extension://ffffffffffffffffffffffffffffffff",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+            ),
+        ];
+
+        for (host, origin, ua) in cases {
+            let mut client = match TcpStream::connect(addr).await {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let req = format!(
+                "CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\nOrigin: {origin}\r\nUser-Agent: {ua}\r\nProxy-Connection: keep-alive\r\n\r\n"
+            );
+            client.write_all(req.as_bytes()).await.unwrap();
+
+            let mut head_buf = [0u8; 256];
+            let n = tokio::time::timeout(Duration::from_secs(3), client.read(&mut head_buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let head = String::from_utf8_lossy(&head_buf[..n]);
+            assert!(
+                head.starts_with("HTTP/1.1 200 Connection Established"),
+                "failed CONNECT for {host} ({origin}): {head}"
+            );
+
+            // Simulate WebSocket/HTTPS frame tunneled through the established CONNECT tunnel.
+            let payload = format!(
+                "GET /v1/ws HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nUpgrade: websocket\r\n\r\n"
+            );
+            client.write_all(payload.as_bytes()).await.unwrap();
+            let mut echo = vec![0u8; payload.len()];
+            tokio::time::timeout(Duration::from_secs(3), client.read_exact(&mut echo))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&echo), payload);
+        }
+
+        // Allow spawned coverage lookup/recording to settle, then verify no misclassifications.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let platform = FakePlatform::new();
+        let policy_store = FakePolicyStore::new();
+        let env = CoverageEnv {
+            platform: &platform,
+            policy_store: &*policy_store,
+            files: None,
+            pac_source: PacSource::Services,
+            sysproxy_enabled: true,
+            cli_protection_enabled: false,
+            chained_proxy: None,
+            jetbrains_xml_confirmed: false,
+        };
+        let snap = server.coverage.snapshot(&env, true);
+        let browsers = snap.apps.iter().find(|a| a.id == "browsers").unwrap();
+        assert!(
+            browsers.ai_requests >= 8
+                || browsers.status == crate::proxy::coverage::CoverageStatus::Confirmed,
+            "expected browser extension requests to be recorded under browsers: {browsers:?}"
+        );
+
+        srv_task.abort();
+        echo_task.abort();
     }
 }

@@ -77,7 +77,10 @@ impl StartupState {
     }
 
     pub fn snapshot(&self) -> StartupSnapshot {
-        self.snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn is_ready(&self) -> bool {
@@ -141,7 +144,9 @@ fn sequence(steps: &dyn StartupSteps, state: &StartupState, sink: &dyn StartupSi
     }
 
     if state.took_over() {
-        eprintln!("Застава: защита выключена вручную до конца запуска, автоматическое включение пропущено");
+        eprintln!(
+            "Застава: защита выключена вручную до конца запуска, автоматическое включение пропущено"
+        );
     } else {
         state.set(sink, Phase::Starting, Some("protection"));
         steps.enable_protection();
@@ -237,7 +242,13 @@ mod tests {
         run_sequence(&Fake::new(&rec), &state, &*rec);
         assert_eq!(rec.calls(), ["recover", "enable", "guard"]);
         assert!(state.is_ready());
-        let steps: Vec<_> = rec.snaps.lock().unwrap().iter().map(|s| (s.phase, s.step)).collect();
+        let steps: Vec<_> = rec
+            .snaps
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| (s.phase, s.step))
+            .collect();
         assert_eq!(
             steps,
             [
@@ -305,8 +316,15 @@ mod tests {
             step: Some("protection"),
         })
         .unwrap();
-        assert_eq!(json, serde_json::json!({"phase": "starting", "step": "protection"}));
-        let ready = serde_json::to_value(StartupSnapshot { phase: Phase::Ready, step: None }).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"phase": "starting", "step": "protection"})
+        );
+        let ready = serde_json::to_value(StartupSnapshot {
+            phase: Phase::Ready,
+            step: None,
+        })
+        .unwrap();
         assert_eq!(ready, serde_json::json!({"phase": "ready", "step": null}));
     }
 }

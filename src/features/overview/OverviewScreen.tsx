@@ -31,8 +31,8 @@ import {
 import { CopyErrorLogButton } from "../../shared/components/CopyErrorLogButton";
 import type { MenuEntry } from "../../ui";
 import { checks as checksCopy, coverage as coverageCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
-import { countryName } from "../../shared/lib/country";
-import { formatNumber } from "../../shared/lib/format";
+import { formatCountryWithCode } from "../../shared/lib/country";
+import { formatIp, formatNumber, resolvePinnedIp } from "../../shared/lib/format";
 import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
 import { openZastavaBot } from "../../utils/opener";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
@@ -59,6 +59,8 @@ export interface OverviewScreenProps {
   updateInfo: UpdateCheckResult | null;
   coverageSnapshot?: CoverageSnapshot | null;
   routesSnapshot?: RoutesSnapshot | null;
+  /** Скрывать ли реальный IP-адрес на экране для безопасных скриншотов. */
+  hideIpMode?: boolean;
   /** Возраст данных в минутах, если отчёт устарел или аудит упал; иначе null. */
   dataAgeMinutes?: number | null;
 
@@ -74,8 +76,8 @@ export interface OverviewScreenProps {
   onToast?: ShowToast;
 
   onCopyIp: () => void;
-  onPinIp: (ip: string) => void;
-  onUnpinIp: () => void;
+  onPinIp: (ip: string, provider?: ProviderId) => void;
+  onUnpinIp: (provider?: ProviderId) => void;
   onToggleStrict: () => void;
   onAllowProvider: (provider: ProviderId) => void;
   onUnblockProvider: (provider: ProviderId) => void;
@@ -250,8 +252,8 @@ export function OverviewScreen(props: OverviewScreenProps) {
           score={trustScore}
           tone={model.tone}
           title={model.verdict}
-          ip={currentIp !== "--" ? currentIp : undefined}
-          country={currentIp !== "--" ? countryName(activeReport?.telemetry.country_code) || undefined : undefined}
+          ip={currentIp !== "--" ? formatIp(currentIp, props.hideIpMode) : undefined}
+          country={currentIp !== "--" ? formatCountryWithCode(activeReport?.telemetry.country_code) || undefined : undefined}
           facts={<HeroFacts model={model} {...props} />}
         >
           <Row
@@ -510,8 +512,10 @@ function ProblemBanner({
 
 function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewModel> } & OverviewScreenProps) {
   const allPassed = model.checksTotal > 0 && model.checksPassed === model.checksTotal;
-  const pinned = props.state?.pinned_ip != null;
+  const activeProvider = props.activeReport?.provider;
+  const pinned = resolvePinnedIp(props.state, activeProvider) != null;
   const strict = Boolean(props.state?.strict_pinning_enabled);
+  const explicitProviderPin = Boolean(activeProvider && props.state?.pinned_ips?.[activeProvider]);
 
   const menu: MenuEntry[] = [
     { id: "copy", label: copy.ipMenu.copy, icon: "copy", onSelect: props.onCopyIp },
@@ -523,7 +527,12 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
             icon: "lock",
             onSelect: props.onToggleStrict,
           },
-          { id: "unpin", label: copy.ipMenu.unpin, icon: "x", onSelect: props.onUnpinIp },
+          {
+            id: "unpin",
+            label: copy.ipMenu.unpin,
+            icon: "x",
+            onSelect: () => props.onUnpinIp(explicitProviderPin ? activeProvider : undefined),
+          },
         ] as MenuEntry[])
       : ([
           {
@@ -531,7 +540,7 @@ function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewMo
             label: copy.ipMenu.pin,
             icon: "lock",
             disabled: props.currentIp === "--",
-            onSelect: () => props.onPinIp(props.currentIp),
+            onSelect: () => props.onPinIp(props.currentIp, activeProvider),
           },
         ] as MenuEntry[])),
   ];

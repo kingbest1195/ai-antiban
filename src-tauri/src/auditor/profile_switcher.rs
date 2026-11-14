@@ -85,7 +85,11 @@ pub fn default_claude_desktop_dir() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = get_user_home_dir()?;
-        Some(home.join("Library").join("Application Support").join("Claude"))
+        Some(
+            home.join("Library")
+                .join("Application Support")
+                .join("Claude"),
+        )
     }
     #[cfg(target_os = "windows")]
     {
@@ -114,10 +118,10 @@ fn load_or_init_storage_in(
 
     if profiles_file.exists() {
         let content = fs::read_to_string(&profiles_file).map_err(|e| e.to_string())?;
-        if let Ok(storage) = serde_json::from_str::<ProfilesStorage>(&content) {
-            if !storage.profiles.is_empty() {
-                return Ok(storage);
-            }
+        if let Ok(storage) = serde_json::from_str::<ProfilesStorage>(&content)
+            && !storage.profiles.is_empty()
+        {
+            return Ok(storage);
         }
     }
 
@@ -161,16 +165,14 @@ fn save_storage_in(storage_dir: &Path, storage: &ProfilesStorage) -> Result<(), 
 
 fn read_existing_device_id(claude_dir: &Path) -> Option<String> {
     let registry_file = claude_dir.join("ant-device-registry.json");
-    if registry_file.exists() {
-        if let Ok(content) = fs::read_to_string(&registry_file) {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(id) = val.get("deviceId").and_then(|v| v.as_str()) {
-                    let clean = id.trim();
-                    if !clean.is_empty() {
-                        return Some(clean.to_string());
-                    }
-                }
-            }
+    if registry_file.exists()
+        && let Ok(content) = fs::read_to_string(&registry_file)
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Some(id) = val.get("deviceId").and_then(|v| v.as_str())
+    {
+        let clean = id.trim();
+        if !clean.is_empty() {
+            return Some(clean.to_string());
         }
     }
     None
@@ -228,12 +230,11 @@ fn snapshot_claude_session(claude_dir: &Path, snapshot_dir: &Path) -> Result<boo
     for name in session_dirs {
         let src = claude_dir.join(name);
         let dst = snapshot_dir.join(name);
-        if src.is_dir() {
-            if let Ok(cnt) = copy_dir_recursive(&src, &dst) {
-                if cnt > 0 {
-                    copied_any = true;
-                }
-            }
+        if src.is_dir()
+            && let Ok(cnt) = copy_dir_recursive(&src, &dst)
+            && cnt > 0
+        {
+            copied_any = true;
         }
     }
 
@@ -257,10 +258,8 @@ fn clean_claude_caches(claude_dir: &Path) -> Result<usize, String> {
 
     for name in cache_dirs {
         let target = claude_dir.join(name);
-        if target.exists() {
-            if fs::remove_dir_all(&target).is_ok() {
-                cleaned_count += 1;
-            }
+        if target.exists() && fs::remove_dir_all(&target).is_ok() {
+            cleaned_count += 1;
         }
     }
 
@@ -344,10 +343,8 @@ fn restore_claude_session(snapshot_dir: &Path, claude_dir: &Path) -> Result<usiz
     for name in session_files {
         let src = snapshot_dir.join(name);
         let dst = claude_dir.join(name);
-        if src.is_file() {
-            if fs::copy(&src, &dst).is_ok() {
-                restored += 1;
-            }
+        if src.is_file() && fs::copy(&src, &dst).is_ok() {
+            restored += 1;
         }
     }
 
@@ -355,10 +352,10 @@ fn restore_claude_session(snapshot_dir: &Path, claude_dir: &Path) -> Result<usiz
     for name in session_dirs {
         let src = snapshot_dir.join(name);
         let dst = claude_dir.join(name);
-        if src.is_dir() {
-            if let Ok(cnt) = copy_dir_recursive(&src, &dst) {
-                restored += cnt;
-            }
+        if src.is_dir()
+            && let Ok(cnt) = copy_dir_recursive(&src, &dst)
+        {
+            restored += cnt;
         }
     }
 
@@ -452,7 +449,11 @@ pub fn switch_claude_profile_in(
     target_id: &str,
 ) -> Result<ProfileSwitchResult, String> {
     let mut storage = load_or_init_storage_in(storage_dir, claude_dir, None)?;
-    let prev_idx = storage.profiles.iter().position(|p| p.is_active).unwrap_or(0);
+    let prev_idx = storage
+        .profiles
+        .iter()
+        .position(|p| p.is_active)
+        .unwrap_or(0);
     let prev_id = storage.profiles[prev_idx].id.clone();
 
     let target_idx = storage
@@ -645,7 +646,9 @@ pub fn sync_profiles_for_route_update_in(
 // Public Environment-Aware Wrappers
 // -----------------------------------------------------------------------------
 
-pub fn list_claude_profiles(current_pinned_ip: Option<&str>) -> Result<ClaudeProfileListResponse, String> {
+pub fn list_claude_profiles(
+    current_pinned_ip: Option<&str>,
+) -> Result<ClaudeProfileListResponse, String> {
     let storage_dir = default_profiles_storage_dir();
     let claude_dir = default_claude_desktop_dir().unwrap_or_else(|| PathBuf::from("mock_claude"));
     list_claude_profiles_in(&storage_dir, &claude_dir, current_pinned_ip)
@@ -659,7 +662,14 @@ pub fn create_claude_profile(
 ) -> Result<ClaudeProfileListResponse, String> {
     let storage_dir = default_profiles_storage_dir();
     let claude_dir = default_claude_desktop_dir().unwrap_or_else(|| PathBuf::from("mock_claude"));
-    create_claude_profile_in(&storage_dir, &claude_dir, name, bind_ip, bind_country, bind_upstream_key)
+    create_claude_profile_in(
+        &storage_dir,
+        &claude_dir,
+        name,
+        bind_ip,
+        bind_country,
+        bind_upstream_key,
+    )
 }
 
 pub fn switch_claude_profile(target_id: &str) -> Result<ProfileSwitchResult, String> {
@@ -714,7 +724,8 @@ mod tests {
         fs::create_dir_all(&claude_dir).unwrap();
 
         // 1. Initial list auto-creates default profile
-        let resp = list_claude_profiles_in(&storage_dir, &claude_dir, Some("145.241.10.5")).unwrap();
+        let resp =
+            list_claude_profiles_in(&storage_dir, &claude_dir, Some("145.241.10.5")).unwrap();
         assert_eq!(resp.profiles.len(), 1);
         assert_eq!(resp.profiles[0].id, "default");
         assert_eq!(resp.profiles[0].name, "Основной аккаунт");
@@ -733,7 +744,10 @@ mod tests {
         .unwrap();
         assert_eq!(resp2.profiles.len(), 2);
         assert_eq!(resp2.profiles[1].name, "Рабочий Claude Pro");
-        assert_eq!(resp2.profiles[1].bound_upstream_key.as_deref(), Some("socks5://proxy.example.com:1080"));
+        assert_eq!(
+            resp2.profiles[1].bound_upstream_key.as_deref(),
+            Some("socks5://proxy.example.com:1080")
+        );
         assert_ne!(
             resp2.profiles[0].isolated_device_id,
             resp2.profiles[1].isolated_device_id
@@ -750,7 +764,11 @@ mod tests {
         // Put initial session file in claude_dir for default profile
         fs::write(claude_dir.join("Cookies"), "session_default_cookie_data").unwrap();
         fs::create_dir_all(claude_dir.join("Cache")).unwrap();
-        fs::write(claude_dir.join("Cache").join("cache_file.bin"), "cached_telemetry").unwrap();
+        fs::write(
+            claude_dir.join("Cache").join("cache_file.bin"),
+            "cached_telemetry",
+        )
+        .unwrap();
 
         // Preserve claude_desktop_config.json
         fs::write(
@@ -775,7 +793,10 @@ mod tests {
         let switch_res = switch_claude_profile_in(&storage_dir, &claude_dir, &p2_id).unwrap();
         assert_eq!(switch_res.previous_profile_id, "default");
         assert_eq!(switch_res.active_profile.id, p2_id);
-        assert_eq!(switch_res.bound_upstream_key_updated.as_deref(), Some("http://10.0.0.1:8080"));
+        assert_eq!(
+            switch_res.bound_upstream_key_updated.as_deref(),
+            Some("http://10.0.0.1:8080")
+        );
 
         // Caches were cleaned
         assert!(!claude_dir.join("Cache").exists());
@@ -792,7 +813,8 @@ mod tests {
 
         // Claude dir now has profile 2's fresh isolated device registry
         assert!(claude_dir.join("ant-device-registry.json").exists());
-        let registry_content = fs::read_to_string(claude_dir.join("ant-device-registry.json")).unwrap();
+        let registry_content =
+            fs::read_to_string(claude_dir.join("ant-device-registry.json")).unwrap();
         assert!(registry_content.contains(&resp.profiles[1].isolated_device_id));
 
         // Switch back to default profile
@@ -818,7 +840,9 @@ mod tests {
         assert!(del_err.is_err());
 
         // Add second profile and delete it
-        let resp = create_claude_profile_in(&storage_dir, &claude_dir, "Temporary", None, None, None).unwrap();
+        let resp =
+            create_claude_profile_in(&storage_dir, &claude_dir, "Temporary", None, None, None)
+                .unwrap();
         let p2_id = resp.profiles[1].id.clone();
         let after_del = delete_claude_profile_in(&storage_dir, &claude_dir, &p2_id).unwrap();
         assert_eq!(after_del.profiles.len(), 1);
@@ -886,13 +910,8 @@ mod tests {
         assert_eq!(res, Some(Some(updated_key.to_string())));
 
         // Remove route -> clears profile binding and reports active profile cleared
-        let removed = sync_profiles_for_route_update_in(
-            &storage_dir,
-            &claude_dir,
-            &route_id,
-            None,
-        )
-        .unwrap();
+        let removed =
+            sync_profiles_for_route_update_in(&storage_dir, &claude_dir, &route_id, None).unwrap();
         assert_eq!(removed, Some(None));
         let after = list_claude_profiles_in(&storage_dir, &claude_dir, None).unwrap();
         assert_eq!(after.profiles[0].bound_upstream_key, None);

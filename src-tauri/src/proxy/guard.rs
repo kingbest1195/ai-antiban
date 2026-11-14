@@ -14,13 +14,14 @@
 //! (another change, accept or restore happened meanwhile, see `Inner::epoch`) leaves the traffic
 //! blocked until the user decides or the hold expires.
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::{AbortHandle, JoinHandle};
@@ -32,7 +33,7 @@ use crate::popup::log_timing;
 use crate::proxy::allow_error::{AllowError, AllowErrorCode};
 use crate::proxy::hold_queue::{
     DEFAULT_HOLD_TTL_SECS, EnrichedPayload, HoldQueue, HoldResolution, NetworkChange,
-    PHASE_DETECTING, PHASE_FAILED, PHASE_READY, RiskInterceptPayload,
+    PHASE_DETECTING, PHASE_FAILED, PHASE_READY, RiskInterceptPayload, build_gate_reason,
 };
 use crate::state::{AppState, IpHistoryEntry, KNOWN_PROVIDERS};
 
@@ -57,6 +58,28 @@ pub enum Gate {
     Pending,
     /// User refused the new network: traffic stays frozen until the IP is restored or confirmed.
     Blocked,
+}
+
+/// Protection pause mode tracked by [`NetworkGuard`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseMode {
+    /// Active protection / normal operation (no global pause engaged).
+    None,
+    /// Traffic stays paused/blocked until the next network interface or exit IP change (or cache invalidation).
+    UntilNetworkChange,
+    /// Manual kill-switch: stays blocked across network changes until explicitly released.
+    Manual,
+}
+
+/// Snapshot of [`NetworkGuard`]'s current gate, pause mode, and `gate_reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuardPauseStatus {
+    pub paused: bool,
+    pub mode: PauseMode,
+    pub gate: String,
+    pub gate_reason: Option<String>,
+    pub manual_killswitch: bool,
 }
 
 #[derive(Clone)]
@@ -182,6 +205,10 @@ struct Pending {
     /// Background clean-up of the old network's allowances / blocks. Whoever decides for this
     /// alert awaits it first, so the clean-up can never land after the decision's own writes.
     clear_old_state: Option<JoinHandle<()>>,
+    /// Unrouted providers whose verdict requires blocking/holding (all unrouted until audit finishes).
+    affected_providers: Vec<&'static str>,
+    /// Unrouted providers whose audit confirmed healthy `Green` on an allowed geo.
+    healthy_providers: Vec<&'static str>,
 }
 
 #[derive(Default)]
@@ -205,6 +232,8 @@ struct Inner {
     dirty_since: Option<Instant>,
     /// Background audit of the current alert (cancelled when the alert is superseded).
     audit_abort: Option<AbortHandle>,
+    /// Exit IP on which `PauseMode::UntilNetworkChange` was engaged (unchanged ticks stay paused).
+    paused_ip: Option<String>,
 }
 
 impl Inner {
@@ -229,6 +258,9 @@ impl Inner {
 
 pub struct NetworkGuard {
     gate_tx: watch::Sender<Gate>,
+    /// Per-provider automatic gates so a critical verdict on one unrouted provider does not
+    /// freeze or block unrelated healthy providers.
+    provider_gates: HashMap<ProviderId, watch::Sender<Gate>>,
     tunnel_abort_tx: watch::Sender<u64>,
     /// Manual kill-switch. Unlike the automatic gate it also stops routed providers.
     kill_tx: watch::Sender<bool>,
@@ -236,6 +268,8 @@ pub struct NetworkGuard {
     /// gate can never be anything but `Blocked`, no matter which task (tick, accept, restore,
     /// popup resolution) races with it.
     gate_lock: std::sync::Mutex<()>,
+    pause_mode: std::sync::Mutex<PauseMode>,
+    gate_reason: std::sync::Mutex<Option<String>>,
     inner: Mutex<Inner>,
     /// One route check at a time (as when `inner` was held across the probe): a CONNECT waits for
     /// the check in flight and then sees its verdict. `inner` itself is only held in short sections.
@@ -313,7 +347,9 @@ pub(crate) fn effective_tray_report<'a>(
 ) -> std::borrow::Cow<'a, RiskReport> {
     if !has_blocked
         && report.overall_status == OverallStatus::Red
-        && st.session_allowed_providers.contains(report.provider.as_str())
+        && st
+            .session_allowed_providers
+            .contains(report.provider.as_str())
     {
         let mut adjusted = report.clone();
         adjusted.overall_status = OverallStatus::Yellow;
@@ -363,6 +399,31 @@ async fn audit_all(audit: &AuditFn) -> AuditResults {
     ]
 }
 
+/// True when an individual provider's audit confirmed `Green` on an allowed egress country.
+fn is_provider_healthy(res: &Result<RiskReport, String>) -> bool {
+    match res {
+        Ok(r) => {
+            r.overall_status == OverallStatus::Green
+                && !crate::is_sanctioned_or_blocked_country(&r.telemetry.country_code)
+                && !r.telemetry.country_code.eq_ignore_ascii_case("HK")
+                && !r.telemetry.country_code.eq_ignore_ascii_case("CN")
+        }
+        Err(_) => false,
+    }
+}
+
+/// True when an individual provider has a critical risk, blocked country, or failed audit.
+fn is_provider_critical_or_blocked(res: &Result<RiskReport, String>) -> bool {
+    match res {
+        Ok(r) => {
+            !report_no_critical_and_geo_ok(r)
+                || r.telemetry.country_code.eq_ignore_ascii_case("HK")
+                || r.telemetry.country_code.eq_ignore_ascii_case("CN")
+        }
+        Err(_) => true,
+    }
+}
+
 /// What the decision logic needs from an audit of the new network.
 struct AuditSummary {
     /// Report for the tray (the first report that succeeded, i.e. anthropic's when it did).
@@ -374,6 +435,12 @@ struct AuditSummary {
     all_green: bool,
     /// Every unrouted provider was audited successfully, geo is allowed, and zero critical issues.
     no_critical_and_geo_ok: bool,
+    /// Unrouted providers whose verdict is `Green` on an allowed country.
+    healthy_providers: Vec<&'static str>,
+    /// Unrouted providers that are not `Green` (Yellow/Red/blocked geo/error).
+    affected_providers: Vec<&'static str>,
+    /// Unrouted providers with a critical issue (`Red`), blocked geo, or failed audit.
+    critical_providers: Vec<&'static str>,
 }
 
 /// `None` = the audit failed: the first (active) unrouted provider could not be audited.
@@ -409,6 +476,25 @@ fn summarize(results: &AuditResults, unrouted: &[&'static str]) -> Option<AuditS
     let no_critical_and_geo_ok = !any_unrouted_failed
         && !relevant.is_empty()
         && relevant.iter().all(|r| report_no_critical_and_geo_ok(r));
+
+    let mut healthy_providers = Vec::new();
+    let mut affected_providers = Vec::new();
+    let mut critical_providers = Vec::new();
+    for (p, res) in results {
+        let pid = p.as_str();
+        if !unrouted.contains(&pid) {
+            continue;
+        }
+        if is_provider_healthy(res) {
+            healthy_providers.push(pid);
+        } else {
+            affected_providers.push(pid);
+        }
+        if is_provider_critical_or_blocked(res) {
+            critical_providers.push(pid);
+        }
+    }
+
     let tray = results
         .iter()
         .find_map(|(_, r)| r.as_ref().ok())
@@ -422,6 +508,9 @@ fn summarize(results: &AuditResults, unrouted: &[&'static str]) -> Option<AuditS
         tel,
         all_green,
         no_critical_and_geo_ok,
+        healthy_providers,
+        affected_providers,
+        critical_providers,
     })
 }
 
@@ -468,6 +557,15 @@ enum TickPlan {
 impl NetworkGuard {
     pub fn new() -> Self {
         let (gate_tx, _rx) = watch::channel(Gate::Open);
+        let mut provider_gates = HashMap::with_capacity(3);
+        for p in [
+            ProviderId::Anthropic,
+            ProviderId::Openai,
+            ProviderId::Gemini,
+        ] {
+            let (tx, _rx) = watch::channel(Gate::Open);
+            provider_gates.insert(p, tx);
+        }
         let (tunnel_abort_tx, _abort_rx) = watch::channel(0u64);
         let (kill_tx, _kill_rx) = watch::channel(false);
         let client = reqwest::Client::builder()
@@ -479,9 +577,12 @@ impl NetworkGuard {
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             gate_tx,
+            provider_gates,
             tunnel_abort_tx,
             kill_tx,
             gate_lock: std::sync::Mutex::new(()),
+            pause_mode: std::sync::Mutex::new(PauseMode::None),
+            gate_reason: std::sync::Mutex::new(None),
             inner: Mutex::new(Inner::default()),
             tick_lock: Mutex::new(()),
             env: OnceLock::new(),
@@ -493,8 +594,80 @@ impl NetworkGuard {
         *self.gate_tx.borrow()
     }
 
+    /// Gate state for a specific provider (isolated from collateral blocks on sibling providers).
+    pub fn gate_for(&self, provider: ProviderId) -> Gate {
+        self.provider_gates
+            .get(&provider)
+            .map(|tx| *tx.borrow())
+            .unwrap_or_else(|| self.gate())
+    }
+
+    pub fn any_provider_gate_closed(&self) -> bool {
+        self.gate() != Gate::Open
+            || self
+                .provider_gates
+                .values()
+                .any(|tx| *tx.borrow() != Gate::Open)
+    }
+
+    pub fn any_provider_gate_blocked(&self) -> bool {
+        self.gate() == Gate::Blocked
+            || self
+                .provider_gates
+                .values()
+                .any(|tx| *tx.borrow() == Gate::Blocked)
+    }
+
+    pub fn pause_mode(&self) -> PauseMode {
+        if self.is_manual_killswitch() {
+            return PauseMode::Manual;
+        }
+        *self.pause_mode.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub fn gate_reason(&self) -> Option<String> {
+        self.gate_reason
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    fn set_gate_reason(&self, reason: Option<String>) {
+        let mut g = self.gate_reason.lock().unwrap_or_else(|p| p.into_inner());
+        *g = reason;
+    }
+
+    fn set_pause_mode_raw(&self, mode: PauseMode) {
+        let mut g = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
+        *g = mode;
+    }
+
+    pub fn pause_status(&self) -> GuardPauseStatus {
+        let mode = self.pause_mode();
+        let gate = match self.gate() {
+            Gate::Open => "open",
+            Gate::Pending => "pending",
+            Gate::Blocked => "blocked",
+        }
+        .to_string();
+        GuardPauseStatus {
+            paused: mode != PauseMode::None,
+            mode,
+            gate,
+            gate_reason: self.gate_reason(),
+            manual_killswitch: self.is_manual_killswitch(),
+        }
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<Gate> {
         self.gate_tx.subscribe()
+    }
+
+    pub fn subscribe_for(&self, provider: ProviderId) -> watch::Receiver<Gate> {
+        self.provider_gates
+            .get(&provider)
+            .map(|tx| tx.subscribe())
+            .unwrap_or_else(|| self.gate_tx.subscribe())
     }
 
     pub fn subscribe_tunnel_abort(&self) -> watch::Receiver<u64> {
@@ -512,7 +685,8 @@ impl NetworkGuard {
 
     /// Aborts unrouted tunnels (routed tunnels only obey the manual kill-switch).
     pub fn abort_active_tunnels(&self) {
-        let _ = self.tunnel_abort_tx.send_modify(|val| *val = val.wrapping_add(1));
+        self.tunnel_abort_tx
+            .send_modify(|val| *val = val.wrapping_add(1));
     }
 
     /// Cheap local check used by every CONNECT. On a route change it closes the gate and aborts
@@ -535,6 +709,15 @@ impl NetworkGuard {
                     g.dirty_since = Some(Instant::now());
                 }
                 g.route_dirty = true;
+                g.paused_ip = None;
+                if !self.is_manual_killswitch() {
+                    let mut pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
+                    if *pm == PauseMode::UntilNetworkChange {
+                        *pm = PauseMode::None;
+                        drop(pm);
+                        self.set_gate_reason(None);
+                    }
+                }
                 self.set_gate(Gate::Pending);
                 self.abort_active_tunnels();
                 return true;
@@ -545,12 +728,105 @@ impl NetworkGuard {
         false
     }
 
-    /// Sets the gate. While the manual kill-switch is engaged every request is coerced to
-    /// `Blocked`: `Open` (or `Pending`) cannot be set behind the kill-switch's back.
+    /// Sets the gate for every provider and overall guard state. While the manual kill-switch is
+    /// engaged every request is coerced to `Blocked`: `Open` (or `Pending`) cannot be set behind
+    /// the kill-switch's back.
     fn set_gate(&self, gate: Gate) {
         let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let effective = if *self.kill_tx.borrow() { Gate::Blocked } else { gate };
+        let effective = if *self.kill_tx.borrow() {
+            Gate::Blocked
+        } else {
+            gate
+        };
         self.gate_tx.send_replace(effective);
+        for tx in self.provider_gates.values() {
+            tx.send_replace(effective);
+        }
+    }
+
+    /// Applies isolated per-provider gates after an audit:
+    /// - `healthy` unrouted providers (and routed providers) open immediately (`Gate::Open`).
+    /// - `affected` unrouted providers move to `affected_gate` (`Pending` or `Blocked`).
+    /// - Global `gate_tx` becomes `affected_gate` only when no healthy unrouted provider exists
+    ///   (or while `Pending` with no healthy unrouted providers), otherwise `Open` when healthy
+    ///   providers are allowed so global checks don't treat healthy providers as blocked.
+    fn apply_provider_gates(
+        &self,
+        unrouted: &[&'static str],
+        healthy: &[&'static str],
+        affected: &[&'static str],
+        affected_gate: Gate,
+    ) {
+        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+        if *self.kill_tx.borrow() {
+            self.gate_tx.send_replace(Gate::Blocked);
+            for tx in self.provider_gates.values() {
+                tx.send_replace(Gate::Blocked);
+            }
+            return;
+        }
+        for (pid, tx) in &self.provider_gates {
+            let name = pid.as_str();
+            if !unrouted.contains(&name) || healthy.contains(&name) {
+                tx.send_replace(Gate::Open);
+            } else if affected.contains(&name) {
+                tx.send_replace(affected_gate);
+            } else {
+                tx.send_replace(Gate::Open);
+            }
+        }
+        let global = if affected.is_empty() || !healthy.is_empty() {
+            Gate::Open
+        } else {
+            affected_gate
+        };
+        self.gate_tx.send_replace(global);
+    }
+
+    /// Synchronises per-provider and global gates with `blocked_providers` from state.
+    fn sync_gates_with_blocked(&self, blocked_providers: &HashSet<String>) {
+        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+        if *self.kill_tx.borrow() {
+            self.gate_tx.send_replace(Gate::Blocked);
+            for tx in self.provider_gates.values() {
+                tx.send_replace(Gate::Blocked);
+            }
+            return;
+        }
+        let mut any_open = false;
+        for (pid, tx) in &self.provider_gates {
+            if blocked_providers.contains(pid.as_str()) {
+                tx.send_replace(Gate::Blocked);
+            } else {
+                tx.send_replace(Gate::Open);
+                any_open = true;
+            }
+        }
+        self.gate_tx
+            .send_replace(if any_open { Gate::Open } else { Gate::Blocked });
+    }
+
+    /// Opens per-provider gates for providers that just moved onto a fixed route without
+    /// disturbing unrouted providers' gates. Respects the manual kill-switch.
+    pub fn open_routed_providers(&self, routed: &[&str]) {
+        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+        if *self.kill_tx.borrow() {
+            return;
+        }
+        for pid_str in routed {
+            if let Some(pid) = ProviderId::from_id(pid_str)
+                && let Some(tx) = self.provider_gates.get(&pid)
+            {
+                tx.send_replace(Gate::Open);
+            }
+        }
+        if self
+            .provider_gates
+            .values()
+            .all(|tx| *tx.borrow() == Gate::Open)
+        {
+            self.gate_tx.send_replace(Gate::Open);
+        }
     }
 
     /// Test seam: sets the gate directly (e.g. `Pending`, which only a real network change sets).
@@ -563,14 +839,151 @@ impl NetworkGuard {
     fn engage_kill(&self) {
         let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
         self.kill_tx.send_replace(true);
+        self.set_pause_mode_raw(PauseMode::Manual);
+        self.set_gate_reason(Some(
+            "Включён ручной Kill-Switch — все ИИ-запросы остановлены".to_string(),
+        ));
         self.gate_tx.send_replace(Gate::Blocked);
+        for tx in self.provider_gates.values() {
+            tx.send_replace(Gate::Blocked);
+        }
     }
 
     /// Lifts the kill flag and opens the gate as one step with respect to `set_gate`.
     fn release_kill(&self) {
         let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
         self.kill_tx.send_replace(false);
+        self.set_pause_mode_raw(PauseMode::None);
+        self.set_gate_reason(None);
         self.gate_tx.send_replace(Gate::Open);
+        for tx in self.provider_gates.values() {
+            tx.send_replace(Gate::Open);
+        }
+    }
+
+    /// Puts the guard in `PauseMode::UntilNetworkChange`: unrouted AI traffic stays paused
+    /// (`Gate::Blocked`) until the network interface/IP changes or `invalidate_cache` clears it.
+    /// Does not override an active manual kill-switch.
+    pub async fn pause_until_network_change(
+        &self,
+        state: &AppState,
+        reason: Option<String>,
+    ) -> GuardPauseStatus {
+        if self.is_manual_killswitch() {
+            return self.pause_status();
+        }
+        let cleaned_reason = reason
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| "Защита поставлена на паузу до следующей смены сети".to_string());
+        self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
+        self.set_gate_reason(Some(cleaned_reason.clone()));
+        self.set_gate(Gate::Blocked);
+        self.abort_active_tunnels();
+
+        {
+            let mut inner = self.inner.lock().await;
+            if let (Some(p), Some(env)) = (inner.invalidate_alert(), self.env.get()) {
+                env.hold_queue.remove(&p.id).await;
+            }
+            let current_ip = inner
+                .observed_ip
+                .clone()
+                .or_else(|| inner.baseline.as_ref().map(|b| b.ip.clone()));
+            inner.paused_ip = current_ip.clone();
+            if inner.handled_ip.is_none() {
+                inner.handled_ip = current_ip;
+            }
+        }
+
+        for p in state.unrouted_providers().await {
+            let _ = state.block_provider(p).await;
+        }
+        if let Some(env) = self.env.get() {
+            self.hide_popup(env);
+            env.io.tray_status("red", Some(&cleaned_reason));
+        }
+        self.pause_status()
+    }
+
+    /// Marks `PauseMode::UntilNetworkChange` when an alert is blocked until network change
+    /// without clearing `blocked_providers` or overriding explicit target selections.
+    pub async fn mark_paused_until_network_change(&self, reason: Option<String>) {
+        if self.is_manual_killswitch() {
+            return;
+        }
+        if let Some(r) = reason
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            self.set_gate_reason(Some(r));
+        } else if self.gate_reason().is_none() {
+            self.set_gate_reason(Some("Защита на паузе до следующей смены сети".to_string()));
+        }
+        self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
+        self.set_gate(Gate::Blocked);
+        let mut inner = self.inner.lock().await;
+        let current_ip = inner
+            .observed_ip
+            .clone()
+            .or_else(|| inner.baseline.as_ref().map(|b| b.ip.clone()));
+        inner.paused_ip = current_ip;
+    }
+
+    fn clear_until_network_change_locked(&self, inner: &mut Inner) -> bool {
+        if self.is_manual_killswitch() {
+            return false;
+        }
+        let mut pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
+        let was_until_change = *pm == PauseMode::UntilNetworkChange;
+        if was_until_change {
+            *pm = PauseMode::None;
+        }
+        drop(pm);
+        inner.paused_ip = None;
+        if was_until_change {
+            self.set_gate_reason(None);
+        }
+        was_until_change
+    }
+
+    /// Clears `PauseMode::UntilNetworkChange` on network change or cache invalidation.
+    /// Never lifts a manual kill-switch. Returns `true` when an `UntilNetworkChange` pause was cleared.
+    pub async fn clear_pause_on_network_change(
+        &self,
+        state: Option<&AppState>,
+        open_gate_if_blocked: bool,
+    ) -> bool {
+        if self.is_manual_killswitch() {
+            return false;
+        }
+        let cleared = {
+            let mut inner = self.inner.lock().await;
+            let cleared = self.clear_until_network_change_locked(&mut inner);
+            if cleared {
+                inner.handled_ip = None;
+            }
+            cleared
+        };
+        if cleared {
+            if let Some(st) = state {
+                let _ = st.clear_blocked_providers().await;
+            }
+            if open_gate_if_blocked && self.any_provider_gate_blocked() {
+                self.set_gate(Gate::Open);
+            }
+        }
+        cleared
+    }
+
+    /// Invalidates cached network telemetry and automatically clears any `UntilNetworkChange` pause.
+    pub async fn invalidate_cache_and_clear_pause(
+        &self,
+        resolver: &crate::auditor::network::NetworkResolver,
+        state: Option<&AppState>,
+    ) -> bool {
+        resolver.invalidate_cache().await;
+        self.clear_pause_on_network_change(state, true).await
     }
 
     /// Re-engages a manual kill-switch saved by a previous run (a restart must not lift it).
@@ -641,9 +1054,7 @@ impl NetworkGuard {
         self.gate() == Gate::Open
     }
 
-    /// Used by new CONNECT requests: waits for the user's decision while the gate is pending.
-    pub async fn await_decision(&self) -> Gate {
-        let mut rx = self.gate_tx.subscribe();
+    async fn await_gate_rx(mut rx: watch::Receiver<Gate>) -> Gate {
         let fut = async {
             loop {
                 let g = *rx.borrow_and_update();
@@ -660,6 +1071,16 @@ impl NetworkGuard {
             .unwrap_or(Gate::Blocked)
     }
 
+    /// Used by new CONNECT requests: waits for the user's decision while the gate is pending.
+    pub async fn await_decision(&self) -> Gate {
+        Self::await_gate_rx(self.gate_tx.subscribe()).await
+    }
+
+    /// Waits for a specific provider's gate decision while pending.
+    pub async fn await_decision_for(&self, provider: ProviderId) -> Gate {
+        Self::await_gate_rx(self.subscribe_for(provider)).await
+    }
+
     /// Starts the background monitor (call once from the Tauri setup hook).
     pub fn start(self: &Arc<Self>, ctx: GuardCtx) {
         if !self.install_env(Env::from_ctx(ctx)) {
@@ -671,10 +1092,11 @@ impl NetworkGuard {
             loop {
                 if let Some(env) = guard.env.get() {
                     guard.check_route_and_tick(env).await;
-                    if n % 20 == 0 {
-                        let _ = tokio::task::spawn_blocking(
-                            crate::sysproxy::refresh_if_services_changed,
-                        )
+                    if n.is_multiple_of(20) {
+                        let _ = tokio::task::spawn_blocking(|| {
+                            crate::sysproxy::refresh_if_services_changed();
+                            crate::sysproxy::reconcile_browser_pac_prefs(None);
+                        })
                         .await;
                     }
                 }
@@ -698,24 +1120,28 @@ impl NetworkGuard {
 
     /// Fetches the current egress IP (Cloudflare trace, falls back to ipify).
     async fn probe_ip(&self) -> Option<String> {
-        if let Ok(resp) = self.client.get("https://1.1.1.1/cdn-cgi/trace").send().await {
-            if let Ok(text) = resp.text().await {
-                for line in text.lines() {
-                    if let Some(val) = line.strip_prefix("ip=") {
-                        let val = val.trim();
-                        if val.parse::<IpAddr>().is_ok() {
-                            return Some(val.to_string());
-                        }
+        if let Ok(resp) = self
+            .client
+            .get("https://1.1.1.1/cdn-cgi/trace")
+            .send()
+            .await
+            && let Ok(text) = resp.text().await
+        {
+            for line in text.lines() {
+                if let Some(val) = line.strip_prefix("ip=") {
+                    let val = val.trim();
+                    if val.parse::<IpAddr>().is_ok() {
+                        return Some(val.to_string());
                     }
                 }
             }
         }
-        if let Ok(resp) = self.client.get("https://api.ipify.org").send().await {
-            if let Ok(text) = resp.text().await {
-                let val = text.trim();
-                if val.parse::<IpAddr>().is_ok() {
-                    return Some(val.to_string());
-                }
+        if let Ok(resp) = self.client.get("https://api.ipify.org").send().await
+            && let Ok(text) = resp.text().await
+        {
+            let val = text.trim();
+            if val.parse::<IpAddr>().is_ok() {
+                return Some(val.to_string());
             }
         }
         None
@@ -800,10 +1226,10 @@ impl NetworkGuard {
 
         inner.last_route_fp = Some(current_fp.clone());
 
-        if let Some(t) = inner.last_probe {
-            if t.elapsed() < Duration::from_millis(PROBE_MIN_GAP_MS) {
-                return TickPlan::Done;
-            }
+        if let Some(t) = inner.last_probe
+            && t.elapsed() < Duration::from_millis(PROBE_MIN_GAP_MS)
+        {
+            return TickPlan::Done;
         }
         TickPlan::ProbeRegular(current_fp)
     }
@@ -827,7 +1253,7 @@ impl NetworkGuard {
         let unrouted = env.state.unrouted_providers().await;
         let st_data = env.state.get_data().await;
         // Capture before `plan_tick` transitions `Gate::Blocked -> Gate::Pending` on route change.
-        let was_blocked = self.gate() == Gate::Blocked || !st_data.blocked_providers.is_empty();
+        let was_blocked = self.any_provider_gate_blocked() || !st_data.blocked_providers.is_empty();
 
         match self
             .plan_tick(current_fp, &unrouted, st_data.split_tunnel_mode)
@@ -864,6 +1290,7 @@ impl NetworkGuard {
             self.set_gate(Gate::Blocked);
             return;
         }
+        self.clear_until_network_change_locked(inner);
         env.auditor.resolver.invalidate_cache().await;
         let unrouted = env.state.unrouted_providers().await;
         let audited = tokio::time::timeout(env.audit_timeout, audit_all(&env.audit)).await;
@@ -880,9 +1307,7 @@ impl NetworkGuard {
         let is_pinned = st
             .pinned_ip
             .as_deref()
-            .map(|p| {
-                p.trim() == baseline_ip.trim() || p.trim() == summary.tel.ip.trim()
-            })
+            .map(|p| p.trim() == baseline_ip.trim() || p.trim() == summary.tel.ip.trim())
             .unwrap_or(false);
         let country_allowed = !crate::is_sanctioned_or_blocked_country(&summary.tel.country_code);
         let session_allowed = all_unrouted_session_allowed(&unrouted, &st);
@@ -891,6 +1316,25 @@ impl NetworkGuard {
             || (!was_blocked && (country_allowed || session_allowed))
         {
             self.restore_locked(env, inner).await;
+        } else if !summary.healthy_providers.is_empty() && !summary.affected_providers.is_empty() {
+            if let Some(p) = inner.invalidate_alert() {
+                env.hold_queue.remove(&p.id).await;
+            }
+            inner.handled_ip = None;
+            for p in &summary.healthy_providers {
+                let _ = env.state.unblock_provider(p).await;
+            }
+            for p in &summary.affected_providers {
+                let _ = env.state.block_provider(p).await;
+            }
+            self.apply_provider_gates(
+                &unrouted,
+                &summary.healthy_providers,
+                &summary.affected_providers,
+                Gate::Blocked,
+            );
+            self.hide_popup(env);
+            env.emit("network://changed", &summary.worst);
         } else if was_blocked {
             self.set_gate(Gate::Blocked);
         }
@@ -908,6 +1352,10 @@ impl NetworkGuard {
         was_blocked: bool,
     ) {
         inner.last_probe = Some(Instant::now());
+        // Local network interface / route changed: clear temporary pause-until-network-change.
+        if self.clear_until_network_change_locked(inner) {
+            inner.handled_ip = None;
+        }
 
         // 3. Check if probed IP equals baseline IP
         let (baseline_ip, baseline_trusted) = inner
@@ -942,13 +1390,8 @@ impl NetworkGuard {
                         return; // the route moved again meanwhile: the next tick decides
                     }
                     if inner.pending.is_some() || was_blocked {
-                        self.verify_and_restore_baseline_locked(
-                            env,
-                            inner,
-                            new_ip,
-                            was_blocked,
-                        )
-                        .await;
+                        self.verify_and_restore_baseline_locked(env, inner, new_ip, was_blocked)
+                            .await;
                     } else {
                         self.set_gate(Gate::Open);
                     }
@@ -993,6 +1436,17 @@ impl NetworkGuard {
         };
         inner.observed_ip = Some(ip.clone());
 
+        // If user explicitly paused until the next network change on this exact IP, stay paused
+        // until the external IP changes or route fingerprint invalidates.
+        if self.pause_mode() == PauseMode::UntilNetworkChange
+            && inner.paused_ip.as_deref() == Some(ip.as_str())
+        {
+            return;
+        }
+        if self.clear_until_network_change_locked(inner) {
+            inner.handled_ip = None;
+        }
+
         if env.state.is_split_tunnel_mode().await {
             if let Some(b) = inner.baseline.as_mut() {
                 b.ip = ip;
@@ -1012,11 +1466,14 @@ impl NetworkGuard {
             return;
         }
 
-        let Some((baseline_ip, baseline_trusted)) = inner
-            .baseline
-            .as_ref()
-            .map(|b| (b.ip.clone(), b.trusted))
+        let Some((baseline_ip, baseline_trusted)) =
+            inner.baseline.as_ref().map(|b| (b.ip.clone(), b.trusted))
         else {
+            let st = env.state.get_data().await;
+            let matches_pinned = st
+                .pinned_ip
+                .as_deref()
+                .is_some_and(|p| p.trim() == ip.trim());
             let country = env
                 .auditor
                 .resolver
@@ -1033,17 +1490,22 @@ impl NetworkGuard {
             } else {
                 false
             };
+            let trusted = matches_pinned || !is_sanctioned;
             inner.baseline = Some(Baseline {
-                ip,
+                ip: ip.clone(),
                 country,
-                trusted: !is_sanctioned,
+                trusted,
             });
+            if trusted && was_blocked && !self.is_manual_killswitch() {
+                self.verify_and_restore_baseline_locked(env, inner, &ip, was_blocked)
+                    .await;
+            }
             return;
         };
 
         if ip == baseline_ip {
             if baseline_trusted {
-                if self.gate() != Gate::Open || inner.pending.is_some() || was_blocked {
+                if self.any_provider_gate_closed() || inner.pending.is_some() || was_blocked {
                     if self.probe_is_stale(inner, planned_fp) {
                         return; // the route moved again meanwhile: the next tick decides
                     }
@@ -1061,7 +1523,7 @@ impl NetworkGuard {
                     b.trusted = true;
                 }
                 inner.handled_ip = None;
-                if self.gate() != Gate::Open || inner.pending.is_some() || was_blocked {
+                if self.any_provider_gate_closed() || inner.pending.is_some() || was_blocked {
                     if self.probe_is_stale(inner, planned_fp) {
                         return;
                     }
@@ -1171,6 +1633,9 @@ impl NetworkGuard {
             tel,
             all_green,
             no_critical_and_geo_ok,
+            healthy_providers,
+            affected_providers,
+            critical_providers,
         } = summary;
 
         let pinned_ip = env.state.get_pinned_ip().await;
@@ -1191,10 +1656,23 @@ impl NetworkGuard {
         // Respect preset InterceptionBehavior
         match behavior {
             crate::state::InterceptionBehavior::AutoLockSilent => {
-                for p in &unrouted {
+                if affected_providers.is_empty() && !healthy_providers.is_empty() {
+                    self.accept_locked(env, inner, &new_ip, &tel).await;
+                    env.emit("network://changed", &worst);
+                    return;
+                }
+                let change = network_change(
+                    old.as_ref(),
+                    Some(tel.ip.clone()),
+                    Some(tel.country_code.clone()),
+                );
+                self.set_gate_reason(Some(build_gate_reason(Some(&worst), Some(&change), false)));
+                let to_block = affected_providers.clone();
+                let to_open = healthy_providers.clone();
+                for p in &to_block {
                     let _ = env.state.block_provider(p).await;
                 }
-                self.set_gate(Gate::Blocked);
+                self.apply_provider_gates(&unrouted, &to_open, &to_block, Gate::Blocked);
                 self.hide_popup(env);
                 self.update_tray(env, &worst).await;
                 env.emit("network://changed", &worst);
@@ -1204,15 +1682,81 @@ impl NetworkGuard {
                 let is_blocked = crate::is_sanctioned_or_blocked_country(&tel.country_code)
                     || tel.country_code.eq_ignore_ascii_case("HK")
                     || tel.country_code.eq_ignore_ascii_case("CN");
-                if !is_blocked {
+                if !is_blocked && critical_providers.is_empty() {
                     self.accept_locked(env, inner, &new_ip, &tel).await;
                     env.emit("network://changed", &worst);
                     return;
-                } else {
-                    for p in &unrouted {
+                } else if !is_blocked {
+                    let non_critical: Vec<&'static str> = unrouted
+                        .iter()
+                        .copied()
+                        .filter(|p| !critical_providers.contains(p))
+                        .collect();
+                    let now = crate::auditor::network::current_timestamp();
+                    for p in &non_critical {
+                        let entry = IpHistoryEntry::new(
+                            tel.ip.clone(),
+                            tel.country_code.clone(),
+                            tel.asn,
+                            now,
+                        );
+                        let _ = env
+                            .state
+                            .record_ip_history_for_selection(
+                                p,
+                                &crate::routing::RouteSelection::Direct,
+                                entry,
+                            )
+                            .await;
+                    }
+                    let change = network_change(
+                        old.as_ref(),
+                        Some(tel.ip.clone()),
+                        Some(tel.country_code.clone()),
+                    );
+                    self.set_gate_reason(Some(build_gate_reason(
+                        Some(&worst),
+                        Some(&change),
+                        false,
+                    )));
+                    for p in &critical_providers {
                         let _ = env.state.block_provider(p).await;
                     }
-                    self.set_gate(Gate::Blocked);
+                    self.apply_provider_gates(
+                        &unrouted,
+                        &non_critical,
+                        &critical_providers,
+                        Gate::Blocked,
+                    );
+                    self.hide_popup(env);
+                    self.update_tray(env, &worst).await;
+                    env.emit("network://changed", &worst);
+                    return;
+                } else {
+                    let change = network_change(
+                        old.as_ref(),
+                        Some(tel.ip.clone()),
+                        Some(tel.country_code.clone()),
+                    );
+                    self.set_gate_reason(Some(build_gate_reason(
+                        Some(&worst),
+                        Some(&change),
+                        false,
+                    )));
+                    let to_block = if affected_providers.is_empty() {
+                        unrouted.clone()
+                    } else {
+                        affected_providers.clone()
+                    };
+                    let to_open = if affected_providers.is_empty() {
+                        Vec::new()
+                    } else {
+                        healthy_providers.clone()
+                    };
+                    for p in &to_block {
+                        let _ = env.state.block_provider(p).await;
+                    }
+                    self.apply_provider_gates(&unrouted, &to_open, &to_block, Gate::Blocked);
                     self.hide_popup(env);
                     self.update_tray(env, &worst).await;
                     env.emit("network://changed", &worst);
@@ -1222,6 +1766,21 @@ impl NetworkGuard {
             crate::state::InterceptionBehavior::AskPopup => {
                 // proceed with hold_queue and the alert popup
             }
+        }
+
+        if affected_providers.is_empty() && !healthy_providers.is_empty() {
+            self.accept_locked(env, inner, &new_ip, &tel).await;
+            env.emit("network://changed", &worst);
+            return;
+        }
+
+        if !healthy_providers.is_empty() {
+            self.apply_provider_gates(
+                &unrouted,
+                &healthy_providers,
+                &affected_providers,
+                Gate::Pending,
+            );
         }
 
         // 4. Ask the user (popup in configured corner without stealing focus), traffic stays frozen.
@@ -1234,7 +1793,17 @@ impl NetworkGuard {
             epoch,
             tel: Some(tel.clone()),
             clear_old_state: None,
+            affected_providers,
+            healthy_providers,
         });
+
+        let net_change = network_change(
+            old.as_ref(),
+            Some(tel.ip.clone()),
+            Some(tel.country_code.clone()),
+        );
+        let reason = build_gate_reason(Some(&worst), Some(&net_change), false);
+        self.set_gate_reason(Some(reason.clone()));
 
         let payload = RiskInterceptPayload {
             id: id.clone(),
@@ -1243,14 +1812,11 @@ impl NetworkGuard {
             report: Some(worst.clone()),
             ttl_seconds: DEFAULT_HOLD_TTL_SECS,
             scope: "network".to_string(),
-            network_change: Some(network_change(
-                old.as_ref(),
-                Some(tel.ip.clone()),
-                Some(tel.country_code.clone()),
-            )),
+            network_change: Some(net_change),
             is_simulation: false,
             detected_at_ms: now_unix_ms(),
             phase: PHASE_READY.to_string(),
+            gate_reason: Some(reason),
         };
 
         env.hold_queue.set_alert(payload.clone());
@@ -1293,12 +1859,17 @@ impl NetworkGuard {
             epoch,
             tel: None,
             clear_old_state: Some(self.spawn_clear_old_network_state(env)),
+            affected_providers: unrouted.clone(),
+            healthy_providers: Vec::new(),
         });
 
         let provider = unrouted
             .iter()
             .find_map(|p| ProviderId::from_id(p))
             .unwrap_or(ProviderId::Anthropic);
+        let net_change = network_change(old.as_ref(), Some(new_ip.clone()), None);
+        let reason = build_gate_reason(None, Some(&net_change), false);
+        self.set_gate_reason(Some(reason.clone()));
         let payload = RiskInterceptPayload {
             id: id.clone(),
             provider,
@@ -1306,10 +1877,11 @@ impl NetworkGuard {
             report: None,
             ttl_seconds: DEFAULT_HOLD_TTL_SECS,
             scope: "network".to_string(),
-            network_change: Some(network_change(old.as_ref(), Some(new_ip.clone()), None)),
+            network_change: Some(net_change),
             is_simulation: false,
             detected_at_ms: now_unix_ms(),
             phase: PHASE_DETECTING.to_string(),
+            gate_reason: Some(reason),
         };
 
         log_timing(&id, "detected", t0);
@@ -1376,12 +1948,17 @@ impl NetworkGuard {
             None => {
                 // Fail-closed: the gate stays `Pending`, the window stays (and is not reopened);
                 // the user can block, or the hold expires and blocks.
+                let reason =
+                    "Не удалось проверить новую сеть после смены IP — запросы временно остановлены"
+                        .to_string();
+                self.set_gate_reason(Some(reason.clone()));
                 let enriched = EnrichedPayload {
                     id: id.to_string(),
                     epoch,
                     phase: PHASE_FAILED.to_string(),
                     report: None,
                     network_change: network_change(old.as_ref(), Some(new_ip), None),
+                    gate_reason: Some(reason),
                 };
                 env.hold_queue.update_alert(&enriched);
                 env.emit("interceptor://enriched", &enriched);
@@ -1392,24 +1969,86 @@ impl NetworkGuard {
                 let tel = summary.tel.clone();
                 if let Some(p) = inner.pending.as_mut() {
                     p.tel = Some(tel.clone());
+                    p.affected_providers = summary.affected_providers.clone();
+                    p.healthy_providers = summary.healthy_providers.clone();
+                }
+                if !summary.healthy_providers.is_empty() {
+                    self.apply_provider_gates(
+                        unrouted,
+                        &summary.healthy_providers,
+                        &summary.affected_providers,
+                        Gate::Pending,
+                    );
                 }
                 self.update_tray(env, &summary.tray).await;
+                let net_change = network_change(
+                    old.as_ref(),
+                    Some(tel.ip.clone()),
+                    Some(tel.country_code.clone()),
+                );
+                let reason = build_gate_reason(Some(&summary.worst), Some(&net_change), false);
+                if summary.affected_providers.is_empty() {
+                    self.set_gate_reason(None);
+                } else {
+                    self.set_gate_reason(Some(reason.clone()));
+                }
                 let enriched = EnrichedPayload {
                     id: id.to_string(),
                     epoch,
                     phase: PHASE_READY.to_string(),
                     report: Some(summary.worst.clone()),
-                    network_change: network_change(
-                        old.as_ref(),
-                        Some(tel.ip.clone()),
-                        Some(tel.country_code.clone()),
-                    ),
+                    network_change: net_change,
+                    gate_reason: (!summary.affected_providers.is_empty()).then_some(reason),
                 };
                 env.hold_queue.update_alert(&enriched);
                 env.emit("interceptor://enriched", &enriched);
                 log_timing(id, "enriched_ready", t0);
                 // After `enriched`: the main window starts its own audit on this event.
                 env.emit("network://changed", &summary.worst);
+
+                if summary.affected_providers.is_empty() && !summary.healthy_providers.is_empty() {
+                    let clear_old_state = inner
+                        .pending
+                        .as_mut()
+                        .and_then(|p| p.clear_old_state.take());
+                    if let Some(p) = inner.invalidate_alert() {
+                        env.hold_queue.remove(&p.id).await;
+                    }
+                    if let Some(clear) = clear_old_state {
+                        let _ = clear.await;
+                    }
+                    let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
+                    inner.baseline = Some(Baseline {
+                        ip,
+                        country: Some(tel.country_code.clone()),
+                        trusted: true,
+                    });
+                    inner.handled_ip = None;
+                    self.clear_until_network_change_locked(&mut inner);
+                    if !self.is_manual_killswitch() {
+                        self.set_gate_reason(None);
+                        let _ = env.state.clear_blocked_providers().await;
+                    }
+                    let now = crate::auditor::network::current_timestamp();
+                    for p in unrouted {
+                        let entry = IpHistoryEntry::new(
+                            tel.ip.clone(),
+                            tel.country_code.clone(),
+                            tel.asn,
+                            now,
+                        );
+                        let _ = env
+                            .state
+                            .record_ip_history_for_selection(
+                                p,
+                                &crate::routing::RouteSelection::Direct,
+                                entry,
+                            )
+                            .await;
+                    }
+                    self.set_gate(Gate::Open);
+                    self.hide_popup(env);
+                }
             }
         }
     }
@@ -1435,9 +2074,14 @@ impl NetworkGuard {
             }
             let pending = inner.invalidate_alert();
             env.hold_queue.remove(&id).await;
-            let (tel, clear_old_state) = match pending {
-                Some(p) => (p.tel, p.clear_old_state),
-                None => (None, None),
+            let (tel, clear_old_state, affected, healthy) = match pending {
+                Some(p) => (
+                    p.tel,
+                    p.clear_old_state,
+                    p.affected_providers,
+                    p.healthy_providers,
+                ),
+                None => (None, None, Vec::new(), Vec::new()),
             };
             if let Some(clear) = clear_old_state {
                 // The old network's clean-up lands before anything this decision writes.
@@ -1454,10 +2098,45 @@ impl NetworkGuard {
                 }
                 eprintln!("Network guard: allow without a finished audit, traffic stays blocked");
             }
-            for p in env.state.unrouted_providers().await {
+            let unrouted = env.state.unrouted_providers().await;
+            let (to_block, to_open) = if affected.is_empty() {
+                let open = if healthy.is_empty() {
+                    unrouted.clone()
+                } else {
+                    healthy
+                };
+                (Vec::new(), open)
+            } else {
+                (affected, healthy)
+            };
+            for p in &to_block {
                 let _ = env.state.block_provider(p).await;
             }
-            guard.set_gate(Gate::Blocked);
+            if !to_block.is_empty() && to_open.is_empty() && !guard.is_manual_killswitch() {
+                guard.set_pause_mode_raw(PauseMode::UntilNetworkChange);
+                if guard.gate_reason().is_none() {
+                    guard.set_gate_reason(Some(
+                        "Запросы на паузе до следующей смены сети".to_string(),
+                    ));
+                }
+                inner.paused_ip = inner
+                    .observed_ip
+                    .clone()
+                    .or_else(|| inner.handled_ip.clone());
+            } else if to_block.is_empty() && !guard.is_manual_killswitch() {
+                guard.clear_until_network_change_locked(&mut inner);
+                guard.set_gate_reason(None);
+                if let Some(ref tel) = tel {
+                    let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
+                    inner.baseline = Some(Baseline {
+                        ip,
+                        country: Some(tel.country_code.clone()),
+                        trusted: true,
+                    });
+                    inner.handled_ip = None;
+                }
+            }
+            guard.apply_provider_gates(&unrouted, &to_open, &to_block, Gate::Blocked);
             guard.hide_popup(&env);
             guard.spawn_refresh_tray(&env);
         });
@@ -1477,6 +2156,10 @@ impl NetworkGuard {
             trusted: true,
         });
         inner.handled_ip = None;
+        self.clear_until_network_change_locked(inner);
+        if !self.is_manual_killswitch() {
+            self.set_gate_reason(None);
+        }
         if let Some(p) = inner.invalidate_alert() {
             env.hold_queue.remove(&p.id).await;
         }
@@ -1485,7 +2168,10 @@ impl NetworkGuard {
         let now = crate::auditor::network::current_timestamp();
         for p in env.state.unrouted_providers().await {
             let entry = IpHistoryEntry::new(tel.ip.clone(), tel.country_code.clone(), tel.asn, now);
-            let _ = env.state.record_ip_history(p, entry).await;
+            let _ = env
+                .state
+                .record_ip_history_for_selection(p, &crate::routing::RouteSelection::Direct, entry)
+                .await;
         }
 
         if !self.is_manual_killswitch() {
@@ -1511,12 +2197,15 @@ impl NetworkGuard {
             env.hold_queue.remove(&p.id).await;
         }
         inner.handled_ip = None;
+        self.clear_until_network_change_locked(&mut inner);
+        self.set_gate_reason(None);
         inner.baseline = Some(Baseline {
             ip: tel.ip.clone(),
             country: Some(tel.country_code.clone()),
             trusted: true,
         });
-        self.set_gate(Gate::Open);
+        let st = env.state.get_data().await;
+        self.sync_gates_with_blocked(&st.blocked_providers);
         self.hide_popup(env);
     }
 
@@ -1526,6 +2215,10 @@ impl NetworkGuard {
             env.hold_queue.remove(&p.id).await;
         }
         inner.handled_ip = None;
+        self.clear_until_network_change_locked(inner);
+        if !self.is_manual_killswitch() {
+            self.set_gate_reason(None);
+        }
         env.auditor.resolver.invalidate_cache().await;
         if !self.is_manual_killswitch() {
             let _ = env.state.clear_blocked_providers().await;
@@ -1548,7 +2241,7 @@ impl NetworkGuard {
             return;
         }
         let mut inner = self.inner.lock().await;
-        if self.gate() == Gate::Open {
+        if !self.any_provider_gate_closed() {
             return;
         }
         match env.resolve_telemetry().await {
@@ -1581,7 +2274,8 @@ impl NetworkGuard {
             match resolved {
                 Ok(t) => {
                     let ip = inner.observed_ip.clone().unwrap_or_else(|| t.ip.clone());
-                    if self.gate() != Gate::Open {
+                    let st = env.state.get_data().await;
+                    if self.any_provider_gate_closed() && st.blocked_providers.is_empty() {
                         self.accept_locked(env, &mut inner, &ip, &t).await;
                     } else {
                         if let Some(p) = inner.invalidate_alert() {
@@ -1593,11 +2287,14 @@ impl NetworkGuard {
                             trusted: true,
                         });
                         inner.handled_ip = None;
-                        self.set_gate(Gate::Open);
+                        self.clear_until_network_change_locked(&mut inner);
+                        self.set_gate_reason(None);
+                        self.sync_gates_with_blocked(&st.blocked_providers);
+                        self.hide_popup(env);
                     }
                 }
                 Err(e) => {
-                    if self.gate() == Gate::Open {
+                    if !self.any_provider_gate_closed() {
                         if let Some(b) = inner.baseline.as_mut() {
                             b.trusted = true;
                         }
@@ -1621,7 +2318,7 @@ impl NetworkGuard {
             });
             inner.handled_ip = None;
             self.set_gate(Gate::Open);
-        } else if self.gate() == Gate::Open {
+        } else if !self.any_provider_gate_closed() {
             if let Some(b) = inner.baseline.as_mut() {
                 b.trusted = true;
             }
@@ -1639,7 +2336,12 @@ impl NetworkGuard {
         id: &str,
         providers: &[String],
     ) -> Result<(), AllowError> {
-        let env = self.env.get().ok_or_else(|| AllowError::new(AllowErrorCode::GuardNotRunning, "network guard is not running"))?;
+        let env = self.env.get().ok_or_else(|| {
+            AllowError::new(
+                AllowErrorCode::GuardNotRunning,
+                "network guard is not running",
+            )
+        })?;
         if self.is_manual_killswitch() {
             return Err(AllowError::new(
                 AllowErrorCode::BlockedByManualKillswitch,
@@ -1693,7 +2395,7 @@ impl NetworkGuard {
             .as_deref()
             .map(|p| p.trim() == report.telemetry.ip.trim())
             .unwrap_or(false);
-        let held = self.gate() != Gate::Open || !st.blocked_providers.is_empty();
+        let held = self.any_provider_gate_closed() || !st.blocked_providers.is_empty();
         let tray_report = effective_tray_report(report, held, &st);
         env.io.tray_report(&tray_report, is_pinned, held);
     }
@@ -2861,7 +3563,10 @@ mod tests {
 
         let io = Arc::new(TestIo::default());
         let state = AppState::new_in_memory();
-        state.set_pinned_ip(Some("1.1.1.1".to_string())).await.unwrap();
+        state
+            .set_pinned_ip(Some("1.1.1.1".to_string()))
+            .await
+            .unwrap();
         state
             .set_interception_behavior(crate::state::InterceptionBehavior::AutoLockSilent)
             .await
@@ -2922,9 +3627,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_returning_to_baseline_with_critical_audit_stays_blocked() {
         let audit: AuditFn = Arc::new(move |provider, _force| {
-            Box::pin(async move {
-                Ok(test_report(provider, OverallStatus::Red, "1.1.1.1", "RU"))
-            })
+            Box::pin(async move { Ok(test_report(provider, OverallStatus::Red, "1.1.1.1", "RU")) })
         });
         let io = Arc::new(TestIo::default());
         let state = AppState::new_in_memory();
@@ -3050,8 +3753,7 @@ mod tests {
         }
         assert_eq!(h.guard.gate(), Gate::Open);
 
-        let tel =
-            test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU").telemetry;
+        let tel = test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU").telemetry;
         h.guard.confirm_current_session(Some(&tel)).await;
         {
             let inner = h.guard.inner.lock().await;
@@ -3099,7 +3801,15 @@ mod tests {
         h.guard.check_route_and_tick(&h.env).await;
         assert_eq!(h.guard.gate(), Gate::Open);
         assert_eq!(h.io.count("interceptor://risk-detected"), 0);
-        assert!(h.guard.inner.lock().await.baseline.as_ref().is_some_and(|b| b.trusted));
+        assert!(
+            h.guard
+                .inner
+                .lock()
+                .await
+                .baseline
+                .as_ref()
+                .is_some_and(|b| b.trusted)
+        );
         for p in KNOWN_PROVIDERS {
             assert!(h.state.is_provider_session_allowed(p).await);
         }
@@ -3151,5 +3861,444 @@ mod tests {
             h.guard.inner.lock().await.observed_ip.as_deref(),
             Some("9.9.9.9")
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_reason_populated_on_detected_and_enriched_events() {
+        let h = harness(
+            slow_audit(Duration::from_millis(20), "9.9.9.9", OverallStatus::Red),
+            "9.9.9.9",
+        )
+        .await;
+
+        let fp = compute_local_route_fingerprint(None);
+        {
+            let mut inner = h.guard.inner.lock().await;
+            inner.last_route_fp = Some(format!("{fp}-old"));
+            inner.route_dirty = true;
+        }
+        h.guard.check_route_and_tick(&h.env).await;
+
+        let pending_alert = h.env.hold_queue.current_alert().expect("alert emitted");
+        let initial_reason = pending_alert
+            .gate_reason
+            .clone()
+            .expect("gate_reason present during detecting phase");
+        assert!(!initial_reason.trim().is_empty());
+        assert_eq!(
+            h.guard.gate_reason().as_deref(),
+            Some(initial_reason.as_str())
+        );
+
+        h.io.wait_for("interceptor://enriched", 1000)
+            .await
+            .expect("enriched event emitted");
+
+        let enriched = h
+            .env
+            .hold_queue
+            .current_alert()
+            .expect("alert still held after audit");
+        assert_eq!(enriched.phase, PHASE_READY);
+        assert!(
+            enriched
+                .gate_reason
+                .as_deref()
+                .is_some_and(|r| !r.trim().is_empty()),
+            "expected enriched gate_reason, got {:?}",
+            enriched.gate_reason
+        );
+        assert_eq!(h.guard.gate_reason(), enriched.gate_reason);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_until_network_change_stays_on_same_ip_and_clears_on_change_or_invalidate_cache()
+    {
+        let probe_ip = Arc::new(std::sync::Mutex::new("1.1.1.1".to_string()));
+        let probe_ip_env = Arc::clone(&probe_ip);
+        let h = harness_env(
+            slow_audit(Duration::from_millis(10), "1.1.1.1", OverallStatus::Green),
+            "1.1.1.1",
+            move |env| {
+                env.probe = Some(Arc::new(move || {
+                    let ip = probe_ip_env.lock().unwrap().clone();
+                    Box::pin(async move { Some(ip) })
+                }));
+            },
+        )
+        .await;
+
+        // 1. Engage PauseMode::UntilNetworkChange on baseline 1.1.1.1.
+        let status = h
+            .guard
+            .pause_until_network_change(&h.state, Some("Пауза на время теста".to_string()))
+            .await;
+        assert!(status.paused);
+        assert_eq!(status.mode, PauseMode::UntilNetworkChange);
+        assert_eq!(status.gate, "blocked");
+        assert_eq!(status.gate_reason.as_deref(), Some("Пауза на время теста"));
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+        assert!(!h.state.get_data().await.blocked_providers.is_empty());
+
+        // Same IP tick (after probe interval) MUST keep PauseMode::UntilNetworkChange.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+
+        // 2. invalidate_cache_and_clear_pause automatically clears UntilNetworkChange pause.
+        let dummy_tel = NetworkTelemetry {
+            ip: "1.1.1.1".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: None,
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: crate::auditor::network::current_timestamp(),
+        };
+        h.env.auditor.resolver.set_cached(dummy_tel).await;
+        let cleared = h
+            .guard
+            .invalidate_cache_and_clear_pause(&h.env.auditor.resolver, Some(&h.state))
+            .await;
+        assert!(cleared);
+        assert_eq!(h.guard.pause_mode(), PauseMode::None);
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert!(h.guard.gate_reason().is_none());
+        assert!(h.state.get_data().await.blocked_providers.is_empty());
+
+        // 3. Re-engage UntilNetworkChange and trigger a real IP/network change on next tick -> cleared.
+        h.guard
+            .pause_until_network_change(&h.state, Some("Ждём новую сеть".to_string()))
+            .await;
+        assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
+        {
+            let mut w = probe_ip.lock().unwrap();
+            *w = "9.9.9.9".to_string();
+        }
+        {
+            // `last_probe` uses `std::time::Instant`; clear it so the next tick runs the probe.
+            let mut inner = h.guard.inner.lock().await;
+            inner.last_probe = None;
+        }
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.guard.pause_mode(), PauseMode::None);
+
+        // 4. Manual kill-switch must NEVER clear on invalidate_cache_and_clear_pause.
+        h.guard.set_manual_killswitch(true, &h.state).await;
+        assert_eq!(h.guard.pause_mode(), PauseMode::Manual);
+        assert!(
+            !h.guard
+                .invalidate_cache_and_clear_pause(&h.env.auditor.resolver, Some(&h.state))
+                .await
+        );
+        assert_eq!(h.guard.pause_mode(), PauseMode::Manual);
+        assert_eq!(h.guard.gate(), Gate::Blocked);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_red_claude_never_blocks_healthy_chatgpt_ask_popup() {
+        let audit: AuditFn = Arc::new(|provider, _force| {
+            Box::pin(async move {
+                match provider {
+                    ProviderId::Anthropic => {
+                        let mut r = test_report(provider, OverallStatus::Red, "203.0.113.10", "GB");
+                        r.checks = vec![CheckResult::critical(
+                            "IMPOSSIBLE_TRAVEL_CRITICAL",
+                            "Country changed FR -> GB in 2 min",
+                            None,
+                        )];
+                        Ok(r)
+                    }
+                    ProviderId::Openai => Ok(test_report(
+                        provider,
+                        OverallStatus::Green,
+                        "203.0.113.10",
+                        "GB",
+                    )),
+                    ProviderId::Gemini => Ok(test_report(
+                        provider,
+                        OverallStatus::Green,
+                        "136.244.114.42",
+                        "FR",
+                    )),
+                }
+            })
+        });
+
+        let h = harness(audit, "203.0.113.10").await;
+        // Bind Gemini to a Zastava key so only Anthropic & OpenAI are unrouted.
+        let fr_route =
+            crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+        let fr_id = h.state.upsert_route(fr_route).await.unwrap();
+        h.state
+            .bind_provider_route("gemini", Some(&fr_id))
+            .await
+            .unwrap();
+
+        h.change("203.0.113.10").await;
+        let enriched =
+            h.io.wait_for("interceptor://enriched", 3000)
+                .await
+                .expect("enriched");
+        let id = enriched.0["id"].as_str().expect("alert id");
+
+        // Healthy ChatGPT is immediately open once audit confirms OpenAI is Green;
+        // Claude stays Pending waiting for decision.
+        assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Pending);
+        assert_eq!(h.guard.gate_for(ProviderId::Gemini), Gate::Open);
+
+        // User blocks the alert (or hold TTL expires) -> ONLY Claude is blocked.
+        h.env.hold_queue.resolve(id, HoldResolution::Block).await;
+        tokio::task::yield_now().await;
+        for _ in 0..10 {
+            if h.guard.gate_for(ProviderId::Anthropic) == Gate::Blocked {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
+        assert!(h.state.is_provider_blocked("anthropic").await);
+        assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
+        assert!(!h.state.is_provider_blocked("openai").await);
+        assert_eq!(h.guard.gate_for(ProviderId::Gemini), Gate::Open);
+        assert!(!h.state.is_provider_blocked("gemini").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_red_claude_never_blocks_healthy_chatgpt_silent_and_auto_allow() {
+        for behavior in [
+            InterceptionBehavior::AutoLockSilent,
+            InterceptionBehavior::AutoAllowTrusted,
+        ] {
+            let audit: AuditFn = Arc::new(|provider, _force| {
+                Box::pin(async move {
+                    match provider {
+                        ProviderId::Anthropic => {
+                            let mut r =
+                                test_report(provider, OverallStatus::Red, "203.0.113.10", "GB");
+                            r.checks = vec![CheckResult::critical(
+                                "IMPOSSIBLE_TRAVEL_CRITICAL",
+                                "Country changed FR -> GB in 2 min",
+                                None,
+                            )];
+                            Ok(r)
+                        }
+                        ProviderId::Openai => Ok(test_report(
+                            provider,
+                            OverallStatus::Green,
+                            "203.0.113.10",
+                            "GB",
+                        )),
+                        ProviderId::Gemini => Ok(test_report(
+                            provider,
+                            OverallStatus::Green,
+                            "136.244.114.42",
+                            "FR",
+                        )),
+                    }
+                })
+            });
+
+            let h = harness(audit, "203.0.113.10").await;
+            let fr_route =
+                crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+            let fr_id = h.state.upsert_route(fr_route).await.unwrap();
+            h.state
+                .bind_provider_route("gemini", Some(&fr_id))
+                .await
+                .unwrap();
+            h.state.set_interception_behavior(behavior).await.unwrap();
+
+            {
+                let mut inner = h.guard.inner.lock().await;
+                inner.route_dirty = true;
+            }
+            h.guard.check_route_and_tick(&h.env).await;
+
+            assert_eq!(
+                h.guard.gate_for(ProviderId::Anthropic),
+                Gate::Blocked,
+                "anthropic must be blocked under {behavior:?}"
+            );
+            assert!(
+                h.state.is_provider_blocked("anthropic").await,
+                "anthropic must be in blocked_providers under {behavior:?}"
+            );
+            assert_eq!(
+                h.guard.gate_for(ProviderId::Openai),
+                Gate::Open,
+                "healthy openai must remain Open under {behavior:?}"
+            );
+            assert!(
+                !h.state.is_provider_blocked("openai").await,
+                "healthy openai must not be collaterally blocked under {behavior:?}"
+            );
+            assert_eq!(h.guard.gate_for(ProviderId::Gemini), Gate::Open);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_finish_audit_opens_all_healthy_providers_when_affected_is_empty() {
+        let audit: AuditFn = Arc::new(|provider, _force| {
+            Box::pin(async move {
+                Ok(test_report(
+                    provider,
+                    OverallStatus::Green,
+                    "145.241.193.245",
+                    "GB",
+                ))
+            })
+        });
+        let h = harness(audit, "145.241.193.245").await;
+        let fr_route =
+            crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+        let fr_id = h.state.upsert_route(fr_route).await.unwrap();
+        h.state
+            .bind_provider_route("gemini", Some(&fr_id))
+            .await
+            .unwrap();
+
+        h.change("145.241.193.245").await;
+        let enriched =
+            h.io.wait_for("interceptor://enriched", 3000)
+                .await
+                .expect("enriched");
+        assert_eq!(enriched.0["phase"], "ready");
+
+        // Both unrouted providers audited Green -> must immediately transition to Gate::Open,
+        // never stuck in Pending or written to blocked_providers.
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Gemini), Gate::Open);
+        assert!(h.state.get_data().await.blocked_providers.is_empty());
+        assert_eq!(h.guard.pause_mode(), PauseMode::None);
+        assert!(h.guard.gate_reason().is_none());
+        assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_spawn_decision_waiter_with_empty_affected_never_blocks_unrouted_providers() {
+        for resolution in [None, Some(HoldResolution::Block)] {
+            let h = harness(
+                slow_audit(
+                    Duration::from_millis(10),
+                    "145.241.193.245",
+                    OverallStatus::Green,
+                ),
+                "145.241.193.245",
+            )
+            .await;
+            let fr_route =
+                crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+            let fr_id = h.state.upsert_route(fr_route).await.unwrap();
+            h.state
+                .bind_provider_route("gemini", Some(&fr_id))
+                .await
+                .unwrap();
+
+            let id = "waiter-empty-affected".to_string();
+            let rx = h.env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
+            let tel = test_report(
+                ProviderId::Anthropic,
+                OverallStatus::Green,
+                "145.241.193.245",
+                "GB",
+            )
+            .telemetry;
+            let epoch = {
+                let mut inner = h.guard.inner.lock().await;
+                inner.observed_ip = Some("145.241.193.245".to_string());
+                inner.pending = Some(Pending {
+                    id: id.clone(),
+                    epoch: inner.epoch,
+                    tel: Some(tel),
+                    clear_old_state: None,
+                    affected_providers: Vec::new(),
+                    healthy_providers: vec!["anthropic", "openai"],
+                });
+                inner.epoch
+            };
+            h.guard.set_gate(Gate::Pending);
+            h.guard.spawn_decision_waiter(&h.env, id.clone(), epoch, rx);
+
+            if let Some(res) = resolution {
+                assert!(h.env.hold_queue.resolve(&id, res).await);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            } else {
+                tokio::time::sleep(Duration::from_secs(DEFAULT_HOLD_TTL_SECS + 1)).await;
+            }
+
+            assert_eq!(h.guard.gate(), Gate::Open);
+            assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+            assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
+            assert!(!h.state.is_provider_blocked("anthropic").await);
+            assert!(!h.state.is_provider_blocked("openai").await);
+            assert_eq!(h.guard.pause_mode(), PauseMode::None);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_routing_gemini_does_not_freeze_or_reset_anthropic_and_openai() {
+        let audit: AuditFn = Arc::new(|provider, _force| {
+            Box::pin(async move {
+                Ok(test_report(
+                    provider,
+                    OverallStatus::Green,
+                    "145.241.193.245",
+                    "GB",
+                ))
+            })
+        });
+        let h = harness(audit, "145.241.193.245").await;
+        h.state
+            .set_pinned_ip(Some("145.241.193.245".to_string()))
+            .await
+            .unwrap();
+        h.state.set_strict_pinning_enabled(true).await.unwrap();
+        {
+            let mut inner = h.guard.inner.lock().await;
+            inner.baseline = None;
+            inner.last_route_fp = Some(compute_local_route_fingerprint(None));
+        }
+
+        // Initial startup tick on pinned VPN IP sets baseline cleanly and keeps gates Open.
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
+        assert_eq!(h.io.count("interceptor://risk-detected"), 0);
+
+        // Bind Gemini to a Zastava key -> unrouted shrinks from 3 to 2.
+        let fr_route =
+            crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+        let fr_id = h.state.upsert_route(fr_route).await.unwrap();
+        h.state
+            .bind_provider_route("gemini", Some(&fr_id))
+            .await
+            .unwrap();
+        h.guard.open_routed_providers(&["gemini"]);
+
+        h.guard.inner.lock().await.last_probe = None;
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Gemini), Gate::Open);
+        assert_eq!(h.io.count("interceptor://risk-detected"), 0);
+        assert!(h.state.get_data().await.blocked_providers.is_empty());
+
+        // Even if Gemini is unbound later, healthy Anthropic & OpenAI remain Open.
+        h.state.bind_provider_route("gemini", None).await.unwrap();
+        h.guard.inner.lock().await.last_probe = None;
+        h.guard.check_route_and_tick(&h.env).await;
+        assert_eq!(h.guard.gate(), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+        assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
+        assert_eq!(h.io.count("interceptor://risk-detected"), 0);
     }
 }

@@ -1,17 +1,26 @@
 //! Native signed updater (tauri-plugin-updater, minisign).
 //!
-//! There is deliberately no second download path: no GitHub API fallback, no URL taken from the
-//! frontend, no platform scripts. The package is fetched from the endpoint pinned in
-//! `tauri.conf.json`, verified against the pinned public key, and only then installed. Any error
-//! is reported as an [`UpdateFailure`] and nothing is installed.
+//! There is deliberately no second download path: no unsigned fallback, no URL taken from the
+//! frontend, no platform scripts. Forward updates fetch from the endpoint pinned in
+//! `tauri.conf.json`; signed rollbacks list GitHub releases metadata and fetch `latest.json` from
+//! the canonical `github.com/kingbest1195/ai-antiban/releases/download/v{version}/latest.json`
+//! endpoint, verified against the pinned [`UPDATER_PUBKEY`] minisign key before anything is
+//! installed. Any error is reported as an [`UpdateFailure`] and nothing is installed.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterBuilder, UpdaterExt};
 
 pub const GITHUB_REPO: &str = "kingbest1195/ai-antiban";
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Pinned minisign public key matching `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`).
+pub const UPDATER_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE0QjJEMDA1QzQ5MjEwNUEKUldSYUVKTEVCZEN5cEE5R1JsaWFnbFVoWi9hRmExZExpTUpiaGdadjZ2ZTJ3a1R3MzUxMy91SkkK";
+const GITHUB_RELEASES_API_URL: &str =
+    "https://api.github.com/repos/kingbest1195/ai-antiban/releases?per_page=15";
+const ROLLBACK_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const ROLLBACK_MAX_RELEASES: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateCheckResult {
@@ -44,6 +53,40 @@ pub struct InstallUpdateResult {
     pub success: bool,
     pub message: String,
     pub will_restart: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackReleaseInfo {
+    pub version: String,
+    pub tag: String,
+    pub name: String,
+    pub published_at: Option<String>,
+    pub notes_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    published_at: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    browser_download_url: Option<String>,
 }
 
 /// Why an update check or installation failed. Serialized for the frontend as
@@ -102,7 +145,10 @@ pub fn parse_semver(ver: &str) -> Option<(u32, u32, u32)> {
 /// The pre-release tail of a version (`"2.1.0-rc.1"` -> `Some("rc.1")`), if any.
 fn pre_release(ver: &str) -> Option<&str> {
     let clean = ver.trim().trim_start_matches(['v', 'V']);
-    clean.split_once('-').map(|(_, pre)| pre).filter(|p| !p.is_empty())
+    clean
+        .split_once('-')
+        .map(|(_, pre)| pre)
+        .filter(|p| !p.is_empty())
 }
 
 /// Orders two pre-release tails the way semver does: dot-separated identifiers, numbers compare
@@ -137,11 +183,132 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
         (Some(cur), Some(lat)) if cur != lat => lat > cur,
         (Some(_), Some(_)) => match (pre_release(current), pre_release(latest)) {
             (Some(_), None) => true,
-            (Some(c), Some(l)) => compare_pre_release(c, l) == std::cmp::Ordering::Less,
+            (Some(c), Some(l)) => compare_pre_release(c, l) == Ordering::Less,
             (None, _) => false,
         },
         _ => false,
     }
+}
+
+/// Strictly validates and normalizes a SemVer string (`major.minor.patch`, optional `-pre`),
+/// stripping at most one leading `v`/`V`. Rejects empty strings, missing/extra dot segments,
+/// leading zeros on multi-digit numeric parts, and URL-unsafe characters.
+pub fn normalize_semver(ver: &str) -> Option<String> {
+    let trimmed = ver.trim();
+    let clean = trimmed.strip_prefix(['v', 'V']).unwrap_or(trimmed);
+    if clean.is_empty() {
+        return None;
+    }
+    let (core, pre) = match clean.split_once('-') {
+        Some((c, p)) => {
+            if p.is_empty()
+                || p.starts_with('.')
+                || p.ends_with('.')
+                || p.contains("..")
+                || !p
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            {
+                return None;
+            }
+            (c, Some(p))
+        }
+        None => (clean, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    for part in &parts {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if part.len() > 1 && part.starts_with('0') {
+            return None;
+        }
+        part.parse::<u32>().ok()?;
+    }
+    Some(match pre {
+        Some(p) => format!("{core}-{p}"),
+        None => core.to_string(),
+    })
+}
+
+/// Returns `true` if `candidate` is a valid SemVer strictly older than `current`.
+pub fn is_older_version(current: &str, candidate: &str) -> bool {
+    let (Some(cur), Some(cand)) = (normalize_semver(current), normalize_semver(candidate)) else {
+        return false;
+    };
+    is_newer_version(&cand, &cur)
+}
+
+fn compare_semver_desc(a: &str, b: &str) -> Ordering {
+    if is_newer_version(b, a) {
+        Ordering::Less
+    } else if is_newer_version(a, b) {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+/// Parses GitHub Releases API JSON into rollback-eligible releases strictly older than
+/// `current_version`, sorted newest-first and capped at [`ROLLBACK_MAX_RELEASES`].
+pub fn parse_rollback_releases(
+    json_str: &str,
+    current_version: &str,
+) -> Result<Vec<RollbackReleaseInfo>, UpdateFailure> {
+    let releases: Vec<GitHubRelease> =
+        serde_json::from_str(json_str).map_err(|_| UpdateFailure::NoRelease)?;
+    let repo_prefix = format!("https://github.com/{GITHUB_REPO}/");
+
+    let mut items: Vec<RollbackReleaseInfo> = releases
+        .into_iter()
+        .filter(|r| !r.draft && !r.prerelease)
+        .filter(|r| r.assets.iter().any(|a| a.name == "latest.json"))
+        .filter_map(|r| {
+            let version = normalize_semver(&r.tag_name)?;
+            if !is_older_version(current_version, &version) {
+                return None;
+            }
+            let name = r
+                .name
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("Zastava v{version}"));
+            let notes_url = r
+                .html_url
+                .map(|u| u.trim().to_string())
+                .filter(|u| u.starts_with(&repo_prefix))
+                .unwrap_or_else(|| release_url_for(&version));
+            Some(RollbackReleaseInfo {
+                version,
+                tag: r.tag_name.trim().to_string(),
+                name,
+                published_at: r.published_at,
+                notes_url,
+            })
+        })
+        .collect();
+
+    items.sort_by(|a, b| compare_semver_desc(&a.version, &b.version));
+    items.dedup_by(|a, b| a.version == b.version);
+    items.truncate(ROLLBACK_MAX_RELEASES);
+    Ok(items)
+}
+
+/// Validates a target rollback version and builds the canonical `github.com` `latest.json` URL.
+pub fn rollback_manifest_url(version: &str) -> Result<(String, url::Url), UpdateFailure> {
+    let clean = normalize_semver(version).ok_or(UpdateFailure::NoRelease)?;
+    if !is_older_version(CURRENT_VERSION, &clean) {
+        return Err(UpdateFailure::NoRelease);
+    }
+    let raw = format!("https://github.com/{GITHUB_REPO}/releases/download/v{clean}/latest.json");
+    let url = url::Url::parse(&raw).map_err(|_| UpdateFailure::NoRelease)?;
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        return Err(UpdateFailure::NoRelease);
+    }
+    Ok((clean, url))
 }
 
 /// Release page for a version, always on our own repository.
@@ -329,14 +496,94 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
         return Err(UpdateFailure::NoRelease);
     }
 
+    run_install_pipeline(app, update, false).await
+}
+
+/// Fetches recent GitHub Releases and returns signed releases strictly older than
+/// [`CURRENT_VERSION`] (newest-first, up to 8 entries) that include a `latest.json` asset.
+pub async fn list_rollback_versions() -> Result<Vec<RollbackReleaseInfo>, UpdateFailure> {
+    let client = reqwest::Client::builder()
+        .timeout(ROLLBACK_HTTP_TIMEOUT)
+        .build()
+        .map_err(|_| UpdateFailure::Network)?;
+
+    let resp = client
+        .get(GITHUB_RELEASES_API_URL)
+        .header(reqwest::header::USER_AGENT, "Zastava-Updater")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|_| UpdateFailure::Network)?;
+
+    if !resp.status().is_success() {
+        return Err(UpdateFailure::Network);
+    }
+
+    let body = resp.text().await.map_err(|_| UpdateFailure::Network)?;
+    parse_rollback_releases(&body, CURRENT_VERSION)
+}
+
+/// Builds a rollback [`UpdaterBuilder`] pinned to [`UPDATER_PUBKEY`] and the exact target version.
+pub fn rollback_updater_builder<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    manifest_url: url::Url,
+    target_version: String,
+) -> Result<UpdaterBuilder, UpdateFailure> {
+    app.updater_builder()
+        .pubkey(UPDATER_PUBKEY)
+        .endpoints(vec![manifest_url])
+        .map_err(|e| map_error(&e))
+        .map(|b| {
+            b.version_comparator(move |_current, release| {
+                let rel_ver = release.version.to_string();
+                rel_ver == target_version && is_older_version(CURRENT_VERSION, &rel_ver)
+            })
+        })
+}
+
+/// Downloads, verifies (minisign), and installs a signed older release for rollback.
+pub async fn install_rollback_version(
+    app: &tauri::AppHandle,
+    version: &str,
+) -> Result<InstallUpdateResult, UpdateFailure> {
+    let (target_version, manifest_url) = rollback_manifest_url(version)?;
+    let updater = rollback_updater_builder(app, manifest_url, target_version)?
+        .build()
+        .map_err(|e| map_error(&e))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| map_error(&e))?
+        .ok_or(UpdateFailure::NoRelease)?;
+
+    if !is_older_version(CURRENT_VERSION, &update.version) {
+        return Err(UpdateFailure::NoRelease);
+    }
+
+    run_install_pipeline(app, update, true).await
+}
+
+async fn run_install_pipeline(
+    app: &tauri::AppHandle,
+    update: Update,
+    is_rollback: bool,
+) -> Result<InstallUpdateResult, UpdateFailure> {
+    let status_downloading = if is_rollback {
+        format!(
+            "Скачивание подписанного отката v{} (minisign)...",
+            update.version
+        )
+    } else {
+        format!(
+            "Скачивание подписанного пакета v{} (minisign)...",
+            update.version
+        )
+    };
     let _ = app.emit(
         "updater://status",
         UpdateStatusPayload {
             stage: "downloading".to_string(),
-            message: format!(
-                "Скачивание подписанного пакета v{} (minisign)...",
-                update.version
-            ),
+            message: status_downloading,
         },
     );
     emit_progress(app, 0, 0, 5, "Подключение к репозиторию релизов...");
@@ -395,7 +642,7 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
                     cli: crate::sysproxy::is_cli_protection_enabled(),
                 });
             }
-            crate::sysproxy::cleanup_all_persistent_settings();
+            let _ = crate::sysproxy::cleanup_on_shutdown_once(Some(&app_off), "update");
             let total = total_off.load(std::sync::atomic::Ordering::Relaxed);
             emit_progress(
                 &app_off,
@@ -407,6 +654,7 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
         },
         |u, bytes| u.install(bytes),
         move || {
+            crate::sysproxy::reset_shutdown_cleanup_guard();
             let snap = snap_restore.lock().ok().and_then(|mut g| g.take());
             restore_protection(snap, pac_url, mode, tz)
         },
@@ -414,11 +662,16 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
     .await?;
 
     emit_progress(app, 100, 100, 100, "Перезапуск Заставы...");
+    let status_installed = if is_rollback {
+        "Подписанный откат версии проверен и установлен!"
+    } else {
+        "Подписанное обновление проверено и установлено!"
+    };
     let _ = app.emit(
         "updater://status",
         UpdateStatusPayload {
             stage: "installing".to_string(),
-            message: "Подписанное обновление проверено и установлено!".to_string(),
+            message: status_installed.to_string(),
         },
     );
 
@@ -426,16 +679,24 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(400)).await;
-        crate::sysproxy::cleanup_all_persistent_settings();
         app_clone.restart();
     });
 
-    Ok(InstallUpdateResult {
-        success: true,
-        message: format!(
+    let result_message = if is_rollback {
+        format!(
+            "Подписанный откат на версию v{} проверен (minisign) и установлен! Застава сейчас перезапустится.",
+            update.version
+        )
+    } else {
+        format!(
             "Подписанное обновление v{} проверено (minisign) и установлено! Застава сейчас перезапустится.",
             update.version
-        ),
+        )
+    };
+
+    Ok(InstallUpdateResult {
+        success: true,
+        message: result_message,
         will_restart: true,
     })
 }
@@ -474,7 +735,10 @@ mod tests {
         assert!(is_newer_version("2.1.0-2", "2.1.0-10"));
         assert!(!is_newer_version("2.1.0-10", "2.1.0-2"));
         assert!(is_newer_version("2.1.0-rc.1", "2.1.0-rc.2"));
-        assert!(is_newer_version("2.1.0-1", "2.1.0-rc.1"), "a number sorts before a word");
+        assert!(
+            is_newer_version("2.1.0-1", "2.1.0-rc.1"),
+            "a number sorts before a word"
+        );
         // A different numeric core always wins.
         assert!(is_newer_version("2.0.0", "2.1.0-1"));
         assert!(!is_newer_version("2.1.0-1", "2.0.9"));
@@ -581,6 +845,200 @@ mod tests {
         assert_eq!(
             r.release_url,
             "https://github.com/kingbest1195/ai-antiban/releases/latest"
+        );
+    }
+
+    #[test]
+    fn test_normalize_semver_and_is_older_version() {
+        assert_eq!(normalize_semver("2.1.0").as_deref(), Some("2.1.0"));
+        assert_eq!(normalize_semver("v2.1.0").as_deref(), Some("2.1.0"));
+        assert_eq!(normalize_semver(" V2.1.0 ").as_deref(), Some("2.1.0"));
+        assert_eq!(
+            normalize_semver("v2.1.0-rc.1").as_deref(),
+            Some("2.1.0-rc.1")
+        );
+
+        // Reject malformed or URL-unsafe inputs.
+        for bad in [
+            "",
+            "   ",
+            "v",
+            "vv2.1.0",
+            "2.1",
+            "2.1.0.4",
+            "01.2.3",
+            "2.1.0+build1",
+            "2.1.0/../../evil",
+            "2.1.0?foo=bar",
+            "2.1.0-rc..1",
+            "2.1.0-",
+            "not-a-version",
+        ] {
+            assert_eq!(normalize_semver(bad), None, "should reject {bad:?}");
+            assert!(!is_older_version("2.2.0", bad));
+        }
+
+        assert!(is_older_version("2.2.0", "2.1.2"));
+        assert!(is_older_version("2.2.0", "v2.1.0"));
+        assert!(is_older_version("2.2.0", "1.3.1"));
+        assert!(is_older_version("2.2.0", "2.2.0-rc.1"));
+        assert!(!is_older_version("2.2.0", "2.2.0"));
+        assert!(!is_older_version("2.2.0", "v2.2.0"));
+        assert!(!is_older_version("2.2.0", "2.2.1"));
+        assert!(!is_older_version("2.2.0", "3.0.0"));
+        assert!(!is_older_version("2.2.0-rc.1", "2.2.0"));
+    }
+
+    #[test]
+    fn test_parse_rollback_releases_filtering_and_sorting() {
+        let payload = serde_json::json!([
+            {
+                "tag_name": "v2.3.0",
+                "name": "Future",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-11-15T00:00:00Z",
+                "html_url": "https://github.com/kingbest1195/ai-antiban/releases/tag/v2.3.0",
+                "assets": [{ "name": "latest.json" }]
+            },
+            {
+                "tag_name": "v2.2.0",
+                "name": "Current",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-11-14T00:00:00Z",
+                "assets": [{ "name": "latest.json" }]
+            },
+            {
+                "tag_name": "v2.1.9",
+                "name": "Draft Release",
+                "draft": true,
+                "prerelease": false,
+                "assets": [{ "name": "latest.json" }]
+            },
+            {
+                "tag_name": "v2.1.8-rc.1",
+                "name": "Prerelease",
+                "draft": false,
+                "prerelease": true,
+                "assets": [{ "name": "latest.json" }]
+            },
+            {
+                "tag_name": "v2.1.7",
+                "name": "No Manifest",
+                "draft": false,
+                "prerelease": false,
+                "assets": [{ "name": "Zastava_2.1.7_aarch64.dmg" }]
+            },
+            {
+                "tag_name": "bad-tag",
+                "name": "Bad Tag",
+                "draft": false,
+                "prerelease": false,
+                "assets": [{ "name": "latest.json" }]
+            },
+            {
+                "tag_name": "v2.0.0",
+                "name": "   ",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-09-01T00:00:00Z",
+                "html_url": "https://evil.example.com/phish",
+                "assets": [{ "name": "latest.json" }]
+            },
+            {
+                "tag_name": "v2.1.2",
+                "name": "Zastava 2.1.2",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-10-10T00:00:00Z",
+                "html_url": "https://github.com/kingbest1195/ai-antiban/releases/tag/v2.1.2",
+                "assets": [{ "name": "latest.json" }]
+            },
+            {
+                "tag_name": "v2.1.0",
+                "name": "Zastava 2.1.0",
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-10-01T00:00:00Z",
+                "assets": [{ "name": "latest.json" }]
+            }
+        ])
+        .to_string();
+
+        let parsed = parse_rollback_releases(&payload, "2.2.0").unwrap();
+        let versions: Vec<&str> = parsed.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(versions, ["2.1.2", "2.1.0", "2.0.0"]);
+
+        assert_eq!(parsed[0].tag, "v2.1.2");
+        assert_eq!(parsed[0].name, "Zastava 2.1.2");
+        assert_eq!(
+            parsed[0].notes_url,
+            "https://github.com/kingbest1195/ai-antiban/releases/tag/v2.1.2"
+        );
+
+        // Fallback name and sanitized notes_url on untrusted html_url:
+        assert_eq!(parsed[2].name, "Zastava v2.0.0");
+        assert_eq!(
+            parsed[2].notes_url,
+            "https://github.com/kingbest1195/ai-antiban/releases/tag/v2.0.0"
+        );
+    }
+
+    #[test]
+    fn test_parse_rollback_releases_caps_at_eight_newest_first() {
+        let releases: Vec<serde_json::Value> = (1..=12)
+            .map(|patch| {
+                serde_json::json!({
+                    "tag_name": format!("v1.0.{patch}"),
+                    "draft": false,
+                    "prerelease": false,
+                    "assets": [{ "name": "latest.json" }]
+                })
+            })
+            .collect();
+        let payload = serde_json::Value::Array(releases).to_string();
+        let parsed = parse_rollback_releases(&payload, "2.2.0").unwrap();
+        assert_eq!(parsed.len(), ROLLBACK_MAX_RELEASES);
+        let versions: Vec<&str> = parsed.iter().map(|r| r.version.as_str()).collect();
+        assert_eq!(
+            versions,
+            [
+                "1.0.12", "1.0.11", "1.0.10", "1.0.9", "1.0.8", "1.0.7", "1.0.6", "1.0.5"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_rollback_manifest_url_validation() {
+        assert_eq!(rollback_manifest_url(""), Err(UpdateFailure::NoRelease));
+        assert_eq!(
+            rollback_manifest_url("2.1.0/../../bad"),
+            Err(UpdateFailure::NoRelease)
+        );
+        assert_eq!(
+            rollback_manifest_url(CURRENT_VERSION),
+            Err(UpdateFailure::NoRelease)
+        );
+        assert_eq!(
+            rollback_manifest_url("99.0.0"),
+            Err(UpdateFailure::NoRelease)
+        );
+
+        let (ver, url) = rollback_manifest_url("v2.1.0").unwrap();
+        assert_eq!(ver, "2.1.0");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("github.com"));
+        assert_eq!(
+            url.as_str(),
+            "https://github.com/kingbest1195/ai-antiban/releases/download/v2.1.0/latest.json"
+        );
+
+        let (ver2, url2) = rollback_manifest_url("2.0.0").unwrap();
+        assert_eq!(ver2, "2.0.0");
+        assert_eq!(
+            url2.as_str(),
+            "https://github.com/kingbest1195/ai-antiban/releases/download/v2.0.0/latest.json"
         );
     }
 }

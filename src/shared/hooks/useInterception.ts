@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { RiskInterceptPayload } from "../../types";
-import { resolveInterception, simulateInterception } from "../../utils/api";
+import { pauseUntilNetworkChange, resolveInterception, simulateInterception } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import { allowErrorText, classifyAllowError } from "../../features/alert/alertState";
 import type { ShowToast } from "./useToasts";
@@ -36,6 +36,25 @@ export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }
     }
   }, [interceptPayload, runFullAudit, showToast]);
 
+  const handlePauseUntilNetworkChange = useCallback(async () => {
+    if (!interceptPayload) return;
+    setAllowError(null);
+    try {
+      await resolveInterception(
+        interceptPayload.id,
+        "BlockUntilNetworkChange",
+        interceptPayload.provider,
+        interceptPayload.scope,
+      );
+      await pauseUntilNetworkChange(interceptPayload.gate_reason ?? undefined);
+      showToast(t.intercept.pausedTitle, t.intercept.pausedText, "info");
+      setInterceptPayload(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(t.intercept.pauseError, msg, "error");
+    }
+  }, [interceptPayload, showToast]);
+
   const handleSimulate = useCallback(async () => {
     try {
       await simulateInterception("anthropic");
@@ -48,5 +67,12 @@ export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }
     }
   }, [onSimulateInBrowser, showToast]);
 
-  return { interceptPayload, setInterceptPayload, allowError, handleAllowInterception, handleSimulate };
+  return {
+    interceptPayload,
+    setInterceptPayload,
+    allowError,
+    handleAllowInterception,
+    handlePauseUntilNetworkChange,
+    handleSimulate,
+  };
 }

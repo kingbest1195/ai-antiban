@@ -15,21 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Shown when an active VPN keeps temporary DNS settings: applying proxy settings could reset
-/// them. Contains no DNS values.
-pub(super) const MSG_TEMP_DNS: &str = "Защита не включена: активный VPN держит временные настройки DNS, \
-и их применение могло бы сбросить DNS этого VPN. Отключите VPN (или подключите его заново \
-после включения защиты) и повторите.";
-
 /// Returned when `networksetup` fails because macOS requires administrator authorization.
 /// The exact `"ADMIN_AUTH_REQUIRED:"` prefix lets the frontend offer a privileged retry.
 pub(super) const MSG_ADMIN_AUTH_REQUIRED: &str = "ADMIN_AUTH_REQUIRED:Не удалось изменить \
 системный прокси без прав администратора macOS. Нажмите «Разрешить с паролем», чтобы \
 подтвердить настройку.";
-
-/// The DNS state could not be checked, so nothing is written.
-pub(super) const MSG_DNS_UNKNOWN: &str = "Защита не включена: не удалось проверить временные \
-настройки DNS активного VPN. Системные настройки не менялись.";
 
 fn msg_incompatible_service(service: &str) -> String {
     format!(
@@ -208,13 +198,14 @@ fn note_changed(outcome: ApplyOutcome, changed: &mut bool) {
     }
 }
 
-/// Puts the PAC on every enabled network service and switches a third-party explicit proxy off
-/// (it is chained through the PAC instead). Used for the first enable and for self-healing: a
-/// repeated call changes nothing that already is as it should be.
+/// Puts the PAC on every enabled physical network service and switches a third-party explicit
+/// proxy off (it is chained through the PAC instead). Used for the first enable and for
+/// self-healing: a repeated call changes nothing that already is as it should be.
 ///
-/// Refuses before ANY write when a VPN keeps temporary DNS settings or when an upstream cannot be
-/// chained safely. Disabled services are not touched; services that appeared since the last
-/// call are picked up.
+/// When a VPN keeps temporary DNS settings (or DNS state cannot be checked), `networksetup` PAC
+/// writes are deferred (`os_pac_deferred = true`, zero OS writes) instead of refusing activation,
+/// so browser PAC policies and CLI/IDE protection can still enable cleanly. Disabled services are
+/// not touched; services that appeared since the last call are picked up.
 pub(super) fn enable_pac(
     j: &mut Journal,
     p: &dyn Platform,
@@ -240,6 +231,30 @@ struct PlannedPac {
     vpn_untouched: Vec<String>,
     unreadable: usize,
     chain_admin_auth: bool,
+    os_pac_deferred: bool,
+}
+
+fn split_services_by_kind(
+    p: &dyn Platform,
+    enabled: &[ServiceId],
+) -> (Vec<ServiceId>, Vec<String>, bool) {
+    // Only physical services are written (or even read for a write). A VPN service, connected or
+    // not, is left alone: the system reconfigures it on any write and a connected tunnel can drop.
+    let mut physical = Vec::new();
+    let mut vpn_untouched = Vec::new();
+    let mut unclassified = false;
+    for (svc, kind) in classify_services(p, enabled) {
+        match kind {
+            ServiceKind::Physical => physical.push(svc),
+            ServiceKind::Vpn { connected: false } => {}
+            ServiceKind::Vpn { connected: true } => vpn_untouched.push(svc.name),
+            ServiceKind::Unknown => {
+                unclassified = true;
+                vpn_untouched.push(svc.name);
+            }
+        }
+    }
+    (physical, vpn_untouched, unclassified)
 }
 
 fn plan_physical_pac(
@@ -247,16 +262,29 @@ fn plan_physical_pac(
     pac_url: &str,
     heal: Option<(&HealGuard, Instant)>,
 ) -> Result<PlannedPac, String> {
-    match p.temp_dns_overrides() {
-        Ok(false) => {}
-        Ok(true) => {
-            crate::diagnostics::record("sysproxy:macos", "enable refused: temp_dns_overrides=true");
-            return Err(MSG_TEMP_DNS.to_string());
-        }
-        Err(e) => {
-            crate::diagnostics::record("sysproxy:macos", &format!("enable refused: temp_dns_overrides error: {e}"));
-            return Err(MSG_DNS_UNKNOWN.to_string());
-        }
+    let defer_reason = match p.temp_dns_overrides() {
+        Ok(false) => None,
+        Ok(true) => Some("temp_dns_overrides=true".to_string()),
+        Err(e) => Some(format!("temp_dns_overrides error: {e}")),
+    };
+    if let Some(reason) = defer_reason {
+        crate::diagnostics::record("sysproxy:macos", &format!("os PAC skipped: {reason}"));
+        let vpn_untouched = p
+            .list_services()
+            .ok()
+            .map(|all| {
+                let enabled: Vec<ServiceId> = all.into_iter().filter(|s| s.enabled).collect();
+                split_services_by_kind(p, &enabled).1
+            })
+            .unwrap_or_default();
+        note_untouched_vpn(&vpn_untouched);
+        return Ok(PlannedPac {
+            plans: Vec::new(),
+            vpn_untouched,
+            unreadable: 0,
+            chain_admin_auth: false,
+            os_pac_deferred: true,
+        });
     }
     let enabled: Vec<ServiceId> = p
         .list_services()
@@ -267,22 +295,7 @@ fn plan_physical_pac(
         .into_iter()
         .filter(|s| s.enabled)
         .collect();
-    // Only physical services are written (or even read for a write). A VPN service, connected or
-    // not, is left alone: the system reconfigures it on any write and a connected tunnel can drop.
-    let mut services: Vec<ServiceId> = Vec::new();
-    let mut vpn_untouched: Vec<String> = Vec::new();
-    let mut unclassified = false;
-    for (svc, kind) in classify_services(p, &enabled) {
-        match kind {
-            ServiceKind::Physical => services.push(svc),
-            ServiceKind::Vpn { connected: false } => {}
-            ServiceKind::Vpn { connected: true } => vpn_untouched.push(svc.name),
-            ServiceKind::Unknown => {
-                unclassified = true;
-                vpn_untouched.push(svc.name);
-            }
-        }
-    }
+    let (mut services, vpn_untouched, unclassified) = split_services_by_kind(p, &enabled);
     note_untouched_vpn(&vpn_untouched);
     if services.is_empty() && !enabled.is_empty() {
         crate::diagnostics::record(
@@ -371,6 +384,7 @@ fn plan_physical_pac(
         vpn_untouched,
         unreadable,
         chain_admin_auth,
+        os_pac_deferred: false,
     })
 }
 
@@ -392,6 +406,7 @@ fn apply_pac(
     });
     let mut report = EnableReport {
         skipped_vpn: planned.vpn_untouched,
+        os_pac_deferred: planned.os_pac_deferred,
         ..EnableReport::default()
     };
     let mut failed = 0usize;
@@ -425,7 +440,11 @@ fn apply_pac(
                 admin_auth_required = true;
                 crate::diagnostics::record(
                     "sysproxy:macos",
-                    &format!("{} ({}) requires admin auth on {op}", plan.svc.name, pac_res.id()),
+                    &format!(
+                        "{} ({}) requires admin auth on {op}",
+                        plan.svc.name,
+                        pac_res.id()
+                    ),
                 );
                 continue;
             }
@@ -586,11 +605,15 @@ fn build_privileged_networksetup_script(
         match (res, val) {
             (Resource::Pac { .. }, Value::Pac(pac)) => {
                 if pac.enabled == Some(false) {
-                    cmds.push(format!("/usr/sbin/networksetup -setautoproxystate {q_name} off"));
+                    cmds.push(format!(
+                        "/usr/sbin/networksetup -setautoproxystate {q_name} off"
+                    ));
                 }
                 match pac.url.as_deref() {
                     Some("") => {
-                        cmds.push(format!("/usr/sbin/networksetup -setautoproxyurl {q_name} ''"));
+                        cmds.push(format!(
+                            "/usr/sbin/networksetup -setautoproxyurl {q_name} ''"
+                        ));
                     }
                     Some(url) => {
                         if !is_safe_pac_url(url) {
@@ -604,13 +627,17 @@ fn build_privileged_networksetup_script(
                     None => {}
                 }
                 if pac.enabled == Some(true) {
-                    cmds.push(format!("/usr/sbin/networksetup -setautoproxystate {q_name} on"));
+                    cmds.push(format!(
+                        "/usr/sbin/networksetup -setautoproxystate {q_name} on"
+                    ));
                 }
             }
             (Resource::Chain { .. }, Value::Chain(chain)) => {
                 if let Some(on) = chain.http.enabled {
                     let flag = if on { "on" } else { "off" };
-                    cmds.push(format!("/usr/sbin/networksetup -setwebproxystate {q_name} {flag}"));
+                    cmds.push(format!(
+                        "/usr/sbin/networksetup -setwebproxystate {q_name} {flag}"
+                    ));
                 }
                 if let Some(on) = chain.https.enabled {
                     let flag = if on { "on" } else { "off" };
@@ -697,6 +724,7 @@ where
     if planned.plans.is_empty() {
         return Ok(EnableReport {
             skipped_vpn: planned.vpn_untouched,
+            os_pac_deferred: planned.os_pac_deferred,
             ..EnableReport::default()
         });
     }
@@ -752,6 +780,7 @@ where
 
     let mut report = EnableReport {
         skipped_vpn: planned.vpn_untouched,
+        os_pac_deferred: planned.os_pac_deferred,
         ..EnableReport::default()
     };
     for (res, outcome) in outcomes {
@@ -967,25 +996,47 @@ mod tests {
     }
 
     #[test]
-    fn temporary_vpn_dns_refuses_before_any_write_and_the_text_has_no_values() {
+    fn temporary_vpn_dns_gracefully_skips_os_pac_writes_and_reports_deferred() {
         let (fs, p) = setup();
+        let happ = p.add_vpn_service("Happ Plus", true);
         p.set_temp_dns(true);
         p.seed_pac(&wifi(), pac(Some("http://corp/p.pac"), Some(true)));
         let mut j = open(&fs);
-        let err = enable_pac(&mut j, &p, PAC).unwrap_err();
-        assert_eq!(err, MSG_TEMP_DNS);
+        let report = enable_pac(&mut j, &p, PAC).unwrap();
+        assert!(report.os_pac_deferred);
+        assert!(report.configured.is_empty());
+        assert!(!report.changed);
+        assert_eq!(report.skipped_vpn, vec!["Happ Plus".to_string()]);
         assert_eq!(p.os_writes(), 0);
-        assert!(j.is_empty(), "no intent either");
-        assert!(!err.contains("1.1.1.1") && !err.contains("://"));
+        assert!(!touched(&p, &happ));
+        assert!(j.is_empty(), "no OS PAC intent recorded when deferred");
+
+        // Privileged enable also returns Ok with os_pac_deferred and triggers no admin prompt.
+        let mut exec_count = 0usize;
+        let priv_report = enable_pac_privileged_with(&mut j, &p, PAC, |_| {
+            exec_count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(priv_report.os_pac_deferred);
+        assert_eq!(
+            exec_count, 0,
+            "no osascript prompt when temp_dns defers OS PAC"
+        );
+        assert_eq!(p.os_writes(), 0);
     }
 
     #[test]
-    fn unknown_dns_state_also_refuses_before_any_write() {
+    fn unknown_dns_state_also_gracefully_skips_os_pac_writes() {
         let (fs, p) = setup();
         p.fail_next(PlatOp::TempDns);
         let mut j = open(&fs);
-        assert_eq!(enable_pac(&mut j, &p, PAC).unwrap_err(), MSG_DNS_UNKNOWN);
+        let report = enable_pac(&mut j, &p, PAC).unwrap();
+        assert!(report.os_pac_deferred);
+        assert!(report.configured.is_empty());
+        assert!(!report.changed);
         assert_eq!(p.os_writes(), 0);
+        assert!(j.is_empty());
     }
 
     #[test]
@@ -1325,7 +1376,10 @@ mod tests {
         let vpn = p.add_vpn_service("Alpha VPN", false);
         let mut j = open(&fs);
         let r = enable_pac(&mut j, &p, PAC).unwrap();
-        assert!(r.skipped_vpn.is_empty(), "only connected ones are announced");
+        assert!(
+            r.skipped_vpn.is_empty(),
+            "only connected ones are announced"
+        );
         assert!(!touched(&p, &vpn));
         assert_eq!(p.pac_of(&vpn), PacState::default());
     }
@@ -1417,7 +1471,10 @@ mod tests {
                 healed += 1;
             }
         }
-        assert_eq!(healed, HEAL_MAX_REWRITES, "healed three times, then stopped");
+        assert_eq!(
+            healed, HEAL_MAX_REWRITES,
+            "healed three times, then stopped"
+        );
         assert_eq!(
             p.pac_of(&wifi()),
             pac(Some("http://vpn.example/p.pac"), Some(true)),
@@ -1439,8 +1496,14 @@ mod tests {
         // Rewrites a window apart: each one is healed, none ever suspends the service.
         for i in 1..=5u64 {
             p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
-            refresh_pac(&mut j, &p, PAC, &guard, t0 + (HEAL_WINDOW + Duration::from_secs(1)) * i as u32)
-                .unwrap();
+            refresh_pac(
+                &mut j,
+                &p,
+                PAC,
+                &guard,
+                t0 + (HEAL_WINDOW + Duration::from_secs(1)) * i as u32,
+            )
+            .unwrap();
             assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)), "pass {i}");
         }
         // Now a burst suspends it ...
@@ -1451,7 +1514,10 @@ mod tests {
         }
         p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
         refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(10)).unwrap();
-        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some("http://vpn.example/p.pac"));
+        assert_eq!(
+            p.pac_of(&wifi()).url.as_deref(),
+            Some("http://vpn.example/p.pac")
+        );
         // ... until the set of services changes (another network).
         p.add_service(usb());
         refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(20)).unwrap();
@@ -1474,7 +1540,10 @@ mod tests {
         p.seed_pac(&usb(), pac(None, Some(false)));
         refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(10)).unwrap();
         assert_eq!(p.pac_of(&usb()), pac(Some(PAC), Some(true)));
-        assert_eq!(p.pac_of(&wifi()).url.as_deref(), Some("http://vpn.example/p.pac"));
+        assert_eq!(
+            p.pac_of(&wifi()).url.as_deref(),
+            Some("http://vpn.example/p.pac")
+        );
     }
 
     // --- first start after 2.0.0: no "off, then on" pair on one service ------------------------
@@ -1502,7 +1571,10 @@ mod tests {
     #[test]
     fn first_start_with_an_old_port_leftover_is_one_write_not_two() {
         let (fs, p) = setup();
-        p.seed_pac(&wifi(), pac(Some("http://127.0.0.1:8900/proxy.pac"), Some(true)));
+        p.seed_pac(
+            &wifi(),
+            pac(Some("http://127.0.0.1:8900/proxy.pac"), Some(true)),
+        );
         start_like_the_app(&fs, &p);
         assert_eq!(p.os_writes(), 1, "calls: {:?}", p.calls());
         assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)));
@@ -1715,9 +1787,14 @@ mod tests {
         // Simulate VPN rewriting Wi-Fi PAC repeatedly until HealGuard suspends Wi-Fi.
         for step in 0..HEAL_MAX_REWRITES {
             p.seed_pac(&wifi(), pac(None, Some(false)));
-            let report =
-                refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(step as u64 + 1))
-                    .unwrap();
+            let report = refresh_pac(
+                &mut j,
+                &p,
+                PAC,
+                &guard,
+                t0 + Duration::from_secs(step as u64 + 1),
+            )
+            .unwrap();
             assert_eq!(report.skipped_vpn, vec!["WireGuard"]);
         }
         assert!(guard.is_suspended(&wifi().key()));

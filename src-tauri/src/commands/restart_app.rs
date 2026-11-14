@@ -8,8 +8,8 @@
 //! Programs run with separate arguments, never through a shell. The OS is reached only through
 //! the [`SystemProbe`] (process list) and [`AppLauncher`] (`osascript`, `open`) seams.
 
-use crate::proxy::coverage::{Os, RealProbe, SystemProbe, antigravity_app_path};
 use crate::proxy::ProxyManager;
+use crate::proxy::coverage::{Os, RealProbe, SystemProbe, antigravity_app_path};
 use crate::state::AppState;
 use crate::sysproxy::FileCtx;
 use serde::Serialize;
@@ -154,12 +154,15 @@ pub(crate) fn restart_with_gateway(
         return Ok(RestartOutcome::NotInstalled);
     };
 
-    let running = is_running(probe)
-        .ok_or_else(|| "Не удалось прочитать список процессов".to_string())?;
+    let running =
+        is_running(probe).ok_or_else(|| "Не удалось прочитать список процессов".to_string())?;
     if running {
         // A soft quit only: the app may ask about unsaved work, and that is the user's call.
         let quit = launcher.run("osascript", &quit_args());
-        if quit.as_ref().is_some_and(|r| !r.success && is_permission_denied(&r.stderr)) {
+        if quit
+            .as_ref()
+            .is_some_and(|r| !r.success && is_permission_denied(&r.stderr))
+        {
             return Ok(RestartOutcome::NeedsAutomationPermission);
         }
         // Any other osascript failure is not final: the user may close the app themselves
@@ -215,7 +218,8 @@ pub async fn restart_app_with_gateway(
     };
     let gateway = proxy_manager.server.bound_addr;
     let outcome = tokio::task::spawn_blocking(move || {
-        let ctx = FileCtx::real().ok_or_else(|| "Не удалось определить домашний каталог".to_string())?;
+        let ctx =
+            FileCtx::real().ok_or_else(|| "Не удалось определить домашний каталог".to_string())?;
         restart_with_gateway(
             &app_id,
             Os::current(),
@@ -230,7 +234,8 @@ pub async fn restart_app_with_gateway(
     .map_err(|e| format!("restart task failed: {e}"))??;
     if outcome == RestartOutcome::Restarted {
         // The status should follow the new process; a failed re-read is not a failed restart.
-        let _ = super::coverage::build_snapshot(&proxy_manager, state.get_cli_mode().await, true).await;
+        let _ =
+            super::coverage::build_snapshot(&proxy_manager, state.get_cli_mode().await, true).await;
     }
     Ok(outcome)
 }
@@ -244,8 +249,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     const BUNDLE_LINE: &str = "/Applications/Antigravity.app/Contents/MacOS/Electron";
-    const AGENT_LINE: &str = "/Applications/Antigravity.app/Contents/Resources/app/bin/language_server_macos_arm";
-    const OTHER_LINES: &str = "/usr/sbin/cfprefsd\n/Applications/Safari.app/Contents/MacOS/Safari\n";
+    const AGENT_LINE: &str =
+        "/Applications/Antigravity.app/Contents/Resources/app/bin/language_server_macos_arm";
+    const OTHER_LINES: &str =
+        "/usr/sbin/cfprefsd\n/Applications/Safari.app/Contents/MacOS/Safari\n";
 
     /// Process list answers in order; the last one repeats. `None` — the listing failed.
     struct FakeProbe {
@@ -264,9 +271,16 @@ mod tests {
 
     impl SystemProbe for FakeProbe {
         fn run(&self, program: &str, args: &[&str]) -> Option<String> {
-            self.calls.lock().unwrap().push(format!("{program} {}", args.join(" ")));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{program} {}", args.join(" ")));
             let mut a = self.answers.lock().unwrap();
-            if a.len() > 1 { a.pop_front().unwrap() } else { a.front().cloned().flatten() }
+            if a.len() > 1 {
+                a.pop_front().unwrap()
+            } else {
+                a.front().cloned().flatten()
+            }
         }
     }
 
@@ -279,22 +293,43 @@ mod tests {
 
     impl FakeLauncher {
         fn new(osascript: Option<RunResult>, open_ok: bool) -> Self {
-            Self { calls: Mutex::new(Vec::new()), osascript: Mutex::new(osascript), open_ok }
+            Self {
+                calls: Mutex::new(Vec::new()),
+                osascript: Mutex::new(osascript),
+                open_ok,
+            }
         }
         fn ok() -> Self {
-            Self::new(Some(RunResult { success: true, stderr: String::new() }), true)
+            Self::new(
+                Some(RunResult {
+                    success: true,
+                    stderr: String::new(),
+                }),
+                true,
+            )
         }
         fn programs(&self) -> Vec<String> {
-            self.calls.lock().unwrap().iter().map(|(p, _)| p.clone()).collect()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(p, _)| p.clone())
+                .collect()
         }
     }
 
     impl AppLauncher for FakeLauncher {
         fn run(&self, program: &str, args: &[String]) -> Option<RunResult> {
-            self.calls.lock().unwrap().push((program.to_string(), args.to_vec()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((program.to_string(), args.to_vec()));
             match program {
                 "osascript" => self.osascript.lock().unwrap().take(),
-                "open" => Some(RunResult { success: self.open_ok, stderr: String::new() }),
+                "open" => Some(RunResult {
+                    success: self.open_ok,
+                    stderr: String::new(),
+                }),
                 _ => None,
             }
         }
@@ -307,7 +342,8 @@ mod tests {
     fn ctx(installed: bool) -> FileCtx {
         let fs = FakeFs::default();
         if installed {
-            fs.create_private_dir_all(Path::new("/Applications/Antigravity.app")).unwrap();
+            fs.create_private_dir_all(Path::new("/Applications/Antigravity.app"))
+                .unwrap();
         }
         FileCtx::new(Arc::new(fs), PathBuf::from("home").join("user"), vec![])
     }
@@ -346,9 +382,16 @@ mod tests {
     fn not_running_opens_once_with_exact_arguments() {
         let probe = FakeProbe::new(&[Some(OTHER_LINES)]);
         let launcher = FakeLauncher::ok();
-        assert_eq!(run("antigravity", Os::Macos, true, &probe, &launcher), Ok(RestartOutcome::Restarted));
+        assert_eq!(
+            run("antigravity", Os::Macos, true, &probe, &launcher),
+            Ok(RestartOutcome::Restarted)
+        );
         let calls = launcher.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "no osascript for a closed app: it would launch it");
+        assert_eq!(
+            calls.len(),
+            1,
+            "no osascript for a closed app: it would launch it"
+        );
         assert_eq!(calls[0], ("open".to_string(), expected_open()));
     }
 
@@ -358,14 +401,20 @@ mod tests {
         let both = format!("{OTHER_LINES}{BUNDLE_LINE}\n{AGENT_LINE}\n");
         let probe = FakeProbe::new(&[Some(&both), Some(&both), Some(OTHER_LINES)]);
         let launcher = FakeLauncher::ok();
-        assert_eq!(run("antigravity", Os::Macos, true, &probe, &launcher), Ok(RestartOutcome::Restarted));
+        assert_eq!(
+            run("antigravity", Os::Macos, true, &probe, &launcher),
+            Ok(RestartOutcome::Restarted)
+        );
         let calls = launcher.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert_eq!(
             calls[0],
             (
                 "osascript".to_string(),
-                vec!["-e".to_string(), "tell application id \"com.google.antigravity\" to quit".to_string()]
+                vec![
+                    "-e".to_string(),
+                    "tell application id \"com.google.antigravity\" to quit".to_string()
+                ]
             )
         );
         assert_eq!(calls[1], ("open".to_string(), expected_open()));
@@ -377,10 +426,20 @@ mod tests {
         let running = format!("{BUNDLE_LINE}\n");
         let probe = FakeProbe::new(&[Some(&running)]);
         let launcher = FakeLauncher::ok();
-        assert_eq!(run("antigravity", Os::Macos, true, &probe, &launcher), Ok(RestartOutcome::NotClosed));
+        assert_eq!(
+            run("antigravity", Os::Macos, true, &probe, &launcher),
+            Ok(RestartOutcome::NotClosed)
+        );
         // Only the polite quit request: no `open`, and nothing that kills (no kill/pkill/killall).
         assert_eq!(launcher.programs(), vec!["osascript".to_string()]);
-        assert!(probe.calls.lock().unwrap().iter().all(|c| c.starts_with("ps ")));
+        assert!(
+            probe
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|c| c.starts_with("ps "))
+        );
     }
 
     #[test]
@@ -389,7 +448,8 @@ mod tests {
         let probe = FakeProbe::new(&[Some(&running)]);
         let denied = RunResult {
             success: false,
-            stderr: "execution error: Not authorized to send Apple events to Antigravity. (-1743)".into(),
+            stderr: "execution error: Not authorized to send Apple events to Antigravity. (-1743)"
+                .into(),
         };
         let launcher = FakeLauncher::new(Some(denied), true);
         assert_eq!(
@@ -397,24 +457,40 @@ mod tests {
             Ok(RestartOutcome::NeedsAutomationPermission)
         );
         assert_eq!(launcher.programs(), vec!["osascript".to_string()]);
-        assert_eq!(probe.calls.lock().unwrap().len(), 1, "no polling after a refusal");
+        assert_eq!(
+            probe.calls.lock().unwrap().len(),
+            1,
+            "no polling after a refusal"
+        );
     }
 
     #[test]
     fn other_osascript_failure_still_lets_the_user_close_the_app() {
         let running = format!("{BUNDLE_LINE}\n");
         let probe = FakeProbe::new(&[Some(&running), Some(OTHER_LINES)]);
-        let failed = RunResult { success: false, stderr: "some other error (-600)".into() };
+        let failed = RunResult {
+            success: false,
+            stderr: "some other error (-600)".into(),
+        };
         let launcher = FakeLauncher::new(Some(failed), true);
-        assert_eq!(run("antigravity", Os::Macos, true, &probe, &launcher), Ok(RestartOutcome::Restarted));
-        assert_eq!(launcher.programs(), vec!["osascript".to_string(), "open".to_string()]);
+        assert_eq!(
+            run("antigravity", Os::Macos, true, &probe, &launcher),
+            Ok(RestartOutcome::Restarted)
+        );
+        assert_eq!(
+            launcher.programs(),
+            vec!["osascript".to_string(), "open".to_string()]
+        );
     }
 
     #[test]
     fn open_failure_is_launch_failed() {
         let probe = FakeProbe::new(&[Some(OTHER_LINES)]);
         let launcher = FakeLauncher::new(None, false);
-        assert_eq!(run("antigravity", Os::Macos, true, &probe, &launcher), Ok(RestartOutcome::LaunchFailed));
+        assert_eq!(
+            run("antigravity", Os::Macos, true, &probe, &launcher),
+            Ok(RestartOutcome::LaunchFailed)
+        );
         // `open` that could not even start is the same outcome.
         struct NoStart;
         impl AppLauncher for NoStart {
@@ -424,17 +500,35 @@ mod tests {
         }
         let probe = FakeProbe::new(&[Some(OTHER_LINES)]);
         assert_eq!(
-            restart_with_gateway("antigravity", Os::Macos, &ctx(true), gw(), &probe, &NoStart, FAST),
+            restart_with_gateway(
+                "antigravity",
+                Os::Macos,
+                &ctx(true),
+                gw(),
+                &probe,
+                &NoStart,
+                FAST
+            ),
             Ok(RestartOutcome::LaunchFailed)
         );
     }
 
     #[test]
     fn unknown_app_id_is_refused_before_anything_runs() {
-        for id in ["", "Antigravity", "claude", "antigravity ", "../antigravity", "antigravity; rm -rf /"] {
+        for id in [
+            "",
+            "Antigravity",
+            "claude",
+            "antigravity ",
+            "../antigravity",
+            "antigravity; rm -rf /",
+        ] {
             let probe = FakeProbe::new(&[Some(OTHER_LINES)]);
             let launcher = FakeLauncher::ok();
-            assert!(run(id, Os::Macos, true, &probe, &launcher).is_err(), "{id:?}");
+            assert!(
+                run(id, Os::Macos, true, &probe, &launcher).is_err(),
+                "{id:?}"
+            );
             assert!(launcher.calls.lock().unwrap().is_empty());
             assert!(probe.calls.lock().unwrap().is_empty());
         }
@@ -445,7 +539,10 @@ mod tests {
         for os in [Os::Windows, Os::Linux] {
             let probe = FakeProbe::new(&[Some(OTHER_LINES)]);
             let launcher = FakeLauncher::ok();
-            assert_eq!(run("antigravity", os, true, &probe, &launcher), Ok(RestartOutcome::Unsupported));
+            assert_eq!(
+                run("antigravity", os, true, &probe, &launcher),
+                Ok(RestartOutcome::Unsupported)
+            );
             assert!(launcher.calls.lock().unwrap().is_empty());
             assert!(probe.calls.lock().unwrap().is_empty());
         }
@@ -455,7 +552,10 @@ mod tests {
     fn not_installed_starts_nothing() {
         let probe = FakeProbe::new(&[Some(OTHER_LINES)]);
         let launcher = FakeLauncher::ok();
-        assert_eq!(run("antigravity", Os::Macos, false, &probe, &launcher), Ok(RestartOutcome::NotInstalled));
+        assert_eq!(
+            run("antigravity", Os::Macos, false, &probe, &launcher),
+            Ok(RestartOutcome::NotInstalled)
+        );
         assert!(launcher.calls.lock().unwrap().is_empty());
     }
 
@@ -469,18 +569,30 @@ mod tests {
 
     #[test]
     fn a_cli_with_the_same_name_is_not_the_app() {
-        assert!(!bundle_running("/Users/x/.gemini/antigravity-cli/bin/agy\n"));
+        assert!(!bundle_running(
+            "/Users/x/.gemini/antigravity-cli/bin/agy\n"
+        ));
         assert!(bundle_running(BUNDLE_LINE));
-        assert!(bundle_running("/Users/x/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper"));
+        assert!(bundle_running(
+            "/Users/x/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper"
+        ));
     }
 
     #[test]
     fn arguments_are_separate_items_and_the_address_is_the_gateways() {
-        let args = open_args(Path::new("/Applications/Antigravity.app"), "127.0.0.1:9".parse().unwrap());
+        let args = open_args(
+            Path::new("/Applications/Antigravity.app"),
+            "127.0.0.1:9".parse().unwrap(),
+        );
         assert_eq!(args.len(), 8);
         assert_eq!(args[3], "HTTPS_PROXY=http://127.0.0.1:9");
         assert_eq!(args[5], "HTTP_PROXY=http://127.0.0.1:9");
         // No argument carries more than one `--env` pair or a shell separator.
-        assert!(args.iter().all(|a| !a.contains(';') && !a.contains('&') && !a.contains('|') && !a.contains(' ')));
+        assert!(
+            args.iter().all(|a| !a.contains(';')
+                && !a.contains('&')
+                && !a.contains('|')
+                && !a.contains(' '))
+        );
     }
 }

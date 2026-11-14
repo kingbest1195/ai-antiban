@@ -11,7 +11,7 @@ export { guides } from "./guides";
 export { onboarding } from "./onboarding";
 export { providers, overview } from "./overview";
 export { settings } from "./settings";
-export { tabs, shell, timezone, updates, about } from "./shell";
+export { tabs, shell, timezone, shutdown, updates, about } from "./shell";
 export { status } from "./status";
 export { subscription } from "./subscription";
 export { toast } from "./toasts";

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProviderId, RiskReport } from "../../types";
-import { Badge, Banner, Card, EmptyState, Progress, Skeleton, StatusHero } from "../../ui";
+import { Badge, Banner, Card, EmptyState, Progress, Row, Rows, Skeleton, StatusHero } from "../../ui";
 import { onboarding as copy } from "../../shared/copy/ru";
 import { checksWord } from "../../shared/lib/format";
 import { evaluateNetwork } from "./networkVerdict";
@@ -24,8 +24,8 @@ export interface StepNetworkProps {
 }
 
 /**
- * Шаг 2: результат аудита, который шлюз уже запустил при старте. Новых запросов нет, пока отчёт свежий;
- * повторяем только по кнопке или если отчёт устарел.
+ * Шаг 2: живой вердикт аудита, который шлюз уже запустил при старте, плюс пояснение по-сервисной маршрутизации.
+ * Новых запросов нет, пока отчёт свежий; повторяем только по кнопке или если отчёт устарел.
  */
 export function StepNetwork({
   reports,
@@ -115,6 +115,11 @@ export function StepNetwork({
             />
             {verdict.good && verdict.passed < verdict.total && <p className="zs-onb__note">{copy.network.advice}</p>}
             {!verdict.good && verdict.reason && <Reason verdict={verdict} />}
+            <Card>
+              <Rows>
+                <Row icon="key" title={copy.network.routing.title} sub={copy.network.routing.sub} />
+              </Rows>
+            </Card>
           </>
         )}
       </div>

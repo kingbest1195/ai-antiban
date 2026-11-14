@@ -1,6 +1,6 @@
+use crate::auditor::geo_matrix::{CheckStatus, GUIDE_PAYMENT_CARDS};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use crate::auditor::geo_matrix::{CheckStatus, GUIDE_PAYMENT_CARDS};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinAuditResult {
@@ -130,20 +130,21 @@ impl BinChecker {
         let url = format!("https://data.handyapi.com/bin/{bin}");
         match self.client.get(&url).send().await {
             Ok(resp) => {
-                if let Ok(data) = resp.json::<HandyApiBinResponse>().await {
-                    if data.status.as_deref() == Some("SUCCESS") {
-                        let country_code = data.country.and_then(|c| c.a2).map(|s| s.to_uppercase());
-                        let card_type = data.card_type;
-                        let bank_name = data.issuer;
-                        let tier = data.card_tier.unwrap_or_default().to_uppercase();
-                        let is_prepaid = card_type
-                            .as_deref()
-                            .map(|t| t.eq_ignore_ascii_case("PREPAID"))
-                            .unwrap_or(false)
-                            || tier.contains("PREPAID")
-                            || tier.contains("VIRTUAL");
+                if let Ok(data) = resp.json::<HandyApiBinResponse>().await
+                    && data.status.as_deref() == Some("SUCCESS")
+                {
+                    let country_code = data.country.and_then(|c| c.a2).map(|s| s.to_uppercase());
+                    let card_type = data.card_type;
+                    let bank_name = data.issuer;
+                    let tier = data.card_tier.unwrap_or_default().to_uppercase();
+                    let is_prepaid = card_type
+                        .as_deref()
+                        .map(|t| t.eq_ignore_ascii_case("PREPAID"))
+                        .unwrap_or(false)
+                        || tier.contains("PREPAID")
+                        || tier.contains("VIRTUAL");
 
-                        let mut result = BinAuditResult {
+                    let mut result = BinAuditResult {
                             bin: bin.clone(),
                             country_code,
                             card_type,
@@ -154,9 +155,8 @@ impl BinChecker {
                             guide_ref: None,
                         };
 
-                        Self::apply_heuristics_and_advisories(&mut result, current_vpn_country);
-                        return Ok(result);
-                    }
+                    Self::apply_heuristics_and_advisories(&mut result, current_vpn_country);
+                    return Ok(result);
                 }
             }
             Err(e) => {
@@ -184,15 +184,15 @@ impl BinChecker {
         result: &mut BinAuditResult,
         current_vpn_country: Option<&str>,
     ) {
-        if let Some(country) = &result.country_code {
-            if country == "RU" || country == "BY" {
-                result.status = CheckStatus::Critical;
-                result.advisory = format!(
-                    "Карта выпущена в неподдерживаемой юрисдикции ({country}). Международные сервисы не принимают карты этого региона."
-                );
-                result.guide_ref = Some(GUIDE_PAYMENT_CARDS.to_string());
-                return;
-            }
+        if let Some(country) = &result.country_code
+            && (country == "RU" || country == "BY")
+        {
+            result.status = CheckStatus::Critical;
+            result.advisory = format!(
+                "Карта выпущена в неподдерживаемой юрисдикции ({country}). Международные сервисы не принимают карты этого региона."
+            );
+            result.guide_ref = Some(GUIDE_PAYMENT_CARDS.to_string());
+            return;
         }
 
         if result.is_prepaid {
@@ -209,9 +209,12 @@ impl BinChecker {
         result: &mut BinAuditResult,
         current_vpn_country: Option<&str>,
     ) {
-        if let (Some(card_country), Some(vpn_country)) = (&result.country_code, current_vpn_country) {
+        if let (Some(card_country), Some(vpn_country)) = (&result.country_code, current_vpn_country)
+        {
             let vpn_upper = vpn_country.trim().to_uppercase();
-            if !card_country.eq_ignore_ascii_case(&vpn_upper) && result.status != CheckStatus::Critical {
+            if !card_country.eq_ignore_ascii_case(&vpn_upper)
+                && result.status != CheckStatus::Critical
+            {
                 result.status = CheckStatus::Warning;
                 result.advisory = format!(
                     "Несовпадение регионов: карта выпущена в {card_country}, а ваш текущий сетевой шлюз — {vpn_upper}. На момент проведения платежа рекомендуется синхронизировать регион шлюза с регионом карты.",

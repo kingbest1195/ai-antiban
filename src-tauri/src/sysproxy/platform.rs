@@ -437,7 +437,10 @@ pub fn classify_service(svc: &ServiceId, nc: Option<&[VpnConnection]>) -> Servic
 }
 
 /// Classifies every service from one read of the connection list.
-pub fn classify_services(p: &dyn Platform, services: &[ServiceId]) -> Vec<(ServiceId, ServiceKind)> {
+pub fn classify_services(
+    p: &dyn Platform,
+    services: &[ServiceId],
+) -> Vec<(ServiceId, ServiceKind)> {
     let nc = p.vpn_connections().ok();
     services
         .iter()
@@ -659,12 +662,7 @@ fn registry_set_sz(_subkey: &str, _name: &str, _value: &str, op: &'static str) -
 }
 
 #[cfg(target_os = "windows")]
-fn registry_set_value(
-    subkey: &str,
-    name: &str,
-    value: &RegValue,
-    op: &'static str,
-) -> PResult<()> {
+fn registry_set_value(subkey: &str, name: &str, value: &RegValue, op: &'static str) -> PResult<()> {
     let root = crate::win_reg::RootKey::HkeyCurrentUser;
     let res = match value.kind {
         RegKind::Sz => crate::win_reg::set_sz(root, subkey, name, &value.data),
@@ -820,6 +818,21 @@ pub fn parse_getsearchdomains(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Service IDs from `scutil`'s `list State:/Network/Service/[^/]+/IPv[46]` that currently carry an
+/// active IPv4 or IPv6 state in `SCDynamicStore`. Disconnected or unplugged adapters without live IP
+/// state do not appear here even if stale `Setup:/Network/Service/*/DNS` entries remain.
+pub fn extract_active_service_ids(listing: &str) -> std::collections::HashSet<String> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let key = line.split(" = ").nth(1)?.trim();
+            let rest = key.strip_prefix("State:/Network/Service/")?;
+            let (id, proto) = rest.split_once('/')?;
+            (matches!(proto, "IPv4" | "IPv6") && !id.is_empty()).then(|| id.to_string())
+        })
+        .collect()
+}
+
 /// One `Setup:/Network/Service/<id>/DNS` entry paired with its `UserDefinedName`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupDnsEntry {
@@ -828,12 +841,10 @@ pub struct SetupDnsEntry {
     pub dns: DnsDict,
 }
 
-/// Pure evaluation of temporary DNS overrides, scoped strictly to `physical_services` (services
-/// Zastava actually modifies). Synthetic/VPN service IDs not matching an enabled physical service
-/// are ignored.
-pub fn has_physical_temp_dns_override<F>(
+fn eval_physical_temp_dns_override<F>(
     physical_services: &[ServiceId],
     entries: &[SetupDnsEntry],
+    active_service_ids: Option<&std::collections::HashSet<String>>,
     mut read_saved_dns: F,
 ) -> PResult<bool>
 where
@@ -849,10 +860,24 @@ where
         if !physical_services.iter().any(|s| s.name == name) {
             continue;
         }
+        if let Some(active_ids) = active_service_ids
+            && !active_ids.contains(&entry.service_id)
+        {
+            crate::diagnostics::record(
+                "sysproxy:dns",
+                &format!(
+                    "temp_dns ignored inactive service={name} (id={}): no State:/.../IPv4|IPv6",
+                    entry.service_id
+                ),
+            );
+            continue;
+        }
         if entry.dns.unknown_fields {
             crate::diagnostics::record(
                 "sysproxy:dns",
-                &format!("temp_dns triggered by service={name}: unknown fields in Setup:/Network/Service/*/DNS"),
+                &format!(
+                    "temp_dns triggered by service={name}: unknown fields in Setup:/Network/Service/*/DNS"
+                ),
             );
             return Ok(true);
         }
@@ -887,6 +912,40 @@ where
         }
     }
     Ok(false)
+}
+
+/// Pure evaluation of temporary DNS overrides, scoped strictly to `physical_services` (services
+/// Zastava actually modifies). Synthetic/VPN service IDs not matching an enabled physical service
+/// are ignored.
+pub fn has_physical_temp_dns_override<F>(
+    physical_services: &[ServiceId],
+    entries: &[SetupDnsEntry],
+    read_saved_dns: F,
+) -> PResult<bool>
+where
+    F: FnMut(&str) -> PResult<(Vec<String>, Vec<String>)>,
+{
+    eval_physical_temp_dns_override(physical_services, entries, None, read_saved_dns)
+}
+
+/// Same check as [`has_physical_temp_dns_override`], ignoring physical services that have no live
+/// `State:/Network/Service/<id>/IPv4|IPv6` entry (e.g. unplugged or inactive secondary adapters
+/// carrying stale `Setup:/.../DNS` records).
+pub fn has_physical_temp_dns_override_active<F>(
+    physical_services: &[ServiceId],
+    entries: &[SetupDnsEntry],
+    active_service_ids: &std::collections::HashSet<String>,
+    read_saved_dns: F,
+) -> PResult<bool>
+where
+    F: FnMut(&str) -> PResult<(Vec<String>, Vec<String>)>,
+{
+    eval_physical_temp_dns_override(
+        physical_services,
+        entries,
+        Some(active_service_ids),
+        read_saved_dns,
+    )
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1279,7 +1338,12 @@ impl Platform for RealPlatform {
                 dns,
             });
         }
-        has_physical_temp_dns_override(&physical, &entries, |name| {
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        let state_listing = scutil("list State:/Network/Service/[^/]+/IPv[46]\nquit\n")?;
+        let active_ids = extract_active_service_ids(&state_listing);
+        has_physical_temp_dns_override_active(&physical, &entries, &active_ids, |name| {
             let saved_dns = run_stdout(
                 "networksetup",
                 &["-getdnsservers", name],
@@ -1506,7 +1570,10 @@ mod ffi {
         unsafe extern "system" {
             fn OpenClipboard(h_wnd_new_owner: *mut core::ffi::c_void) -> i32;
             fn EmptyClipboard() -> i32;
-            fn SetClipboardData(u_format: u32, h_mem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+            fn SetClipboardData(
+                u_format: u32,
+                h_mem: *mut core::ffi::c_void,
+            ) -> *mut core::ffi::c_void;
             fn CloseClipboard() -> i32;
         }
         #[link(name = "kernel32")]
@@ -2080,9 +2147,11 @@ pub fn collect_os_diagnostic_snapshot() -> Vec<String> {
             lines.push(format!("macos_version: {} ({build})", ver.trim()));
         }
     }
-    if let Ok((ok, code, stdout, stderr)) =
-        run_detailed("networksetup", &["-listnetworkserviceorder"], "diag_services")
-    {
+    if let Ok((ok, code, stdout, stderr)) = run_detailed(
+        "networksetup",
+        &["-listnetworkserviceorder"],
+        "diag_services",
+    ) {
         if ok {
             let svcs = parse_service_order(&stdout);
             let nc = run_detailed("scutil", &["--nc", "list"], "diag_nc")
@@ -2105,7 +2174,17 @@ pub fn collect_os_diagnostic_snapshot() -> Vec<String> {
             if let Some(connections) = nc {
                 let nc_summary: Vec<String> = connections
                     .iter()
-                    .map(|c| format!("{}={}", c.name, if c.connected { "connected" } else { "disconnected" }))
+                    .map(|c| {
+                        format!(
+                            "{}={}",
+                            c.name,
+                            if c.connected {
+                                "connected"
+                            } else {
+                                "disconnected"
+                            }
+                        )
+                    })
                     .collect();
                 lines.push(format!(
                     "scutil_nc: {}",
@@ -2119,10 +2198,7 @@ pub fn collect_os_diagnostic_snapshot() -> Vec<String> {
                 lines.push("scutil_nc: unavailable".to_string());
             }
         } else {
-            lines.push(format!(
-                "services_error: code={code:?} {}",
-                stderr.trim()
-            ));
+            lines.push(format!("services_error: code={code:?} {}", stderr.trim()));
         }
     }
     if let Ok((ok, _, stdout, _)) = run_detailed("scutil", &["--proxy"], "diag_proxy")
@@ -2327,7 +2403,9 @@ mod tests {
         let unknown = "<dictionary> {\n  UnexpectedCustomDnsFlag : 1\n}\n";
         assert!(parse_scutil_dns(unknown).unknown_fields);
         assert!(parse_getdnsservers("There aren't any DNS Servers set on Wi-Fi.\n").is_empty());
-        assert!(parse_getsearchdomains("There aren't any Search Domains set on Wi-Fi.\n").is_empty());
+        assert!(
+            parse_getsearchdomains("There aren't any Search Domains set on Wi-Fi.\n").is_empty()
+        );
     }
 
     #[test]
@@ -2361,21 +2439,24 @@ mod tests {
                 ),
             },
         ];
-        let triggered = has_physical_temp_dns_override(&[wifi.clone()], &entries, |name| {
-            assert_eq!(name, "Wi-Fi");
-            Ok((vec!["192.168.1.1".into()], Vec::new()))
-        })
-        .unwrap();
-        assert!(!triggered, "AmneziaVPN / synthetic DNS entries must be ignored");
+        let triggered =
+            has_physical_temp_dns_override(std::slice::from_ref(&wifi), &entries, |name| {
+                assert_eq!(name, "Wi-Fi");
+                Ok((vec!["192.168.1.1".into()], Vec::new()))
+            })
+            .unwrap();
+        assert!(
+            !triggered,
+            "AmneziaVPN / synthetic DNS entries must be ignored"
+        );
 
         // Now simulate Wi-Fi having an ephemeral DNS server override differing from preferences.
         let mut override_entries = entries.clone();
         override_entries[2].dns.servers = vec!["9.9.9.9".into()];
         assert!(
-            has_physical_temp_dns_override(&[wifi.clone()], &override_entries, |_| Ok((
-                vec!["192.168.1.1".into()],
-                Vec::new()
-            )))
+            has_physical_temp_dns_override(std::slice::from_ref(&wifi), &override_entries, |_| Ok(
+                (vec!["192.168.1.1".into()], Vec::new())
+            ))
             .unwrap()
         );
 
@@ -2387,6 +2468,60 @@ mod tests {
                 vec!["192.168.1.1".into()],
                 Vec::new()
             )))
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn inactive_secondary_physical_service_with_stale_setup_dns_is_ignored() {
+        let active_ids = extract_active_service_ids(
+            "  subKey [0] = State:/Network/Service/USB-LAN-UUID/IPv4\n  subKey [1] = State:/Network/Service/WIFI-UUID/IPv6\n  subKey [2] = State:/Network/Service/VPN-UUID/IPv4\n",
+        );
+        assert!(active_ids.contains("USB-LAN-UUID"));
+        assert!(active_ids.contains("WIFI-UUID"));
+        assert!(!active_ids.contains("P30T-UUID"));
+
+        let usb_lan = svc("en7", "USB 10/100/1000 LAN");
+        let p30t = svc("en9", "P30T");
+        let wifi = svc("en0", "Wi-Fi");
+        let physical = vec![usb_lan, p30t, wifi];
+
+        // P30T (en9) has a stale Setup:/.../DNS with 2 servers while saved_servers=0,
+        // but no live State:/Network/Service/P30T-UUID/IPv4|IPv6 -> ignored (Log 2 scenario).
+        let stale_p30t_only = vec![SetupDnsEntry {
+            service_id: "P30T-UUID".into(),
+            user_defined_name: Some("P30T".into()),
+            dns: parse_scutil_dns(
+                "<dictionary> {\n  ServerAddresses : <array> {\n    0 : 1.1.1.1\n    1 : 1.0.0.1\n  }\n}\n",
+            ),
+        }];
+        assert!(
+            !has_physical_temp_dns_override_active(
+                &physical,
+                &stale_p30t_only,
+                &active_ids,
+                |_| { Ok((Vec::new(), Vec::new())) }
+            )
+            .unwrap()
+        );
+
+        // When an active interface (Wi-Fi) holds temporary DNS differing from saved DHCP (0),
+        // it still triggers temp_dns (Log 1 scenario).
+        let mut with_active_wifi = stale_p30t_only;
+        with_active_wifi.push(SetupDnsEntry {
+            service_id: "WIFI-UUID".into(),
+            user_defined_name: Some("Wi-Fi".into()),
+            dns: parse_scutil_dns(
+                "<dictionary> {\n  ServerAddresses : <array> {\n    0 : 10.0.0.1\n  }\n}\n",
+            ),
+        });
+        assert!(
+            has_physical_temp_dns_override_active(
+                &physical,
+                &with_active_wifi,
+                &active_ids,
+                |_| { Ok((Vec::new(), Vec::new())) }
+            )
             .unwrap()
         );
     }
@@ -2561,7 +2696,10 @@ mod tests {
     #[test]
     fn nc_list_reads_state_and_the_quoted_name() {
         let list = parse_nc_list(NC_LIST);
-        let seen: Vec<(&str, bool)> = list.iter().map(|c| (c.name.as_str(), c.connected)).collect();
+        let seen: Vec<(&str, bool)> = list
+            .iter()
+            .map(|c| (c.name.as_str(), c.connected))
+            .collect();
         assert_eq!(
             seen,
             vec![
@@ -2585,17 +2723,35 @@ mod tests {
         let nc = parse_nc_list(NC_LIST);
         let kind = |s: &ServiceId, nc: Option<&[VpnConnection]>| classify_service(s, nc);
         // Listed: a VPN, whatever the device column says.
-        assert_eq!(kind(&svc("", "Beta VPN Pro"), Some(&nc)), ServiceKind::Vpn { connected: true });
-        assert_eq!(kind(&svc("", "Alpha VPN"), Some(&nc)), ServiceKind::Vpn { connected: false });
-        assert_eq!(kind(&svc("utun4", "Gamma"), Some(&nc)), ServiceKind::Vpn { connected: true });
+        assert_eq!(
+            kind(&svc("", "Beta VPN Pro"), Some(&nc)),
+            ServiceKind::Vpn { connected: true }
+        );
+        assert_eq!(
+            kind(&svc("", "Alpha VPN"), Some(&nc)),
+            ServiceKind::Vpn { connected: false }
+        );
+        assert_eq!(
+            kind(&svc("utun4", "Gamma"), Some(&nc)),
+            ServiceKind::Vpn { connected: true }
+        );
         // Not listed, no device: still a VPN (state unknown, so connected).
-        assert_eq!(kind(&svc("", "Mystery"), Some(&nc)), ServiceKind::Vpn { connected: true });
+        assert_eq!(
+            kind(&svc("", "Mystery"), Some(&nc)),
+            ServiceKind::Vpn { connected: true }
+        );
         // Not listed, with a device: physical.
         assert_eq!(kind(&svc("en0", "Wi-Fi"), Some(&nc)), ServiceKind::Physical);
-        assert_eq!(kind(&svc("bridge0", "Thunderbolt Bridge"), Some(&nc)), ServiceKind::Physical);
+        assert_eq!(
+            kind(&svc("bridge0", "Thunderbolt Bridge"), Some(&nc)),
+            ServiceKind::Physical
+        );
         // The list could not be read: a device alone does not vouch for a service.
         assert_eq!(kind(&svc("en0", "Wi-Fi"), None), ServiceKind::Unknown);
-        assert_eq!(kind(&svc("", "Alpha VPN"), None), ServiceKind::Vpn { connected: true });
+        assert_eq!(
+            kind(&svc("", "Alpha VPN"), None),
+            ServiceKind::Vpn { connected: true }
+        );
         assert!(ServiceKind::Physical.is_physical());
         assert!(!ServiceKind::Unknown.is_physical());
         assert!(ServiceKind::Vpn { connected: false }.is_idle_vpn());
@@ -2622,8 +2778,15 @@ mod tests {
     fn scutil_proxy_gives_the_pac_part_only() {
         let text = "<dictionary> {\n  ExceptionsList : <array> {\n    0 : *.local\n    1 : 169.254/16\n  }\n  ExcludeSimpleHostnames : 1\n  FTPPassive : 1\n  ProxyAutoConfigEnable : 1\n  ProxyAutoConfigURLString : http://127.0.0.1:8899/proxy.pac\n  __SCOPED__ : <dictionary> {\n    en0 : <dictionary> {\n      ProxyAutoConfigEnable : 0\n    }\n  }\n}\n";
         let e = parse_scutil_proxy(text);
-        assert_eq!(e.pac_enabled, Some(true), "the scoped block does not override it");
-        assert_eq!(e.pac_url.as_deref(), Some("http://127.0.0.1:8899/proxy.pac"));
+        assert_eq!(
+            e.pac_enabled,
+            Some(true),
+            "the scoped block does not override it"
+        );
+        assert_eq!(
+            e.pac_url.as_deref(),
+            Some("http://127.0.0.1:8899/proxy.pac")
+        );
         let off = parse_scutil_proxy("<dictionary> {\n  ProxyAutoConfigEnable : 0\n}\n");
         assert_eq!(off.pac_enabled, Some(false));
         assert_eq!(off.pac_url, None);
@@ -2664,19 +2827,40 @@ mod tests {
         assert!(is_admin_auth_error("", "errAuthorizationDenied"));
         assert!(is_admin_auth_error("Authorization failed.", ""));
         assert!(is_admin_auth_error("", "User is Not Authorized"));
-        assert!(is_admin_auth_error("", "Command requires admin privileges."));
+        assert!(is_admin_auth_error(
+            "",
+            "Command requires admin privileges."
+        ));
         assert!(is_admin_auth_error(
             "",
             "The networksetup tool requires at least admin privileges to change network settings."
         ));
-        assert!(is_admin_auth_error("", "AuthorizationCreate() failed: -60007"));
-        assert!(is_admin_auth_error("", "An error occurred while authenticating."));
+        assert!(is_admin_auth_error(
+            "",
+            "AuthorizationCreate() failed: -60007"
+        ));
+        assert!(is_admin_auth_error(
+            "",
+            "An error occurred while authenticating."
+        ));
         assert!(is_admin_auth_error("", "Operation not permitted"));
-        assert!(is_admin_auth_error("", "Error: -60031 errAuthorizationInternal"));
+        assert!(is_admin_auth_error(
+            "",
+            "Error: -60031 errAuthorizationInternal"
+        ));
         assert!(is_admin_auth_error("", "This tool must be run as root."));
-        assert!(is_admin_auth_error("", "Недостаточно прав администратора для изменения настроек."));
-        assert!(!is_admin_auth_error("", "Wi-Fi is not a recognized network service."));
-        assert!(!is_admin_auth_error("", "Corp Authentication is not a recognized network service."));
+        assert!(is_admin_auth_error(
+            "",
+            "Недостаточно прав администратора для изменения настроек."
+        ));
+        assert!(!is_admin_auth_error(
+            "",
+            "Wi-Fi is not a recognized network service."
+        ));
+        assert!(!is_admin_auth_error(
+            "",
+            "Corp Authentication is not a recognized network service."
+        ));
         assert!(
             PlatformError::AdminAuthRequired("set_pac")
                 .to_string()

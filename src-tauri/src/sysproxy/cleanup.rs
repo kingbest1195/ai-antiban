@@ -1,12 +1,17 @@
 //! Process-exit safety net and cleanup entry points: panic flag, OS signal watcher, restore of
 //! the ownership journal and the one-time, signature-based cleanup of 1.3.x leftovers.
 
+use super::browser_policies;
 use super::journal::{self, Journal, Outcome, RecoveryReport, ReportItem, Resource};
 use super::platform::PacState;
 use super::platform::{Platform, PlatformError, RegKind, RegValue, classify_services};
-use super::{FileCtx, Run, is_known_no_proxy_value, state, with_journal};
+use super::{FileCtx, Run, is_known_no_proxy_value, os_effects_enabled, state, with_journal};
+use crate::proxy::coverage::{Os, RealProbe, SystemProbe};
+use serde::Serialize;
 use std::collections::BTreeMap;
-use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, Once};
+use tauri::{Emitter, Manager};
 
 static CLEAN_HOOK_INIT: Once = Once::new();
 
@@ -56,7 +61,7 @@ pub fn spawn_signal_cleanup_watcher() {
         }
 
         eprintln!("Termination signal received! Restoring system settings...");
-        let _ = cleanup_all_persistent_settings();
+        let _ = cleanup_on_shutdown_once(None, "quit");
         std::process::exit(0);
     });
 }
@@ -456,11 +461,10 @@ fn migrate_vpn_pac_leftovers(
         if kind.is_physical() {
             continue;
         }
-        if j
-            .entry(&Resource::Pac {
-                service: svc.clone(),
-            })
-            .is_some()
+        if j.entry(&Resource::Pac {
+            service: svc.clone(),
+        })
+        .is_some()
         {
             continue; // the journal restores it by the general rule
         }
@@ -569,6 +573,16 @@ fn held_by_connected_vpn(j: &Journal, p: &dyn Platform, scope: Scope) -> Vec<Res
 /// while an active VPN keeps temporary DNS settings (or that cannot be checked) they are NOT
 /// written: their records stay and the pass reports a failure, so a later pass finishes the job.
 pub(super) fn restore_with(j: &mut Journal, p: &dyn Platform, scope: Scope) -> RecoveryReport {
+    let probe = os_effects_enabled().then_some((Os::current(), &RealProbe as &dyn SystemProbe));
+    restore_with_probe(j, p, scope, probe)
+}
+
+pub(super) fn restore_with_probe(
+    j: &mut Journal,
+    p: &dyn Platform,
+    scope: Scope,
+    probe: Option<(Os, &dyn SystemProbe)>,
+) -> RecoveryReport {
     let net_ids: Vec<String> = j
         .entries()
         .iter()
@@ -581,14 +595,44 @@ pub(super) fn restore_with(j: &mut Journal, p: &dyn Platform, scope: Scope) -> R
     } else {
         held_by_connected_vpn(j, p, scope)
     };
+    let browser_held: Vec<Resource> = if let Some((os, pr)) = probe
+        && j.entries().iter().any(|e| {
+            scope.covers(&e.resource) && matches!(e.resource, Resource::BrowserPacPref { .. })
+        }) {
+        let running = browser_policies::inspect_running_browsers(pr, os, None);
+        j.entries()
+            .iter()
+            .filter_map(|e| match &e.resource {
+                Resource::BrowserPacPref { domain, .. } if scope.covers(&e.resource) => {
+                    let is_running = match &running {
+                        Some(map) => map.get(domain.as_str()).is_some_and(|i| i.running),
+                        None => true,
+                    };
+                    is_running.then(|| e.resource.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut report = j.restore_where(p, |r| {
-        scope.covers(r) && !(dns_blocked && is_network_setting(r)) && !vpn_held.contains(r)
+        scope.covers(r)
+            && (!dns_blocked || !is_network_setting(r))
+            && !vpn_held.contains(r)
+            && !browser_held.contains(r)
     });
     for r in &vpn_held {
         // Not an error: the record stays and is put back once the VPN is disconnected.
         report.items.push(ReportItem {
             resource: r.id(),
             outcome: Outcome::Skipped("vpn"),
+        });
+    }
+    for r in &browser_held {
+        report.items.push(ReportItem {
+            resource: r.id(),
+            outcome: Outcome::Skipped("browser_running"),
         });
     }
     if dns_blocked {
@@ -617,17 +661,17 @@ pub(super) fn restore_and_migrate_with(
     at_app_start: bool,
 ) -> RecoveryReport {
     let mut report = restore_with(j, p, Scope::All);
-    report.items.extend(migrate_legacy_with(
-        j,
-        p,
-        gateway_port_now(),
-        at_app_start,
-    ));
+    report
+        .items
+        .extend(migrate_legacy_with(j, p, gateway_port_now(), at_app_start));
     if let Some(ctx) = FileCtx::real_with_fs(j.fs()) {
         let (strip, items) = super::cli_protection::clean_zshenv(j, p, &ctx);
         report.items.extend(items);
         if let Some(note) = strip.note("~/.zshenv") {
             eprintln!("Застава: {note}");
+        }
+        if !at_app_start && os_effects_enabled() {
+            browser_policies::clear_stale_browser_pac_prefs_in(&ctx, Os::current(), &RealProbe);
         }
     }
     report
@@ -656,12 +700,161 @@ pub(super) fn cleanup_cli_files() -> RecoveryReport {
     super::cli_protection::disable_cli_files()
 }
 
-/// Restores everything Zastava changed in the system from the ownership journal (PAC, chained
-/// proxy, WinINet, user environment), runs the one-time legacy migration and cleans the CLI/IDE
-/// files. Anything that cannot be restored right now (temporary VPN DNS, busy journal) stays
-/// recorded and is finished at the next start; the report says what was not done.
-pub fn cleanup_all_persistent_settings() -> RecoveryReport {
-    let mut report = match with_journal("ownership_cleanup", |j, p| {
+/// Event emitted during shutdown or update cleanup so the UI can show live phase progress.
+pub const SHUTDOWN_PROGRESS_EVENT: &str = "app://shutdown-progress";
+/// Total number of numbered shutdown cleanup phases before completion.
+pub const SHUTDOWN_PROGRESS_TOTAL: u8 = 4;
+
+/// Payload for [`SHUTDOWN_PROGRESS_EVENT`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ShutdownProgressPayload {
+    pub mode: String,
+    pub step: u8,
+    pub total: u8,
+    pub label: String,
+    pub done: bool,
+}
+
+impl ShutdownProgressPayload {
+    pub fn step(mode: &str, step: u8) -> Self {
+        let label = match step {
+            1 => "Остановка защиты и локального шлюза...",
+            2 => "Восстановление системного прокси и политик браузеров...",
+            3 => "Очистка настроек терминала и IDE...",
+            _ => "Восстановление системного часового пояса...",
+        };
+        Self {
+            mode: mode.to_string(),
+            step,
+            total: SHUTDOWN_PROGRESS_TOTAL,
+            label: label.to_string(),
+            done: false,
+        }
+    }
+
+    pub fn done(mode: &str) -> Self {
+        let label = if mode == "update" {
+            "Перезапуск после обновления..."
+        } else {
+            "Готово, закрываем приложение..."
+        };
+        Self {
+            mode: mode.to_string(),
+            step: SHUTDOWN_PROGRESS_TOTAL,
+            total: SHUTDOWN_PROGRESS_TOTAL,
+            label: label.to_string(),
+            done: true,
+        }
+    }
+}
+
+/// Process-wide idempotency guard for final shutdown / update cleanup so quit hooks and tray
+/// handlers cannot run the full OS restore more than once.
+pub struct ShutdownCleanupGuard {
+    lock: Mutex<()>,
+    in_progress: AtomicBool,
+    completed: AtomicBool,
+}
+
+impl Default for ShutdownCleanupGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShutdownCleanupGuard {
+    pub const fn new() -> Self {
+        Self {
+            lock: Mutex::new(()),
+            in_progress: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+        }
+    }
+
+    /// Claims the async tray-quit slot before spawning a background cleanup worker. Returns
+    /// `false` if shutdown cleanup has already started or completed.
+    pub fn try_claim_async_start(&self) -> bool {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.in_progress.load(Ordering::SeqCst) || self.completed.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.in_progress.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// Clears the guard when the process is NOT exiting after all (e.g. a failed update install
+    /// that restored protection).
+    pub fn reset(&self) {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.in_progress.store(false, Ordering::SeqCst);
+        self.completed.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.completed.load(Ordering::SeqCst)
+    }
+
+    /// Executes the 4-phase shutdown cleanup at most once, serializing concurrent callers.
+    /// Returns `None` if cleanup already completed earlier.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_once_with(
+        &self,
+        mode: &str,
+        emit_step1: bool,
+        mut sink: impl FnMut(ShutdownProgressPayload),
+        stop_gateway: impl FnOnce(),
+        os_cleanup: impl FnOnce() -> RecoveryReport,
+        cli_cleanup: impl FnOnce() -> RecoveryReport,
+        tz_restore: impl FnOnce(),
+    ) -> Option<RecoveryReport> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.completed.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.in_progress.store(true, Ordering::SeqCst);
+
+        if emit_step1 {
+            sink(ShutdownProgressPayload::step(mode, 1));
+        }
+        stop_gateway();
+
+        sink(ShutdownProgressPayload::step(mode, 2));
+        let mut report = os_cleanup();
+
+        sink(ShutdownProgressPayload::step(mode, 3));
+        let files = cli_cleanup();
+        report.items.extend(files.items);
+        report.journal_write_failed |= files.journal_write_failed;
+
+        sink(ShutdownProgressPayload::step(mode, 4));
+        tz_restore();
+
+        sink(ShutdownProgressPayload::done(mode));
+        self.completed.store(true, Ordering::SeqCst);
+        self.in_progress.store(false, Ordering::SeqCst);
+        Some(report)
+    }
+}
+
+static SHUTDOWN_GUARD: ShutdownCleanupGuard = ShutdownCleanupGuard::new();
+
+/// Claims the async shutdown slot on the main thread before spawning background cleanup.
+pub fn try_claim_async_shutdown() -> bool {
+    SHUTDOWN_GUARD.try_claim_async_start()
+}
+
+/// Resets the shutdown cleanup guard (used if an update install fails and the app stays running).
+pub fn reset_shutdown_cleanup_guard() {
+    SHUTDOWN_GUARD.reset();
+}
+
+/// Returns `true` once shutdown cleanup has completed in this process.
+pub fn is_shutdown_cleanup_completed() -> bool {
+    SHUTDOWN_GUARD.is_completed()
+}
+
+fn cleanup_os_and_policies_pass() -> RecoveryReport {
+    match with_journal("ownership_cleanup", |j, p| {
         // The PAC flag goes down before the restore, under the same lock (see `restore_pass`).
         super::restore_pass(state(), j, p, restore_and_migrate)
     }) {
@@ -674,11 +867,76 @@ pub fn cleanup_all_persistent_settings() -> RecoveryReport {
             journal_write_failed: true,
             ..Default::default()
         },
-    };
+    }
+}
+
+fn cleanup_cli_and_reset_state() -> RecoveryReport {
     let files = cleanup_cli_files();
+    state().reset();
+    files
+}
+
+fn run_shutdown_cleanup_inner(
+    app: Option<&tauri::AppHandle>,
+    mode: &str,
+    emit_step1: bool,
+) -> Option<RecoveryReport> {
+    SHUTDOWN_GUARD.run_once_with(
+        mode,
+        emit_step1,
+        |payload| {
+            if let Some(handle) = app {
+                let _ = handle.emit(SHUTDOWN_PROGRESS_EVENT, payload);
+            }
+        },
+        || {
+            if let Some(handle) = app {
+                if mode != "update" {
+                    crate::startup::note_shutdown(handle);
+                }
+                if let Some(guard) =
+                    handle.try_state::<std::sync::Arc<crate::proxy::NetworkGuard>>()
+                {
+                    guard.abort_active_tunnels();
+                }
+            }
+            state().set_sys_proxy_active(false);
+        },
+        cleanup_os_and_policies_pass,
+        cleanup_cli_and_reset_state,
+        || {
+            crate::os_tz::restore_on_exit_once(app);
+        },
+    )
+}
+
+/// Runs the deduplicated 4-step shutdown/update cleanup once per process exit, emitting
+/// `"app://shutdown-progress"` events for steps 1..4 and completion.
+pub fn cleanup_on_shutdown_once(
+    app: Option<&tauri::AppHandle>,
+    mode: &str,
+) -> Option<RecoveryReport> {
+    run_shutdown_cleanup_inner(app, mode, true)
+}
+
+/// Completes the deduplicated shutdown cleanup after step 1 was already emitted synchronously
+/// on the main thread (used by the async tray-quit flow).
+pub fn cleanup_on_shutdown_after_step1(
+    app: Option<&tauri::AppHandle>,
+    mode: &str,
+) -> Option<RecoveryReport> {
+    run_shutdown_cleanup_inner(app, mode, false)
+}
+
+/// Restores everything Zastava changed in the system from the ownership journal (PAC, chained
+/// proxy, WinINet, user environment, browser policies), runs the one-time legacy migration and
+/// cleans the CLI/IDE files. Intended for runtime toggle-off / manual cleanups (unguarded by the
+/// process-exit guard).
+pub fn cleanup_all_persistent_settings() -> RecoveryReport {
+    let mut report = cleanup_os_and_policies_pass();
+    let files = cleanup_cli_and_reset_state();
     report.items.extend(files.items);
     report.journal_write_failed |= files.journal_write_failed;
-    state().reset();
     report
 }
 
@@ -1408,10 +1666,23 @@ mod tests {
         p.seed_pac(&vpn, ours());
         let mut j = open(&fs);
         let items = migrate_legacy(&mut j, &p, None);
-        assert_eq!(p.pac_of(&vpn), PacState { url: None, enabled: Some(false) });
-        assert!(items.iter().any(|i| i.resource.starts_with("legacy:vpn-pac:")));
+        assert_eq!(
+            p.pac_of(&vpn),
+            PacState {
+                url: None,
+                enabled: Some(false)
+            }
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i.resource.starts_with("legacy:vpn-pac:"))
+        );
         assert!(j.has_mark(VPN_PAC_MIGRATION_MARK));
-        assert_eq!(VPN_PAC_MIGRATION_MARK, "legacy-2.0-vpn-services-pac-cleanup");
+        assert_eq!(
+            VPN_PAC_MIGRATION_MARK,
+            "legacy-2.0-vpn-services-pac-cleanup"
+        );
         // Done once: a second run neither reads nor writes.
         p.seed_pac(&vpn, ours());
         p.clear_calls();
@@ -1502,12 +1773,25 @@ mod tests {
         p.clear_calls();
         let writes = p.os_writes();
         let rep = restore_with(&mut j, &p, Scope::All);
-        assert_eq!(p.pac_of(&vpn), ours(), "the connected VPN keeps what it has");
+        assert_eq!(
+            p.pac_of(&vpn),
+            ours(),
+            "the connected VPN keeps what it has"
+        );
         assert_eq!(p.pac_of(&wifi()).enabled, Some(false), "Wi-Fi is restored");
         assert_eq!(p.os_writes(), writes + 1);
-        assert!(rep.items.iter().any(|i| i.outcome == Outcome::Skipped("vpn")));
+        assert!(
+            rep.items
+                .iter()
+                .any(|i| i.outcome == Outcome::Skipped("vpn"))
+        );
         assert!(!rep.has_failures(), "a skipped VPN is not an error");
-        assert!(j.entry(&Resource::Pac { service: vpn.clone() }).is_some());
+        assert!(
+            j.entry(&Resource::Pac {
+                service: vpn.clone()
+            })
+            .is_some()
+        );
         assert!(
             !p.calls()
                 .iter()
@@ -1573,5 +1857,172 @@ mod tests {
         );
         assert_eq!(store.get("com.google.Chrome", "DnsOverHttpsMode"), None);
         assert!(j.is_empty());
+    }
+
+    #[test]
+    fn shutdown_cleanup_guard_runs_once_emits_steps_and_resets_for_retry() {
+        use std::sync::atomic::AtomicUsize;
+
+        let guard = ShutdownCleanupGuard::new();
+        let events = std::sync::Mutex::new(Vec::<ShutdownProgressPayload>::new());
+        let calls = AtomicUsize::new(0);
+
+        assert!(guard.try_claim_async_start());
+        // Duplicate async quit claim while in-progress is rejected.
+        assert!(!guard.try_claim_async_start());
+
+        let res1 = guard.run_once_with(
+            "quit",
+            false,
+            |p| events.lock().unwrap().push(p),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            },
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                RecoveryReport::default()
+            },
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                RecoveryReport::default()
+            },
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        assert!(res1.is_some());
+        assert!(guard.is_completed());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+        // Subsequent RunEvent::ExitRequested / RunEvent::Exit calls must be no-ops.
+        let res2 = guard.run_once_with(
+            "quit",
+            true,
+            |p| events.lock().unwrap().push(p),
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            },
+            RecoveryReport::default,
+            RecoveryReport::default,
+            || {},
+        );
+        assert!(res2.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+
+        let recorded = events.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![
+                ShutdownProgressPayload::step("quit", 2),
+                ShutdownProgressPayload::step("quit", 3),
+                ShutdownProgressPayload::step("quit", 4),
+                ShutdownProgressPayload::done("quit"),
+            ]
+        );
+        assert_eq!(
+            recorded.last().unwrap().label,
+            "Готово, закрываем приложение..."
+        );
+        assert!(recorded.last().unwrap().done);
+
+        // Resetting (e.g. failed update install) allows cleanup to run again later with step 1.
+        guard.reset();
+        assert!(!guard.is_completed());
+        let mut update_events = Vec::new();
+        let res3 = guard.run_once_with(
+            "update",
+            true,
+            |p| update_events.push(p),
+            || {},
+            RecoveryReport::default,
+            RecoveryReport::default,
+            || {},
+        );
+        assert!(res3.is_some());
+        assert_eq!(update_events.len(), 5);
+        assert_eq!(update_events[0].step, 1);
+        assert_eq!(
+            update_events[0].label,
+            "Остановка защиты и локального шлюза..."
+        );
+        assert_eq!(
+            update_events[1].label,
+            "Восстановление системного прокси и политик браузеров..."
+        );
+        assert_eq!(
+            update_events[2].label,
+            "Очистка настроек терминала и IDE..."
+        );
+        assert_eq!(
+            update_events[3].label,
+            "Восстановление системного часового пояса..."
+        );
+        assert!(update_events[4].done);
+        assert_eq!(update_events[4].label, "Перезапуск после обновления...");
+    }
+
+    #[test]
+    fn restore_with_probe_skips_running_browser_pac_pref_and_restores_closed() {
+        use super::super::fs::FakeFs;
+        use super::super::journal::Value;
+        use super::super::platform::FakePlatform;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        struct RunningChromeProbe;
+        impl SystemProbe for RunningChromeProbe {
+            fn run(&self, _program: &str, _args: &[&str]) -> Option<String> {
+                Some("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n".to_string())
+            }
+        }
+
+        let fs = Arc::new(FakeFs::new());
+        let plat = FakePlatform::new();
+        let chrome_prefs = PathBuf::from("/Users/t/Chrome/Default/Preferences");
+        let comet_prefs = PathBuf::from("/Users/t/Comet/Default/Preferences");
+        fs.put(&chrome_prefs, br#"{"keep":1}"#, 0o600);
+        fs.put(&comet_prefs, br#"{"keep":2}"#, 0o600);
+
+        let mut j = Journal::open(fs.clone(), Path::new("/j")).unwrap();
+        let desired =
+            browser_policies::build_browser_proxy_json_string("http://127.0.0.1:8899/proxy.pac");
+        j.apply(
+            &plat,
+            &Resource::BrowserPacPref {
+                domain: "com.google.Chrome".into(),
+                file: chrome_prefs.to_string_lossy().into_owned(),
+            },
+            Value::Json(Some(desired.clone())),
+        )
+        .unwrap();
+        j.apply(
+            &plat,
+            &Resource::BrowserPacPref {
+                domain: "ai.perplexity.comet".into(),
+                file: comet_prefs.to_string_lossy().into_owned(),
+            },
+            Value::Json(Some(desired)),
+        )
+        .unwrap();
+
+        let probe = RunningChromeProbe;
+        let rep = restore_with_probe(&mut j, &plat, Scope::All, Some((Os::Macos, &probe)));
+        assert!(!rep.has_failures());
+        assert!(
+            rep.items
+                .iter()
+                .any(|i| matches!(i.outcome, Outcome::Skipped("browser_running")))
+        );
+        // Running Chrome keeps its injected proxy; closed Comet had its proxy removed.
+        assert!(
+            browser_policies::read_browser_proxy_pref(&*fs, &chrome_prefs)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            browser_policies::read_browser_proxy_pref(&*fs, &comet_prefs)
+                .unwrap()
+                .is_none()
+        );
     }
 }

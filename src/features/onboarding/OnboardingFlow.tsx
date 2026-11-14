@@ -90,8 +90,9 @@ export function OnboardingFlow({ initialStep = 1, onClose, ...data }: Onboarding
   }, []);
 
   const finished = step === DONE_STEP;
-  // На шаге с пробной тревогой «Пропустить» ведёт к финалу, на остальных закрывает знакомство.
-  const skip = () => (step === ONBOARDING_STEPS ? next() : onClose());
+  const isAlertStep = step === ONBOARDING_STEPS;
+  // На шаге с пробной тревогой кнопка в шапке ведёт к финалу («Продолжить»), на остальных закрывает знакомство.
+  const headerAction = () => (isAlertStep ? next() : onClose());
 
   let body;
   switch (step) {
@@ -143,8 +144,8 @@ export function OnboardingFlow({ initialStep = 1, onClose, ...data }: Onboarding
             showValue={false}
           />
           {!finished && (
-            <Button size="sm" onClick={skip}>
-              {copy.skip}
+            <Button size="sm" onClick={headerAction}>
+              {isAlertStep ? copy.continue : copy.skip}
             </Button>
           )}
         </header>

@@ -1,4 +1,4 @@
-import { Banner, Card, Row, Rows, Switch } from "../../ui";
+import { Badge, Banner, Card, Row, Rows, Switch } from "../../ui";
 import { onboarding as copy } from "../../shared/copy/ru";
 import { StepFooter, StepFrame } from "./parts";
 
@@ -12,7 +12,7 @@ export interface StepProtectProps {
   onBack: () => void;
 }
 
-/** Шаг 3: два тумблера с честным описанием того, что меняется в системе. Показывает фактическое состояние. */
+/** Шаг 3: три слоя защиты v2.2 — браузеры (PAC + QUIC/DoH), приложения/CLI/IDE (ai_only) и часовой пояс для ИИ. */
 export function StepProtect({ sysproxyActive, cliProtected, onToggleSysproxy, onToggleCli, onNext, onBack }: StepProtectProps) {
   const state =
     sysproxyActive && cliProtected
@@ -38,16 +38,16 @@ export function StepProtect({ sysproxyActive, cliProtected, onToggleSysproxy, on
             trail={<Switch checked={sysproxyActive} onChange={onToggleSysproxy} aria-label={copy.protect.browsers.title} />}
           />
           <Row
-            icon="shield"
-            title={copy.protect.desktopApps.title}
-            sub={copy.protect.desktopApps.sub}
-            trail={<Switch checked={sysproxyActive} onChange={onToggleSysproxy} aria-label={copy.protect.desktopApps.title} />}
+            icon="term"
+            title={copy.protect.appsCliIde.title}
+            sub={copy.protect.appsCliIde.sub}
+            trail={<Switch checked={cliProtected} onChange={onToggleCli} aria-label={copy.protect.appsCliIde.title} />}
           />
           <Row
-            icon="term"
-            title={copy.protect.editors.title}
-            sub={copy.protect.editors.sub}
-            trail={<Switch checked={cliProtected} onChange={onToggleCli} aria-label={copy.protect.editors.title} />}
+            icon="shield"
+            title={copy.protect.timezone.title}
+            sub={copy.protect.timezone.sub}
+            trail={<Badge tone="neutral">{copy.protect.timezone.badge}</Badge>}
           />
         </Rows>
       </Card>

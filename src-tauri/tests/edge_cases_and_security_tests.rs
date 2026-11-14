@@ -1,12 +1,14 @@
-use zastava_lib::auditor::dnsbl::{format_dnsbl_query, reverse_ipv4};
-use zastava_lib::auditor::ip_type::{evaluate_ip_reputation, ExitIdentity, TorLookup};
-use zastava_lib::auditor::geo_matrix::{evaluate_provider_geo, CheckStatus, ProviderId};
-use zastava_lib::auditor::history::{evaluate_impossible_travel, evaluate_ip_pinning};
-use zastava_lib::auditor::leaks::{is_russian_or_belarusian_timezone, RUSSIAN_TIMEZONES};
-use zastava_lib::auditor::rules::{DangerousAsns, ProviderMatrix};
 use std::net::IpAddr;
+use zastava_lib::auditor::dnsbl::{format_dnsbl_query, reverse_ipv4};
+use zastava_lib::auditor::geo_matrix::{CheckStatus, ProviderId, evaluate_provider_geo};
+use zastava_lib::auditor::history::{evaluate_impossible_travel, evaluate_ip_pinning};
+use zastava_lib::auditor::ip_type::{ExitIdentity, TorLookup, evaluate_ip_reputation};
+use zastava_lib::auditor::leaks::{RUSSIAN_TIMEZONES, is_russian_or_belarusian_timezone};
+use zastava_lib::auditor::rules::{DangerousAsns, ProviderMatrix};
 use zastava_lib::bin_checker::BinChecker;
-use zastava_lib::proxy::server::{is_forbidden_ip, is_tun_fake_ip, parse_host_port, validate_tunnel_target};
+use zastava_lib::proxy::server::{
+    is_forbidden_ip, is_tun_fake_ip, parse_host_port, validate_tunnel_target,
+};
 use zastava_lib::state::{AppState, AppStateData, IpHistoryEntry};
 
 #[test]
@@ -34,13 +36,24 @@ fn test_edge_case_impossible_travel_exact_window() {
     let inside_window = now - (3 * 3600 + 59 * 60); // 3h 59m ago
     let outside_window = now - (4 * 3600 + 60); // 4h 1m ago
 
-    let history_inside = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1234), inside_window)];
+    let history_inside = vec![IpHistoryEntry::new(
+        "1.1.1.1",
+        "DE",
+        Some(1234),
+        inside_window,
+    )];
     let res_inside = evaluate_impossible_travel(&history_inside, "US", now, ProviderId::Anthropic);
     assert_eq!(res_inside.status, CheckStatus::Critical);
     assert_eq!(res_inside.code, "IMPOSSIBLE_TRAVEL_CRITICAL");
 
-    let history_outside = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1234), outside_window)];
-    let res_outside = evaluate_impossible_travel(&history_outside, "US", now, ProviderId::Anthropic);
+    let history_outside = vec![IpHistoryEntry::new(
+        "1.1.1.1",
+        "DE",
+        Some(1234),
+        outside_window,
+    )];
+    let res_outside =
+        evaluate_impossible_travel(&history_outside, "US", now, ProviderId::Anthropic);
     assert_eq!(res_outside.status, CheckStatus::Ok);
     assert_eq!(res_outside.code, "TRAVEL_NORMAL");
 }
@@ -53,7 +66,10 @@ fn test_edge_case_dnsbl_all_configured_zones_formatting() {
 
     for zone_cfg in &dangerous_asns.dnsbl_zones {
         let fqdn = format_dnsbl_query(test_ip, &zone_cfg.zone).expect("Format query");
-        assert_eq!(fqdn, format!("{reversed}.{}", zone_cfg.zone.trim_matches('.')));
+        assert_eq!(
+            fqdn,
+            format!("{reversed}.{}", zone_cfg.zone.trim_matches('.'))
+        );
         assert!(!fqdn.ends_with('.'));
     }
 }
@@ -104,7 +120,13 @@ fn test_edge_case_vps_pinning_and_russian_telecom() {
     let asns = DangerousAsns::load_bundled().expect("Failed to load bundled ASNs");
 
     let rep = |asn: u32, isp: &str, pinned: bool| {
-        let id = ExitIdentity { ip: "203.0.113.9", country_code: "NL", asn: Some(asn), isp: Some(isp), org: None };
+        let id = ExitIdentity {
+            ip: "203.0.113.9",
+            country_code: "NL",
+            asn: Some(asn),
+            isp: Some(isp),
+            org: None,
+        };
         evaluate_ip_reputation(&id, &asns, TorLookup::NotListed, pinned)
     };
 
@@ -188,9 +210,13 @@ fn test_security_ssrf_and_proxy_loop_prevention() {
 
     // Verify is_forbidden_ip directly
     assert!(is_forbidden_ip(&"127.0.0.1".parse::<IpAddr>().unwrap()));
-    assert!(is_forbidden_ip(&"169.254.169.254".parse::<IpAddr>().unwrap()));
+    assert!(is_forbidden_ip(
+        &"169.254.169.254".parse::<IpAddr>().unwrap()
+    ));
     assert!(!is_forbidden_ip(&"1.1.1.1".parse::<IpAddr>().unwrap()));
-    assert!(!is_forbidden_ip(&"2606:4700:4700::1111".parse::<IpAddr>().unwrap()));
+    assert!(!is_forbidden_ip(
+        &"2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+    ));
 
     // Verify is_tun_fake_ip identifies FakeIP pool (198.18.0.0/15)
     assert!(is_tun_fake_ip(&"198.18.0.1".parse::<IpAddr>().unwrap()));
@@ -209,10 +235,7 @@ fn test_security_parse_host_port_ipv6_and_fqdn() {
         parse_host_port("[2606:4700:4700::1111]:443"),
         ("2606:4700:4700::1111".to_string(), 443)
     );
-    assert_eq!(
-        parse_host_port("[::1]:8899"),
-        ("::1".to_string(), 8899)
-    );
+    assert_eq!(parse_host_port("[::1]:8899"), ("::1".to_string(), 8899));
 }
 
 #[test]
@@ -233,4 +256,3 @@ fn test_self_healing_corrupt_state_file() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
-

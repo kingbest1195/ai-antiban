@@ -15,6 +15,7 @@
 //! * Cisco OpenDNS: 208.67.216.0/21 (ARIN: 208.67.216.0 - 208.67.223.255, AS36692).
 //! * AdGuard DNS: adguard-dns.io/en/public-dns.html (94.140.14.x, 94.140.15.x, 2a10:50c0::); the
 //!   covering /24 and /32 are the blocks of those addresses.
+//!
 //! NextDNS is not listed: its egress ranges are not published, so nothing is assumed.
 
 use std::net::IpAddr;
@@ -134,7 +135,10 @@ mod tests {
     fn other_operators_and_ranges_edges() {
         assert_eq!(operator_of(ip("8.8.8.8")), Some("Google Public DNS"));
         assert_eq!(operator_of(ip("74.125.99.1")), Some("Google Public DNS"));
-        assert_eq!(operator_of(ip("2001:4860:4860::8888")), Some("Google Public DNS"));
+        assert_eq!(
+            operator_of(ip("2001:4860:4860::8888")),
+            Some("Google Public DNS")
+        );
         assert_eq!(operator_of(ip("9.9.9.9")), Some("Quad9"));
         assert_eq!(operator_of(ip("208.67.222.222")), Some("Cisco OpenDNS"));
         assert_eq!(operator_of(ip("94.140.14.14")), Some("AdGuard DNS"));

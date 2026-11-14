@@ -129,7 +129,7 @@ pub fn decode_project_slug(slug: &str) -> String {
             }
         }
 
-        if found_on_fs && resolved != PathBuf::from("/") {
+        if found_on_fs && resolved != Path::new("/") {
             return resolved.to_string_lossy().to_string();
         }
 
@@ -157,11 +157,11 @@ fn dir_size_and_count(dir: &Path) -> (u64, usize) {
                 let (b, c) = dir_size_and_count(&p);
                 total_bytes += b;
                 count += c;
-            } else if p.is_file() {
-                if let Ok(meta) = fs::metadata(&p) {
-                    total_bytes += meta.len();
-                    count += 1;
-                }
+            } else if p.is_file()
+                && let Ok(meta) = fs::metadata(&p)
+            {
+                total_bytes += meta.len();
+                count += 1;
             }
         }
     }
@@ -205,12 +205,12 @@ pub fn extract_last_user_query_from_jsonl(path: &Path) -> Option<String> {
                     return Some(clean.chars().take(240).collect());
                 }
             }
-            if let Some(msg) = val.get("message") {
-                if let Some(c) = msg.get("content").and_then(|c| c.as_str()) {
-                    let clean = c.trim();
-                    if !clean.is_empty() {
-                        return Some(clean.chars().take(240).collect());
-                    }
+            if let Some(msg) = val.get("message")
+                && let Some(c) = msg.get("content").and_then(|c| c.as_str())
+            {
+                let clean = c.trim();
+                if !clean.is_empty() {
+                    return Some(clean.chars().take(240).collect());
                 }
             }
         }
@@ -243,75 +243,70 @@ pub fn scan_claude_dir(claude_dir: &Path, home_dir: &Path) -> ClaudeLocalDataSum
     let mut total_memory_files = 0;
 
     let projects_dir = claude_dir.join("projects");
-    if projects_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&projects_dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    let slug = p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let decoded_path = decode_project_slug(&slug);
+    if projects_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&projects_dir)
+    {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let slug = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let decoded_path = decode_project_slug(&slug);
 
-                    let mut sessions_count = 0;
-                    let mut proj_bytes = 0;
-                    let mut latest_mod: Option<u64> = None;
-                    let mut has_mem = false;
+                let mut sessions_count = 0;
+                let mut proj_bytes = 0;
+                let mut latest_mod: Option<u64> = None;
+                let mut has_mem = false;
 
-                    if let Ok(p_entries) = fs::read_dir(&p) {
-                        for sub_entry in p_entries.flatten() {
-                            let sp = sub_entry.path();
-                            if sp.is_file() {
-                                if let Ok(meta) = sp.metadata() {
-                                    proj_bytes += meta.len();
-                                    if let Ok(mod_time) = meta.modified() {
-                                        if let Ok(dur) =
-                                            mod_time.duration_since(std::time::UNIX_EPOCH)
-                                        {
-                                            let s = dur.as_secs();
-                                            latest_mod = Some(latest_mod.map_or(s, |m| m.max(s)));
-                                        }
-                                    }
-                                }
-                                if sp
-                                    .extension()
-                                    .map(|e| e.eq_ignore_ascii_case("jsonl"))
-                                    .unwrap_or(false)
+                if let Ok(p_entries) = fs::read_dir(&p) {
+                    for sub_entry in p_entries.flatten() {
+                        let sp = sub_entry.path();
+                        if sp.is_file() {
+                            if let Ok(meta) = sp.metadata() {
+                                proj_bytes += meta.len();
+                                if let Ok(mod_time) = meta.modified()
+                                    && let Ok(dur) = mod_time.duration_since(std::time::UNIX_EPOCH)
                                 {
-                                    sessions_count += 1;
+                                    let s = dur.as_secs();
+                                    latest_mod = Some(latest_mod.map_or(s, |m| m.max(s)));
                                 }
-                            } else if sp.is_dir()
-                                && sp
-                                    .file_name()
-                                    .map(|n| n == "memory")
-                                    .unwrap_or(false)
+                            }
+                            if sp
+                                .extension()
+                                .map(|e| e.eq_ignore_ascii_case("jsonl"))
+                                .unwrap_or(false)
                             {
-                                has_mem = true;
-                                if let Ok(mem_entries) = fs::read_dir(&sp) {
-                                    for me in mem_entries.flatten() {
-                                        if me.path().is_file() {
-                                            total_memory_files += 1;
-                                            if let Ok(meta) = me.metadata() {
-                                                proj_bytes += meta.len();
-                                            }
+                                sessions_count += 1;
+                            }
+                        } else if sp.is_dir()
+                            && sp.file_name().map(|n| n == "memory").unwrap_or(false)
+                        {
+                            has_mem = true;
+                            if let Ok(mem_entries) = fs::read_dir(&sp) {
+                                for me in mem_entries.flatten() {
+                                    if me.path().is_file() {
+                                        total_memory_files += 1;
+                                        if let Ok(meta) = me.metadata() {
+                                            proj_bytes += meta.len();
                                         }
                                     }
                                 }
                             }
                         }
                     }
-
-                    total_sessions += sessions_count;
-                    projects.push(ClaudeProjectBrief {
-                        slug,
-                        decoded_path,
-                        sessions_count,
-                        has_memory: has_mem,
-                        total_bytes: proj_bytes,
-                        last_modified: latest_mod,
-                    });
                 }
+
+                total_sessions += sessions_count;
+                projects.push(ClaudeProjectBrief {
+                    slug,
+                    decoded_path,
+                    sessions_count,
+                    has_memory: has_mem,
+                    total_bytes: proj_bytes,
+                    last_modified: latest_mod,
+                });
             }
         }
     }
@@ -325,12 +320,12 @@ pub fn scan_claude_dir(claude_dir: &Path, home_dir: &Path) -> ClaudeLocalDataSum
 
     let plans_dir = claude_dir.join("plans");
     let mut plans_count = 0;
-    if plans_dir.is_dir() {
-        if let Ok(entries) = fs::read_dir(&plans_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_file() {
-                    plans_count += 1;
-                }
+    if plans_dir.is_dir()
+        && let Ok(entries) = fs::read_dir(&plans_dir)
+    {
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                plans_count += 1;
             }
         }
     }
@@ -476,13 +471,14 @@ pub fn generate_index_summary_md(
                 md.push_str("- **Долговременная память**: _отсутствует_\n");
             }
 
-            if let Some((_, _, last_query)) = project_queries
-                .iter()
-                .find(|(slug, _, _)| slug == &p.slug)
+            if let Some((_, _, last_query)) =
+                project_queries.iter().find(|(slug, _, _)| slug == &p.slug)
+                && let Some(q) = last_query
             {
-                if let Some(q) = last_query {
-                    md.push_str(&format!("- **Последний контекст сессии**:\n  > {}\n", q.replace('\n', " ")));
-                }
+                md.push_str(&format!(
+                    "- **Последний контекст сессии**:\n  > {}\n",
+                    q.replace('\n', " ")
+                ));
             }
             md.push('\n');
         }
@@ -515,7 +511,7 @@ pub fn generate_index_summary_md(
 /// Generates the RESTORE_PROMPT.md ready for copy-paste into any AI assistant.
 pub fn generate_restore_prompt_md(export_dir_path: &str) -> String {
     format!(
-r#"# Системная директива переноса инженерного контекста
+        r#"# Системная директива переноса инженерного контекста
 
 Ты — ведущий инженер-архитектор. Пользователь подключил архив полного рабочего контекста из предыдущей сессии разработки.
 
@@ -597,17 +593,14 @@ pub fn export_claude_dir_to(
                                 .unwrap_or(false)
                             {
                                 sessions_exported += 1;
-                                if let Ok(meta) = s_path.metadata() {
-                                    if let Ok(mod_time) = meta.modified() {
-                                        if let Ok(dur) =
-                                            mod_time.duration_since(std::time::UNIX_EPOCH)
-                                        {
-                                            let s = dur.as_secs();
-                                            if s >= latest_mod {
-                                                latest_mod = s;
-                                                latest_session_file = Some(s_path);
-                                            }
-                                        }
+                                if let Ok(meta) = s_path.metadata()
+                                    && let Ok(mod_time) = meta.modified()
+                                    && let Ok(dur) = mod_time.duration_since(std::time::UNIX_EPOCH)
+                                {
+                                    let s = dur.as_secs();
+                                    if s >= latest_mod {
+                                        latest_mod = s;
+                                        latest_session_file = Some(s_path);
                                     }
                                 }
                             }
@@ -629,8 +622,7 @@ pub fn export_claude_dir_to(
     let mut plans = Vec::new();
 
     if src_plans.is_dir() {
-        fs::create_dir_all(&dst_plans)
-            .map_err(|e| format!("Ошибка создания папки plans: {e}"))?;
+        fs::create_dir_all(&dst_plans).map_err(|e| format!("Ошибка создания папки plans: {e}"))?;
         if let Ok(entries) = fs::read_dir(&src_plans) {
             for entry in entries.flatten() {
                 let p = entry.path();
@@ -660,10 +652,10 @@ pub fn export_claude_dir_to(
     // 3. Copy skills/ (if present)
     let src_skills = claude_dir.join("skills");
     let dst_skills = export_dir.join("skills");
-    if src_skills.is_dir() {
-        if let Ok((_cnt, b)) = copy_dir_all(&src_skills, &dst_skills) {
-            total_bytes += b;
-        }
+    if src_skills.is_dir()
+        && let Ok((_cnt, b)) = copy_dir_all(&src_skills, &dst_skills)
+    {
+        total_bytes += b;
     }
 
     // 4. Copy loose root artifacts
@@ -765,7 +757,7 @@ fn pack_directory_to_zip(dir: &Path, zip_file: &Path) -> Result<(), String> {
         if status2.success() {
             return Ok(());
         }
-        return Err("macOS zip command failed".to_string());
+        Err("macOS zip command failed".to_string())
     }
 
     #[cfg(target_os = "windows")]
@@ -806,7 +798,8 @@ fn pack_directory_to_zip(dir: &Path, zip_file: &Path) -> Result<(), String> {
 
 /// Public API to export local Claude data onto the user's Desktop.
 pub fn export_claude_local_data() -> Result<ClaudeExportResult, String> {
-    let home = get_home_dir().ok_or_else(|| "Домашняя директория пользователя не найдена.".to_string())?;
+    let home =
+        get_home_dir().ok_or_else(|| "Домашняя директория пользователя не найдена.".to_string())?;
     let claude_dir = home.join(".claude");
     let desktop = get_desktop_dir(&home);
     export_claude_dir_to(&claude_dir, &home, &desktop)
@@ -832,11 +825,17 @@ mod tests {
         fs::create_dir_all(&claude_dir).unwrap();
 
         // 1. Create mock projects
-        let p1 = claude_dir.join("projects").join("-Users-test-projects-app1");
+        let p1 = claude_dir
+            .join("projects")
+            .join("-Users-test-projects-app1");
         fs::create_dir_all(&p1).unwrap();
         let mem1 = p1.join("memory");
         fs::create_dir_all(&mem1).unwrap();
-        fs::write(mem1.join("MEMORY.md"), "# Architecture Notes\nPostgreSQL + Actix").unwrap();
+        fs::write(
+            mem1.join("MEMORY.md"),
+            "# Architecture Notes\nPostgreSQL + Actix",
+        )
+        .unwrap();
 
         let s1 = p1.join("session-abc.jsonl");
         let sample_jsonl = r#"{"type":"cost-state","totalCostUSD":0.12}
@@ -846,7 +845,11 @@ mod tests {
         // 2. Create mock plans
         let plans_dir = claude_dir.join("plans");
         fs::create_dir_all(&plans_dir).unwrap();
-        fs::write(plans_dir.join("v1-release.md"), "# План релиза v1.1.3\n- Задача 1\n- Задача 2").unwrap();
+        fs::write(
+            plans_dir.join("v1-release.md"),
+            "# План релиза v1.1.3\n- Задача 1\n- Задача 2",
+        )
+        .unwrap();
 
         // 3. Create loose files
         fs::write(claude_dir.join("CLAUDE.md"), "# Guidelines\nStrict Rust").unwrap();
@@ -868,7 +871,8 @@ mod tests {
         let desktop = base.join("mock_desktop");
         fs::create_dir_all(&desktop).unwrap();
 
-        let export_res = export_claude_dir_to(&claude_dir, &home_dir, &desktop).expect("export success");
+        let export_res =
+            export_claude_dir_to(&claude_dir, &home_dir, &desktop).expect("export success");
         assert_eq!(export_res.projects_exported, 1);
         assert_eq!(export_res.sessions_exported, 1);
         assert!(Path::new(&export_res.index_summary_path).is_file());

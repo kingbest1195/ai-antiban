@@ -6,6 +6,7 @@ import type { EnrichedPayload, InterceptionAction, RiskInterceptPayload } from "
 import {
   MOCK_ALERT_DETECTED_EVENT,
   MOCK_ALERT_ENRICHED_EVENT,
+  pauseUntilNetworkChange,
   resolveInterception,
   takePendingAlert,
 } from "../../utils/api";
@@ -142,6 +143,9 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
 
       try {
         await resolveInterception(payload.id, action, payload.provider, payload.scope);
+        if (action === "BlockUntilNetworkChange" && payload.scope !== "network") {
+          await pauseUntilNetworkChange(payload.gate_reason ?? undefined).catch(() => {});
+        }
         if (onResolved) onResolved(action);
       } catch (err) {
         console.error("Failed to resolve interception:", err);
@@ -216,7 +220,21 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
 
   const incomplete = !detecting && !failed && Boolean(report?.incomplete);
   const base = failed ? copy.failedText : detecting ? `${reason} ${copy.detectingHint}` : reason;
-  const text: ReactNode = demoFeedback ?? allowError ?? (incomplete ? `${base} ${copy.textIncomplete}` : base);
+  const textBody = incomplete ? `${base} ${copy.textIncomplete}` : base;
+  const gateReason = !failed && payload.gate_reason?.trim() ? payload.gate_reason.trim() : null;
+  const text: ReactNode =
+    demoFeedback ??
+    allowError ??
+    (gateReason ? (
+      <>
+        <span className="zs-alert-reason">
+          {copy.gateReasonPrefix} {gateReason}
+        </span>
+        {textBody}
+      </>
+    ) : (
+      textBody
+    ));
 
   const locked = resolving || Boolean(demoFeedback);
 

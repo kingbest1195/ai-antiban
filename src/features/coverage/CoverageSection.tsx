@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppCoverageItem, CoverageSnapshot } from "../../types";
-import { restartAppWithGateway } from "../../utils/api";
+import { openOsNetworkSettings, reapplyBrowserPolicies, relaunchBrowsersWithPac, restartAppWithGateway } from "../../utils/api";
 import { Badge, Banner, Button, Card, ConfirmModal, CopyBlock, ExpandRow, Progress, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
 import { CopyErrorLogButton } from "../../shared/components/CopyErrorLogButton";
 import type { BadgeTone, IconName, RowTone } from "../../ui";
 import { coverage as copy } from "../../shared/copy/ru";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
+import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
 import { useCopy } from "../guides/useCopy";
 import { buildManualSetup } from "./manualSetup";
-import { canRestartAntigravity, enableResult, isListed, isProtectionOn, protectedAppNames, protectionControl, restartResult, sinceLastSeen, viewOf, vpnNotice } from "./coverageModel";
+import { browserPacStatus, canRestartAntigravity, enableResult, isListed, isProtectionOn, protectedAppNames, protectionControl, relaunchBrowsersResult, restartResult, shouldShowBrowserTimezoneHint, sinceLastSeen, viewOf, vpnNotice } from "./coverageModel";
 import type { CoverageView, ProtectionKind, ProtectionResult, WaitingMap } from "./coverageModel";
 import { useCoverage } from "./useCoverage";
 import "./coverage.css";
@@ -50,7 +51,7 @@ const rowTone = (view: CoverageView): RowTone => (view === "confirmed" ? "ok" : 
 
 /** Секция «Покрытие приложений»: одна реализация для «Обзора» и «Проверок». */
 export function CoverageSection({ variant, initialSnapshot, pending, protection, onToast }: CoverageSectionProps) {
-  const { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup } = useCoverage(initialSnapshot);
+  const { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup, applySnapshot } = useCoverage(initialSnapshot);
   const { copiedId, copy: copyText } = useCopy(onToast);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   /** Какая защита сейчас применяется: кнопки этой группы заблокированы, показан индикатор. */
@@ -60,6 +61,9 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
   /** Подтверждение перезапуска Antigravity открыто / перезапуск идёт (до 15 секунд ожидания закрытия). */
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [linkingBrowsers, setLinkingBrowsers] = useState(false);
+  const [relaunchingBrowsers, setRelaunchingBrowsers] = useState(false);
+  const { osTzStatus, osTzLoading, syncOsTimezone } = useOsTimezoneSync();
 
   // Как только запуск закончился, читаем состояние заново: снимок до этого описывал выключенную защиту.
   useEffect(() => {
@@ -70,6 +74,11 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
 
   const apps = useMemo(() => (snapshot?.apps ?? []).filter((a) => isListed(a, variant)), [snapshot, variant]);
   const vpn = useMemo(() => (snapshot ? vpnNotice(snapshot) : null), [snapshot]);
+  const browserPac = useMemo(() => (snapshot ? browserPacStatus(snapshot) : null), [snapshot]);
+  const showBrowserTzHint = useMemo(
+    () => shouldShowBrowserTimezoneHint(snapshot?.apps, osTzStatus),
+    [snapshot?.apps, osTzStatus],
+  );
 
   /** «Включить»: только включает; итог берётся из ответа команды и показывается строкой и тостом. */
   const enable = async (kind: ProtectionKind) => {
@@ -119,6 +128,43 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
     }
   };
 
+  /** Привязывает браузеры через управляемые политики (Chrome/Edge/Brave/Firefox) и перечитывает покрытие. */
+  const linkBrowsers = async () => {
+    if (linkingBrowsers) return;
+    setLinkingBrowsers(true);
+    try {
+      await reapplyBrowserPolicies();
+      onToast?.(copy.vpn.actions.policyToastTitle, undefined, "success");
+      await recheck();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onToast?.(copy.vpn.actions.policyToastError, msg, "error");
+    } finally {
+      setLinkingBrowsers(false);
+    }
+  };
+
+  /** Перезапускает запущенные браузеры без PAC, применяя политики и `--proxy-pac-url`. */
+  const relaunchBrowsers = async () => {
+    if (relaunchingBrowsers) return;
+    setRelaunchingBrowsers(true);
+    setResult(null);
+    try {
+      const res = await relaunchBrowsersWithPac();
+      applySnapshot(res.snapshot);
+      const out = relaunchBrowsersResult(res);
+      setResult(out);
+      onToast?.(out.title, out.text, out.tone === "ok" ? "success" : out.tone === "warn" ? "warning" : "error");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const out: ProtectionResult = { tone: "danger", title: copy.vpn.restartNeeded.relaunchErrorTitle, text: msg };
+      setResult(out);
+      onToast?.(out.title, msg, "error");
+    } finally {
+      setRelaunchingBrowsers(false);
+    }
+  };
+
   /** «Перезапустить»: после подтверждения; итог — строкой и тостом, статус перечитывается. */
   const restart = async () => {
     if (restarting) return;
@@ -158,12 +204,91 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
           </p>
         ) : (
           <>
-          {vpn?.overridden && (
-            <Banner tone="warn" title={copy.vpn.overridden.title(vpn.names)} className="zs-cov__vpn">
-              {copy.vpn.overridden.text}
+          {browserPac && browserPac.pacOverridden && browserPac.browsersNeedingRestart.length > 0 ? (
+            <Banner
+              tone="warn"
+              title={copy.vpn.restartNeeded.title(browserPac.browsersNeedingRestart.join(", "))}
+              className="zs-cov__vpn"
+              action={
+                <div className="zs-banner__actions">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={relaunchingBrowsers || linkingBrowsers || checking}
+                    aria-busy={relaunchingBrowsers}
+                    onClick={() => void relaunchBrowsers()}
+                  >
+                    {relaunchingBrowsers ? (
+                      <>
+                        <Spinner /> {copy.vpn.restartNeeded.relaunchingButton}
+                      </>
+                    ) : (
+                      copy.vpn.restartNeeded.relaunchButton
+                    )}
+                  </Button>
+                  <Button size="sm" variant="secondary" disabled={checking || relaunchingBrowsers} onClick={() => void recheck()}>
+                    {checking ? copy.rechecking : copy.vpn.actions.recheck}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={linkingBrowsers || relaunchingBrowsers || checking}
+                    onClick={() => void linkBrowsers()}
+                  >
+                    {linkingBrowsers
+                      ? copy.vpn.actions.relinkingBrowsers
+                      : browserPac.pacPolicyActive
+                        ? copy.vpn.actions.relinkBrowsers
+                        : copy.vpn.actions.linkBrowsers}
+                  </Button>
+                  <Button size="sm" variant="quiet" onClick={() => void openOsNetworkSettings().catch(() => {})}>
+                    {copy.vpn.actions.osNetworkSettings}
+                  </Button>
+                </div>
+              }
+            >
+              {vpn
+                ? copy.vpn.restartNeeded.textWithVpn(vpn.names, browserPac.browsersNeedingRestart.join(", "))
+                : copy.vpn.restartNeeded.textWithoutVpn(browserPac.browsersNeedingRestart.join(", "))}
             </Banner>
+          ) : (
+            vpn?.overridden && (
+              <Banner
+                tone={vpn.pacPolicyActive ? "info" : "warn"}
+                title={vpn.pacPolicyActive ? copy.vpn.pacLinked.title(vpn.names) : copy.vpn.overridden.title(vpn.names)}
+                className="zs-cov__vpn"
+                action={
+                  <div className="zs-banner__actions">
+                    <Button
+                      size="sm"
+                      variant={vpn.pacPolicyActive ? "secondary" : "primary"}
+                      disabled={linkingBrowsers || checking}
+                      onClick={() => void linkBrowsers()}
+                    >
+                      {linkingBrowsers
+                        ? copy.vpn.actions.relinkingBrowsers
+                        : vpn.pacPolicyActive
+                          ? copy.vpn.actions.relinkBrowsers
+                          : copy.vpn.actions.linkBrowsers}
+                    </Button>
+                    <Button size="sm" variant="secondary" disabled={checking} onClick={() => void recheck()}>
+                      {checking ? copy.rechecking : copy.vpn.actions.recheck}
+                    </Button>
+                    <Button size="sm" variant="quiet" onClick={() => void openOsNetworkSettings().catch(() => {})}>
+                      {copy.vpn.actions.osNetworkSettings}
+                    </Button>
+                  </div>
+                }
+              >
+                {vpn.pacPolicyActive
+                  ? browserPac && browserPac.browsersPacActive.length > 0
+                    ? copy.vpn.pacLinked.textWithBrowsers(browserPac.browsersPacActive.join(", "))
+                    : copy.vpn.pacLinked.text
+                  : copy.vpn.overridden.text}
+              </Banner>
+            )
           )}
-          {vpn && <p className="zs-cov__hint zs-cov__vpn-line">{copy.vpn.untouched(vpn.names)}</p>}
+          {vpn && !vpn.overridden && <p className="zs-cov__hint zs-cov__vpn-line">{copy.vpn.untouched(vpn.names)}</p>}
           {result && (
             <Banner
               tone={result.tone}
@@ -249,6 +374,19 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
               />
             ))}
           </Rows>
+          {showBrowserTzHint && (
+            <div className="zs-cov__tz-hint" role="note">
+              <p className="zs-cov__tz-hint-text">{copy.browserTz.hint}</p>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={osTzLoading}
+                onClick={() => void syncOsTimezone()}
+              >
+                {osTzLoading ? copy.browserTz.syncing : copy.browserTz.sync}
+              </Button>
+            </div>
+          )}
           <ConfirmModal
             open={confirmOff !== null}
             title={confirmOff ? copy.protection.confirm.title[confirmOff] : ""}

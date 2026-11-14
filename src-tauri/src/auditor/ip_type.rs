@@ -87,10 +87,13 @@ pub async fn fetch_tor_list(probe: &dyn IpProbe) -> Result<TorExitSet, UnknownRe
                 Ok(Arc::new(set))
             }
         }
-        HttpProbeOutcome::Response { status: 403 | 429 | 451, .. } => Err(UnknownReason::SourceRefused),
-        HttpProbeOutcome::Response { .. } | HttpProbeOutcome::ConnectFailed | HttpProbeOutcome::ReadFailed => {
-            Err(UnknownReason::NetworkError)
-        }
+        HttpProbeOutcome::Response {
+            status: 403 | 429 | 451,
+            ..
+        } => Err(UnknownReason::SourceRefused),
+        HttpProbeOutcome::Response { .. }
+        | HttpProbeOutcome::ConnectFailed
+        | HttpProbeOutcome::ReadFailed => Err(UnknownReason::NetworkError),
         HttpProbeOutcome::Timeout => Err(UnknownReason::Timeout),
         HttpProbeOutcome::ClientError => Err(UnknownReason::InternalError),
     }
@@ -163,7 +166,9 @@ pub fn evaluate_ip_reputation(
     let isp_str = id.isp.unwrap_or_default();
     let org_str = id.org.unwrap_or_default();
     let ip_type = classify(asns, id, tor);
-    let name = [isp_str.trim(), org_str.trim()].into_iter().find(|t| !t.is_empty());
+    let name = [isp_str.trim(), org_str.trim()]
+        .into_iter()
+        .find(|t| !t.is_empty());
 
     // 1. A domestic ISP of Russia: direct exit without a VPN.
     if let Some(matched_isp) = asns
@@ -203,7 +208,12 @@ pub fn evaluate_ip_reputation(
             .asn
             .and_then(|n| asns.asn_entry(n))
             .map(|e| (format!("«{}» (AS{})", e.name, e.asn), e.reason.clone()))
-            .unwrap_or_else(|| (name.unwrap_or("сеть массового VPN").to_string(), String::new()));
+            .unwrap_or_else(|| {
+                (
+                    name.unwrap_or("сеть массового VPN").to_string(),
+                    String::new(),
+                )
+            });
         return CheckResult::warning(
             "HIGH_RISK_MASS_VPN_ASN",
             format!(
@@ -297,14 +307,26 @@ mod tests {
     }
 
     fn id<'a>(ip: &'a str, asn: Option<u32>, isp: Option<&'a str>) -> ExitIdentity<'a> {
-        ExitIdentity { ip, country_code: "NL", asn, isp, org: None }
+        ExitIdentity {
+            ip,
+            country_code: "NL",
+            asn,
+            isp,
+            org: None,
+        }
     }
 
     fn list_probe() -> FakeProbe {
         FakeProbe::body(200, LIST)
     }
 
-    async fn verdict(probe: &FakeProbe, ip: &str, asn: Option<u32>, isp: Option<&str>, pinned: bool) -> CheckResult {
+    async fn verdict(
+        probe: &FakeProbe,
+        ip: &str,
+        asn: Option<u32>,
+        isp: Option<&str>,
+        pinned: bool,
+    ) -> CheckResult {
         let cache = TorListCache::default();
         let tor = lookup_tor(&cache, probe, ip).await;
         evaluate_ip_reputation(&id(ip, asn, isp), &asns(), tor, pinned)
@@ -326,8 +348,19 @@ mod tests {
     async fn tor_exit_is_a_warning_even_on_a_hosting_asn_and_even_pinned() {
         let probe = list_probe();
         for pinned in [false, true] {
-            let r = verdict(&probe, TOR_IP, Some(24940), Some("Hetzner Online GmbH"), pinned).await;
-            assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "IP_TYPE_TOR"), "pinned={pinned}");
+            let r = verdict(
+                &probe,
+                TOR_IP,
+                Some(24940),
+                Some("Hetzner Online GmbH"),
+                pinned,
+            )
+            .await;
+            assert_eq!(
+                (r.status, r.code.as_str()),
+                (CheckStatus::Warning, "IP_TYPE_TOR"),
+                "pinned={pinned}"
+            );
             assert_eq!(type_of(&r), Some(IpType::Tor));
         }
     }
@@ -335,16 +368,36 @@ mod tests {
     #[tokio::test]
     async fn cloudflare_t1_country_is_tor_too() {
         let tor = TorLookup::NotListed;
-        let ident = ExitIdentity { ip: OTHER_IP, country_code: "t1", asn: Some(64500), isp: Some("Example Net"), org: None };
+        let ident = ExitIdentity {
+            ip: OTHER_IP,
+            country_code: "t1",
+            asn: Some(64500),
+            isp: Some("Example Net"),
+            org: None,
+        };
         assert_eq!(classify(&asns(), &ident, tor), IpType::Tor);
     }
 
     #[tokio::test]
     async fn hosting_is_ok_and_costs_nothing() {
         let probe = list_probe();
-        let r = verdict(&probe, OTHER_IP, Some(24940), Some("Hetzner Online GmbH"), false).await;
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "IP_TYPE_HOSTING"));
-        assert!(r.message.starts_with("Хостинг (ожидаемо для личного VPS)"), "{}", r.message);
+        let r = verdict(
+            &probe,
+            OTHER_IP,
+            Some(24940),
+            Some("Hetzner Online GmbH"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "IP_TYPE_HOSTING")
+        );
+        assert!(
+            r.message.starts_with("Хостинг (ожидаемо для личного VPS)"),
+            "{}",
+            r.message
+        );
         assert_eq!(type_of(&r), Some(IpType::Hosting));
         let v = crate::auditor::score_checks(&[r], false);
         assert_eq!(v.trust_score, 100, "a hosting address is not penalised");
@@ -353,15 +406,35 @@ mod tests {
     #[tokio::test]
     async fn hosting_is_recognised_by_the_name_when_the_asn_is_not_listed() {
         let probe = list_probe();
-        let r = verdict(&probe, OTHER_IP, Some(64500), Some("Example Cloud Hosting Ltd"), false).await;
-        assert_eq!((r.status, type_of(&r)), (CheckStatus::Ok, Some(IpType::Hosting)));
+        let r = verdict(
+            &probe,
+            OTHER_IP,
+            Some(64500),
+            Some("Example Cloud Hosting Ltd"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            (r.status, type_of(&r)),
+            (CheckStatus::Ok, Some(IpType::Hosting))
+        );
     }
 
     #[tokio::test]
     async fn residential_is_ok() {
         let probe = list_probe();
-        let r = verdict(&probe, OTHER_IP, Some(64500), Some("Example Broadband Ltd"), false).await;
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "IP_TYPE_RESIDENTIAL"));
+        let r = verdict(
+            &probe,
+            OTHER_IP,
+            Some(64500),
+            Some("Example Broadband Ltd"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "IP_TYPE_RESIDENTIAL")
+        );
         assert_eq!(type_of(&r), Some(IpType::Residential));
     }
 
@@ -378,25 +451,44 @@ mod tests {
     async fn mass_vpn_pool_is_a_warning_and_pinning_excuses_it() {
         let probe = list_probe();
         let r = verdict(&probe, OTHER_IP, Some(9009), Some("M247"), false).await;
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "HIGH_RISK_MASS_VPN_ASN"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Warning, "HIGH_RISK_MASS_VPN_ASN")
+        );
         assert_eq!(type_of(&r), Some(IpType::Vpn));
         assert!(r.message.contains("AS9009"), "{}", r.message);
         let r = verdict(&probe, OTHER_IP, Some(9009), Some("M247"), true).await;
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "ASN_VERIFIED_PINNED"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "ASN_VERIFIED_PINNED")
+        );
     }
 
     #[tokio::test]
     async fn a_russian_isp_stays_critical() {
         let probe = list_probe();
-        let r = verdict(&probe, OTHER_IP, Some(12389), Some("PJSC Rostelecom"), false).await;
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Critical, "RUSSIAN_ISP_DETECTED"));
+        let r = verdict(
+            &probe,
+            OTHER_IP,
+            Some(12389),
+            Some("PJSC Rostelecom"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Critical, "RUSSIAN_ISP_DETECTED")
+        );
     }
 
     #[tokio::test]
     async fn without_any_data_the_check_is_unknown_no_data() {
         let probe = list_probe();
         let r = verdict(&probe, OTHER_IP, None, None, false).await;
-        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NoData)));
+        assert_eq!(
+            (r.status, r.reason),
+            (CheckStatus::Unknown, Some(UnknownReason::NoData))
+        );
         assert_eq!(type_of(&r), Some(IpType::Unknown));
         // Blank names are no data either.
         let r = verdict(&probe, OTHER_IP, None, Some("  "), false).await;
@@ -406,13 +498,29 @@ mod tests {
     #[tokio::test]
     async fn an_unavailable_list_is_unknown_never_ok_and_never_a_block() {
         for (probe, reason) in [
-            (FakeProbe::new(HttpProbeOutcome::Timeout), UnknownReason::Timeout),
-            (FakeProbe::new(HttpProbeOutcome::ConnectFailed), UnknownReason::NetworkError),
+            (
+                FakeProbe::new(HttpProbeOutcome::Timeout),
+                UnknownReason::Timeout,
+            ),
+            (
+                FakeProbe::new(HttpProbeOutcome::ConnectFailed),
+                UnknownReason::NetworkError,
+            ),
             (FakeProbe::body(403, "denied"), UnknownReason::SourceRefused),
-            (FakeProbe::body(200, "<html>portal</html>"), UnknownReason::EmptyResponse),
+            (
+                FakeProbe::body(200, "<html>portal</html>"),
+                UnknownReason::EmptyResponse,
+            ),
             (FakeProbe::body(500, ""), UnknownReason::NetworkError),
         ] {
-            let r = verdict(&probe, OTHER_IP, Some(24940), Some("Hetzner Online GmbH"), false).await;
+            let r = verdict(
+                &probe,
+                OTHER_IP,
+                Some(24940),
+                Some("Hetzner Online GmbH"),
+                false,
+            )
+            .await;
             assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(reason)));
             assert_eq!(r.code, "TOR_LIST_UNAVAILABLE");
             // The type is still shown from the provider data.
@@ -427,10 +535,24 @@ mod tests {
     #[tokio::test]
     async fn an_ipv6_exit_is_not_applicable_and_the_list_is_not_downloaded() {
         let probe = list_probe();
-        let r = verdict(&probe, "2001:db8::9", Some(24940), Some("Hetzner Online GmbH"), false).await;
-        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NotApplicable)));
+        let r = verdict(
+            &probe,
+            "2001:db8::9",
+            Some(24940),
+            Some("Hetzner Online GmbH"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            (r.status, r.reason),
+            (CheckStatus::Unknown, Some(UnknownReason::NotApplicable))
+        );
         assert!(r.is_not_applicable());
-        assert!(r.message.starts_with("Не применимо к IPv6"), "{}", r.message);
+        assert!(
+            r.message.starts_with("Не применимо к IPv6"),
+            "{}",
+            r.message
+        );
         assert_eq!(type_of(&r), Some(IpType::Hosting));
         assert_eq!(probe.calls(), 0);
         // Not applicable costs nothing.
@@ -442,7 +564,10 @@ mod tests {
         let cache = TorListCache::default();
         let probe = list_probe();
         assert_eq!(lookup_tor(&cache, &probe, TOR_IP).await, TorLookup::Listed);
-        assert_eq!(lookup_tor(&cache, &probe, OTHER_IP).await, TorLookup::NotListed);
+        assert_eq!(
+            lookup_tor(&cache, &probe, OTHER_IP).await,
+            TorLookup::NotListed
+        );
         assert_eq!(probe.calls(), 1);
 
         let cache = TorListCache::default();
@@ -469,6 +594,11 @@ mod tests {
             assert_eq!(serde_json::to_value(t).unwrap(), s);
         }
         // A result without a type carries no `detail` at all.
-        assert!(serde_json::to_value(CheckResult::ok("A", "a")).unwrap().get("detail").is_none());
+        assert!(
+            serde_json::to_value(CheckResult::ok("A", "a"))
+                .unwrap()
+                .get("detail")
+                .is_none()
+        );
     }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { AppStateData, ProviderId, RoutesSnapshot } from "../../types";
+import type { AppStateData, ProviderId, RouteView, RoutesSnapshot } from "../../types";
 import {
   DIRECT_ROUTE_ID,
   bindProviderRoute,
@@ -28,7 +28,8 @@ import {
 } from "../../ui";
 import type { BadgeTone, RowTone, SegmentedOption } from "../../ui";
 import { connect as copy } from "../../shared/copy/ru";
-import { countryName } from "../../shared/lib/country";
+import { formatCountryWithCode, formatRouteOptionLabel, isCountryBlockedForProvider } from "../../shared/lib/country";
+import { formatIp } from "../../shared/lib/format";
 import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
 import type { ShowToast } from "../../shared/hooks";
 import { HOSTINGS } from "./hostings";
@@ -38,11 +39,44 @@ export interface ConnectScreenProps {
   routesSnapshot?: RoutesSnapshot | null;
   currentIp: string;
   currentCountry: string;
+  hideIpMode?: boolean;
   onRefreshState: () => Promise<unknown>;
   onRefreshRoutes?: () => Promise<unknown>;
-  onAuditRefresh: () => Promise<void>;
+  onAuditRefresh?: (providerId?: ProviderId) => Promise<void> | void;
   onOpenGuide: (guideId: string) => void;
   onToast: ShowToast;
+}
+
+const ALL_PROVIDERS: ProviderId[] = ["anthropic", "openai", "gemini"];
+
+/** Возвращает сервисы, на которые влияет маршрут, или `"all"`, если затронуты все/снимок неизвестен. */
+export function getAffectedProvidersForRoute(
+  routeId: string,
+  snapshot: RoutesSnapshot | null | undefined,
+): "all" | ProviderId[] {
+  if (!snapshot) return "all";
+  const affected = ALL_PROVIDERS.filter((p) => {
+    const explicit = snapshot.provider_routes[p];
+    return explicit === routeId || (!explicit && snapshot.default_route_id === routeId);
+  });
+  return affected.length === ALL_PROVIDERS.length ? "all" : affected;
+}
+
+/** Определяет страну выхода для сервиса по выбранной привязке маршрута или текущему VPN. */
+export function resolveProviderExitCountry(
+  providerId: ProviderId,
+  snapshot: RoutesSnapshot | null | undefined,
+  routes: RouteView[],
+  currentCountry: string,
+): string {
+  const explicitBinding = snapshot?.provider_routes[providerId];
+  if (explicitBinding === DIRECT_ROUTE_ID) return currentCountry;
+  const routeId = explicitBinding || snapshot?.default_route_id || "";
+  if (routeId) {
+    const bound = routes.find((r) => r.id === routeId);
+    if (bound) return bound.country ?? "";
+  }
+  return currentCountry;
 }
 
 const VPN_GUIDE = "01-personal-vpn-15min";
@@ -66,6 +100,7 @@ export function ConnectScreen({
   routesSnapshot: propSnapshot,
   currentIp,
   currentCountry,
+  hideIpMode = false,
   onRefreshState,
   onRefreshRoutes,
   onAuditRefresh,
@@ -83,7 +118,7 @@ export function ConnectScreen({
 
   const snapshot = propSnapshot ?? localSnapshot;
 
-  const refresh = async () => {
+  const refresh = async (auditScope: ProviderId | ProviderId[] | "all" | "none" = "all") => {
     try {
       if (onRefreshRoutes) {
         await onRefreshRoutes();
@@ -95,7 +130,16 @@ export function ConnectScreen({
       // Игнорируем ошибки при обновлении снимка
     }
     await onRefreshState();
-    await onAuditRefresh();
+    if (!onAuditRefresh || auditScope === "none") return;
+    if (auditScope === "all") {
+      await onAuditRefresh();
+    } else if (Array.isArray(auditScope)) {
+      for (const providerId of Array.from(new Set(auditScope))) {
+        await onAuditRefresh(providerId);
+      }
+    } else {
+      await onAuditRefresh(auditScope);
+    }
   };
 
   useEffect(() => {
@@ -123,7 +167,7 @@ export function ConnectScreen({
     try {
       const applyToAll = addScope === "all";
       await upsertRoute(key, null, applyToAll);
-      await refresh();
+      await refresh(applyToAll ? "all" : "none");
       setInputKey("");
       onToast(
         copy.key.toast.connected,
@@ -141,9 +185,10 @@ export function ConnectScreen({
 
   const handleToggleRoute = async (routeId: string, enabled: boolean) => {
     setTogglingId(routeId);
+    const affected = getAffectedProvidersForRoute(routeId, snapshot);
     try {
       await setRouteEnabled(routeId, enabled);
-      await refresh();
+      await refresh(affected);
       onToast(
         enabled ? copy.key.toast.on : copy.key.toast.off,
         enabled ? copy.key.toast.onText : copy.key.toast.offText,
@@ -164,13 +209,13 @@ export function ConnectScreen({
       if (res.ok) {
         onToast(
           copy.key.toast.testSuccess,
-          copy.key.toast.testSuccessText(res.exit_ip || "—", res.latency_ms),
+          copy.key.toast.testSuccessText(res.exit_ip ? formatIp(res.exit_ip, hideIpMode) : "—", res.latency_ms),
           "success",
         );
       } else {
         onToast(copy.key.toast.testError, res.error || copy.key.unreachable, "error");
       }
-      await refresh();
+      await refresh("none");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       onToast(copy.key.toast.testError, msg, "error");
@@ -181,6 +226,7 @@ export function ConnectScreen({
 
   const handleRemoveRoute = async (routeId: string) => {
     setDeletingId(routeId);
+    const affected = routes.length <= 1 ? "all" : getAffectedProvidersForRoute(routeId, snapshot);
     try {
       await removeRoute(routeId);
       if (routes.length <= 1) {
@@ -190,7 +236,7 @@ export function ConnectScreen({
           // Игнорируем
         }
       }
-      await refresh();
+      await refresh(affected);
       onToast(copy.key.toast.disconnected, copy.key.toast.disconnectedText, "info");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -213,7 +259,7 @@ export function ConnectScreen({
   const handleBindProvider = async (provider: ProviderId, target: string) => {
     try {
       await bindProviderRoute(provider, target);
-      await refresh();
+      await refresh(provider);
       onToast(
         copy.routes.toast.boundSuccess,
         copy.routes.toast.boundSuccessText(copy.routes.services[provider]),
@@ -229,15 +275,17 @@ export function ConnectScreen({
     try {
       const dangling = snapshot?.dangling || [];
       let clearedDefault = false;
+      const affectedProviders: ProviderId[] = [];
       for (const item of dangling) {
         if (item.kind === "default" && !clearedDefault) {
           await setDefaultRoute(null);
           clearedDefault = true;
         } else if (item.provider) {
           await bindProviderRoute(item.provider as ProviderId, "direct");
+          affectedProviders.push(item.provider as ProviderId);
         }
       }
-      await refresh();
+      await refresh(clearedDefault ? "all" : affectedProviders.length > 0 ? affectedProviders : "none");
       onToast(copy.routes.toast.resetSuccess, copy.routes.toast.resetSuccessText, "info");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -352,7 +400,7 @@ export function ConnectScreen({
                     ? copy.key.ipMismatch
                     : copy.key.switchOff;
 
-                const locationText = r.country ? countryName(r.country) || r.country : "";
+                const locationText = r.country ? formatCountryWithCode(r.country) || r.country : "";
                 const latencyText = r.health?.latency_ms ? copy.key.latency(r.health.latency_ms) : "";
                 const dateText = r.expires_at ? copy.key.expires(new Date(r.expires_at * 1000).toLocaleDateString()) : "";
 
@@ -376,7 +424,7 @@ export function ConnectScreen({
                       }
                       sub={
                         <span className="inline-flex items-center gap-2 flex-wrap">
-                          {r.exit_ip && <Mono>{r.exit_ip}</Mono>}
+                          {r.exit_ip && <Mono>{formatIp(r.exit_ip, hideIpMode)}</Mono>}
                           {locationText && <span>· {locationText}</span>}
                           {latencyText && <span>· {latencyText}</span>}
                           {dateText && <span>· {dateText}</span>}
@@ -493,8 +541,8 @@ export function ConnectScreen({
                 sub={
                   exitKnown ? (
                     <>
-                      <Mono>{currentIp}</Mono>
-                      {countryName(currentCountry) ? ` · ${countryName(currentCountry)}` : ""}
+                      <Mono>{formatIp(currentIp, hideIpMode)}</Mono>
+                      {formatCountryWithCode(currentCountry) ? ` · ${formatCountryWithCode(currentCountry)}` : ""}
                     </>
                   ) : (
                     copy.key.exitUnknown
@@ -565,26 +613,50 @@ export function ConnectScreen({
                   ? [{ value: "default", label: copy.routes.default }]
                   : []),
                 ...routes.map((r) => {
-                  const country = r.country ? `${r.country} · ` : "";
-                  const ipOrHost = r.exit_ip || r.entries[0]?.host || "";
+                  const rawIpOrHost = r.exit_ip || r.entries[0]?.host || "";
+                  const ipOrHost = rawIpOrHost ? formatIp(rawIpOrHost, hideIpMode) : "";
                   return {
                     value: r.id,
-                    label: `${r.label || copy.key.defaultLabel} (${country}${ipOrHost})`,
+                    label: formatRouteOptionLabel({
+                      label: r.label,
+                      country: r.country,
+                      ipOrHost,
+                      fallbackLabel: copy.key.defaultLabel,
+                    }),
                   };
                 }),
               ];
 
+              const exitCountry = resolveProviderExitCountry(p.id, snapshot, routes, currentCountry);
+              const blockedCountry =
+                exitCountry && exitCountry !== "--" && isCountryBlockedForProvider(p.id, exitCountry)
+                  ? exitCountry
+                  : null;
+
               return (
-                <div key={p.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2 rounded-lg bg-bg-2">
-                  <span className="font-medium text-ink">{p.name}</span>
-                  <div className="w-full sm:w-64">
-                    <Select
-                      options={selectOptions}
-                      value={currentValue}
-                      onChange={(e) => handleBindProvider(p.id, e.target.value)}
-                      aria-label={p.name}
-                    />
+                <div key={p.id} className="zs-stack gap-2 p-2 rounded-lg bg-bg-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <span className="font-medium text-ink">{p.name}</span>
+                    <div className="w-full sm:w-64">
+                      <Select
+                        options={selectOptions}
+                        value={currentValue}
+                        onChange={(e) => handleBindProvider(p.id, e.target.value)}
+                        aria-label={p.name}
+                      />
+                    </div>
                   </div>
+                  {blockedCountry && (
+                    <Banner
+                      tone="warn"
+                      title={copy.routes.blockedCountryTitle(
+                        p.name,
+                        formatCountryWithCode(blockedCountry) || blockedCountry,
+                      )}
+                    >
+                      {copy.routes.blockedCountryText}
+                    </Banner>
+                  )}
                 </div>
               );
             })}

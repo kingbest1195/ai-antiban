@@ -15,7 +15,7 @@ import { Badge, Banner, Button, Card, ConfirmModal, EmptyState, Field, Menu, Mod
 import type { MenuEntry, SelectOption } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { backup as copy, common as commonCopy } from "../../shared/copy/ru";
-import { countryName } from "../../shared/lib/country";
+import { countryName, formatRouteBadgeLabel, formatRouteOptionLabel, hasCountryMention } from "../../shared/lib/country";
 import { decodeZastavaKeyPreview } from "../../shared/lib/zastavaKey";
 
 export interface ProfilesSectionProps {
@@ -140,13 +140,13 @@ export function ProfilesSection({
     if (p.bound_route_id) {
       const match = routes.find((r) => r.id === p.bound_route_id);
       if (match) {
-        return match.country ? `${match.label} · ${match.country}` : match.label;
+        return formatRouteBadgeLabel(match.label, match.country);
       }
     }
     if (p.bound_upstream_key) {
       const preview = decodeZastavaKeyPreview(p.bound_upstream_key);
       if (preview?.label) {
-        return preview.country ? `${preview.label} · ${preview.country}` : preview.label;
+        return formatRouteBadgeLabel(preview.label, preview.country);
       }
       if (preview?.entrySummary) return preview.entrySummary;
     }
@@ -450,7 +450,7 @@ export function ProfilesSection({
                 { value: KEY_OPTION_NONE, label: copy.create.keyNone },
                 ...routes.map((r) => ({
                   value: r.id,
-                  label: r.country ? `${r.label} · ${r.country}` : r.label,
+                  label: formatRouteBadgeLabel(r.label, r.country),
                 })),
                 { value: KEY_OPTION_NEW, label: copy.create.keyNewOption },
               ] satisfies SelectOption[]
@@ -500,7 +500,11 @@ export function ProfilesSection({
                 { value: KEY_OPTION_NONE, label: copy.bindKeyModal.noneOption },
                 ...routes.map((r) => ({
                   value: r.id,
-                  label: `${r.label}${r.country ? ` · ${r.country}` : ""}${r.exit_ip ? ` (${r.exit_ip})` : ""}`,
+                  label: formatRouteOptionLabel({
+                    label: r.label,
+                    country: r.country,
+                    ipOrHost: r.exit_ip,
+                  }),
                 })),
                 { value: KEY_OPTION_NEW, label: copy.bindKeyModal.newOption },
               ] satisfies SelectOption[]
@@ -519,7 +523,9 @@ export function ProfilesSection({
               {(() => {
                 const preview = decodeZastavaKeyPreview(bindKeyInput);
                 if (!preview) return null;
-                const parts = [preview.label, preview.country, preview.exit_ip, preview.entrySummary].filter(Boolean);
+                const countryPart =
+                  preview.country && !hasCountryMention(preview.label, preview.country) ? preview.country : null;
+                const parts = [preview.label, countryPart, preview.exit_ip, preview.entrySummary].filter(Boolean);
                 return parts.length > 0 ? (
                   <Banner tone="info" title={copy.bindKeyModal.previewLabel}>
                     {parts.join(" · ")}

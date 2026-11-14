@@ -1085,7 +1085,10 @@ mod file_tests {
         let ide = e.ide_with(original, 0o644);
         e.enable(None);
         let after = e.text(&ide);
-        assert!(after.contains("\"editor.fontSize\": 14, // keep"), "{after}");
+        assert!(
+            after.contains("\"editor.fontSize\": 14, // keep"),
+            "{after}"
+        );
         jsonc::validate(&after).unwrap();
         e.disable();
         assert_eq!(e.text(&ide), original, "restored byte for byte");
@@ -2580,5 +2583,65 @@ mod file_tests {
         let none = e.apply(None, None, CliMode::AiOnly, HostOs::Unix);
         assert!(none.targets.is_empty());
         assert!(e.journal_is_empty());
+    }
+
+    #[test]
+    fn restore_preserves_trailing_newline_and_handles_empty_and_no_newline_files() {
+        let e = env();
+        let zshrc = e.ctx.home.join(".zshrc");
+        let bash_profile = e.ctx.home.join(".bash_profile");
+
+        // 1. Journaled apply + disable preserves exact trailing '\n' on .zshrc and .bash_profile.
+        e.fs.put(&zshrc, b"export A=1\n", 0o644);
+        e.fs.put(&bash_profile, b"export B=2\n", 0o644);
+        e.apply(Some(URL), None, CliMode::GlobalTerminal, HostOs::Unix);
+        assert!(e.text(&zshrc).contains(ZASTAVA_RC_START));
+        e.disable();
+        assert_eq!(e.text(&zshrc), "export A=1\n");
+        assert_eq!(e.text(&bash_profile), "export B=2\n");
+
+        // 2. Switching GlobalTerminal -> AiOnly also restores .zshrc with trailing '\n' intact.
+        e.apply(Some(URL), None, CliMode::GlobalTerminal, HostOs::Unix);
+        e.apply(Some(URL), None, CliMode::AiOnly, HostOs::Unix);
+        assert_eq!(e.text(&zshrc), "export A=1\n");
+
+        // 3. No trailing '\n' originally -> exact original without trailing '\n' restored.
+        e.fs.put(&zshrc, b"export NO_EOL=1", 0o644);
+        e.apply(Some(URL), None, CliMode::GlobalTerminal, HostOs::Unix);
+        e.disable();
+        assert_eq!(e.text(&zshrc), "export NO_EOL=1");
+
+        // 4. Legacy unjournaled blocks in .bash_profile / .zshenv / .zshrc / .bashrc on a fresh environment:
+        //    - trailing '\n' before block is preserved when block is stripped
+        //    - file that contained only the block becomes completely empty ""
+        let e2 = env();
+        let bash_profile2 = e2.ctx.home.join(".bash_profile");
+        let zshenv2 = e2.ctx.home.join(".zshenv");
+        let zshrc2 = e2.ctx.home.join(".zshrc");
+        let bashrc2 = e2.ctx.home.join(".bashrc");
+        let legacy_block = shell_block();
+        e2.fs.put(
+            &bash_profile2,
+            format!("export C=3\n\n{legacy_block}\n").as_bytes(),
+            0o644,
+        );
+        e2.fs
+            .put(&zshenv2, format!("{legacy_block}\n").as_bytes(), 0o644);
+        e2.fs
+            .put(&zshrc2, format!("{legacy_block}\n").as_bytes(), 0o644);
+        e2.fs.put(
+            &bashrc2,
+            format!("export D=4\n\n{legacy_block}\n").as_bytes(),
+            0o644,
+        );
+        e2.apply(Some(URL), None, CliMode::AiOnly, HostOs::Unix);
+        assert_eq!(e2.text(&bash_profile2), "export C=3\n");
+        assert_eq!(e2.text(&zshenv2), "");
+        assert_eq!(e2.text(&zshrc2), "");
+        assert_eq!(
+            strip_marked_block(&e2.journal(), &*e2.ctx.fs, &bashrc2),
+            Strip::Removed
+        );
+        assert_eq!(e2.text(&bashrc2), "export D=4\n");
     }
 }

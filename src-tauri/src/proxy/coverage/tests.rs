@@ -3,6 +3,10 @@
 
 use super::*;
 use crate::state::CliMode;
+use crate::sysproxy::browser_policies::{
+    FakePolicyStore, KEY_PROXY_MODE, KEY_PROXY_PAC_URL, MACOS_CHROMIUM_DOMAIN_NAMES,
+    PROXY_MODE_PAC_SCRIPT, PolicyValue, WINDOWS_CHROMIUM_DOMAIN_NAMES,
+};
 use crate::sysproxy::fs::{FakeFs, Fs, RealFs};
 use crate::sysproxy::platform::{FakePlatform, PacState, PlatOp, RegValue, ServiceId};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,6 +83,7 @@ fn make_editor(fs: &FakeFs, folder: &str, settings: Option<&str>) {
 
 struct Rig {
     platform: FakePlatform,
+    policy_store: Arc<FakePolicyStore>,
     ctx: FileCtx,
     fs: FakeFs,
 }
@@ -88,6 +93,7 @@ impl Rig {
         let fs = FakeFs::new();
         Self {
             platform: FakePlatform::new(),
+            policy_store: FakePolicyStore::new(),
             ctx: ctx_with(&fs),
             fs,
         }
@@ -96,6 +102,7 @@ impl Rig {
     fn env(&self, source: PacSource, cli: bool) -> CoverageEnv<'_> {
         CoverageEnv {
             platform: &self.platform,
+            policy_store: &*self.policy_store,
             files: Some(&self.ctx),
             pac_source: source,
             sysproxy_enabled: true,
@@ -151,6 +158,10 @@ fn classify_known_names() {
     assert_eq!(classify_process_name("Android Studio"), "jetbrains");
     assert_eq!(classify_process_name("studio64.exe"), "jetbrains");
     assert_eq!(classify_process_name("Google Chrome Helper"), "browsers");
+    assert_eq!(
+        classify_process_name("Google Chrome Helper (Renderer)"),
+        "browsers"
+    );
     assert_eq!(classify_process_name("Safari"), "browsers");
     assert_eq!(classify_process_name("Arc"), "browsers");
     assert_eq!(classify_process_name("Arc Helper"), "browsers");
@@ -158,8 +169,29 @@ fn classify_known_names() {
     assert_eq!(classify_process_name("Microsoft Edge Helper"), "browsers");
     assert_eq!(classify_process_name("Яндекс Браузер"), "browsers");
     assert_eq!(classify_process_name("YandexBrowser"), "browsers");
+    assert_eq!(classify_process_name("Yandex Helper"), "browsers");
     assert_eq!(classify_process_name("Firefox"), "browsers");
     assert_eq!(classify_process_name("Brave Browser Helper"), "browsers");
+    assert_eq!(classify_process_name("Comet"), "browsers");
+    assert_eq!(classify_process_name("Comet Helper"), "browsers");
+    assert_eq!(classify_process_name("Comet Helper (Renderer)"), "browsers");
+    assert_eq!(classify_process_name("comet.exe"), "browsers");
+    assert_eq!(classify_process_name("Opera"), "browsers");
+    assert_eq!(classify_process_name("Opera GX"), "browsers");
+    assert_eq!(classify_process_name("Opera Helper"), "browsers");
+    assert_eq!(classify_process_name("opera.exe"), "browsers");
+    assert_eq!(classify_process_name("Dia"), "browsers");
+    assert_eq!(classify_process_name("Dia Helper"), "browsers");
+    assert_eq!(classify_process_name("ChatGPT Atlas"), "browsers");
+    assert_eq!(classify_process_name("ChatGPT Atlas Helper"), "browsers");
+    assert_eq!(classify_process_name("Atlas"), "browsers");
+    assert_eq!(classify_process_name("Zen"), "browsers");
+    assert_eq!(classify_process_name("Zen Browser"), "browsers");
+    assert_eq!(classify_process_name("Zen Helper"), "browsers");
+    assert_eq!(classify_process_name("Waterfox"), "browsers");
+    assert_eq!(classify_process_name("waterfox.exe"), "browsers");
+    assert_eq!(classify_process_name("Vivaldi"), "browsers");
+    assert_eq!(classify_process_name("Vivaldi Helper"), "browsers");
     assert_eq!(classify_process_name("claude-code"), "claude-code");
     assert_eq!(classify_process_name("gemini"), "gemini-cli");
     assert_eq!(classify_process_name("node"), "node-cli");
@@ -191,6 +223,15 @@ fn classify_has_no_substring_false_positives() {
     assert_eq!(classify_process_name("nodemon"), "other");
     assert_eq!(classify_process_name("claudette"), "other");
     assert_eq!(classify_process_name("pythonista"), "other");
+    // new browser names must not match substrings inside unrelated processes
+    assert_eq!(classify_process_name("media-daemon"), "other");
+    assert_eq!(classify_process_name("diagram"), "other");
+    assert_eq!(classify_process_name("operator"), "other");
+    assert_eq!(classify_process_name("atlassian-helper"), "other");
+    assert_eq!(classify_process_name("zenith"), "other");
+    assert_eq!(classify_process_name("citizen"), "other");
+    assert_eq!(classify_process_name("comets"), "other");
+    assert_eq!(classify_process_name("archer"), "other");
 }
 
 // ----- OS output parsers -----------------------------------------------------------------------
@@ -718,7 +759,7 @@ const JB_XML: &str = "<application>\n  <component name=\"HttpConfigurable\">\n  
 
 #[test]
 fn jetbrains_is_unknown_by_default_with_manual_steps() {
-    assert!(!JETBRAINS_XML_CONFIRMED);
+    const { assert!(!JETBRAINS_XML_CONFIRMED) };
     let (_, t) = tracker(FakeProbe::failing());
     t.set_gateway_addr(gw(8899));
     let rig = Rig::new();
@@ -1088,7 +1129,8 @@ fn a_vpn_that_takes_over_makes_the_pac_on_wifi_ineffective_and_is_named() {
     assert_eq!(rig.platform.pac_of(&vpn), PacState::default());
     assert_eq!(rig.platform.os_writes(), 0, "coverage only reads");
     // Another PAC or a disabled flag is "not ours" too.
-    rig.platform.set_effective_pac(Some("http://vpn.example/p.pac"), true);
+    rig.platform
+        .set_effective_pac(Some("http://vpn.example/p.pac"), true);
     assert_eq!(snapshot_with_vpn(&rig).system_proxy_effective, Some(false));
     rig.platform.set_effective_pac(Some(OUR_PAC), false);
     assert_eq!(snapshot_with_vpn(&rig).system_proxy_effective, Some(false));
@@ -1208,7 +1250,10 @@ fn antigravity_kind_is_told_by_the_user_folder_and_the_bundle() {
         .fs
         .create_private_dir_all(&home().join(".gemini").join("antigravity-cli"))
         .unwrap();
-    assert_eq!(antigravity_kind(&cli_only.ctx), Some(AntigravityKind::CliOnly));
+    assert_eq!(
+        antigravity_kind(&cli_only.ctx),
+        Some(AntigravityKind::CliOnly)
+    );
     assert!(check_app_installed_in("antigravity", &cli_only.ctx));
 }
 
@@ -1234,7 +1279,11 @@ fn desktop_antigravity_is_not_judged_by_a_settings_file() {
     assert!(a.installed);
     assert_eq!(a.status, CoverageStatus::Off);
     assert!(!a.detail.contains("settings.json"), "{}", a.detail);
-    assert!(a.detail.contains("мимо") || a.detail.contains("напрямую"), "{}", a.detail);
+    assert!(
+        a.detail.contains("мимо") || a.detail.contains("напрямую"),
+        "{}",
+        a.detail
+    );
     assert_eq!(
         a.manual_steps,
         vec![
@@ -1243,7 +1292,8 @@ fn desktop_antigravity_is_not_judged_by_a_settings_file() {
         ]
     );
     assert!(
-        !a.manual_steps.contains(&steps::ENABLE_PROTECTION.to_string()),
+        !a.manual_steps
+            .contains(&steps::ENABLE_PROTECTION.to_string()),
         "no automatic button for this app"
     );
     assert!(!a.bypass_suspected, "not running: no alarm");
@@ -1348,7 +1398,9 @@ fn desktop_antigravity_is_confirmed_by_traffic_of_its_ui_or_its_agent() {
     assert_eq!(a.ai_requests, 2);
     assert!(a.last_seen_ms.is_some());
     assert!(
-        snap.apps.iter().all(|x| !x.id.starts_with("language-server")),
+        snap.apps
+            .iter()
+            .all(|x| !x.id.starts_with("language-server")),
         "no duplicate row"
     );
 }
@@ -1363,7 +1415,11 @@ fn the_language_server_is_not_claimed_when_windsurf_shares_the_binary() {
     t.record_hit("language_server_macos_arm", None);
     let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
     assert_ne!(app(&snap, "antigravity").status, CoverageStatus::Confirmed);
-    assert!(snap.apps.iter().any(|x| x.id == "language-server-macos-arm"));
+    assert!(
+        snap.apps
+            .iter()
+            .any(|x| x.id == "language-server-macos-arm")
+    );
 }
 
 #[test]
@@ -1389,8 +1445,245 @@ fn the_new_item_field_is_in_the_json() {
 #[test]
 fn listing_and_agent_id_helpers() {
     assert!(listing_has_antigravity(PS_ANTIGRAVITY));
-    assert!(listing_has_antigravity("\"Antigravity.exe\",\"4312\",\"Console\"\n"));
+    assert!(listing_has_antigravity(
+        "\"Antigravity.exe\",\"4312\",\"Console\"\n"
+    ));
     assert!(!listing_has_antigravity(PS_OTHER));
     assert!(is_antigravity_agent_id("language-server-macos-arm"));
     assert!(!is_antigravity_agent_id("antigravity"));
+}
+
+fn put_browser_prefs(rig: &Rig, rel: &str, json: &str) {
+    let p = rig
+        .ctx
+        .home
+        .join("Library")
+        .join("Application Support")
+        .join(rel)
+        .join("Preferences");
+    rig.fs.put(&p, json.as_bytes(), 0o600);
+}
+
+#[test]
+fn browser_pac_policy_active_ignores_plist_only_and_detects_preferences_and_flags() {
+    let rig = Rig::new();
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let env = rig.env(PacSource::Services, false);
+
+    let snap = t.snapshot(&env, true);
+    assert!(!snap.browser_pac_policy_active);
+    assert!(snap.browsers_pac_active.is_empty());
+    assert!(snap.browsers_needing_restart.is_empty());
+
+    // Managed plist policy alone (POLICY_LEVEL_RECOMMENDED) MUST NOT mark PAC active.
+    let domain = MACOS_CHROMIUM_DOMAIN_NAMES[0];
+    rig.policy_store.set_domain_applicable(domain, true);
+    rig.policy_store.preset(
+        domain,
+        KEY_PROXY_MODE,
+        PolicyValue::Sz(PROXY_MODE_PAC_SCRIPT.into()),
+    );
+    rig.policy_store
+        .preset(domain, KEY_PROXY_PAC_URL, PolicyValue::Sz(OUR_PAC.into()));
+    assert!(!t.snapshot(&env, true).browser_pac_policy_active);
+
+    // Chrome profile Preferences JSON with our PAC -> active.
+    put_browser_prefs(
+        &rig,
+        "Google/Chrome/Default",
+        r#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac","pac_mandatory":false}}"#,
+    );
+
+    // Without invalidation or force=true cached facts stay until invalidated.
+    let cached = t.snapshot(&env, false);
+    assert!(!cached.browser_pac_policy_active);
+
+    t.invalidate_facts();
+    let refreshed = t.snapshot(&env, false);
+    assert!(refreshed.browser_pac_policy_active);
+    assert_eq!(
+        refreshed.browsers_pac_active,
+        vec!["Google Chrome".to_string()]
+    );
+
+    // Windows (`AppData/Local/...`) Preferences JSON with our PAC -> active.
+    let win_prefs = rig
+        .ctx
+        .local_appdata
+        .join("Microsoft/Edge/User Data/Default/Preferences");
+    rig.fs.put(
+        &win_prefs,
+        br#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac","pac_mandatory":false}}"#,
+        0o600,
+    );
+    let win_domain = WINDOWS_CHROMIUM_DOMAIN_NAMES[0];
+    rig.policy_store.set_domain_applicable(win_domain, true);
+    let (_, win_tracker) = {
+        let (t_clock, clock) = clock_at(10_000_000);
+        (
+            t_clock,
+            CoverageTracker::with_parts(clock, FakeProbe::failing(), Os::Windows),
+        )
+    };
+    win_tracker.set_gateway_addr(gw(8899));
+    let win_snap = win_tracker.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert!(win_snap.browser_pac_policy_active);
+    assert_eq!(
+        win_snap.browsers_pac_active,
+        vec!["Microsoft Edge".to_string()]
+    );
+}
+
+#[test]
+fn browser_pac_running_flag_vs_needing_restart_is_reported_accurately() {
+    let rig = Rig::new();
+    rig.seed_wifi_pac(OUR_PAC, true);
+    let _vpn = rig.platform.add_vpn_service("V2Box Pro", true);
+    rig.platform.set_effective_pac(None, false);
+
+    // Chrome is running without `--proxy-pac-url` and without PAC in Preferences -> needs restart.
+    // Comet is running WITH `--proxy-pac-url` -> active.
+    put_browser_prefs(&rig, "Google/Chrome/Default", "{}");
+    put_browser_prefs(&rig, "Comet/Default", "{}");
+    let ps = format!(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n\
+         /Applications/Comet.app/Contents/MacOS/Comet --proxy-pac-url={OUR_PAC}\n"
+    );
+    let (_, t) = tracker(FakeProbe::answering(&ps));
+    t.set_gateway_addr(gw(8899));
+
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert!(snap.browser_pac_policy_active);
+    assert_eq!(snap.browsers_pac_active, vec!["Comet".to_string()]);
+    assert_eq!(
+        snap.browsers_needing_restart,
+        vec!["Google Chrome".to_string()]
+    );
+    let browsers = app(&snap, "browsers");
+    assert_eq!(browsers.status, CoverageStatus::Configured);
+    assert!(browsers.detail.contains("Google Chrome"));
+
+    // If ONLY Chrome is running without PAC and no browser has PAC active -> false + Off.
+    let rig_only = Rig::new();
+    rig_only.seed_wifi_pac(OUR_PAC, true);
+    let _vpn2 = rig_only.platform.add_vpn_service("V2Box Pro", true);
+    rig_only.platform.set_effective_pac(None, false);
+    put_browser_prefs(&rig_only, "Google/Chrome/Default", "{}");
+    let (_, t2) = tracker(FakeProbe::answering(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n",
+    ));
+    t2.set_gateway_addr(gw(8899));
+    let snap2 = t2.snapshot(&rig_only.env(PacSource::Services, false), true);
+    assert!(!snap2.browser_pac_policy_active);
+    assert!(snap2.browsers_pac_active.is_empty());
+    assert_eq!(
+        snap2.browsers_needing_restart,
+        vec!["Google Chrome".to_string()]
+    );
+    assert_eq!(app(&snap2, "browsers").status, CoverageStatus::Off);
+}
+
+#[test]
+fn browser_pac_policy_active_marks_browsers_configured_even_when_vpn_overrides_system_proxy() {
+    let rig = Rig::new();
+    rig.seed_wifi_pac(OUR_PAC, true);
+    let _vpn = rig.platform.add_vpn_service("V2Box Pro", true);
+    // Simulate a TUN VPN overriding effective `scutil --proxy` so OS proxy reads inactive.
+    rig.platform.set_effective_pac(None, false);
+
+    put_browser_prefs(
+        &rig,
+        "Google/Chrome/Default",
+        r#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac","pac_mandatory":false}}"#,
+    );
+
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+
+    assert_eq!(snap.vpn_connected, vec!["V2Box Pro".to_string()]);
+    assert_eq!(snap.system_proxy_effective, Some(false));
+    assert!(snap.browser_pac_policy_active);
+    assert_eq!(snap.browsers_pac_active, vec!["Google Chrome".to_string()]);
+
+    let browsers = app(&snap, "browsers");
+    assert_eq!(browsers.status, CoverageStatus::Configured);
+    assert!(browsers.manual_steps.is_empty());
+    assert!(browsers.detail.contains("VPN"));
+}
+
+#[test]
+fn browser_pac_policy_active_serializes_in_json_and_defaults_to_false() {
+    let rig = Rig::new();
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    put_browser_prefs(
+        &rig,
+        "Google/Chrome/Default",
+        r#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac","pac_mandatory":false}}"#,
+    );
+
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    let mut v = serde_json::to_value(&snap).unwrap();
+    assert_eq!(v["browser_pac_policy_active"], true);
+    assert_eq!(
+        v["browsers_pac_active"],
+        serde_json::json!(["Google Chrome"])
+    );
+    assert_eq!(v["browsers_needing_restart"], serde_json::json!([]));
+
+    let obj = v.as_object_mut().unwrap();
+    obj.remove("browser_pac_policy_active");
+    obj.remove("browsers_pac_active");
+    obj.remove("browsers_needing_restart");
+    let old: CoverageSnapshot = serde_json::from_value(v).unwrap();
+    assert!(!old.browser_pac_policy_active);
+    assert!(old.browsers_pac_active.is_empty());
+    assert!(old.browsers_needing_restart.is_empty());
+}
+
+#[test]
+fn utun_vpn_with_temp_dns_and_deferred_os_pac_surfaces_tunnel_notice_and_configured_browsers() {
+    let rig = Rig::new();
+    // Simulate AmneziaVPN (utun daemon not in scutil --nc list) holding temporary DNS so OS PAC
+    // on Wi-Fi stayed off, while browser Preferences PAC is active.
+    rig.seed_wifi_pac("", false);
+    rig.platform.set_temp_dns(true);
+    rig.platform.set_effective_pac(None, false);
+    rig.fs
+        .create_private_dir_all(Path::new("/Applications/Claude.app"))
+        .unwrap();
+
+    put_browser_prefs(
+        &rig,
+        "Google/Chrome/Default",
+        r#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac","pac_mandatory":false}}"#,
+    );
+
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let mut env = rig.env(PacSource::Services, false);
+    env.sysproxy_enabled = true;
+    let snap = t.snapshot(&env, true);
+
+    assert_eq!(
+        snap.vpn_connected,
+        vec!["активный туннель (временные DNS)".to_string()]
+    );
+    assert_eq!(snap.system_proxy_effective, Some(false));
+    assert!(snap.browser_pac_policy_active);
+
+    let browsers = app(&snap, "browsers");
+    assert_eq!(browsers.status, CoverageStatus::Configured);
+    assert!(browsers.detail.contains("VPN"));
+
+    let claude = app(&snap, "claude-desktop");
+    assert_eq!(claude.status, CoverageStatus::Off);
+    assert!(claude.detail.contains("временные DNS"), "{}", claude.detail);
+    assert!(
+        !claude
+            .manual_steps
+            .contains(&steps::ENABLE_PROTECTION.to_string())
+    );
 }

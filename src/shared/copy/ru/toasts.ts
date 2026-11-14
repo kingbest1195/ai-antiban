@@ -40,6 +40,9 @@ export const toast = {
   intercept: {
     allowedTitle: "Пауза снята",
     allowedText: "Трафик к ИИ разрешён на эту сессию.",
+    pausedTitle: "Пауза до смены сети",
+    pausedText: "Запросы к ИИ приостановлены до смены сети или IP.",
+    pauseError: "Не удалось включить паузу до смены сети",
     simulateTitle: "Тест перехвата запущен",
     simulateText: "Открыто окно экстренного удержания трафика.",
     simulateError: "Не удалось запустить тест",

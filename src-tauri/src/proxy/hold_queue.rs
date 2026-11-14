@@ -1,9 +1,9 @@
+use crate::auditor::RiskReport;
+use crate::auditor::geo_matrix::ProviderId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{oneshot, RwLock};
-use crate::auditor::geo_matrix::ProviderId;
-use crate::auditor::RiskReport;
+use tokio::sync::{RwLock, oneshot};
 
 pub const DEFAULT_HOLD_TTL_SECS: u64 = 60;
 
@@ -66,6 +66,9 @@ pub struct RiskInterceptPayload {
     /// `"detecting"` (minimal payload, `report == None`) or `"ready"`.
     #[serde(default = "default_phase")]
     pub phase: String,
+    /// Human-readable reason explaining why traffic was held or gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_reason: Option<String>,
 }
 
 /// `interceptor://enriched`: data that arrives after the window was already shown.
@@ -78,6 +81,81 @@ pub struct EnrichedPayload {
     pub phase: String,
     pub report: Option<RiskReport>,
     pub network_change: NetworkChange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_reason: Option<String>,
+}
+
+/// Builds a concise, human-readable `gate_reason` from an audit report and/or network change.
+pub fn build_gate_reason(
+    report: Option<&RiskReport>,
+    network_change: Option<&NetworkChange>,
+    is_simulation: bool,
+) -> String {
+    if is_simulation {
+        if let Some(r) = report {
+            let top = r
+                .checks
+                .iter()
+                .find(|c| c.status.is_critical())
+                .or_else(|| r.checks.iter().find(|c| c.status.is_warning()));
+            if let Some(c) = top {
+                return format!("Демо-перехват ({}): {}", c.code, c.message);
+            }
+        }
+        if let Some(nc) = network_change
+            && let (Some(old_ip), Some(new_ip)) = (nc.old_ip.as_deref(), nc.new_ip.as_deref())
+        {
+            return format!(
+                "Демо-перехват: имитация обрыва VPN ({old_ip} -> {new_ip}) и небезопасного выхода"
+            );
+        }
+        return "Демо-перехват: имитация обрыва VPN и небезопасного выхода".to_string();
+    }
+
+    if let Some(r) = report {
+        let top_issue = r
+            .checks
+            .iter()
+            .find(|c| c.status.is_critical())
+            .or_else(|| {
+                if r.geo_result.status.is_critical() {
+                    Some(&r.geo_result)
+                } else if r.pinning_result.status.is_critical() {
+                    Some(&r.pinning_result)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| r.checks.iter().find(|c| c.status.is_warning()))
+            .or_else(|| {
+                r.checks
+                    .iter()
+                    .find(|c| c.status.is_unknown() && !c.is_not_applicable())
+            });
+        if let Some(c) = top_issue {
+            return format!("{}: {}", c.code, c.message);
+        }
+        if r.incomplete {
+            return "Часть проверок безопасности не завершилась — соединение удержано".to_string();
+        }
+    }
+
+    if let Some(nc) = network_change {
+        match (nc.old_country.as_deref(), nc.new_country.as_deref()) {
+            (Some(old_cc), Some(new_cc)) if !old_cc.is_empty() && !new_cc.is_empty() => {
+                return format!(
+                    "Смена сети ({old_cc} -> {new_cc}) — требуется подтверждение безопасности"
+                );
+            }
+            _ if nc.old_ip.is_some() || nc.new_ip.is_some() => {
+                return "Смена внешнего IP или сетевого интерфейса — выполняется проверка безопасности"
+                    .to_string();
+            }
+            _ => {}
+        }
+    }
+
+    "Проверка безопасности сети перед открытием соединения".to_string()
 }
 
 fn default_scope() -> String {
@@ -127,6 +205,9 @@ impl HoldQueue {
         cur.phase = enriched.phase.clone();
         cur.report = enriched.report.clone();
         cur.network_change = Some(enriched.network_change.clone());
+        if let Some(reason) = enriched.gate_reason.as_ref() {
+            cur.gate_reason = Some(reason.clone());
+        }
     }
 
     /// The alert that is currently waiting for a decision, with all data known so far.
@@ -143,11 +224,7 @@ impl HoldQueue {
     }
 
     /// Registers a connection in the hold queue and returns a receiver to await resolution.
-    pub async fn register(
-        &self,
-        id: String,
-        provider: &str,
-    ) -> oneshot::Receiver<HoldResolution> {
+    pub async fn register(&self, id: String, provider: &str) -> oneshot::Receiver<HoldResolution> {
         let (tx, rx) = oneshot::channel();
         let mut w = self.entries.write().await;
         w.insert(
@@ -173,7 +250,11 @@ impl HoldQueue {
     }
 
     /// Resolves all held connections matching a provider ID.
-    pub async fn resolve_all_for_provider(&self, provider: &str, resolution: HoldResolution) -> usize {
+    pub async fn resolve_all_for_provider(
+        &self,
+        provider: &str,
+        resolution: HoldResolution,
+    ) -> usize {
         let mut w = self.entries.write().await;
         let mut resolved = 0;
         let keys_to_remove: Vec<String> = w
@@ -239,7 +320,9 @@ mod tests {
         let rx2 = queue.register("req-2".into(), "openai").await;
         let rx3 = queue.register("req-3".into(), "anthropic").await;
 
-        let count = queue.resolve_all_for_provider("openai", HoldResolution::Allow).await;
+        let count = queue
+            .resolve_all_for_provider("openai", HoldResolution::Allow)
+            .await;
         assert_eq!(count, 2);
 
         assert_eq!(rx1.await.unwrap(), HoldResolution::Allow);

@@ -7,17 +7,17 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-use tokio_rustls::TlsConnector;
 
 use crate::routing::net::resolve_entry_checked;
-use crate::routing::{parse_route_key, Entry, EntryProto, Route};
+use crate::routing::{Entry, EntryProto, Route, parse_route_key};
 use crate::state::UpstreamProxyConfig;
 
 /// Parses a key or proxy URL into the legacy single-proxy view (first entry).
@@ -49,7 +49,11 @@ impl AsyncRead for UpstreamStream {
 }
 
 impl AsyncWrite for UpstreamStream {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             UpstreamStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
             UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
@@ -169,7 +173,10 @@ async fn socks5_handshake(
             if auth_resp[0] != 0x01 || auth_resp[1] != 0x00 {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
-                    format!("SOCKS5 authentication failed (status: 0x{:02x})", auth_resp[1]),
+                    format!(
+                        "SOCKS5 authentication failed (status: 0x{:02x})",
+                        auth_resp[1]
+                    ),
                 ));
             }
         }
@@ -198,7 +205,10 @@ async fn socks5_handshake(
     } else {
         let d = target_host.as_bytes();
         if d.len() > 255 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target domain exceeds 255 bytes"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Target domain exceeds 255 bytes",
+            ));
         }
         req.push(0x03);
         req.push(d.len() as u8);
@@ -270,7 +280,8 @@ async fn http_connect_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (code, status_line) = http_connect_exchange(stream, entry, target_host, target_port).await?;
+    let (code, status_line) =
+        http_connect_exchange(stream, entry, target_host, target_port).await?;
     match code.as_str() {
         "200" => Ok(()),
         "407" => Err(io::Error::new(
@@ -316,7 +327,10 @@ where
     let mut matched = 0;
     loop {
         if header.len() >= 8192 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "HTTP proxy response headers too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP proxy response headers too large",
+            ));
         }
         let n = stream.read(&mut b).await?;
         if n == 0 {
@@ -336,8 +350,18 @@ where
     }
 
     let resp = String::from_utf8_lossy(&header);
-    let status_line: String = resp.lines().next().unwrap_or("").chars().take(120).collect();
-    let code = status_line.split_whitespace().nth(1).unwrap_or("").to_string();
+    let status_line: String = resp
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect();
+    let code = status_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
     Ok((code, status_line))
 }
 
@@ -364,7 +388,9 @@ async fn connect_entry_with(
             }
             EntryProto::Https => {
                 let server_name = ServerName::try_from(entry.tls_server_name().to_string())
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid TLS server name")
+                    })?;
                 let tcp = tcp_connect(entry, allow_local, gateway_port).await?;
                 let mut tls_stream = TlsConnector::from(Arc::clone(tls))
                     .connect(server_name, tcp)
@@ -392,7 +418,10 @@ async fn connect_via_route_with(
     gateway_port: u16,
 ) -> io::Result<UpstreamStream> {
     if route.entries.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "route has no entry nodes"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "route has no entry nodes",
+        ));
     }
     let mut errors = Vec::with_capacity(route.entries.len());
     let mut last_kind = io::ErrorKind::Other;
@@ -438,7 +467,15 @@ pub async fn connect_via_route(
     gateway_port: u16,
 ) -> io::Result<UpstreamStream> {
     let tls = production_tls_config()?;
-    connect_via_route_with(route, target_host, target_port, per_entry_timeout, &tls, gateway_port).await
+    connect_via_route_with(
+        route,
+        target_host,
+        target_port,
+        per_entry_timeout,
+        &tls,
+        gateway_port,
+    )
+    .await
 }
 
 /// Why a connection through the chained (system) proxy failed.
@@ -455,7 +492,9 @@ impl std::fmt::Display for ChainedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChainedError::Unreachable(e) => write!(f, "chained proxy unreachable: {e}"),
-            ChainedError::Refused { status } => write!(f, "chained proxy refused the tunnel (status {status})"),
+            ChainedError::Refused { status } => {
+                write!(f, "chained proxy refused the tunnel (status {status})")
+            }
         }
     }
 }
@@ -657,7 +696,10 @@ mod tests {
             assert_eq!(u16::from_be_bytes(port_bytes), 443);
 
             // Send success reply (IPv4 bind 0.0.0.0:0)
-            socket.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            socket
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
 
             // Echo test
             let mut buf = [0u8; 4];
@@ -676,7 +718,8 @@ mod tests {
             label: None,
         };
 
-        let stream_res = connect_via_upstream(&cfg, "api.anthropic.com", 443, Duration::from_secs(3)).await;
+        let stream_res =
+            connect_via_upstream(&cfg, "api.anthropic.com", 443, Duration::from_secs(3)).await;
         let mut stream = match stream_res {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -735,7 +778,10 @@ mod tests {
             socket.read_exact(&mut domain).await.unwrap();
 
             // Success reply
-            socket.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            socket
+                .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
         });
 
         let cfg = UpstreamProxyConfig {
@@ -749,7 +795,8 @@ mod tests {
             label: None,
         };
 
-        let stream_res = connect_via_upstream(&cfg, "api.openai.com", 443, Duration::from_secs(3)).await;
+        let stream_res =
+            connect_via_upstream(&cfg, "api.openai.com", 443, Duration::from_secs(3)).await;
         let stream = match stream_res {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -836,7 +883,8 @@ mod tests {
             label: None,
         };
 
-        let stream_res = connect_via_upstream(&cfg, "api.openai.com", 443, Duration::from_secs(3)).await;
+        let stream_res =
+            connect_via_upstream(&cfg, "api.openai.com", 443, Duration::from_secs(3)).await;
         let mut stream = match stream_res {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -882,9 +930,9 @@ mod tests {
 
     // --- HTTPS (TLS) entry tests: local stub with a throwaway CA ---
 
-    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    use tokio_rustls::rustls::ServerConfig;
     use tokio_rustls::TlsAcceptor;
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
     struct TestCa {
         cert: rcgen::Certificate,
@@ -958,8 +1006,12 @@ mod tests {
                         head.push(b[0]);
                     }
                     let req = String::from_utf8_lossy(&head).to_string();
-                    assert!(req.starts_with("CONNECT api.anthropic.com:443 HTTP/1.1"), "{req}");
-                    let authed = req.contains(&format!("Proxy-Authorization: Basic {expected_auth}\r\n"));
+                    assert!(
+                        req.starts_with("CONNECT api.anthropic.com:443 HTTP/1.1"),
+                        "{req}"
+                    );
+                    let authed =
+                        req.contains(&format!("Proxy-Authorization: Basic {expected_auth}\r\n"));
                     let resp: &[u8] = match (reply, authed) {
                         (StubReply::Forbidden, _) => b"HTTP/1.1 403 Forbidden\r\n\r\n",
                         (StubReply::AuthRequired, _) | (StubReply::Ok, false) => {
@@ -1017,7 +1069,15 @@ mod tests {
         let ca = make_ca();
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
         let route = route_of(vec![https_entry(port, "wonderland")]);
-        let res = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0).await;
+        let res = connect_via_route_with(
+            &route,
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(3),
+            &client_cfg_trusting(&ca),
+            0,
+        )
+        .await;
         let mut s = match res {
             Ok(s) => s,
             Err(e) if sandboxed(&e) => return,
@@ -1037,27 +1097,48 @@ mod tests {
 
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Ok).await;
         let route = route_of(vec![https_entry(port, "WrongSecret77")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
-            .await
-            .err()
-            .expect("wrong password must fail");
+        let err = connect_via_route_with(
+            &route,
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(3),
+            &cfg,
+            0,
+        )
+        .await
+        .err()
+        .expect("wrong password must fail");
         assert!(err.to_string().contains("407"), "{err}");
         assert!(!err.to_string().contains("WrongSecret77"));
 
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::AuthRequired).await;
         let route = route_of(vec![https_entry(port, "wonderland")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
-            .await
-            .err()
-            .expect("407 must fail");
+        let err = connect_via_route_with(
+            &route,
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(3),
+            &cfg,
+            0,
+        )
+        .await
+        .err()
+        .expect("407 must fail");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
 
         let port = spawn_tls_proxy(&ca, ALICE_AUTH, StubReply::Forbidden).await;
         let route = route_of(vec![https_entry(port, "wonderland")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &cfg, 0)
-            .await
-            .err()
-            .expect("403 must fail");
+        let err = connect_via_route_with(
+            &route,
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(3),
+            &cfg,
+            0,
+        )
+        .await
+        .err()
+        .expect("403 must fail");
         assert!(err.to_string().contains("403"), "{err}");
     }
 
@@ -1069,10 +1150,17 @@ mod tests {
         let route = route_of(vec![https_entry(port, "wonderland")]);
 
         // Client trusts a different CA.
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&other_ca), 0)
-            .await
-            .err()
-            .expect("untrusted cert must fail");
+        let err = connect_via_route_with(
+            &route,
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(3),
+            &client_cfg_trusting(&other_ca),
+            0,
+        )
+        .await
+        .err()
+        .expect("untrusted cert must fail");
         assert!(err.to_string().contains("TLS handshake failed"), "{err}");
 
         // Production path (public roots only) rejects the private CA as well.
@@ -1085,10 +1173,17 @@ mod tests {
         // SNI that the certificate does not cover is rejected too.
         let mut bad_sni = https_entry(port, "wonderland");
         bad_sni.sni = Some("evil.example.com".to_string());
-        let err = connect_via_route_with(&route_of(vec![bad_sni]), "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0)
-            .await
-            .err()
-            .expect("name mismatch must fail");
+        let err = connect_via_route_with(
+            &route_of(vec![bad_sni]),
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(3),
+            &client_cfg_trusting(&ca),
+            0,
+        )
+        .await
+        .err()
+        .expect("name mismatch must fail");
         assert!(err.to_string().contains("TLS handshake failed"), "{err}");
     }
 
@@ -1100,8 +1195,20 @@ mod tests {
             let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap().port()
         };
-        let route = route_of(vec![https_entry(closed, "wonderland"), https_entry(good, "wonderland")]);
-        let mut s = match connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(3), &client_cfg_trusting(&ca), 0).await {
+        let route = route_of(vec![
+            https_entry(closed, "wonderland"),
+            https_entry(good, "wonderland"),
+        ]);
+        let mut s = match connect_via_route_with(
+            &route,
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(3),
+            &client_cfg_trusting(&ca),
+            0,
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) if sandboxed(&e) => return,
             Err(e) => panic!("failover failed: {e}"),
@@ -1112,13 +1219,26 @@ mod tests {
         assert_eq!(&echo, b"pong");
 
         // All entries down -> one aggregated error, no secrets.
-        let route = route_of(vec![https_entry(closed, "wonderland"), https_entry(closed, "wonderland")]);
-        let err = connect_via_route_with(&route, "api.anthropic.com", 443, Duration::from_secs(1), &client_cfg_trusting(&ca), 0)
-            .await
-            .err()
-            .expect("all down must fail");
+        let route = route_of(vec![
+            https_entry(closed, "wonderland"),
+            https_entry(closed, "wonderland"),
+        ]);
+        let err = connect_via_route_with(
+            &route,
+            "api.anthropic.com",
+            443,
+            Duration::from_secs(1),
+            &client_cfg_trusting(&ca),
+            0,
+        )
+        .await
+        .err()
+        .expect("all down must fail");
         let msg = err.to_string();
-        assert!(msg.contains("entry #1") && msg.contains("entry #2"), "{msg}");
+        assert!(
+            msg.contains("entry #1") && msg.contains("entry #2"),
+            "{msg}"
+        );
         assert!(!msg.contains("wonderland"));
     }
 }

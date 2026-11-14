@@ -26,7 +26,9 @@ export const alertDialog = {
   confirmForceText: "Запросы пойдут без проверки — реальный IP может раскрыться.",
   confirmForceCancel: "Отмена",
   confirmForceAccept: "Подтвердить",
+  /** Причина перехвата из шлюза (`gate_reason`). */
+  gateReasonPrefix: "Причина:",
   /** Порядок совпадает с клавишами 1 → 2. */
-  block: "Держать на паузе",
+  block: "Пауза до смены сети",
   allow: "Разрешить принудительно",
 } as const;

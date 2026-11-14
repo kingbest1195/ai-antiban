@@ -80,6 +80,10 @@ export const connect = {
     danglingText: "Привязанный к сервису ключ был удалён. Сервис удерживается шлюзом для безопасности.",
     profileErrorTitle: "Ошибка ключа профиля Claude",
     profileErrorText: "Ключ активного профиля Claude не прошёл проверку. Запросы удерживаются.",
+    blockedCountryTitle: (service: string, country: string) =>
+      `Страна ${country} заблокирована в ${service}`,
+    blockedCountryText:
+      "Выбранный маршрут или VPN выходит в неподдерживаемом регионе — переключите сервис на другой ключ или страну VPN.",
     resetToDirect: "Сбросить на текущий VPN",
     toast: {
       boundSuccess: "Маршрут привязан",

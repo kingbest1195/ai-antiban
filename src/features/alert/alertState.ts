@@ -35,6 +35,7 @@ export function applyEnriched(
       phase: enriched.phase,
       report: enriched.report ?? payload.report ?? null,
       network_change: { ...(payload.network_change ?? {}), ...enriched.network_change },
+      gate_reason: enriched.gate_reason ?? payload.gate_reason ?? null,
     },
   };
 }

@@ -9,20 +9,20 @@ pub mod server;
 pub mod transit;
 pub mod upstream;
 
-use std::sync::Arc;
+use crate::auditor::Auditor;
+use crate::state::AppState;
 pub use allow_error::{AllowError, AllowErrorCode};
 pub use coverage::{
-    classify_process_name, lookup_process_name_by_port, AppCoverageItem, CoverageSnapshot,
-    CoverageTracker,
+    AppCoverageItem, CoverageSnapshot, CoverageTracker, classify_process_name,
+    lookup_process_name_by_port,
 };
-pub use guard::{Gate, GuardCtx, NetworkGuard, ALL_PROVIDERS};
+pub use guard::{ALL_PROVIDERS, Gate, GuardCtx, NetworkGuard};
 pub use hold_queue::{HoldQueue, HoldResolution, InterceptionAction, RiskInterceptPayload};
 pub use pac::generate_pac_script;
 pub use server::ProxyServer;
+use std::sync::Arc;
 pub use transit::Transit;
 pub use upstream::{connect_via_upstream, parse_upstream_key};
-use crate::auditor::Auditor;
-use crate::state::AppState;
 
 #[derive(Clone)]
 pub struct ProxyManager {
@@ -39,9 +39,8 @@ impl ProxyManager {
         app_handle: Option<tauri::AppHandle>,
     ) -> Result<Self, std::io::Error> {
         let hold_queue = Arc::new(HoldQueue::new());
-        let server = Arc::new(
-            ProxyServer::bind(auditor, state, Arc::clone(&hold_queue), app_handle).await?,
-        );
+        let server =
+            Arc::new(ProxyServer::bind(auditor, state, Arc::clone(&hold_queue), app_handle).await?);
         let guard = Arc::clone(&server.guard);
         let coverage = Arc::clone(&server.coverage);
 

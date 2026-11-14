@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppCoverageItem, AppCoverageStatus, CliProtectionReport, RestartOutcome } from "../../types";
-import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, canRestartAntigravity, coverageNeedsAttention, enableResult, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, resolveWaiting, restartResult, sinceLastSeen, startWaiting, uncoveredAiApps, viewOf, vpnNotice } from "./coverageModel";
+import { POLL_FAST_MS, POLL_SLOW_MS, WAIT_TIMEOUT_MS, browserPacStatus, canRestartAntigravity, coverageNeedsAttention, enableResult, hasBrowserTraffic, isListed, isProtectionOn, pollInterval, protectedAppNames, protectionControl, relaunchBrowsersResult, resolveWaiting, restartResult, shouldShowBrowserTimezoneHint, sinceLastSeen, startWaiting, uncoveredAiApps, viewOf, vpnNotice } from "./coverageModel";
 import { CoverageSection } from "./CoverageSection";
 import { checkCliProtectionStatus, disableCliProtection, enableCliProtection, restartAppWithGateway } from "../../utils/api";
 import { coverage as copy } from "../../shared/copy/ru";
@@ -139,10 +139,30 @@ describe("uncoveredAiApps и coverageNeedsAttention: основание жёлт
   it("браузеры не считаются ИИ-приложениями", () => {
     expect(coverageNeedsAttention(snap([app("browsers", "off", { category: "browser" })]))).toBe(false);
   });
-  it("системный прокси не действует поверх VPN — замечание, даже если все приложения в порядке", () => {
+  it("системный прокси не действует поверх VPN — замечание, если браузеры не привязаны политикой и не подтверждены", () => {
     expect(coverageNeedsAttention(snap([app("a", "confirmed")], { system_proxy_effective: false }))).toBe(true);
+    expect(
+      coverageNeedsAttention(snap([app("a", "confirmed")], { system_proxy_effective: false, browser_pac_policy_active: true })),
+    ).toBe(false);
+    expect(
+      coverageNeedsAttention(
+        snap([app("a", "confirmed"), app("browsers", "confirmed", { category: "browser" })], {
+          system_proxy_effective: false,
+          browser_pac_policy_active: false,
+        }),
+      ),
+    ).toBe(false);
     expect(coverageNeedsAttention(snap([app("a", "confirmed")], { system_proxy_effective: null }))).toBe(false);
     expect(coverageNeedsAttention(snap([app("a", "confirmed")], { sysproxy_enabled: false, system_proxy_effective: false }))).toBe(false);
+    expect(
+      coverageNeedsAttention(
+        snap([app("a", "confirmed")], {
+          system_proxy_effective: false,
+          browser_pac_policy_active: true,
+          browsers_needing_restart: ["Google Chrome"],
+        }),
+      ),
+    ).toBe(true);
   });
   it("снимка нет — замечания нет", () => {
     expect(coverageNeedsAttention(null)).toBe(false);
@@ -151,7 +171,13 @@ describe("uncoveredAiApps и coverageNeedsAttention: основание жёлт
 });
 
 describe("vpnNotice: подключённый VPN и системный прокси", () => {
-  const snap = (over: Partial<Parameters<typeof vpnNotice>[0]> = {}) => ({ sysproxy_enabled: true, system_proxy_effective: true as boolean | null, vpn_connected: ["V2 Pro"], ...over });
+  const snap = (over: Partial<Parameters<typeof vpnNotice>[0]> = {}) => ({
+    sysproxy_enabled: true,
+    system_proxy_effective: true as boolean | null,
+    vpn_connected: ["V2 Pro"],
+    browser_pac_policy_active: false,
+    ...over,
+  });
 
   it("подключённых VPN нет — сказать нечего", () => {
     expect(vpnNotice(snap({ vpn_connected: [] }))).toBeNull();
@@ -159,10 +185,19 @@ describe("vpnNotice: подключённый VPN и системный прок
     expect(vpnNotice(snap({ vpn_connected: ["  "] }))).toBeNull();
   });
   it("VPN есть, PAC действует — только строка «не изменялись»", () => {
-    expect(vpnNotice(snap())).toEqual({ names: "V2 Pro", overridden: false });
+    expect(vpnNotice(snap())).toEqual({ names: "V2 Pro", overridden: false, pacPolicyActive: false });
   });
-  it("VPN перебивает PAC — честное предупреждение", () => {
-    expect(vpnNotice(snap({ system_proxy_effective: false }))).toEqual({ names: "V2 Pro", overridden: true });
+  it("VPN перебивает PAC — честное предупреждение или спокойный info при активной политике браузеров", () => {
+    expect(vpnNotice(snap({ system_proxy_effective: false }))).toEqual({
+      names: "V2 Pro",
+      overridden: true,
+      pacPolicyActive: false,
+    });
+    expect(vpnNotice(snap({ system_proxy_effective: false, browser_pac_policy_active: true }))).toEqual({
+      names: "V2 Pro",
+      overridden: true,
+      pacPolicyActive: true,
+    });
   });
   it("не прочитано (null) и защита выключена — не утверждаем, что прокси не действует", () => {
     expect(vpnNotice(snap({ system_proxy_effective: null }))?.overridden).toBe(false);
@@ -171,11 +206,13 @@ describe("vpnNotice: подключённый VPN и системный прок
   it("несколько VPN перечисляются через запятую", () => {
     expect(vpnNotice(snap({ vpn_connected: ["Alpha", "Beta Pro"] }))?.names).toBe("Alpha, Beta Pro");
   });
-  it("тексты: строка про неизменённые службы и предупреждение с именем и советом", () => {
+  it("тексты: строка про неизменённые службы, спокойный info при PAC и предупреждение с шагами", () => {
     expect(copy.vpn.untouched("Alpha, Beta Pro")).toBe("VPN-службы не изменялись: Alpha, Beta Pro");
     expect(copy.vpn.overridden.title("V2 Pro")).toBe("VPN «V2 Pro» сейчас управляет маршрутами — системный прокси выключен на время его работы");
     expect(copy.vpn.overridden.text).toContain("системный прокси");
     expect(copy.vpn.overridden.text).toContain("вручную");
+    expect(copy.vpn.pacLinked.title("V2 Pro")).toContain("браузеры привязаны к Заставе напрямую");
+    expect(copy.vpn.pacLinked.text).toContain("TUN-режимом VPN");
   });
 });
 
@@ -356,5 +393,182 @@ describe("CoverageSection: короткие бейджи и zs-cov__row", () => 
     expect(html).toContain(copy.status.confirmed);
     expect(html).toContain(copy.status.configured);
     expect(html).toContain(copy.status.direct);
+  });
+
+  it("VPN-баннер в CoverageSection показывает info при browser_pac_policy_active и кнопки без дубля untouched", () => {
+    const htmlInfo = renderToStaticMarkup(
+      createElement(CoverageSection, {
+        variant: "overview",
+        pending: false,
+        initialSnapshot: {
+          sysproxy_enabled: true,
+          cli_protection_enabled: true,
+          chained_proxy: null,
+          gateway_addr: "127.0.0.1:40111",
+          pac_url: "http://127.0.0.1:40111/proxy.pac",
+          generated_at_ms: 1,
+          cli_mode: "ai_only",
+          apps: [app("browsers", "confirmed", { name: "Браузеры", category: "browser", ai_requests: 1, last_seen_ms: 1 })],
+          system_proxy_effective: false,
+          vpn_connected: ["V2BOX Pro"],
+          browser_pac_policy_active: true,
+        },
+      }),
+    );
+    expect(htmlInfo).toContain("zs-banner--info");
+    expect(htmlInfo).toContain(copy.vpn.actions.relinkBrowsers);
+    expect(htmlInfo).toContain(copy.vpn.actions.recheck);
+    expect(htmlInfo).toContain(copy.vpn.actions.osNetworkSettings);
+    expect(htmlInfo).not.toContain(copy.vpn.untouched("V2BOX Pro"));
+  });
+});
+
+describe("hasBrowserTraffic & shouldShowBrowserTimezoneHint", () => {
+  it("определяет браузерный трафик по confirmed/configured или ai_requests > 0", () => {
+    expect(hasBrowserTraffic([app("browsers", "confirmed", { category: "browser" })])).toBe(true);
+    expect(hasBrowserTraffic([app("browsers", "configured", { category: "browser" })])).toBe(true);
+    expect(hasBrowserTraffic([app("browsers", "off", { category: "browser", ai_requests: 2 })])).toBe(true);
+    expect(hasBrowserTraffic([app("browsers", "off", { category: "browser", ai_requests: 0 })])).toBe(false);
+    expect(hasBrowserTraffic([app("claude-code", "confirmed", { category: "cli", ai_requests: 10 })])).toBe(false);
+  });
+
+  it("показывает напоминание о TZ ОС только при браузерном трафике и несинхронизированной ОС", () => {
+    const browserApps = [app("browsers", "confirmed", { category: "browser", ai_requests: 3 })];
+    expect(shouldShowBrowserTimezoneHint(browserApps, { synced: false })).toBe(true);
+    expect(shouldShowBrowserTimezoneHint(browserApps, { synced: true })).toBe(false);
+    expect(shouldShowBrowserTimezoneHint(browserApps, null)).toBe(false);
+    expect(shouldShowBrowserTimezoneHint([app("claude-code", "confirmed", { category: "cli" })], { synced: false })).toBe(false);
+  });
+});
+
+describe("browserPacStatus, relaunchBrowsersResult и честный статус браузеров в CoverageSection", () => {
+  it("browserPacStatus нормализует browsers_pac_active и browsers_needing_restart", () => {
+    expect(
+      browserPacStatus({
+        sysproxy_enabled: true,
+        system_proxy_effective: false,
+        browser_pac_policy_active: true,
+        browsers_pac_active: ["Comet", " ", "Arc"],
+        browsers_needing_restart: ["Google Chrome", ""],
+      }),
+    ).toEqual({
+      pacOverridden: true,
+      pacPolicyActive: true,
+      browsersPacActive: ["Comet", "Arc"],
+      browsersNeedingRestart: ["Google Chrome"],
+    });
+  });
+
+  it("relaunchBrowsersResult возвращает честный русский фидбек для restarted, automation, failed и unsupported", () => {
+    const emptySnap = {
+      sysproxy_enabled: true,
+      cli_protection_enabled: true,
+      gateway_addr: "127.0.0.1:40111",
+      pac_url: "http://127.0.0.1:40111/proxy.pac",
+      generated_at_ms: 1,
+      cli_mode: "ai_only" as const,
+      apps: [],
+    };
+    expect(
+      relaunchBrowsersResult({
+        restarted: ["Google Chrome", "Comet"],
+        skipped: [],
+        failed: [],
+        needs_automation_permission: false,
+        unsupported: false,
+        snapshot: emptySnap,
+      }),
+    ).toEqual({
+      tone: "ok",
+      title: copy.vpn.restartNeeded.restartedTitle,
+      text: copy.vpn.restartNeeded.restartedText("Google Chrome, Comet"),
+    });
+
+    const auto = relaunchBrowsersResult({
+      restarted: [],
+      skipped: [],
+      failed: ["Google Chrome"],
+      needs_automation_permission: true,
+      unsupported: false,
+      snapshot: emptySnap,
+    });
+    expect(auto.tone).toBe("warn");
+    expect(auto.text).toContain("Настройках macOS -> Конфиденциальность -> Автоматизация");
+
+    const partial = relaunchBrowsersResult({
+      restarted: ["Comet"],
+      skipped: [],
+      failed: ["Google Chrome"],
+      needs_automation_permission: false,
+      unsupported: false,
+      snapshot: emptySnap,
+    });
+    expect(partial.tone).toBe("warn");
+    expect(partial.text).toContain("Comet");
+    expect(partial.text).toContain("Google Chrome");
+
+    const failed = relaunchBrowsersResult({
+      restarted: [],
+      skipped: [],
+      failed: ["Google Chrome"],
+      needs_automation_permission: false,
+      unsupported: false,
+      snapshot: emptySnap,
+    });
+    expect(failed.tone).toBe("danger");
+    expect(failed.text).toContain("Google Chrome");
+  });
+
+  it("CoverageSection показывает warn с кнопкой «Перезапустить браузеры» при browsers_needing_restart и info с именами при browsers_pac_active", () => {
+    const htmlWarn = renderToStaticMarkup(
+      createElement(CoverageSection, {
+        variant: "overview",
+        pending: false,
+        initialSnapshot: {
+          sysproxy_enabled: true,
+          cli_protection_enabled: true,
+          chained_proxy: null,
+          gateway_addr: "127.0.0.1:40111",
+          pac_url: "http://127.0.0.1:40111/proxy.pac",
+          generated_at_ms: 1,
+          cli_mode: "ai_only",
+          apps: [app("browsers", "off", { category: "browser" })],
+          system_proxy_effective: false,
+          vpn_connected: ["V2BOX Pro"],
+          browser_pac_policy_active: true,
+          browsers_pac_active: ["Arc"],
+          browsers_needing_restart: ["Google Chrome", "Comet"],
+        },
+      }),
+    );
+    expect(htmlWarn).toContain("zs-banner--warn");
+    expect(htmlWarn).toContain("Google Chrome, Comet");
+    expect(htmlWarn).toContain(copy.vpn.restartNeeded.relaunchButton);
+    expect(htmlWarn).toContain(copy.vpn.actions.recheck);
+
+    const htmlInfo = renderToStaticMarkup(
+      createElement(CoverageSection, {
+        variant: "overview",
+        pending: false,
+        initialSnapshot: {
+          sysproxy_enabled: true,
+          cli_protection_enabled: true,
+          chained_proxy: null,
+          gateway_addr: "127.0.0.1:40111",
+          pac_url: "http://127.0.0.1:40111/proxy.pac",
+          generated_at_ms: 1,
+          cli_mode: "ai_only",
+          apps: [app("browsers", "confirmed", { category: "browser", ai_requests: 1, last_seen_ms: 1 })],
+          system_proxy_effective: false,
+          vpn_connected: ["V2BOX Pro"],
+          browser_pac_policy_active: true,
+          browsers_pac_active: ["Comet", "Arc"],
+          browsers_needing_restart: [],
+        },
+      }),
+    );
+    expect(htmlInfo).toContain("zs-banner--info");
+    expect(htmlInfo).toContain("Comet, Arc");
+    expect(htmlInfo).not.toContain(copy.vpn.restartNeeded.relaunchButton);
   });
 });

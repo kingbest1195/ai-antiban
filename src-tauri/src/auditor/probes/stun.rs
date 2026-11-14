@@ -149,19 +149,92 @@ pub async fn probe_servers(
     vec![(&SERVERS[0], a), (&SERVERS[1], b)]
 }
 
+fn extract_answered(
+    answers: &[(&'static StunServer, ServerAnswer)],
+) -> Vec<(&'static StunServer, Ipv4Addr)> {
+    answers
+        .iter()
+        .filter_map(|(s, a)| match a {
+            ServerAnswer::Addr(ip) => Some((*s, *ip)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn format_via_and_labels(answered: &[(&'static StunServer, Ipv4Addr)]) -> (String, String) {
+    let via = format!(
+        "stun:{}",
+        answered
+            .iter()
+            .map(|(s, _)| s.id)
+            .collect::<Vec<_>>()
+            .join("+")
+    );
+    let labels = answered
+        .iter()
+        .map(|(s, _)| s.label)
+        .collect::<Vec<_>>()
+        .join(" и ");
+    (via, labels)
+}
+
+/// Evaluates UDP STUN results taking route isolation into account.
+///
+/// When `via_zastava_key` is true, AI traffic goes over TCP through the Zastava key (and
+/// browser QUIC is disabled by policy), so a non-sanctioned foreign VPN UDP exit or blocked UDP
+/// returns `Ok("UDP_KEY_TCP_PROTECTED")` instead of flagging an HTTP/UDP country mismatch.
+pub fn evaluate_udp_stun_for_route(
+    answers: &[(&'static StunServer, ServerAnswer)],
+    http_exit_ip: &str,
+    via_zastava_key: bool,
+    udp_ip_country: Option<&str>,
+) -> CheckResult {
+    if !via_zastava_key {
+        return evaluate_udp_stun(answers, http_exit_ip);
+    }
+
+    let answered = extract_answered(answers);
+    if answered.is_empty() {
+        return CheckResult::ok(
+            "UDP_KEY_TCP_PROTECTED",
+            "Ключ Заставы передаёт AI-трафик по TCP, а QUIC в браузерах отключён политикой Заставы; исходящий UDP заблокирован или недоступен, утечки локального IP РФ нет.",
+        );
+    }
+
+    let (via, labels) = format_via_and_labels(&answered);
+    let first_ip = answered[0].1;
+    let sanctioned = udp_ip_country.is_some_and(crate::sanctions::is_sanctioned_or_blocked_country);
+    if sanctioned {
+        let cc = udp_ip_country.unwrap_or("??");
+        return CheckResult::warning(
+            "UDP_STUN_MISMATCH",
+            format!(
+                "По UDP виден адрес {first_ip} ({cc}, ответ {labels}), хотя HTTP-трафик AI идёт через ключ Заставы ({http_exit_ip}). Включите зарубежный VPN для системного UDP-трафика."
+            ),
+            None,
+        )
+        .with_measured_via(via);
+    }
+
+    let cc_note = udp_ip_country
+        .map(|c| format!(" ({c})"))
+        .unwrap_or_default();
+    CheckResult::ok(
+        "UDP_KEY_TCP_PROTECTED",
+        format!(
+            "Ключ Заставы передаёт AI-трафик по TCP (выход {http_exit_ip}), QUIC в браузерах отключён политикой Заставы. Системный UDP идёт через VPN-туннель ({first_ip}{cc_note}, ответ {labels}) без утечки локального IP РФ."
+        ),
+    )
+    .with_measured_via(via)
+}
+
 /// Verdict of the UDP check: the public address STUN servers see for UDP against the exit address
 /// of HTTP traffic. A closed UDP is not a leak: without any answer the check is `Unknown`.
 pub fn evaluate_udp_stun(
     answers: &[(&'static StunServer, ServerAnswer)],
     http_exit_ip: &str,
 ) -> CheckResult {
-    let answered: Vec<(&StunServer, Ipv4Addr)> = answers
-        .iter()
-        .filter_map(|(s, a)| match a {
-            ServerAnswer::Addr(ip) => Some((*s, *ip)),
-            _ => None,
-        })
-        .collect();
+    let answered = extract_answered(answers);
 
     if answered.is_empty() {
         let (reason, why) = if answers.iter().any(|(_, a)| *a == ServerAnswer::Timeout) {
@@ -188,19 +261,7 @@ pub fn evaluate_udp_stun(
         );
     }
 
-    let via = format!(
-        "stun:{}",
-        answered
-            .iter()
-            .map(|(s, _)| s.id)
-            .collect::<Vec<_>>()
-            .join("+")
-    );
-    let labels = answered
-        .iter()
-        .map(|(s, _)| s.label)
-        .collect::<Vec<_>>()
-        .join(" и ");
+    let (via, labels) = format_via_and_labels(&answered);
 
     let exit: IpAddr = match http_exit_ip.trim().parse() {
         Ok(ip) => ip,
@@ -567,5 +628,45 @@ mod tests {
         let silent_addr = silent.local_addr().unwrap().to_string();
         let got = query_server(&TokioUdp, &silent_addr, Duration::from_millis(100)).await;
         assert_eq!(got, ServerAnswer::Timeout);
+    }
+
+    #[test]
+    fn route_via_zastava_key_allows_foreign_vpn_udp_or_blocked_udp_but_warns_on_ru() {
+        let foreign_answers = [
+            (
+                &SERVERS[0],
+                ServerAnswer::Addr(Ipv4Addr::new(145, 241, 193, 245)),
+            ),
+            (&SERVERS[1], ServerAnswer::Timeout),
+        ];
+
+        // Direct mode still flags HTTP (FR key) vs UDP (UK VPN) mismatch.
+        let direct =
+            evaluate_udp_stun_for_route(&foreign_answers, "136.244.114.42", false, Some("GB"));
+        assert_eq!(direct.status, CheckStatus::Warning);
+        assert_eq!(direct.code, "UDP_STUN_MISMATCH");
+
+        // Bound Zastava key treats foreign VPN UDP as TCP-protected OK.
+        let routed_ok =
+            evaluate_udp_stun_for_route(&foreign_answers, "136.244.114.42", true, Some("GB"));
+        assert_eq!(routed_ok.status, CheckStatus::Ok);
+        assert_eq!(routed_ok.code, "UDP_KEY_TCP_PROTECTED");
+
+        // Empty/blocked STUN under Zastava key is also OK (no UDP leak).
+        let blocked_answers = [
+            (&SERVERS[0], ServerAnswer::Timeout),
+            (&SERVERS[1], ServerAnswer::Timeout),
+        ];
+        let routed_blocked =
+            evaluate_udp_stun_for_route(&blocked_answers, "136.244.114.42", true, None);
+        assert_eq!(routed_blocked.status, CheckStatus::Ok);
+        assert_eq!(routed_blocked.code, "UDP_KEY_TCP_PROTECTED");
+
+        // Sanctioned UDP country (e.g. RU) still produces Warning even with Zastava key.
+        let ru_answers = [(&SERVERS[0], ServerAnswer::Addr(Ipv4Addr::new(5, 8, 8, 8)))];
+        let routed_ru =
+            evaluate_udp_stun_for_route(&ru_answers, "136.244.114.42", true, Some("RU"));
+        assert_eq!(routed_ru.status, CheckStatus::Warning);
+        assert_eq!(routed_ru.code, "UDP_STUN_MISMATCH");
     }
 }

@@ -352,7 +352,10 @@ mod win_dns {
     }
 
     fn query_raw(host_fqdn: &str, record_type: u16) -> Option<QueryList> {
-        let wide: Vec<u16> = host_fqdn.encode_utf16().chain(core::iter::once(0)).collect();
+        let wide: Vec<u16> = host_fqdn
+            .encode_utf16()
+            .chain(core::iter::once(0))
+            .collect();
         let mut head: *mut DnsRecordW = core::ptr::null_mut();
         let status = unsafe {
             DnsQuery_W(
@@ -430,11 +433,14 @@ mod win_dns {
                 let data_len = core::ptr::addr_of!((*cur).w_data_length).read() as usize;
                 let next = core::ptr::addr_of!((*cur).p_next).read();
                 if w_type == DNS_TYPE_TEXT {
-                    let count = core::ptr::addr_of!((*cur).data.txt.dw_string_count).read() as usize;
+                    let count =
+                        core::ptr::addr_of!((*cur).data.txt.dw_string_count).read() as usize;
                     let header_bytes = core::mem::offset_of!(DnsTxtDataW, p_string_array);
-                    let max_ptrs = data_len.saturating_sub(header_bytes) / core::mem::size_of::<*const u16>();
+                    let max_ptrs =
+                        data_len.saturating_sub(header_bytes) / core::mem::size_of::<*const u16>();
                     let bounded_count = count.min(max_ptrs).min(64);
-                    let arr_ptr = core::ptr::addr_of!((*cur).data.txt.p_string_array).cast::<*const u16>();
+                    let arr_ptr =
+                        core::ptr::addr_of!((*cur).data.txt.p_string_array).cast::<*const u16>();
                     let mut joined = String::new();
                     for i in 0..bounded_count {
                         if let Some(part) = utf16_ptr_to_string(*arr_ptr.add(i)) {
@@ -478,7 +484,9 @@ fn build_hickory_resolver(
         ResolverConfig::from_parts(None, vec![], usable)
     } else {
         let (mut sys_cfg, _) = hickory_resolver::system_conf::read_system_conf().ok()?;
-        sys_cfg.name_servers.retain(|ns| is_usable_nameserver(&ns.ip));
+        sys_cfg
+            .name_servers
+            .retain(|ns| is_usable_nameserver(&ns.ip));
         if sys_cfg.name_servers.is_empty() {
             return None;
         }
@@ -576,9 +584,12 @@ async fn system_a_lookup(host: &str, limit: Duration) -> LookupOutcome {
     let per_try = Duration::from_millis((limit.as_millis() as u64 / 2).clamp(800, 1250));
 
     #[cfg(target_os = "windows")]
-    if let Some(outcome) =
-        windows_native_lookup(&name, per_try.max(Duration::from_millis(1200)), win_dns::query_a)
-            .await
+    if let Some(outcome) = windows_native_lookup(
+        &name,
+        per_try.max(Duration::from_millis(1200)),
+        win_dns::query_a,
+    )
+    .await
     {
         if matches!(outcome, LookupOutcome::Addrs(_) | LookupOutcome::NotFound) {
             return outcome;
@@ -1191,10 +1202,10 @@ pub mod fakes {
     impl DnsLookup for FakeDns {
         fn lookup<'a>(&'a self, host: &'a str, _limit: Duration) -> BoxFuture<'a, LookupOutcome> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if let Some(p) = &self.panic_on {
-                if host.contains(p.as_str()) {
-                    panic!("fake resolver panic");
-                }
+            if let Some(p) = &self.panic_on
+                && host.contains(p.as_str())
+            {
+                panic!("fake resolver panic");
             }
             let out = self
                 .answers
@@ -1474,16 +1485,14 @@ mod tests {
 
     #[test]
     fn not_found_is_told_apart_from_a_broken_resolver() {
-        use std::io::{Error, ErrorKind};
-        let nx = Error::new(
-            ErrorKind::Other,
+        use std::io::Error;
+        let nx = Error::other(
             "failed to lookup address information: nodename nor servname provided, or not known",
         );
         assert!(is_name_not_found(&nx));
-        let glibc = Error::new(ErrorKind::Other, "Name or service not known");
+        let glibc = Error::other("Name or service not known");
         assert!(is_name_not_found(&glibc));
-        let broken = Error::new(
-            ErrorKind::Other,
+        let broken = Error::other(
             "failed to lookup address information: Temporary failure in name resolution",
         );
         assert!(!is_name_not_found(&broken));
@@ -1537,7 +1546,10 @@ mod tests {
             // Windows retries a refused loopback connect for about two seconds, so the short
             // limit can expire first; either way the probe reports a failure, never a response.
             assert!(
-                matches!(refused, HttpProbeOutcome::ConnectFailed | HttpProbeOutcome::Timeout),
+                matches!(
+                    refused,
+                    HttpProbeOutcome::ConnectFailed | HttpProbeOutcome::Timeout
+                ),
                 "{refused:?}"
             );
         } else {
@@ -1550,13 +1562,21 @@ mod tests {
         use std::net::IpAddr;
         assert!(is_usable_nameserver(&"1.1.1.1".parse::<IpAddr>().unwrap()));
         assert!(is_usable_nameserver(&"10.0.0.1".parse::<IpAddr>().unwrap()));
-        assert!(is_usable_nameserver(&"2606:4700:4700::1111".parse::<IpAddr>().unwrap()));
+        assert!(is_usable_nameserver(
+            &"2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+        ));
         assert!(!is_usable_nameserver(&"0.0.0.0".parse::<IpAddr>().unwrap()));
         assert!(!is_usable_nameserver(&"::".parse::<IpAddr>().unwrap()));
-        assert!(!is_usable_nameserver(&"224.0.0.251".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(
+            &"224.0.0.251".parse::<IpAddr>().unwrap()
+        ));
         assert!(!is_usable_nameserver(&"fe80::1".parse::<IpAddr>().unwrap()));
-        assert!(!is_usable_nameserver(&"fec0:0:0:ffff::1".parse::<IpAddr>().unwrap()));
-        assert!(!is_usable_nameserver(&"fec0:0:0:ffff::2".parse::<IpAddr>().unwrap()));
+        assert!(!is_usable_nameserver(
+            &"fec0:0:0:ffff::1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_usable_nameserver(
+            &"fec0:0:0:ffff::2".parse::<IpAddr>().unwrap()
+        ));
     }
 
     #[test]

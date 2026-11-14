@@ -176,6 +176,12 @@ export interface AppStateData {
   cowork_guard_enabled?: boolean;
   /** Режим выборочной маршрутизации VPN (split tunneling / TUN). */
   split_tunnel_mode?: boolean;
+  /** Попровйдерное закрепление IP-адреса (ключ "default" или ProviderId). */
+  pinned_ips?: Record<string, string>;
+  /** Скрытие реального IP на экране для безопасных скриншотов. */
+  hide_ip_mode?: boolean;
+  /** Пройден ли мастер настройки v2.2. */
+  onboarding_v2_2_done?: boolean;
 }
 
 /** Состояние синхронизации системного часового пояса ОС (`os_tz::OsTzSyncStatus`). */
@@ -218,6 +224,8 @@ export interface RiskInterceptPayload {
   ttl_seconds: number;
   scope?: "provider" | "network" | string;
   network_change?: NetworkChange | null;
+  /** Понятная причина срабатывания перехвата из шлюза. */
+  gate_reason?: string | null;
   is_simulation?: boolean;
   /** Unix-время (мс), когда изменение сети обнаружено. */
   detected_at_ms: number;
@@ -232,6 +240,25 @@ export interface EnrichedPayload {
   phase: "ready" | "failed";
   report?: RiskReport | null;
   network_change: NetworkChange;
+  gate_reason?: string | null;
+}
+
+export type GuardPauseMode = "none" | "until_network_change" | "manual";
+
+export interface GuardPauseStatus {
+  paused: boolean;
+  mode: GuardPauseMode;
+  gate?: string | null;
+  gate_reason?: string | null;
+  manual_killswitch: boolean;
+}
+
+export interface ProtectionChangePreviewItem {
+  category: string;
+  target: string;
+  action: string;
+  description: string;
+  reversible: boolean;
 }
 
 export interface UpdateCheckResult {
@@ -302,6 +329,14 @@ export interface InstallUpdateResult {
   success: boolean;
   message: string;
   will_restart: boolean;
+}
+
+export interface RollbackReleaseInfo {
+  version: string;
+  tag: string;
+  name: string | null;
+  published_at: string | null;
+  notes_url: string | null;
 }
 
 export interface CliProtectionReport {
@@ -514,6 +549,37 @@ export interface CoverageSnapshot {
   system_proxy_effective?: boolean | null;
   /** Включённые VPN-службы, подключённые сейчас. Застава в них ничего не пишет. */
   vpn_connected?: string[];
+  /** Активна ли управляемая PAC-политика браузеров (в обход TUN/VPN). */
+  browser_pac_policy_active?: boolean;
+  /** Названия браузеров, в которых PAC-политика реально активна сейчас. */
+  browsers_pac_active?: string[];
+  /** Названия запущенных браузеров без PAC, которым нужен перезапуск. */
+  browsers_needing_restart?: string[];
+}
+
+export interface RelaunchBrowsersResult {
+  restarted: string[];
+  skipped: string[];
+  failed: string[];
+  needs_automation_permission: boolean;
+  unsupported: boolean;
+  snapshot: CoverageSnapshot;
+}
+
+export interface PolicyApplyReport {
+  applied: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  pac_policy_active: boolean;
+}
+
+export interface ShutdownProgressPayload {
+  mode: "quit" | "update";
+  step: number;
+  total: number;
+  label: string;
+  done: boolean;
 }
 
 export interface AutostartStatus {

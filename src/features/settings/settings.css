@@ -13,3 +13,5 @@
 .zs-settings__result{margin-top:var(--space-3)}
 .zs-settings__danger{margin-top:var(--space-3)}
 .zs-settings__source{margin:var(--space-3) 0 0}
+.zs-settings__rollback-title{display:inline-flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+.zs-settings__rollback-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1)}

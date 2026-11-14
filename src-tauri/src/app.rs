@@ -1,8 +1,10 @@
 //! Application bootstrap: Tauri builder, setup sequence and background tasks.
 
-use crate::tray::update_tray_from_report;
 use crate::startup::{self, StartupSink, StartupSnapshot, StartupState, StartupSteps};
-use crate::{auditor, bin_checker, commands, cowork_guard, os_tz, proxy, state, sysproxy, tray, updater};
+use crate::tray::update_tray_from_report;
+use crate::{
+    auditor, bin_checker, commands, cowork_guard, os_tz, proxy, state, sysproxy, tray, updater,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -18,12 +20,13 @@ pub fn run() {
                     found_deep_link = true;
                 }
             }
-            if !found_deep_link && !minimized {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.unminimize();
-                    let _ = win.set_focus();
-                }
+            if !found_deep_link
+                && !minimized
+                && let Some(win) = app.get_webview_window("main")
+            {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
@@ -64,11 +67,9 @@ pub fn run() {
             // Window starts hidden (`visible: false` in tauri.conf.json) so `--minimized`
             // keeps Zastava strictly in the tray; show it on interactive launches.
             let start_minimized = std::env::args().any(|a| a == "--minimized");
-            if !start_minimized {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+            if !start_minimized && let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.set_focus();
             }
 
             // The gateway listens (`pac_url` exists only after the bind), so the sequence may
@@ -105,18 +106,18 @@ pub fn run() {
 
             for arg in std::env::args() {
                 if arg.starts_with("zastava://") {
-                    commands::deeplink::handle_deep_link(&app.handle(), &arg);
+                    commands::deeplink::handle_deep_link(app.handle(), &arg);
                 }
             }
 
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    let _ = window.hide();
-                    api.prevent_close();
-                }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+            {
+                let _ = window.hide();
+                api.prevent_close();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -128,6 +129,11 @@ pub fn run() {
             commands::claude::export_claude_data_cmd,
             commands::audit::pin_current_ip,
             commands::audit::unpin_ip,
+            commands::audit::get_pinned_ips,
+            commands::audit::get_onboarding_v2_2_done,
+            commands::audit::set_onboarding_v2_2_done,
+            commands::audit::get_hide_ip_mode,
+            commands::audit::set_hide_ip_mode,
             commands::audit::toggle_strict_pinning,
             commands::audit::allow_provider_session,
             commands::audit::unblock_provider_cmd,
@@ -152,10 +158,14 @@ pub fn run() {
             commands::sysproxy::get_sysproxy_status,
             commands::sysproxy::get_error_diagnostics,
             commands::sysproxy::copy_text_to_clipboard,
+            commands::sysproxy::export_diagnostic_bundle_cmd,
+            commands::sysproxy::preview_protection_changes_cmd,
             commands::payment::check_payment_bin,
             commands::updates::check_for_updates,
             commands::updates::install_update,
             commands::updates::toggle_auto_update,
+            commands::updates::list_rollback_versions,
+            commands::updates::install_rollback_version,
             commands::claude::list_claude_profiles_cmd,
             commands::claude::create_claude_profile_cmd,
             commands::claude::switch_claude_profile_cmd,
@@ -194,8 +204,13 @@ pub fn run() {
             commands::sysproxy::force_clean_os_proxy_cmd,
             commands::interception::toggle_network_killswitch_cmd,
             commands::interception::get_network_killswitch_status_cmd,
+            commands::interception::pause_until_network_change_cmd,
+            commands::interception::set_guard_pause_mode_cmd,
+            commands::interception::get_guard_pause_status_cmd,
             commands::coverage::get_coverage_snapshot,
             commands::coverage::recheck_coverage,
+            commands::coverage::reapply_browser_policies_cmd,
+            commands::coverage::relaunch_browsers_with_pac_cmd,
             commands::restart_app::restart_app_with_gateway,
             commands::deeplink::take_pending_deep_link
         ])
@@ -210,11 +225,18 @@ pub fn run() {
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
                 startup::note_shutdown(app_handle);
-                // Cmd+Q / closing the last window: the same notice as a quit from the tray.
-                if sysproxy::cleanup_all_persistent_settings().restore_deferred_by_vpn_dns() {
-                    sysproxy::notify_restore_deferred();
+                // Cmd+Q / closing the last window / external OS exit: run shutdown cleanup only if
+                // it has not already executed via the async tray-quit or updater flows.
+                if let Some(report) = sysproxy::cleanup_on_shutdown_once(Some(app_handle), "quit") {
+                    if report.has_failures() {
+                        eprintln!(
+                            "Застава: часть настроек будет восстановлена при следующем запуске"
+                        );
+                    }
+                    if report.restore_deferred_by_vpn_dns() {
+                        sysproxy::notify_restore_deferred();
+                    }
                 }
-                os_tz::restore_on_exit_once(Some(app_handle));
             }
             _ => {}
         });
@@ -240,7 +262,7 @@ fn init_services(
 
     // Initialize Risk Auditor Engine
     let risk_auditor = auditor::Auditor::new()
-        .map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error>)?;
+        .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error>)?;
     app.manage(risk_auditor.clone());
 
     // Initialize Payment Geo Checker
@@ -260,13 +282,10 @@ fn start_proxy(
     let auditor_for_proxy = risk_auditor.clone();
     let state_for_proxy = app_state.clone();
     tauri::async_runtime::block_on(async {
-        let proxy_mgr = proxy::ProxyManager::start(
-            auditor_for_proxy,
-            state_for_proxy,
-            Some(handle_clone),
-        )
-        .await
-        .expect("Failed to start proxy server");
+        let proxy_mgr =
+            proxy::ProxyManager::start(auditor_for_proxy, state_for_proxy, Some(handle_clone))
+                .await
+                .expect("Failed to start proxy server");
         let guard = proxy_mgr.guard.clone();
         guard.restore_manual_killswitch(app_state).await;
         let pac_url = format!("http://{}/proxy.pac", proxy_mgr.server.bound_addr);
@@ -334,6 +353,9 @@ impl StartupSteps for RealSteps {
 
     /// Network guard: detects sudden IP changes and freezes AI traffic until confirmed.
     fn start_guard(&self) {
+        if !sysproxy::is_sysproxy_active() {
+            sysproxy::clear_stale_browser_pac_prefs();
+        }
         self.guard.start(proxy::GuardCtx {
             auditor: self.auditor.clone(),
             state: self.app_state.clone(),
@@ -415,7 +437,10 @@ fn spawn_tray_status_watcher(
                             // Cold start (network or PAC not up yet): still "checking", not an error.
                             crate::tray::update_tray_checking(&watcher_handle);
                         } else {
-                            crate::tray::update_tray_no_data(&watcher_handle, last_checked.as_deref());
+                            crate::tray::update_tray_no_data(
+                                &watcher_handle,
+                                last_checked.as_deref(),
+                            );
                         }
                     }
                     if !initial_synced {
@@ -437,16 +462,15 @@ fn spawn_update_checker(app: &tauri::App, app_state: &state::AppState) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(20)).await;
         loop {
-            if updater_state.get_data().await.auto_update_enabled {
-                if let Ok(res) = updater::check_for_updates(&updater_app_handle).await {
-                    if res.update_available {
-                        let _ = updater_app_handle.emit("updater://available", &res);
-                        crate::tray::update_tray_tooltip(
-                            &updater_app_handle,
-                            format!("Застава — Доступна новая версия v{}", res.latest_version),
-                        );
-                    }
-                }
+            if updater_state.get_data().await.auto_update_enabled
+                && let Ok(res) = updater::check_for_updates(&updater_app_handle).await
+                && res.update_available
+            {
+                let _ = updater_app_handle.emit("updater://available", &res);
+                crate::tray::update_tray_tooltip(
+                    &updater_app_handle,
+                    format!("Застава — Доступна новая версия v{}", res.latest_version),
+                );
             }
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }

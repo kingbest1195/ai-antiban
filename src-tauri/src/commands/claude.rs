@@ -17,7 +17,8 @@ pub fn scan_claude_data_cmd() -> Result<auditor::claude_exporter::ClaudeLocalDat
 }
 
 #[tauri::command]
-pub async fn export_claude_data_cmd() -> Result<auditor::claude_exporter::ClaudeExportResult, String> {
+pub async fn export_claude_data_cmd() -> Result<auditor::claude_exporter::ClaudeExportResult, String>
+{
     tokio::task::spawn_blocking(auditor::claude_exporter::export_claude_local_data)
         .await
         .map_err(|e| e.to_string())?
@@ -44,7 +45,12 @@ pub async fn create_claude_profile_cmd(
         let route = routing::parse_route_key(k, crate::auditor::network::current_timestamp())?;
         state.upsert_route(route).await.map_err(|e| e.to_string())?;
     }
-    auditor::profile_switcher::create_claude_profile(&name, bind_ip, bind_country, bind_upstream_key)
+    auditor::profile_switcher::create_claude_profile(
+        &name,
+        bind_ip,
+        bind_country,
+        bind_upstream_key,
+    )
 }
 
 #[tauri::command]
@@ -98,7 +104,10 @@ pub async fn bind_upstream_to_claude_profile_cmd(
         let route = routing::parse_route_key(k, crate::auditor::network::current_timestamp())?;
         state.upsert_route(route).await.map_err(|e| e.to_string())?;
     }
-    let resp = auditor::profile_switcher::update_profile_bound_upstream(&profile_id, upstream_key.clone())?;
+    let resp = auditor::profile_switcher::update_profile_bound_upstream(
+        &profile_id,
+        upstream_key.clone(),
+    )?;
     if resp.active_profile_id == profile_id {
         routing::apply_profile_key(&state, upstream_key.as_deref()).await?;
     }
@@ -126,7 +135,10 @@ pub async fn bind_route_to_claude_profile(
         None => None,
     };
 
-    let resp = auditor::profile_switcher::update_profile_bound_upstream(&profile_id, upstream_key.clone())?;
+    let resp = auditor::profile_switcher::update_profile_bound_upstream(
+        &profile_id,
+        upstream_key.clone(),
+    )?;
     if resp.active_profile_id == profile_id {
         routing::apply_profile_key(&state, upstream_key.as_deref()).await?;
     }

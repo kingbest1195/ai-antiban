@@ -118,6 +118,14 @@ impl<V: Clone> TtlCache<V> {
     pub async fn clear(&self) {
         self.entries.lock().await.clear();
     }
+
+    pub async fn is_empty(&self) -> bool {
+        self.entries.lock().await.is_empty()
+    }
+
+    pub async fn contains_key(&self, key: &str) -> bool {
+        self.entries.lock().await.contains_key(key)
+    }
 }
 
 /// Cache of a plain check result: `Unknown` is not a valid (long-lived) answer.
@@ -280,6 +288,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "reused across 10s poll");
         tokio::time::advance(Duration::from_secs(16)).await;
         run_probe().await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "retried after 25s cooldown");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "retried after 25s cooldown"
+        );
     }
 }

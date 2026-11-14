@@ -1,6 +1,6 @@
-use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 use crate::auditor::geo_matrix::ProviderId;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanResult {
@@ -16,7 +16,9 @@ pub fn get_ai_app_data_dir(provider: ProviderId) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").ok()?;
-        let app_support = PathBuf::from(home).join("Library").join("Application Support");
+        let app_support = PathBuf::from(home)
+            .join("Library")
+            .join("Application Support");
         match provider {
             ProviderId::Anthropic => Some(app_support.join("Claude")),
             ProviderId::Openai => Some(app_support.join("ChatGPT")),
@@ -168,12 +170,11 @@ pub fn clean_ai_app_cache_in_dir(provider: ProviderId, app_dir: &std::path::Path
 
     // Clean up empty Network directory if all contents were removed
     let network_dir = app_dir.join("Network");
-    if network_dir.is_dir() {
-        if let Ok(mut entries) = std::fs::read_dir(&network_dir) {
-            if entries.next().is_none() {
-                let _ = std::fs::remove_dir(&network_dir);
-            }
-        }
+    if network_dir.is_dir()
+        && let Ok(mut entries) = std::fs::read_dir(&network_dir)
+        && entries.next().is_none()
+    {
+        let _ = std::fs::remove_dir(&network_dir);
     }
 
     CleanResult {

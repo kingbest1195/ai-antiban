@@ -17,6 +17,22 @@ pub async fn install_update(
     updater::install_update(&app).await
 }
 
+/// Lists signed GitHub releases strictly older than the running version that have a `latest.json` manifest.
+#[tauri::command]
+pub async fn list_rollback_versions()
+-> Result<Vec<updater::RollbackReleaseInfo>, updater::UpdateFailure> {
+    updater::list_rollback_versions().await
+}
+
+/// Downloads, verifies (minisign), and installs a signed older release for rollback.
+#[tauri::command]
+pub async fn install_rollback_version(
+    app: tauri::AppHandle,
+    version: String,
+) -> Result<updater::InstallUpdateResult, updater::UpdateFailure> {
+    updater::install_rollback_version(&app, &version).await
+}
+
 #[tauri::command]
 pub async fn toggle_auto_update(
     enabled: bool,

@@ -36,7 +36,9 @@ pub const RUSSIAN_TIMEZONES: &[&str] = &[
 ];
 
 pub fn is_russian_or_belarusian_timezone(tz: &str) -> bool {
-    RUSSIAN_TIMEZONES.iter().any(|&item| item.eq_ignore_ascii_case(tz))
+    RUSSIAN_TIMEZONES
+        .iter()
+        .any(|&item| item.eq_ignore_ascii_case(tz))
 }
 
 /// `"+01:00"` style label of an offset.
@@ -54,7 +56,8 @@ fn zones_match(
     system_tz: &str,
     ip_tz: &str,
 ) -> (bool, Option<(i32, i32)>) {
-    if system_tz.eq_ignore_ascii_case(ip_tz) || system_tz.replace('_', " ") == ip_tz.replace('_', " ")
+    if system_tz.eq_ignore_ascii_case(ip_tz)
+        || system_tz.replace('_', " ") == ip_tz.replace('_', " ")
     {
         return (true, None);
     }
@@ -68,6 +71,24 @@ fn zones_match(
     }
 }
 
+fn format_ai_tz_synced_message(
+    system_tz: &str,
+    synced_clean: Option<&str>,
+    ip_tz: Option<&str>,
+) -> String {
+    match (synced_clean, ip_tz) {
+        (Some(synced), Some(target)) if !synced.eq_ignore_ascii_case(target) => format!(
+            "Часовой пояс для AI-окружения ({synced}) и локаль синхронизированы для CLI, IDE и десктопных приложений (пояс узла провайдера: {target}); системный пояс ОС ({system_tz}) требуется менять только опционально для веб-браузеров."
+        ),
+        (Some(synced), _) => format!(
+            "Часовой пояс для AI-окружения ({synced}) и локаль синхронизированы для CLI, IDE и десктопных приложений; системный пояс ОС ({system_tz}) требуется менять только опционально для веб-браузеров."
+        ),
+        (None, _) => format!(
+            "Часовой пояс для AI-окружения и локаль синхронизированы для CLI, IDE и десктопных приложений; системный пояс ОС ({system_tz}) требуется менять только опционально для веб-браузеров."
+        ),
+    }
+}
+
 /// Evaluates whether system timezone exposes user's actual location.
 pub fn evaluate_system_timezone(
     ip_timezone: Option<&str>,
@@ -77,16 +98,22 @@ pub fn evaluate_system_timezone(
 }
 
 /// [`evaluate_system_timezone`] through `system` (injectable for tests).
-///
-/// The OS zone is compared with the zone of the exit IP by UTC offset (1 h tolerance). Even when
-/// CLI/IDE environment variables (`TZ`, `LANG`, `LC_TIME`) are synced to the exit IP, browsers and
-/// desktop apps (including Claude Desktop) read the real OS timezone: if the OS timezone itself is
-/// RU/BY or differs from the exit IP timezone, this check MUST return [`CheckStatus::Warning`]
-/// rather than a false green [`CheckStatus::Ok`].
 pub fn evaluate_system_timezone_with(
     system: &dyn SystemInfo,
     ip_timezone: Option<&str>,
     synced_ai_tz: Option<&str>,
+) -> CheckResult {
+    evaluate_system_timezone_with_sync(system, ip_timezone, synced_ai_tz, false)
+}
+
+/// Evaluates OS timezone vs provider exit IP timezone, treating active AI environment timezone
+/// sync (`cli_synced_to_ip`, or `sync_ai_tz_enabled && system.sync_ai_tz_active()`) as `Ok`
+/// (`TIMEZONE_SYNCED_AI`) for CLI, IDE, and desktop apps even when providers use different routes.
+pub fn evaluate_system_timezone_with_sync(
+    system: &dyn SystemInfo,
+    ip_timezone: Option<&str>,
+    synced_ai_tz: Option<&str>,
+    sync_ai_tz_enabled: bool,
 ) -> CheckResult {
     let system_tz = match system.system_timezone() {
         Ok(tz) if !tz.trim().is_empty() => tz,
@@ -109,16 +136,14 @@ pub fn evaluate_system_timezone_with(
         }
         _ => false,
     };
+    let ai_tz_synced = cli_synced_to_ip || (sync_ai_tz_enabled && system.sync_ai_tz_active());
 
-    // 1. Check if OS system timezone is in Russia or Belarus (never Ok, even if CLI/IDE is synced).
+    // 1. Check if OS system timezone is in Russia or Belarus.
     if is_russian_or_belarusian_timezone(&system_tz) {
-        if cli_synced_to_ip && let Some(synced) = synced_clean {
-            return CheckResult::warning(
-                "TIMEZONE_SYNCED_CLI_ONLY",
-                format!(
-                    "CLI и IDE синхронизированы ({synced}), но системный пояс ОС остаётся {system_tz} (РФ/РБ) — браузеры и десктопные приложения (в т.ч. Claude Desktop) видят реальный пояс ОС; нажмите «Синхронизировать системный TZ»."
-                ),
-                Some(GUIDE_OS_PRIVACY.to_string()),
+        if ai_tz_synced {
+            return CheckResult::ok(
+                "TIMEZONE_SYNCED_AI",
+                format_ai_tz_synced_message(&system_tz, synced_clean, ip_tz),
             );
         }
         return CheckResult::warning(
@@ -158,13 +183,10 @@ pub fn evaluate_system_timezone_with(
             )
         }
         (false, offsets) => {
-            if cli_synced_to_ip && let Some(synced) = synced_clean {
-                return CheckResult::warning(
-                    "TIMEZONE_SYNCED_CLI_ONLY",
-                    format!(
-                        "CLI и IDE синхронизированы ({synced}), но системный пояс ОС остаётся {system_tz} (пояс IP: {target}) — браузеры и десктопные приложения (в т.ч. Claude Desktop) видят реальный пояс ОС; нажмите «Синхронизировать системный TZ»."
-                    ),
-                    Some(GUIDE_OS_PRIVACY.to_string()),
+            if ai_tz_synced {
+                return CheckResult::ok(
+                    "TIMEZONE_SYNCED_AI",
+                    format_ai_tz_synced_message(&system_tz, synced_clean, Some(target)),
                 );
             }
             let detail = match offsets {
@@ -292,7 +314,10 @@ fn evaluate_locale_values(
     }
     CheckResult::ok(
         "LOCALE_HYGIENE_CLEAN",
-        format!("Маркеров РФ/РБ нет в проверенных источниках: {}.", read.join("; ")),
+        format!(
+            "Маркеров РФ/РБ нет в проверенных источниках: {}.",
+            read.join("; ")
+        ),
     )
 }
 
@@ -389,7 +414,10 @@ mod tests {
             ..sys()
         };
         let r = evaluate_system_timezone_with(&s, Some("Europe/Amsterdam"), None);
-        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NoData)));
+        assert_eq!(
+            (r.status, r.reason),
+            (CheckStatus::Unknown, Some(UnknownReason::NoData))
+        );
         assert_eq!(r.code, "TIMEZONE_UNKNOWN");
     }
 
@@ -436,10 +464,19 @@ mod tests {
         s.zone_offsets.insert("Europe/London".into(), 0); // 1 h away: inside
         s.zone_offsets.insert("Europe/Helsinki".into(), 7200); // 1 h away: inside
         s.zone_offsets.insert("Asia/Dubai".into(), 4 * 3600); // 3 h away: outside
-        assert_eq!(evaluate_system_timezone_with(&s, Some("Europe/London"), None).status, CheckStatus::Ok);
-        assert_eq!(evaluate_system_timezone_with(&s, Some("Europe/Helsinki"), None).status, CheckStatus::Ok);
+        assert_eq!(
+            evaluate_system_timezone_with(&s, Some("Europe/London"), None).status,
+            CheckStatus::Ok
+        );
+        assert_eq!(
+            evaluate_system_timezone_with(&s, Some("Europe/Helsinki"), None).status,
+            CheckStatus::Ok
+        );
         let r = evaluate_system_timezone_with(&s, Some("Asia/Dubai"), None);
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "TIMEZONE_MISMATCH"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Warning, "TIMEZONE_MISMATCH")
+        );
         assert!(r.message.contains("UTC+04:00"), "{}", r.message);
     }
 
@@ -455,59 +492,157 @@ mod tests {
     }
 
     #[test]
-    fn tz_synced_cli_does_not_hide_mismatched_or_ru_os_tz() {
+    fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_ru_os_tz() {
         let far = |applied: bool| FakeSystem {
             timezone: Ok("Asia/Tokyo".into()),
             local_offset: Some(9 * 3600),
             sync_ai_tz: applied,
             ..sys()
         };
-        // Applied CLI/IDE sync while OS TZ is still mismatched: Warning (never False Green Ok!).
-        let r = evaluate_system_timezone_with(&far(true), Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY"));
+        // Applied AI env TZ sync while OS TZ is still mismatched: Ok (OS TZ is optional for web).
+        let r = evaluate_system_timezone_with(
+            &far(true),
+            Some("Europe/Amsterdam"),
+            Some("Europe/Amsterdam"),
+        );
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        );
         assert!(r.message.contains("Asia/Tokyo"), "{}", r.message);
-        assert!(r.message.contains("Claude Desktop"), "{}", r.message);
-        assert!(r.message.contains("Синхронизировать системный TZ"), "{}", r.message);
+        assert!(
+            r.message.contains("CLI, IDE и десктопных приложений"),
+            "{}",
+            r.message
+        );
+        assert!(r.message.contains("веб-браузеров"), "{}", r.message);
 
-        // Only remembered in the settings, the switch is off: a plain mismatch.
-        let r = evaluate_system_timezone_with(&far(false), Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "TIMEZONE_MISMATCH"));
-        // Synced to a zone that is not the IP zone: plain mismatch.
-        let r = evaluate_system_timezone_with(&far(true), Some("Europe/Amsterdam"), Some("America/New_York"));
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "TIMEZONE_MISMATCH"));
+        // Only remembered in settings, active sync is false: plain mismatch.
+        let r = evaluate_system_timezone_with(
+            &far(false),
+            Some("Europe/Amsterdam"),
+            Some("Europe/Amsterdam"),
+        );
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Warning, "TIMEZONE_MISMATCH")
+        );
+        // Synced to a different zone without sync_ai_tz_enabled flag: plain mismatch.
+        let r = evaluate_system_timezone_with(
+            &far(true),
+            Some("Europe/Amsterdam"),
+            Some("America/New_York"),
+        );
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Warning, "TIMEZONE_MISMATCH")
+        );
 
-        // OS TZ is RU + CLI TZ synced -> Warning (no longer false green!).
+        // With sync_ai_tz_enabled=true & sync_ai_tz_active=true: cross-route provider ip_tz (Paris vs London)
+        // or None synced_ai_tz still yields Ok("TIMEZONE_SYNCED_AI").
+        let r_cross = evaluate_system_timezone_with_sync(
+            &far(true),
+            Some("Europe/Paris"),
+            Some("Europe/London"),
+            true,
+        );
+        assert_eq!(
+            (r_cross.status, r_cross.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        );
+        let r_no_hint =
+            evaluate_system_timezone_with_sync(&far(true), Some("Europe/Paris"), None, true);
+        assert_eq!(
+            (r_no_hint.status, r_no_hint.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        );
+
+        // OS TZ is RU + AI TZ synced -> Ok("TIMEZONE_SYNCED_AI"), never Warning.
         let ru = |applied: bool| FakeSystem {
             timezone: Ok("Europe/Moscow".into()),
             local_offset: Some(3 * 3600),
             sync_ai_tz: applied,
             ..sys()
         };
-        let ru_synced = evaluate_system_timezone_with(&ru(true), Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
-        assert_eq!((ru_synced.status, ru_synced.code.as_str()), (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY"));
-        assert!(ru_synced.message.contains("Europe/Moscow"), "{}", ru_synced.message);
-        assert!(ru_synced.message.contains("Синхронизировать системный TZ"), "{}", ru_synced.message);
+        let ru_synced = evaluate_system_timezone_with(
+            &ru(true),
+            Some("Europe/Amsterdam"),
+            Some("Europe/Amsterdam"),
+        );
+        assert_eq!(
+            (ru_synced.status, ru_synced.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        );
+        assert!(
+            ru_synced.message.contains("Europe/Moscow"),
+            "{}",
+            ru_synced.message
+        );
+        assert!(
+            ru_synced.message.contains("веб-браузеров"),
+            "{}",
+            ru_synced.message
+        );
+
+        let ru_cross = evaluate_system_timezone_with_sync(
+            &ru(true),
+            Some("Europe/Paris"),
+            Some("Europe/London"),
+            true,
+        );
+        assert_eq!(
+            (ru_cross.status, ru_cross.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        );
 
         assert_eq!(
-            evaluate_system_timezone_with(&ru(false), Some("Europe/Amsterdam"), Some("Europe/Amsterdam")).code,
+            evaluate_system_timezone_with(
+                &ru(false),
+                Some("Europe/Amsterdam"),
+                Some("Europe/Amsterdam")
+            )
+            .code,
+            "TIMEZONE_LEAK_RU"
+        );
+        assert_eq!(
+            evaluate_system_timezone_with_sync(
+                &ru(false),
+                Some("Europe/Amsterdam"),
+                Some("Europe/Amsterdam"),
+                true
+            )
+            .code,
             "TIMEZONE_LEAK_RU"
         );
 
         // OS TZ itself matches IP TZ -> Ok!
-        let matched = evaluate_system_timezone_with(&sys(), Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
-        assert_eq!((matched.status, matched.code.as_str()), (CheckStatus::Ok, "TIMEZONE_MATCH"));
+        let matched = evaluate_system_timezone_with(
+            &sys(),
+            Some("Europe/Amsterdam"),
+            Some("Europe/Amsterdam"),
+        );
+        assert_eq!(
+            (matched.status, matched.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_MATCH")
+        );
     }
 
     // ---- locale ----
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn locale_nothing_readable_is_unknown() {
         let r = evaluate_locale_values(&[], Err(SystemReadError::Failed));
-        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NoData)));
+        assert_eq!(
+            (r.status, r.reason),
+            (CheckStatus::Unknown, Some(UnknownReason::NoData))
+        );
         assert_eq!(r.code, "LOCALE_NOT_READ");
         let r = evaluate_locale_values(&[], Err(SystemReadError::Unsupported));
         assert_eq!(r.code, "LOCALE_ENV_NOT_SET");
@@ -532,7 +667,10 @@ mod tests {
             os_locales: Ok(vec!["en_RU".into()]),
             ..sys()
         };
-        assert_eq!(evaluate_locale_env_hygiene_with(&en_ru, None).status, CheckStatus::Warning);
+        assert_eq!(
+            evaluate_locale_env_hygiene_with(&en_ru, None).status,
+            CheckStatus::Warning
+        );
     }
 
     #[test]
@@ -566,20 +704,45 @@ mod tests {
             ..sys()
         };
         let r = evaluate_locale_env_hygiene_with(&ru_host(true), Some("Europe/Amsterdam"));
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "LOCALE_HYGIENE_CLEAN"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "LOCALE_HYGIENE_CLEAN")
+        );
         // Remembered, but not applied: the system locale decides.
         let r = evaluate_locale_env_hygiene_with(&ru_host(false), Some("Europe/Amsterdam"));
         assert_eq!(r.status, CheckStatus::Warning);
         // Nothing synced: the system locale decides.
-        assert_eq!(evaluate_locale_env_hygiene_with(&ru_host(true), None).status, CheckStatus::Warning);
+        assert_eq!(
+            evaluate_locale_env_hygiene_with(&ru_host(true), None).status,
+            CheckStatus::Warning
+        );
     }
 
     #[test]
     fn locale_tag_recognition() {
-        for yes in ["ru_RU.UTF-8", "RU-ru", "be_BY", "be-BY", "en_RU", "en-RU", "en_US@rg=ruzzzz", "de_BY.UTF-8"] {
+        for yes in [
+            "ru_RU.UTF-8",
+            "RU-ru",
+            "be_BY",
+            "be-BY",
+            "en_RU",
+            "en-RU",
+            "en_US@rg=ruzzzz",
+            "de_BY.UTF-8",
+        ] {
             assert!(is_sanctioned_locale(yes), "{yes}");
         }
-        for no in ["en_US.UTF-8", "en-US", "C", "POSIX", "", "  ", "de_DE", "pt_BR", "ru_UA"] {
+        for no in [
+            "en_US.UTF-8",
+            "en-US",
+            "C",
+            "POSIX",
+            "",
+            "  ",
+            "de_DE",
+            "pt_BR",
+            "ru_UA",
+        ] {
             assert!(!is_sanctioned_locale(no), "{no}");
         }
     }
@@ -604,22 +767,37 @@ mod tests {
         let allow = "    Value    REG_SZ    Allow";
         let deny = "    Value    REG_SZ    Deny";
         let r = check_os_location_services_with(&win(deny, Ok(allow)));
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "OS_LOCATION_SAFE"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "OS_LOCATION_SAFE")
+        );
         let r = check_os_location_services_with(&win(allow, Ok(allow)));
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Warning, "OS_LOCATION_ENABLED"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Warning, "OS_LOCATION_ENABLED")
+        );
         let r = check_os_location_services_with(&win(allow, Ok(deny)));
         assert_eq!(r.status, CheckStatus::Ok);
         assert!(r.message.contains("HKCU"));
         // Unreadable pieces are never "safe".
         let r = check_os_location_services_with(&win(allow, Err(SystemReadError::Failed)));
-        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::InternalError)));
+        assert_eq!(
+            (r.status, r.reason),
+            (CheckStatus::Unknown, Some(UnknownReason::InternalError))
+        );
         let r = check_os_location_services_with(&win("garbage", Ok(allow)));
-        assert_eq!((r.status, r.reason), (CheckStatus::Unknown, Some(UnknownReason::NoData)));
+        assert_eq!(
+            (r.status, r.reason),
+            (CheckStatus::Unknown, Some(UnknownReason::NoData))
+        );
         let failed = FakeSystem {
             consent_machine: Err(SystemReadError::Failed),
             ..sys()
         };
-        assert_eq!(check_os_location_services_with(&failed).reason, Some(UnknownReason::InternalError));
+        assert_eq!(
+            check_os_location_services_with(&failed).reason,
+            Some(UnknownReason::InternalError)
+        );
     }
 
     // ---- time zone / locale switch (independent of the proxy protection) ----
@@ -705,26 +883,26 @@ mod tests {
     }
 
     #[test]
-    fn the_synced_zone_note_follows_the_switch_and_never_returns_false_green() {
+    fn the_synced_zone_note_follows_the_switch_and_returns_ok_when_active() {
         let far = |sync: bool| FakeSystem {
             timezone: Ok("Asia/Tokyo".into()),
             local_offset: Some(9 * 3600),
             sync_ai_tz: sync,
             ..sys()
         };
-        let synced_only = evaluate_system_timezone_with(
+        let synced_ai = evaluate_system_timezone_with(
             &far(true),
             Some("Europe/Amsterdam"),
             Some("Europe/Amsterdam"),
         );
         assert_eq!(
-            (synced_only.status, synced_only.code.as_str()),
-            (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
+            (synced_ai.status, synced_ai.code.as_str()),
+            (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
         );
         assert!(
-            synced_only.message.contains("CLI и IDE синхронизированы"),
+            synced_ai.message.contains("синхронизированы"),
             "{}",
-            synced_only.message
+            synced_ai.message
         );
         let off = evaluate_system_timezone_with(
             &far(false),

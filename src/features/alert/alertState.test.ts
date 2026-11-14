@@ -205,8 +205,8 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
     expect(withOld).toContain("Стало");
     expect(withOld).toContain("Нидерланды (NL)");
     expect(withOld).toContain("Россия (RU)");
-    expect(withOld).toContain("Держать на паузе");
-    expect(withOld).toContain("Разрешить принудительно");
+    expect(withOld).toContain(alertDialog.block);
+    expect(withOld).toContain(alertDialog.allow);
     expect(withOld).not.toContain("Открыть инструкцию");
 
     const withoutOld = renderToStaticMarkup(
@@ -244,5 +244,27 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
     expect(html).toContain(formatCountryWithCode("US"));
     expect(html).toContain('aria-keyshortcuts="1"');
     expect(html).toContain('aria-keyshortcuts="2"');
+    expect(html).toContain(alertDialog.block);
+  });
+
+  it("alertReducer и AlertWindow сохраняют и отображают gate_reason", () => {
+    const s1 = alertReducer(initialAlertState, {
+      type: "detected",
+      payload: { ...detecting(), gate_reason: "Первичная причина" },
+    });
+    const s2 = alertReducer(s1, {
+      type: "enriched",
+      payload: enriched({ gate_reason: "Адрес выхода сменился на RU" }),
+    });
+    expect(s2.payload?.gate_reason).toBe("Адрес выхода сменился на RU");
+
+    const html = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        initialPayload: s2.payload ?? undefined,
+      }),
+    );
+    expect(html).toContain("zs-alert-reason");
+    expect(html).toContain("Адрес выхода сменился на RU");
+    expect(html).toContain("Пауза до смены сети");
   });
 });

@@ -3,9 +3,9 @@
 use super::{update_tray_killswitch, update_tray_status};
 use crate::{auditor, proxy, state, sysproxy};
 use tauri::{
+    Emitter, Manager,
     menu::IconMenuItem,
     tray::{MouseButton, MouseButtonState, TrayIconEvent},
-    Emitter, Manager,
 };
 use tauri_plugin_opener::OpenerExt;
 
@@ -21,14 +21,34 @@ pub fn handle_menu_event(
             // next start (or after the VPN lets go of its temporary DNS). Quit does not wait for a
             // VPN with temporary DNS settings; the user is told, the behaviour itself is unchanged.
             crate::startup::note_shutdown(app);
-            let report = sysproxy::cleanup_all_persistent_settings();
-            if report.has_failures() {
-                eprintln!("Застава: часть настроек будет восстановлена при следующем запуске");
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
             }
-            if report.restore_deferred_by_vpn_dns() {
-                sysproxy::notify_restore_deferred();
+            if !sysproxy::try_claim_async_shutdown() {
+                return;
             }
-            app.exit(0);
+            let _ = app.emit(
+                sysproxy::SHUTDOWN_PROGRESS_EVENT,
+                sysproxy::ShutdownProgressPayload::step("quit", 1),
+            );
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Some(report) =
+                    sysproxy::cleanup_on_shutdown_after_step1(Some(&app_handle), "quit")
+                {
+                    if report.has_failures() {
+                        eprintln!(
+                            "Застава: часть настроек будет восстановлена при следующем запуске"
+                        );
+                    }
+                    if report.restore_deferred_by_vpn_dns() {
+                        sysproxy::notify_restore_deferred();
+                    }
+                }
+                app_handle.exit(0);
+            });
         }
         "show" => {
             if let Some(win) = app.get_webview_window("main") {
@@ -71,7 +91,11 @@ pub fn handle_menu_event(
                             )
                             .await;
                         }
-                        update_tray_status(&app_handle, "green", Some(&format!("Профиль: {}", res.active_profile.name)));
+                        update_tray_status(
+                            &app_handle,
+                            "green",
+                            Some(&format!("Профиль: {}", res.active_profile.name)),
+                        );
                         let _ = app_handle.emit("tray://profile-switched", &res);
                     }
                     Err(e) => {
@@ -147,9 +171,15 @@ pub fn handle_menu_event(
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(st) = app_handle.try_state::<state::AppState>() {
-                    let _ = st.set_interception_behavior(state::InterceptionBehavior::AskPopup).await;
+                    let _ = st
+                        .set_interception_behavior(state::InterceptionBehavior::AskPopup)
+                        .await;
                 }
-                update_tray_status(&app_handle, "green", Some("Режим: Уведомление в правом верхнем углу"));
+                update_tray_status(
+                    &app_handle,
+                    "green",
+                    Some("Режим: Уведомление в правом верхнем углу"),
+                );
                 let _ = app_handle.emit("tray://state-changed", ());
             });
         }
@@ -157,7 +187,9 @@ pub fn handle_menu_event(
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(st) = app_handle.try_state::<state::AppState>() {
-                    let _ = st.set_interception_behavior(state::InterceptionBehavior::AutoLockSilent).await;
+                    let _ = st
+                        .set_interception_behavior(state::InterceptionBehavior::AutoLockSilent)
+                        .await;
                 }
                 update_tray_status(&app_handle, "red", Some("Режим: Тихая авто-пауза"));
                 let _ = app_handle.emit("tray://state-changed", ());
@@ -167,7 +199,9 @@ pub fn handle_menu_event(
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(st) = app_handle.try_state::<state::AppState>() {
-                    let _ = st.set_interception_behavior(state::InterceptionBehavior::AutoAllowTrusted).await;
+                    let _ = st
+                        .set_interception_behavior(state::InterceptionBehavior::AutoAllowTrusted)
+                        .await;
                 }
                 update_tray_status(&app_handle, "green", Some("Режим: Авто-пропуск (NL/DE/US)"));
                 let _ = app_handle.emit("tray://state-changed", ());
@@ -183,7 +217,9 @@ pub fn handle_menu_event(
         "backup_claude_tray" => {
             let app_clone = app.clone();
             tauri::async_runtime::spawn(async move {
-                let res = tokio::task::spawn_blocking(auditor::claude_exporter::export_claude_local_data).await;
+                let res =
+                    tokio::task::spawn_blocking(auditor::claude_exporter::export_claude_local_data)
+                        .await;
                 if let Ok(Ok(export_res)) = res {
                     let _ = app_clone.emit("claude://backup-finished", &export_res);
                 }
@@ -204,7 +240,9 @@ pub fn handle_menu_event(
             }
         }
         "support" => {
-            let _ = app.opener().open_url("https://t.me/nomadnocode", None::<&str>);
+            let _ = app
+                .opener()
+                .open_url("https://t.me/nomadnocode", None::<&str>);
         }
         "check_updates" => {
             if let Some(win) = app.get_webview_window("main") {
@@ -219,20 +257,20 @@ pub fn handle_menu_event(
 
 /// Left click on the tray icon toggles the main window.
 pub fn handle_tray_icon_event(tray: &tauri::tray::TrayIcon, event: TrayIconEvent) {
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } = event
-        {
-            let app = tray.app_handle();
-            if let Some(win) = app.get_webview_window("main") {
-                if win.is_visible().unwrap_or(false) {
-                    let _ = win.hide();
-                } else {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+    if let TrayIconEvent::Click {
+        button: MouseButton::Left,
+        button_state: MouseButtonState::Up,
+        ..
+    } = event
+    {
+        let app = tray.app_handle();
+        if let Some(win) = app.get_webview_window("main") {
+            if win.is_visible().unwrap_or(false) {
+                let _ = win.hide();
+            } else {
+                let _ = win.show();
+                let _ = win.set_focus();
             }
         }
+    }
 }

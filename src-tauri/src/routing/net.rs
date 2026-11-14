@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::Entry;
 use crate::proxy::server::{
-    embedded_ipv4, is_forbidden_ip, is_tun_fake_ip, DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT,
+    DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_forbidden_ip, is_tun_fake_ip,
 };
 
 /// DNS lookup limit for entry hosts.
@@ -124,14 +124,34 @@ mod tests {
     #[test]
     fn test_forbidden_ip_gaps_closed() {
         for s in [
-            "0.0.0.0", "0.1.2.3", "240.0.0.1", "255.255.255.255", "127.0.0.1", "10.1.2.3",
-            "::127.0.0.1", "::10.0.0.1", "::ffff:127.0.0.1", "::ffff:10.0.0.1",
-            "64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b::c0a8:1", "64:ff9b:1::1",
-            "2002:7f00:1::1", "::", "::1", "100::1",
+            "0.0.0.0",
+            "0.1.2.3",
+            "240.0.0.1",
+            "255.255.255.255",
+            "127.0.0.1",
+            "10.1.2.3",
+            "::127.0.0.1",
+            "::10.0.0.1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "64:ff9b::c0a8:1",
+            "64:ff9b:1::1",
+            "2002:7f00:1::1",
+            "::",
+            "::1",
+            "100::1",
         ] {
             assert!(is_forbidden_ip(&ip(s)), "{s} must be forbidden");
         }
-        for s in ["8.8.8.8", "185.10.10.2", "2606:4700:4700::1111", "64:ff9b::808:808", "::ffff:8.8.8.8"] {
+        for s in [
+            "8.8.8.8",
+            "185.10.10.2",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+            "::ffff:8.8.8.8",
+        ] {
             assert!(!is_forbidden_ip(&ip(s)), "{s} must be allowed");
         }
     }
@@ -180,13 +200,18 @@ mod tests {
         let e = resolve_entry_checked(&entry("localhost", 1080), false, 8899).await;
         assert_eq!(e.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         // ... and accepted for the user's own keys.
-        let ok = resolve_entry_checked(&entry("localhost", 1080), true, 8899).await.unwrap();
+        let ok = resolve_entry_checked(&entry("localhost", 1080), true, 8899)
+            .await
+            .unwrap();
         assert!(!ok.is_empty() && ok.iter().all(|a| a.ip().is_loopback()));
         // Odd numeric spellings go through the system resolver as IPv4 literals and are caught.
         if let Ok(res) = resolve_entry_checked(&entry("127.1", 1080), false, 8899).await {
             panic!("127.1 must not pass: {res:?}");
         }
         let loopback_gw = resolve_entry_checked(&entry("127.0.0.1", 8899), true, 8899).await;
-        assert_eq!(loopback_gw.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            loopback_gw.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

@@ -3,7 +3,9 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AppHeader, Banner, Button, Mono, TabPanel, Tabs, Toast, ToastViewport } from "../ui";
 import type { MenuEntry, TabItem } from "../ui";
-import { overview as overviewCopy, shell as copy, tabs as tabCopy } from "../shared/copy/ru";
+import { overview as overviewCopy, shell as copy, tabs as tabCopy, toast as toastCopy } from "../shared/copy/ru";
+import { formatCountryWithCode } from "../shared/lib/country";
+import { formatIp } from "../shared/lib/format";
 import { APP_VERSION } from "../shared/version";
 import { tabBadges, useOverviewModel } from "../features/overview/useOverviewModel";
 import { coverageNeedsAttention } from "../features/coverage/coverageModel";
@@ -22,9 +24,17 @@ import {
   useUpdater,
 } from "../shared/hooks";
 import type { TabId } from "../shared/hooks";
-import type { RouteUnavailablePayload } from "../types";
+import type { RouteUnavailablePayload, ShutdownProgressPayload } from "../types";
 import { openTelegramSupport } from "../utils/opener";
-import { bindUpstreamToClaudeProfile, onRouteUnavailable, takePendingDeepLink, upsertRoute } from "../utils/api";
+import {
+  bindUpstreamToClaudeProfile,
+  getHideIpMode,
+  onRouteUnavailable,
+  onShutdownProgress,
+  setHideIpMode,
+  takePendingDeepLink,
+  upsertRoute,
+} from "../utils/api";
 import { OverviewScreen } from "../features/overview/OverviewScreen";
 import { ConnectScreen } from "../features/connect/ConnectScreen";
 import { CopyErrorLogButton } from "../shared/components/CopyErrorLogButton";
@@ -35,11 +45,13 @@ import { ChecksScreen } from "../features/checks";
 import { CrashTestModal } from "../features/crash-test";
 import { GuidesScreen } from "../features/guides";
 import { SettingsModal } from "../features/settings";
+import { hasBrowserTraffic } from "../features/coverage/coverageModel";
 import { SubscriptionScreen } from "../features/subscription";
 import { AboutModal } from "./AboutModal";
 import { DeepLinkModal } from "./DeepLinkModal";
 import type { DeepLinkConfirmOptions } from "./DeepLinkModal";
 import { EventsModal } from "./EventsModal";
+import { ShutdownOverlay } from "./ShutdownOverlay";
 import { TimezoneModal } from "./TimezoneModal";
 import { UpdateModal } from "./UpdateModal";
 import "./shell.css";
@@ -80,6 +92,8 @@ export function AppShell() {
   const [pendingDeepLinkKey, setPendingDeepLinkKey] = useState<string | null>(null);
   const [submittingDeepLink, setSubmittingDeepLink] = useState(false);
   const [routeUnavailableBanner, setRouteUnavailableBanner] = useState<RouteUnavailablePayload | null>(null);
+  const [shutdownProgress, setShutdownProgress] = useState<ShutdownProgressPayload | null>(null);
+  const [hideIpPref, setHideIpPref] = useState<boolean>(false);
 
   // ---- Состояние и действия, вынесенные из старого Dashboard ----
   const stats = useGatewayStats(nav.tab === "overview" && !nav.subscriptionOpen);
@@ -100,6 +114,7 @@ export function AppShell() {
   });
   const tz = useTimezoneSync({ activeReport: gw.activeReport, runFullAudit, showToast });
   const updater = useUpdater({ showToast, setAutoUpdateEnabled: gw.setAutoUpdateEnabled });
+  const hideIpMode = gw.state?.hide_ip_mode ?? hideIpPref;
   const intercept = useInterception({
     runFullAudit,
     showToast,
@@ -225,6 +240,50 @@ export function AppShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    getHideIpMode()
+      .then((enabled) => {
+        if (active) setHideIpPref(enabled);
+      })
+      .catch(() => {});
+
+    onShutdownProgress((payload) => {
+      if (active) setShutdownProgress(payload);
+    })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  // Если установка обновления завершилась ошибкой, убираем прелоадер завершения, чтобы пользователь увидел ошибку в окне обновления.
+  useEffect(() => {
+    if (updater.updaterStatus?.stage === "failed") {
+      setShutdownProgress(null);
+    }
+  }, [updater.updaterStatus?.stage]);
+
+  const handleToggleHideIp = async () => {
+    const next = !hideIpMode;
+    setHideIpPref(next);
+    try {
+      await setHideIpMode(next);
+      await refreshState();
+      showToast(next ? copy.hideIp.onToast : copy.hideIp.offToast, undefined, "info");
+    } catch (err: unknown) {
+      setHideIpPref(!next);
+      showToast(toastCopy.genericError, err instanceof Error ? err.message : String(err), "error");
+    }
+  };
+
   const handleConfirmDeepLink = async ({ scope, profileId }: DeepLinkConfirmOptions) => {
     if (!pendingDeepLinkKey) return;
     const key = pendingDeepLinkKey;
@@ -340,7 +399,23 @@ export function AppShell() {
   return (
     <div className="zs-root zs-shell-page">
       <div className="zs-app zs-shell">
-        <AppHeader ping={gw.activeReport ? copy.pingLabel(gw.scanLatencyMs) : undefined} menuItems={menuItems} menuLabel={copy.menuLabel} />
+        <AppHeader
+          ping={gw.activeReport ? copy.pingLabel(gw.scanLatencyMs) : undefined}
+          menuItems={menuItems}
+          menuLabel={copy.menuLabel}
+        >
+          <Button
+            variant={hideIpMode ? "secondary" : "quiet"}
+            size="sm"
+            icon={hideIpMode ? "lock" : "globe"}
+            className="zs-hide-ip-btn"
+            aria-pressed={hideIpMode}
+            title={hideIpMode ? copy.hideIp.hideTooltip : copy.hideIp.showTooltip}
+            onClick={() => void handleToggleHideIp()}
+          >
+            {copy.hideIp.button}
+          </Button>
+        </AppHeader>
 
         {nav.subscriptionOpen ? (
           <div className="zs-stack">
@@ -393,23 +468,36 @@ export function AppShell() {
                 role="alert"
                 title={copy.intercept.title(payload.provider.toUpperCase())}
                 action={
-                  <>
+                  <div className="zs-banner__actions">
                     <Button size="sm" disabled={payload.phase !== "ready"} onClick={intercept.handleAllowInterception}>
                       {copy.intercept.allow}
-                    </Button>{" "}
+                    </Button>
+                    <Button size="sm" variant="secondary" onClick={intercept.handlePauseUntilNetworkChange}>
+                      {copy.intercept.pauseUntilNetworkChange}
+                    </Button>
                     <Button size="sm" variant="quiet" onClick={() => intercept.setInterceptPayload(null)}>
                       {copy.intercept.dismiss}
                     </Button>
-                  </>
+                  </div>
                 }
               >
-                {intercept.allowError ??
-                  (payload.network_change?.new_country === "RU"
-                    ? copy.intercept.ruText
-                    : copy.intercept.ipText(
-                        payload.report?.telemetry?.ip || "--",
-                        payload.report?.telemetry?.country_code || "--",
-                      ))}
+                {intercept.allowError ?? (
+                  <>
+                    {payload.gate_reason && (
+                      <strong className="zs-intercept-reason">
+                        {copy.intercept.gateReasonLabel} {payload.gate_reason}{" "}
+                      </strong>
+                    )}
+                    {payload.network_change?.new_country === "RU"
+                      ? copy.intercept.ruText
+                      : copy.intercept.ipText(
+                          formatIp(payload.report?.telemetry?.ip, hideIpMode),
+                          formatCountryWithCode(payload.report?.telemetry?.country_code) ||
+                            payload.report?.telemetry?.country_code ||
+                            "--",
+                        )}
+                  </>
+                )}
               </Banner>
             )}
 
@@ -454,6 +542,7 @@ export function AppShell() {
                 updateInfo={updater.updateInfo}
                 coverageSnapshot={gw.coverageSnapshot}
                 routesSnapshot={gw.routesSnapshot}
+                hideIpMode={hideIpMode}
                 dataAgeMinutes={gw.dataAgeMinutes}
                 sysproxyActive={gw.sysproxyActive}
                 cliProtected={toggles.cliProtected}
@@ -486,9 +575,12 @@ export function AppShell() {
                 routesSnapshot={gw.routesSnapshot}
                 currentIp={gw.currentIp}
                 currentCountry={gw.currentCountry}
+                hideIpMode={hideIpMode}
                 onRefreshState={refreshState}
                 onRefreshRoutes={gw.refreshRoutes}
-                onAuditRefresh={() => runFullAudit(true)}
+                onAuditRefresh={(providerId) =>
+                  providerId ? gw.runProviderAudit(providerId, true) : runFullAudit(true)
+                }
                 onOpenGuide={nav.openGuide}
                 onToast={showToast}
               />
@@ -504,6 +596,7 @@ export function AppShell() {
                 provider={nav.checksProvider}
                 state={gw.state}
                 coverageSnapshot={gw.coverageSnapshot}
+                hideIpMode={hideIpMode}
                 protection={toggles.protection}
                 onToast={showToast}
                 onNavigateToGuide={nav.openGuide}
@@ -583,6 +676,17 @@ export function AppShell() {
         customAiDomains={gw.state?.custom_ai_domains}
         onStateUpdated={() => refreshState().catch(() => {})}
         onToast={showToast}
+        appVersion={version}
+        rollbackReleases={updater.rollbackReleases}
+        rollbackLoading={updater.rollbackLoading}
+        rollbackLoaded={updater.rollbackLoaded}
+        rollbackError={updater.rollbackError}
+        rollingBackVersion={updater.rollingBackVersion}
+        installingUpdate={updater.installingUpdate}
+        updateProgress={updater.updateProgress}
+        updaterStatus={updater.updaterStatus}
+        onLoadRollbackVersions={updater.handleLoadRollbackVersions}
+        onInstallRollback={updater.handleInstallRollback}
       />
       <CrashTestModal open={crashTestOpen} onClose={() => setCrashTestOpen(false)} onToast={showToast} />
       <TimezoneModal
@@ -592,6 +696,7 @@ export function AppShell() {
         synced={tz.tzSyncedNotice}
         onSync={() => tz.handleSyncTz()}
         onOpenOsClock={handleOpenOsClock}
+        hasBrowserTraffic={hasBrowserTraffic(gw.coverageSnapshot?.apps)}
       />
       <UpdateModal
         open={updater.showUpdateModal}
@@ -648,6 +753,8 @@ export function AppShell() {
           }}
         />
       )}
+
+      <ShutdownOverlay progress={shutdownProgress} />
     </div>
   );
 }

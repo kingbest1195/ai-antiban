@@ -70,6 +70,7 @@ export function StepAlert({ onReacted, onBack }: { onReacted: () => void; onBack
           <StepFooter
             back={onBack}
             primary={{ icon: "zap", onClick: show, children: phase === "waiting" ? copy.alert.showAgain : copy.alert.show }}
+            secondary={{ onClick: onReacted, children: copy.alert.continue }}
           />
         }
       >
@@ -88,8 +89,9 @@ export function StepAlert({ onReacted, onBack }: { onReacted: () => void; onBack
         <Section title={copy.alert.sectionChoices}>
           <Card>
             <Rows>
-              <Row title={c.block.title} sub={c.block.sub} />
-              <Row title={c.allow.title} sub={c.allow.sub} />
+              <Row icon="alert" title={c.reason.title} sub={c.reason.sub} />
+              <Row icon="shield" title={c.block.title} sub={c.block.sub} />
+              <Row icon="zap" title={c.allow.title} sub={c.allow.sub} />
             </Rows>
           </Card>
         </Section>

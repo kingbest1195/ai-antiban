@@ -13,6 +13,9 @@
 
 use crate::state::CliMode;
 use crate::sysproxy::FileCtx;
+use crate::sysproxy::browser_policies::{
+    BrowserPacStatus, PolicyStore, detect_browser_pac_status_in,
+};
 use crate::sysproxy::fs::Fs;
 use crate::sysproxy::platform::{Platform, PlatformError, ServiceKind, classify_services};
 use serde::{Deserialize, Serialize};
@@ -127,6 +130,16 @@ pub struct CoverageSnapshot {
     /// Enabled VPN services that are connected right now. Zastava never writes into them.
     #[serde(default)]
     pub vpn_connected: Vec<String>,
+    /// True when at least one installed Chromium-family browser actually has PAC enforced
+    /// (profile `Preferences` JSON or `--proxy-pac-url` flag, not merely recommended plist).
+    #[serde(default)]
+    pub browser_pac_policy_active: bool,
+    /// Display names of running supported Chromium browsers that still need a restart for PAC.
+    #[serde(default)]
+    pub browsers_needing_restart: Vec<String>,
+    /// Display names of installed Chromium browsers where PAC is confirmed active.
+    #[serde(default)]
+    pub browsers_pac_active: Vec<String>,
 }
 
 /// What kind of connection reached the gateway.
@@ -300,6 +313,13 @@ impl CoverageTracker {
 
     pub fn cli_mode(&self) -> CliMode {
         self.cli_mode.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    /// Clears cached environment facts so the next snapshot re-reads OS, proxy and policy state.
+    pub fn invalidate_facts(&self) {
+        if let Ok(mut f) = self.facts.lock() {
+            *f = None;
+        }
     }
 
     /// Records an incoming connection from `peer_port`. Never blocks the tunnel: the OS lookup
@@ -506,7 +526,10 @@ impl CoverageTracker {
                 None => false,
             };
             if !fresh {
-                *guard = Some((now, compute_config_facts(env, gateway, cli_mode)));
+                *guard = Some((
+                    now,
+                    compute_config_facts(env, gateway, cli_mode, self.os, &*self.probe),
+                ));
             }
             guard.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
         };
@@ -517,7 +540,10 @@ impl CoverageTracker {
         // The agent of Antigravity 2.x talks to the gateway under its own process name. It is
         // counted for Antigravity unless Windsurf (same `language_server*` binary) is installed.
         let windsurf_installed = facts.apps.get("windsurf").is_some_and(|f| f.installed);
-        let antigravity_app = facts.apps.get("antigravity").is_some_and(|f| f.watch_bypass);
+        let antigravity_app = facts
+            .apps
+            .get("antigravity")
+            .is_some_and(|f| f.watch_bypass);
         let merge_agent = antigravity_app && !windsurf_installed;
         let antigravity_traffic = merge_agent.then(|| {
             let mut sum = AppTrafficStats {
@@ -653,6 +679,9 @@ impl CoverageTracker {
                 None
             },
             vpn_connected: facts.vpn_connected.clone(),
+            browser_pac_policy_active: facts.browser_pac_policy_active,
+            browsers_needing_restart: facts.browsers_needing_restart.clone(),
+            browsers_pac_active: facts.browsers_pac_active.clone(),
         }
     }
 }
@@ -721,6 +750,8 @@ impl PacSource {
 /// Everything the status computation reads from outside.
 pub(crate) struct CoverageEnv<'a> {
     pub platform: &'a dyn Platform,
+    #[allow(dead_code)]
+    pub policy_store: &'a dyn PolicyStore,
     /// `None` when the user's directories cannot be determined: file based facts are `unknown`.
     pub files: Option<&'a FileCtx>,
     pub pac_source: PacSource,
@@ -747,6 +778,9 @@ pub(crate) struct ConfigFacts {
     pub apps: HashMap<&'static str, AppFact>,
     pub system_proxy_effective: Option<bool>,
     pub vpn_connected: Vec<String>,
+    pub browser_pac_policy_active: bool,
+    pub browsers_needing_restart: Vec<String>,
+    pub browsers_pac_active: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -764,22 +798,37 @@ fn compute_config_facts(
     env: &CoverageEnv<'_>,
     gateway: Option<SocketAddr>,
     cli_mode: CliMode,
+    os: Os,
+    probe: &dyn SystemProbe,
 ) -> ConfigFacts {
+    let pac_url = gateway.map(pac_url_for);
+    let browser_pac = match env.files {
+        Some(ctx) => detect_browser_pac_status_in(ctx, os, probe, pac_url.as_deref()),
+        None => BrowserPacStatus::default(),
+    };
+    let browser_pac_policy_active = !browser_pac.browsers_pac_active.is_empty();
+
     let mut facts = ConfigFacts {
         gateway,
         apps: HashMap::new(),
         system_proxy_effective: None,
         vpn_connected: Vec::new(),
+        browser_pac_policy_active,
+        browsers_needing_restart: browser_pac.browsers_needing_restart.clone(),
+        browsers_pac_active: browser_pac.browsers_pac_active.clone(),
     };
 
     // One PAC read serves browsers and desktop apps.
-    let pac_verdict = match gateway {
-        Some(g) => read_os_pac(env.platform, env.pac_source, &pac_url_for(g)),
+    let pac_verdict = match pac_url.as_deref() {
+        Some(u) => read_os_pac(env.platform, env.pac_source, u),
         None => Verdict::Unknown,
     };
 
+    let mut temp_dns_active = false;
     if env.pac_source == PacSource::Services {
-        facts.vpn_connected = connected_vpn_names(env.platform);
+        let (vpn_names, temp_dns) = detect_macos_vpn_state(env.platform);
+        facts.vpn_connected = vpn_names;
+        temp_dns_active = temp_dns;
         facts.system_proxy_effective = gateway.and_then(|g| read_effective_pac(env.platform, g));
     }
 
@@ -813,23 +862,62 @@ fn compute_config_facts(
                 .is_some_and(|k| k != AntigravityKind::Editor);
 
         let (status, manual_steps, detail) = match info.category {
-            "browser" | "desktop" => match pac_verdict {
-                Verdict::Configured => (
-                    CoverageStatus::Configured,
-                    Vec::new(),
-                    "Системный PAC указывает на Заставу, ждём первый запрос".to_string(),
-                ),
-                Verdict::Off => (
-                    CoverageStatus::Off,
-                    steps_of(&[steps::ENABLE_PROTECTION]),
-                    "Системный PAC не указывает на Заставу".to_string(),
-                ),
-                Verdict::Unknown => (
-                    CoverageStatus::Unknown,
-                    steps_of(&[steps::ENABLE_PROTECTION, steps::SET_PAC_URL]),
-                    "Не удалось прочитать системный PAC".to_string(),
-                ),
-            },
+            "browser" | "desktop" => {
+                if info.category == "browser" && browser_pac_policy_active {
+                    let detail = if !facts.browsers_needing_restart.is_empty() {
+                        format!(
+                            "PAC активен ({}); нужен перезапуск: {}",
+                            facts.browsers_pac_active.join(", "),
+                            facts.browsers_needing_restart.join(", ")
+                        )
+                    } else if facts.system_proxy_effective == Some(false)
+                        || pac_verdict != Verdict::Configured
+                    {
+                        "Настройки браузеров (Preferences) направляют трафик в Заставу поверх VPN"
+                            .to_string()
+                    } else {
+                        "Настройки браузеров и системный PAC направляют трафик в Заставу, ждём первый запрос"
+                            .to_string()
+                    };
+                    (CoverageStatus::Configured, Vec::new(), detail)
+                } else if info.category == "browser"
+                    && !facts.browsers_needing_restart.is_empty()
+                    && (facts.system_proxy_effective == Some(false)
+                        || pac_verdict != Verdict::Configured)
+                {
+                    (
+                        CoverageStatus::Off,
+                        steps_of(&[steps::ENABLE_PROTECTION]),
+                        format!(
+                            "Требуется перезапуск браузеров: {}",
+                            facts.browsers_needing_restart.join(", ")
+                        ),
+                    )
+                } else {
+                    match pac_verdict {
+                        Verdict::Configured => (
+                            CoverageStatus::Configured,
+                            Vec::new(),
+                            "Системный PAC указывает на Заставу, ждём первый запрос".to_string(),
+                        ),
+                        Verdict::Off if env.sysproxy_enabled && temp_dns_active => (
+                            CoverageStatus::Off,
+                            steps_of(&[steps::SET_PAC_URL]),
+                            "Системный PAC отложен: активный VPN держит временные DNS".to_string(),
+                        ),
+                        Verdict::Off => (
+                            CoverageStatus::Off,
+                            steps_of(&[steps::ENABLE_PROTECTION]),
+                            "Системный PAC не указывает на Заставу".to_string(),
+                        ),
+                        Verdict::Unknown => (
+                            CoverageStatus::Unknown,
+                            steps_of(&[steps::ENABLE_PROTECTION, steps::SET_PAC_URL]),
+                            "Не удалось прочитать системный PAC".to_string(),
+                        ),
+                    }
+                }
+            }
             "ide" if desktop_antigravity && id == "antigravity" => antigravity_app_fact(
                 env.sysproxy_enabled,
                 facts.system_proxy_effective,
@@ -990,17 +1078,25 @@ fn same_pac(a: &str, b: &str) -> bool {
         .eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
 }
 
-/// Names of the enabled VPN services that are connected now (macOS). Read-only.
-fn connected_vpn_names(platform: &dyn Platform) -> Vec<String> {
-    let Ok(services) = platform.list_services() else {
-        return Vec::new();
+/// Names of enabled connected VPN services on macOS plus whether temporary VPN DNS is active
+/// (e.g. an `utun` daemon such as AmneziaVPN not listed by `scutil --nc list`). Read-only.
+fn detect_macos_vpn_state(platform: &dyn Platform) -> (Vec<String>, bool) {
+    let temp_dns = matches!(platform.temp_dns_overrides(), Ok(true));
+    let mut names: Vec<String> = match platform.list_services() {
+        Ok(services) => {
+            let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
+            classify_services(platform, &enabled)
+                .into_iter()
+                .filter(|(_, k)| *k == ServiceKind::Vpn { connected: true })
+                .map(|(s, _)| s.name)
+                .collect()
+        }
+        Err(_) => Vec::new(),
     };
-    let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
-    classify_services(platform, &enabled)
-        .into_iter()
-        .filter(|(_, k)| *k == ServiceKind::Vpn { connected: true })
-        .map(|(s, _)| s.name)
-        .collect()
+    if names.is_empty() && temp_dns {
+        names.push("активный туннель (временные DNS)".to_string());
+    }
+    (names, temp_dns)
 }
 
 /// `scutil --proxy` against our PAC: the proxy the system really applies, which follows the
@@ -1095,7 +1191,8 @@ pub(crate) fn antigravity_kind(ctx: &FileCtx) -> Option<AntigravityKind> {
     {
         return Some(AntigravityKind::Editor);
     }
-    if antigravity_app_path(ctx).is_some() || ctx.ide_roots.iter().any(|r| ex(&r.join("Antigravity")))
+    if antigravity_app_path(ctx).is_some()
+        || ctx.ide_roots.iter().any(|r| ex(&r.join("Antigravity")))
     {
         return Some(AntigravityKind::Desktop);
     }
@@ -1374,7 +1471,7 @@ pub fn classify_process_name(name: &str) -> &'static str {
     if first == "claude" {
         return "claude-desktop";
     }
-    if has("chatgpt") {
+    if has("chatgpt") && !has("atlas") {
         return "chatgpt-desktop";
     }
     if has("antigravity") {
@@ -1400,7 +1497,14 @@ pub fn classify_process_name(name: &str) -> &'static str {
         || has("brave")
         || has("msedge")
         || has("edge")
-        || first == "arc"
+        || has("arc")
+        || has("vivaldi")
+        || has("opera")
+        || has("comet")
+        || has("dia")
+        || has("atlas")
+        || has("zen")
+        || has("waterfox")
         || words
             .iter()
             .any(|w| w.starts_with("yandex") || w.starts_with("яндекс"))

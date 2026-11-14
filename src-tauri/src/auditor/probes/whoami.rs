@@ -124,6 +124,26 @@ fn is_special_v6(ip: Ipv6Addr) -> bool {
         || (first & 0xfe00) == 0xfc00 // fc00::/7 unique local
 }
 
+/// Whether an IP address belongs to RFC 2544 (`198.18.0.0/15`), used by TUN/FakeDNS proxies.
+pub fn is_tun_fake_ip(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(v4) if {
+        let o = v4.octets();
+        o[0] == 198 && (o[1] & 0xfe) == 18
+    })
+}
+
+/// True when all recorded whoami sources returned `SourceState::Special` in `198.18.0.0/15`.
+pub fn all_sources_tun_fake_ip(sources: &[SourceView]) -> bool {
+    !sources.is_empty()
+        && sources.iter().all(|s| {
+            s.state == SourceState::Special
+                && s.addr
+                    .as_deref()
+                    .and_then(|raw| raw.parse::<IpAddr>().ok())
+                    .is_some_and(is_tun_fake_ip)
+        })
+}
+
 fn classify(ip: IpAddr) -> SourceReading {
     if is_special_addr(&ip) {
         SourceReading::Special(ip)
@@ -223,20 +243,27 @@ pub fn combine_sources(
     use SourceReading::*;
     let sources = source_views(akamai, google);
 
-    // A service address instead of a resolver address: a local DNS stub answers for the name.
-    let special = match (akamai, google) {
-        (Special(ip), _) | (_, Special(ip)) => Some(*ip),
-        _ => None,
-    };
-    if let Some(ip) = special {
-        return Err(Unmeasured {
-            code: "DNS_WHOAMI_FAKE_IP",
-            reason: UnknownReason::SourceRefused,
-            detail: format!(
-                "DNS ответил служебным адресом {ip} (так выглядит fake-IP режим TUN-клиента или локальный DNS-перехватчик), реальный резолвер не виден"
-            ),
-            sources,
-        });
+    // If one source returns a TUN Fake-IP / local stub and the other source returns a valid
+    // public resolver IP (e.g. V2Box FakeDNS intercepts A records while TXT passes through to
+    // Cloudflare), prefer the valid public resolver rather than failing with DNS_WHOAMI_FAKE_IP.
+    match (akamai, google) {
+        (Special(_), Addr(pub_ip)) | (Addr(pub_ip), Special(_)) => {
+            return Ok(Agreed {
+                ip: *pub_ip,
+                operator: operator_of(*pub_ip),
+            });
+        }
+        (Special(ip), _) | (_, Special(ip)) => {
+            return Err(Unmeasured {
+                code: "DNS_WHOAMI_FAKE_IP",
+                reason: UnknownReason::SourceRefused,
+                detail: format!(
+                    "DNS ответил служебным адресом {ip} (так выглядит fake-IP режим TUN-клиента или локальный DNS-перехватчик), реальный резолвер не виден"
+                ),
+                sources,
+            });
+        }
+        _ => {}
     }
 
     match (akamai, google) {
@@ -244,10 +271,7 @@ pub fn combine_sources(
             let (op_a, op_g) = (operator_of(*a), operator_of(*g));
             let operator = op_a.filter(|op| Some(*op) == op_g);
             if operator.is_some() || same_resolver_network(*a, *g) {
-                return Ok(Agreed {
-                    ip: *a,
-                    operator,
-                });
+                return Ok(Agreed { ip: *a, operator });
             }
             let named = |ip: &IpAddr, op: Option<&str>| match op {
                 Some(op) => format!("{ip}, {op}"),
@@ -586,6 +610,19 @@ pub fn same_operator_note(sources: &[SourceView], service: &str) -> String {
 
 /// "DNS country = exit country" on a measured resolver.
 pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckResult {
+    evaluate_dns_country_for_route(view, exit_country, false)
+}
+
+/// Evaluates whether the measured DNS resolver country aligns with `exit_country`.
+///
+/// When `via_zastava_key` is true, traffic to the AI provider passes over TCP CONNECT through the
+/// remote Zastava key, so a non-sanctioned foreign VPN resolver country does not trigger a mismatch.
+/// Pure `198.18.0.0/15` TUN Fake-IP responses return `NotApplicable` so `report.incomplete` is not inflated.
+pub fn evaluate_dns_country_for_route(
+    view: &ResolverView,
+    exit_country: &str,
+    via_zastava_key: bool,
+) -> CheckResult {
     let (ip, country, public_service, sources) = match view {
         ResolverView::Located {
             ip,
@@ -594,6 +631,14 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
             sources,
         } => (ip, country, public_service, sources),
         ResolverView::Unmeasured(u) => {
+            if u.code == "DNS_WHOAMI_FAKE_IP" && all_sources_tun_fake_ip(&u.sources) {
+                return CheckResult::unknown(
+                    "DNS_COUNTRY_FAKE_IP",
+                    "Сравнение страны DNS и выходного узла неприменимо: используется режим Fake-IP VPN-туннеля (198.18.0.0/15).",
+                    UnknownReason::NotApplicable,
+                )
+                .with_sources(&u.sources);
+            }
             return CheckResult::unknown(
                 u.code,
                 format!(
@@ -628,6 +673,16 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
         .with_sources(sources);
     };
     if *country != exit {
+        if via_zastava_key && !crate::sanctions::is_sanctioned_or_blocked_country(country) {
+            return CheckResult::ok(
+                "DNS_KEY_COUNTRY_ISOLATED",
+                format!(
+                    "DNS-резолвер {ip} ({country}) работает через системный VPN, а трафик AI изолирован через ключ Заставы ({exit}) по TCP CONNECT."
+                ),
+            )
+            .with_measured_via(MEASURED_VIA)
+            .with_sources(sources);
+        }
         return CheckResult::warning(
             "DNS_COUNTRY_SPLIT",
             format!(
@@ -797,12 +852,24 @@ mod tests {
         let view = measure(two("172.70.161.26", "172.71.240.11"), &geo_probe("US")).await;
         let config = CheckResult::ok("DNS_CONFIG_OK", "в настройках ОС всё чисто");
         let r = crate::auditor::leaks::evaluate_dns_resolver(config, &view, "NL");
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Ok, "DNS_PUBLIC_RESOLVER"));
-        assert!(r.message.starts_with("Резолвер: Cloudflare (публичный DNS)"), "{}", r.message);
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Ok, "DNS_PUBLIC_RESOLVER")
+        );
+        assert!(
+            r.message
+                .starts_with("Резолвер: Cloudflare (публичный DNS)"),
+            "{}",
+            r.message
+        );
         assert!(r.message.contains("172.70.161.26") && r.message.contains("172.71.240.11"));
         let sources = r.detail.expect("detail").sources;
         assert_eq!(sources.len(), 2);
-        assert!(sources.iter().all(|s| s.operator.as_deref() == Some("Cloudflare")));
+        assert!(
+            sources
+                .iter()
+                .all(|s| s.operator.as_deref() == Some("Cloudflare"))
+        );
         // The country check does not penalise it: not applicable.
         let c = evaluate_dns_country(&view, "NL");
         assert!(c.is_not_applicable());
@@ -843,14 +910,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_ip_or_one_silent_source_is_still_unknown_with_detail() {
+    async fn fake_ip_paired_with_public_txt_resolves_public_dns_while_single_source_is_unknown() {
         let probe = geo_probe("US");
-        let fake = measure(two("198.18.0.7", "172.71.240.11"), &probe).await;
-        let ResolverView::Unmeasured(u) = fake else {
-            panic!()
+        // Akamai Fake-IP + Google TXT Cloudflare -> resolves Cloudflare (not DNS_WHOAMI_FAKE_IP).
+        let mixed = measure(two("198.18.0.98", "172.71.240.11"), &probe).await;
+        let ResolverView::Located {
+            ip: res_ip,
+            public_service,
+            sources,
+            ..
+        } = mixed
+        else {
+            panic!("expected Located when TXT returns public resolver, got {mixed:?}");
         };
-        assert_eq!(u.code, "DNS_WHOAMI_FAKE_IP");
-        assert_eq!(u.sources[0].state, SourceState::Special);
+        assert_eq!(res_ip.to_string(), "172.71.240.11");
+        assert_eq!(public_service, Some("Cloudflare"));
+        assert_eq!(sources[0].state, SourceState::Special);
+        assert_eq!(sources[1].state, SourceState::Answered);
+
+        // One silent source without another public/special answer is still Unknown.
         let dns = FakeDns::new(LookupOutcome::Failed)
             .with(AKAMAI_HOST, addr("172.70.161.26"))
             .with_txt(GOOGLE_TXT_HOST, TxtOutcome::Timeout);
@@ -971,14 +1049,47 @@ mod tests {
                 "{fake}"
             );
         }
-        // One of the two being a stub answer is enough.
+        // One Fake-IP + one public resolver uses the valid public resolver reading.
         let dns = FakeDns::new(LookupOutcome::Failed)
             .with(AKAMAI_HOST, addr("198.18.0.9"))
             .with_txt(GOOGLE_TXT_HOST, txt("8.8.8.8"));
-        let ResolverView::Unmeasured(u) = measure(dns, &geo_probe("NL")).await else {
-            panic!()
+        let view = measure(dns, &geo_probe("NL")).await;
+        assert!(matches!(
+            view,
+            ResolverView::Located {
+                public_service: Some("Google Public DNS"),
+                ..
+            }
+        ));
+
+        // Fake-IP + IPv6 Cloudflare TXT also locates the resolver.
+        let dns_v6 = FakeDns::new(LookupOutcome::Failed)
+            .with(AKAMAI_HOST, addr("198.18.0.98"))
+            .with_txt(GOOGLE_TXT_HOST, txt("2400:cb00:989:1024::a29e:d50e"));
+        let view_v6 = measure(dns_v6, &geo_probe("NL")).await;
+        assert!(matches!(view_v6, ResolverView::Located { .. }));
+
+        // Both TUN Fake-IP -> DNS_COUNTRY_FAKE_IP (NotApplicable) & DNS country route isolation.
+        let both_fake = measure(two("198.18.0.12", "198.18.0.13"), &geo_probe("NL")).await;
+        let fake_country = evaluate_dns_country_for_route(&both_fake, "FR", false);
+        assert_eq!(fake_country.code, "DNS_COUNTRY_FAKE_IP");
+        assert_eq!(fake_country.reason, Some(UnknownReason::NotApplicable));
+
+        let gb_resolver = ResolverView::Located {
+            ip: ip("81.2.69.142"),
+            country: "GB".to_string(),
+            public_service: None,
+            sources: vec![],
         };
-        assert_eq!(u.reason, UnknownReason::SourceRefused);
+        assert_eq!(
+            evaluate_dns_country_for_route(&gb_resolver, "FR", false).status,
+            CheckStatus::Warning
+        );
+        let routed_country = evaluate_dns_country_for_route(&gb_resolver, "FR", true);
+        assert_eq!(
+            (routed_country.status, routed_country.code.as_str()),
+            (CheckStatus::Ok, "DNS_KEY_COUNTRY_ISOLATED")
+        );
     }
 
     #[tokio::test]

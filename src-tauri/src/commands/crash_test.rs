@@ -44,7 +44,10 @@ pub async fn run_vpn_crash_test_step(
             (tel.ip, tel.country_code)
         } else {
             let st = state.get_data().await;
-            (st.pinned_ip.unwrap_or_else(|| "127.0.0.1".to_string()), "??".to_string())
+            (
+                st.pinned_ip.unwrap_or_else(|| "127.0.0.1".to_string()),
+                "??".to_string(),
+            )
         }
     };
 
@@ -67,7 +70,10 @@ pub async fn run_vpn_crash_test_step(
                     latency_ms,
                     current_ip,
                     current_country,
-                    status_text: format!("Мгновенно перехвачено Kill-Switch ({:.1} мс)", latency_ms),
+                    status_text: format!(
+                        "Мгновенно перехвачено Kill-Switch ({:.1} мс)",
+                        latency_ms
+                    ),
                 })
             }
         }

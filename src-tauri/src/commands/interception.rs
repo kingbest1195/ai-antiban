@@ -26,12 +26,12 @@ pub async fn resolve_interception(
             | proxy::InterceptionAction::OpenGuideAndBlock => proxy::HoldResolution::Block,
         };
         proxy_manager.hold_queue.resolve(&id, resolution).await;
-        if matches!(action, proxy::InterceptionAction::OpenGuideAndBlock) {
-            if let Some(main_win) = app.get_webview_window("main") {
-                let _ = main_win.show();
-                let _ = main_win.set_focus();
-                let _ = app.emit("interceptor://open-guide", "01-personal-vpn-15min");
-            }
+        if matches!(action, proxy::InterceptionAction::OpenGuideAndBlock)
+            && let Some(main_win) = app.get_webview_window("main")
+        {
+            let _ = main_win.show();
+            let _ = main_win.set_focus();
+            let _ = app.emit("interceptor://open-guide", "01-personal-vpn-15min");
         }
         if let Some(popup) = app.get_webview_window("alert-popup") {
             let _ = popup.hide();
@@ -43,7 +43,10 @@ pub async fn resolve_interception(
     // `all` or scope "network" = network-wide hold created by the network guard after a sudden IP change
     let is_network_scope = scope.as_deref() == Some("network") || provider == proxy::ALL_PROVIDERS;
     let targets: Vec<String> = if is_network_scope {
-        state::KNOWN_PROVIDERS.iter().map(|p| p.to_string()).collect()
+        state::KNOWN_PROVIDERS
+            .iter()
+            .map(|p| p.to_string())
+            .collect()
     } else {
         vec![provider.clone()]
     };
@@ -79,14 +82,36 @@ pub async fn resolve_interception(
             }
         }
         proxy::InterceptionAction::BlockUntilNetworkChange => {
+            let pause_reason = if is_network_scope {
+                proxy_manager.guard.gate_reason().or_else(|| {
+                    proxy_manager
+                        .hold_queue
+                        .current_alert()
+                        .and_then(|alert| alert.gate_reason)
+                })
+            } else {
+                None
+            };
             for p in &targets {
                 state.block_provider(p).await.map_err(|e| e.to_string())?;
+            }
+            if is_network_scope {
+                proxy_manager
+                    .guard
+                    .mark_paused_until_network_change(pause_reason)
+                    .await;
+                let status = proxy_manager.guard.pause_status();
+                emit_guard_pause_status(&app, &status);
             }
             proxy_manager
                 .hold_queue
                 .resolve(&id, proxy::HoldResolution::Block)
                 .await;
-            for p in targets.iter().map(String::as_str).chain([proxy::ALL_PROVIDERS]) {
+            for p in targets
+                .iter()
+                .map(String::as_str)
+                .chain([proxy::ALL_PROVIDERS])
+            {
                 proxy_manager
                     .hold_queue
                     .resolve_all_for_provider(p, proxy::HoldResolution::Block)
@@ -101,7 +126,11 @@ pub async fn resolve_interception(
                 .hold_queue
                 .resolve(&id, proxy::HoldResolution::Block)
                 .await;
-            for p in targets.iter().map(String::as_str).chain([proxy::ALL_PROVIDERS]) {
+            for p in targets
+                .iter()
+                .map(String::as_str)
+                .chain([proxy::ALL_PROVIDERS])
+            {
                 proxy_manager
                     .hold_queue
                     .resolve_all_for_provider(p, proxy::HoldResolution::Block)
@@ -127,10 +156,12 @@ fn build_simulation_network_change(
     data: &state::AppStateData,
     provider_key: &str,
 ) -> proxy::hold_queue::NetworkChange {
+    let scoped_key = data.ip_history_key_for_provider(provider_key);
     let last_entry = data
         .ip_history
-        .get(provider_key)
+        .get(&scoped_key)
         .and_then(|v| v.last())
+        .or_else(|| data.ip_history.get(provider_key).and_then(|v| v.last()))
         .or_else(|| data.ip_history.values().filter_map(|v| v.last()).next());
 
     let old_ip = data
@@ -193,7 +224,8 @@ pub async fn simulate_interception(
         "Строгая привязка IP отключена. Трафик идет через публичный коммерческий VPN-пул.",
         Some(auditor::geo_matrix::GUIDE_PERSONAL_VPN.to_string()),
     );
-    let travel_result = auditor::CheckResult::ok("TRAVEL_NORMAL", "Конфликтов перемещения за 12ч нет.");
+    let travel_result =
+        auditor::CheckResult::ok("TRAVEL_NORMAL", "Конфликтов перемещения за 12ч нет.");
     let dnsbl_report = auditor::check_all_dnsbl(&telemetry.ip, &dangerous_asns).await;
     let dnsbl_result = auditor::evaluate_dnsbl_report(&dnsbl_report);
     // SIMULATION ONLY: the Tor list is not downloaded here; the demo address is a mass-VPN pool.
@@ -277,6 +309,11 @@ pub async fn simulate_interception(
 
     let data = state.get_data().await;
     let network_change = Some(build_simulation_network_change(&data, provider_id.as_str()));
+    let gate_reason = Some(proxy::hold_queue::build_gate_reason(
+        Some(&report),
+        network_change.as_ref(),
+        true,
+    ));
 
     let payload = proxy::RiskInterceptPayload {
         id: hold_id,
@@ -292,6 +329,7 @@ pub async fn simulate_interception(
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         phase: proxy::hold_queue::PHASE_READY.to_string(),
+        gate_reason,
     };
 
     // Emit first, then show: the hidden window must not display its placeholder content.
@@ -325,7 +363,10 @@ pub async fn set_interception_behavior_cmd(
     behavior: state::InterceptionBehavior,
     state: tauri::State<'_, state::AppState>,
 ) -> Result<(), String> {
-    state.set_interception_behavior(behavior).await.map_err(|e| e.to_string())
+    state
+        .set_interception_behavior(behavior)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -340,7 +381,14 @@ pub async fn set_popup_position_cmd(
     position: state::PopupPosition,
     state: tauri::State<'_, state::AppState>,
 ) -> Result<(), String> {
-    state.set_popup_position(position).await.map_err(|e| e.to_string())
+    state
+        .set_popup_position(position)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn emit_guard_pause_status(app: &tauri::AppHandle, status: &proxy::guard::GuardPauseStatus) {
+    let _ = app.emit("guard://pause-status-changed", status);
 }
 
 #[tauri::command]
@@ -354,6 +402,7 @@ pub async fn toggle_network_killswitch_cmd(
     let now_frozen = guard.set_manual_killswitch(target_freeze, &state).await;
     crate::tray::update_tray_killswitch(&app, now_frozen);
     let _ = app.emit("tray://killswitch-toggled", now_frozen);
+    emit_guard_pause_status(&app, &guard.pause_status());
     Ok(now_frozen)
 }
 
@@ -362,6 +411,60 @@ pub async fn get_network_killswitch_status_cmd(
     guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
 ) -> Result<bool, String> {
     Ok(guard.is_gate_blocked())
+}
+
+#[tauri::command]
+pub async fn pause_until_network_change_cmd(
+    reason: Option<String>,
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
+    state: tauri::State<'_, AppContext>,
+    app: tauri::AppHandle,
+) -> Result<proxy::guard::GuardPauseStatus, String> {
+    let status = guard.pause_until_network_change(&state, reason).await;
+    emit_guard_pause_status(&app, &status);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn set_guard_pause_mode_cmd(
+    mode: proxy::guard::PauseMode,
+    reason: Option<String>,
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
+    state: tauri::State<'_, AppContext>,
+    app: tauri::AppHandle,
+) -> Result<proxy::guard::GuardPauseStatus, String> {
+    let was_manual = guard.is_manual_killswitch();
+    let status = match mode {
+        proxy::guard::PauseMode::None => {
+            if was_manual {
+                guard.set_manual_killswitch(false, &state).await;
+            }
+            guard
+                .clear_pause_on_network_change(Some(&state), true)
+                .await;
+            guard.pause_status()
+        }
+        proxy::guard::PauseMode::UntilNetworkChange => {
+            guard.pause_until_network_change(&state, reason).await
+        }
+        proxy::guard::PauseMode::Manual => {
+            guard.set_manual_killswitch(true, &state).await;
+            guard.pause_status()
+        }
+    };
+    if status.manual_killswitch != was_manual {
+        crate::tray::update_tray_killswitch(&app, status.manual_killswitch);
+        let _ = app.emit("tray://killswitch-toggled", status.manual_killswitch);
+    }
+    emit_guard_pause_status(&app, &status);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn get_guard_pause_status_cmd(
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
+) -> Result<proxy::guard::GuardPauseStatus, String> {
+    Ok(guard.pause_status())
 }
 
 #[cfg(test)]
@@ -394,5 +497,19 @@ mod tests {
         let nc_pinned = build_simulation_network_change(&data, "anthropic");
         assert_eq!(nc_pinned.old_ip.as_deref(), Some("91.199.10.20"));
         assert_eq!(nc_pinned.old_country.as_deref(), Some("DE"));
+    }
+
+    #[test]
+    fn simulation_gate_reason_and_pause_mode_serde_work() {
+        let data = state::AppStateData::default();
+        let nc = build_simulation_network_change(&data, "anthropic");
+        let sim_reason = proxy::hold_queue::build_gate_reason(None, Some(&nc), true);
+        assert!(!sim_reason.trim().is_empty());
+        assert!(sim_reason.contains("185.212.102.40"));
+        assert!(sim_reason.contains("185.220.101.5"));
+
+        let parsed: proxy::guard::PauseMode =
+            serde_json::from_str("\"until_network_change\"").expect("parse PauseMode");
+        assert_eq!(parsed, proxy::guard::PauseMode::UntilNetworkChange);
     }
 }

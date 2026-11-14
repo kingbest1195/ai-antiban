@@ -18,15 +18,15 @@ pub mod updater;
 pub mod win_reg;
 
 // Backward-compatible re-exports: these used to live in the crate root.
+pub use commands::AppContext;
 pub use commands::coverage::get_coverage_snapshot;
 pub use commands::crash_test::CrashTestStepResult;
 pub use commands::deeplink::take_pending_deep_link;
-pub use commands::AppContext;
 pub use popup::show_and_position_alert_popup;
 pub use sanctions::is_sanctioned_or_blocked_country;
 pub use tray::{
-    update_tray_from_report, update_tray_status, TrayKillswitchMenuItem, TrayStatsMenuItem,
-    TrayStatusMenuItem, MAIN_TRAY_ID,
+    MAIN_TRAY_ID, TrayKillswitchMenuItem, TrayStatsMenuItem, TrayStatusMenuItem,
+    update_tray_from_report, update_tray_status,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

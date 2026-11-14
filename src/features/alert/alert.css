@@ -7,3 +7,4 @@
 /* Шапка: заголовок в одну строку при ширине окна 440px */
 .zs-alert-win .zs-dialog__head{gap:var(--space-2)}
 .zs-alert-win .zs-dialog__head .zs-btn--icon{width:28px;flex:none}
+.zs-alert-reason{display:block;margin-bottom:var(--space-1);color:var(--ink);font-weight:600}

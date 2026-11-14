@@ -1,7 +1,7 @@
 import type { GatewayStatsSnapshot } from "../types";
 import { Badge, Button, Modal, Mono, Row, Rows } from "../ui";
 import { overview as copy, status as words } from "../shared/copy/ru";
-import { countryName } from "../shared/lib/country";
+import { formatCountryWithCode } from "../shared/lib/country";
 import { formatClock } from "../shared/lib/format";
 
 interface EventsModalProps {
@@ -51,7 +51,7 @@ export function EventsModal({ open, onClose, stats }: EventsModalProps) {
                   ) : isProtected ? (
                     <Badge tone="ok" icon="check">
                       {words.protected}
-                      {ev.country ? ` · ${countryName(ev.country) || ev.country}` : ""}
+                      {ev.country ? ` · ${formatCountryWithCode(ev.country) || ev.country}` : ""}
                     </Badge>
                   ) : (
                     <Badge tone="danger" icon="alert">

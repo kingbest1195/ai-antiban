@@ -3,10 +3,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use zastava_lib::auditor::network::{current_timestamp, NetworkTelemetry};
 use zastava_lib::auditor::Auditor;
-use zastava_lib::proxy::hold_queue::{HoldQueue, HoldResolution};
+use zastava_lib::auditor::network::{NetworkTelemetry, current_timestamp};
 use zastava_lib::proxy::ProxyServer;
+use zastava_lib::proxy::hold_queue::{HoldQueue, HoldResolution};
 use zastava_lib::state::AppState;
 use zastava_lib::sysproxy::SysProxy;
 
@@ -128,7 +128,8 @@ async fn test_connect_hold_and_block() {
         Err(e) => panic!("Failed to connect to proxy: {e}"),
     };
 
-    let connect_req = "CONNECT gemini.google.com:443 HTTP/1.1\r\nHost: gemini.google.com:443\r\n\r\n";
+    let connect_req =
+        "CONNECT gemini.google.com:443 HTTP/1.1\r\nHost: gemini.google.com:443\r\n\r\n";
     client
         .write_all(connect_req.as_bytes())
         .await
@@ -150,11 +151,8 @@ async fn test_connect_hold_and_block() {
     });
 
     let mut response = Vec::new();
-    let read_res = tokio::time::timeout(
-        Duration::from_secs(4),
-        client.read_to_end(&mut response),
-    )
-    .await;
+    let read_res =
+        tokio::time::timeout(Duration::from_secs(4), client.read_to_end(&mut response)).await;
 
     assert!(read_res.is_ok(), "Client read timed out during hold");
     let resp_str = String::from_utf8_lossy(&response);
@@ -187,10 +185,10 @@ async fn test_connect_hold_and_allow_session() {
     let mock_handle = tokio::spawn(async move {
         if let Ok((mut stream, _)) = mock_target.accept().await {
             let mut buf = [0u8; 128];
-            if let Ok(n) = stream.read(&mut buf).await {
-                if n > 0 {
-                    let _ = stream.write_all(&buf[..n]).await;
-                }
+            if let Ok(n) = stream.read(&mut buf).await
+                && n > 0
+            {
+                let _ = stream.write_all(&buf[..n]).await;
             }
         }
     });
@@ -234,7 +232,8 @@ async fn test_connect_hold_and_allow_session() {
         Err(e) => panic!("Failed to connect to proxy: {e}"),
     };
 
-    let connect_req = "CONNECT gemini.google.com:443 HTTP/1.1\r\nHost: gemini.google.com:443\r\n\r\n";
+    let connect_req =
+        "CONNECT gemini.google.com:443 HTTP/1.1\r\nHost: gemini.google.com:443\r\n\r\n";
     client
         .write_all(connect_req.as_bytes())
         .await
@@ -409,7 +408,8 @@ async fn test_upstream_proxy_selective_routing() {
         }
         Err(e) => panic!("Failed to connect to proxy: {e}"),
     };
-    let connect_req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
+    let connect_req =
+        "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
     client.write_all(connect_req.as_bytes()).await.unwrap();
     client.flush().await.unwrap();
 
@@ -485,6 +485,7 @@ fn detecting_payload(id: &str) -> zastava_lib::proxy::RiskInterceptPayload {
         is_simulation: false,
         detected_at_ms: 1_700_000_000_000,
         phase: PHASE_DETECTING.to_string(),
+        gate_reason: None,
     }
 }
 
@@ -549,6 +550,7 @@ fn test_alert_event_payload_shapes() {
             new_ip: Some("9.9.9.9".to_string()),
             new_country: Some("NL".to_string()),
         },
+        gate_reason: None,
     };
     let v = serde_json::to_value(&enriched).unwrap();
     let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
@@ -606,6 +608,7 @@ async fn test_pending_alert_snapshot_lifecycle() {
         phase: PHASE_FAILED.to_string(),
         report: None,
         network_change: change.clone(),
+        gate_reason: None,
     });
     assert_eq!(queue.current_alert().unwrap().phase, "detecting");
 
@@ -615,6 +618,7 @@ async fn test_pending_alert_snapshot_lifecycle() {
         phase: PHASE_READY.to_string(),
         report: Some(sample_report(ProviderId::Anthropic)),
         network_change: change,
+        gate_reason: None,
     });
     let snap = queue.current_alert().unwrap();
     assert_eq!(snap.phase, "ready");
@@ -631,4 +635,39 @@ async fn test_pending_alert_snapshot_lifecycle() {
     let _rx2 = queue.register("net-2".into(), "all").await;
     queue.remove("net-2").await;
     assert!(queue.current_alert().is_none());
+}
+
+#[tokio::test]
+async fn test_gate_reason_folds_and_serializes_when_present() {
+    use zastava_lib::auditor::ProviderId;
+    use zastava_lib::proxy::hold_queue::{EnrichedPayload, NetworkChange, PHASE_READY};
+
+    let queue = HoldQueue::new();
+    let _rx = queue.register("net-reason".into(), "all").await;
+    let mut initial = detecting_payload("net-reason");
+    initial.gate_reason = Some("Detected IP change".to_string());
+    queue.set_alert(initial);
+    assert_eq!(
+        queue.current_alert().unwrap().gate_reason.as_deref(),
+        Some("Detected IP change")
+    );
+
+    let enriched = EnrichedPayload {
+        id: "net-reason".to_string(),
+        epoch: 2,
+        phase: PHASE_READY.to_string(),
+        report: Some(sample_report(ProviderId::Anthropic)),
+        network_change: NetworkChange {
+            old_ip: Some("1.1.1.1".to_string()),
+            old_country: Some("DE".to_string()),
+            new_ip: Some("9.9.9.9".to_string()),
+            new_country: Some("NL".to_string()),
+        },
+        gate_reason: Some("High risk route".to_string()),
+    };
+    queue.update_alert(&enriched);
+    let snap = queue.current_alert().unwrap();
+    assert_eq!(snap.gate_reason.as_deref(), Some("High risk route"));
+    let json = serde_json::to_value(&snap).unwrap();
+    assert_eq!(json["gate_reason"], "High risk route");
 }

@@ -3,10 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub const DEFAULT_PROVIDER_MATRIX_JSON: &str =
-    include_str!("../../../rules/provider_matrix.json");
-pub const DEFAULT_DANGEROUS_ASNS_JSON: &str =
-    include_str!("../../../rules/dangerous_asns.json");
+pub const DEFAULT_PROVIDER_MATRIX_JSON: &str = include_str!("../../../rules/provider_matrix.json");
+pub const DEFAULT_DANGEROUS_ASNS_JSON: &str = include_str!("../../../rules/dangerous_asns.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecommendedCountry {
@@ -150,14 +148,20 @@ impl RuleSet {
         })
     }
 
-    pub async fn update_provider_matrix_from_json(&self, json: &str) -> Result<(), serde_json::Error> {
+    pub async fn update_provider_matrix_from_json(
+        &self,
+        json: &str,
+    ) -> Result<(), serde_json::Error> {
         let matrix: ProviderMatrix = serde_json::from_str(json)?;
         let mut w = self.provider_matrix.write().await;
         *w = matrix;
         Ok(())
     }
 
-    pub async fn update_dangerous_asns_from_json(&self, json: &str) -> Result<(), serde_json::Error> {
+    pub async fn update_dangerous_asns_from_json(
+        &self,
+        json: &str,
+    ) -> Result<(), serde_json::Error> {
         let asns: DangerousAsns = serde_json::from_str(json)?;
         let mut w = self.dangerous_asns.write().await;
         *w = asns;
@@ -184,8 +188,14 @@ mod tests {
         assert_eq!(asns.version, "1.2.0");
         assert_eq!(asns.dnsbl_zones.len(), 5);
         assert_eq!(asns.asn_entry(9009).map(|e| e.kind), Some(NetworkKind::Vpn));
-        assert_eq!(asns.asn_entry(24940).map(|e| e.kind), Some(NetworkKind::Hosting));
-        assert_eq!(asns.matches_russian_isp("Rostelecom broadband"), Some("Rostelecom"));
+        assert_eq!(
+            asns.asn_entry(24940).map(|e| e.kind),
+            Some(NetworkKind::Hosting)
+        );
+        assert_eq!(
+            asns.matches_russian_isp("Rostelecom broadband"),
+            Some("Rostelecom")
+        );
     }
     /// Every record of the type lists is traceable: a non-empty source that names a licence.
     /// A record without a source (or without a licence) must not be in the file.
@@ -202,7 +212,11 @@ mod tests {
             !t.is_empty() && t.to_lowercase().contains("license:")
         };
         for e in &asns.asns {
-            assert!(has_source(&e.source), "AS{} has no source with a licence", e.asn);
+            assert!(
+                has_source(&e.source),
+                "AS{} has no source with a licence",
+                e.asn
+            );
             assert!(!e.name.trim().is_empty(), "AS{} has no name", e.asn);
             assert!(
                 e.kind != NetworkKind::Residential,
@@ -210,11 +224,19 @@ mod tests {
                 e.asn
             );
             if e.kind == NetworkKind::Vpn {
-                assert!(!e.reason.trim().is_empty(), "AS{}: a vpn entry needs a reason", e.asn);
+                assert!(
+                    !e.reason.trim().is_empty(),
+                    "AS{}: a vpn entry needs a reason",
+                    e.asn
+                );
             }
         }
         for g in &asns.isp_keyword_groups {
-            assert!(has_source(&g.source), "keyword group {:?} has no source", g.kind);
+            assert!(
+                has_source(&g.source),
+                "keyword group {:?} has no source",
+                g.kind
+            );
             assert!(!g.keywords.is_empty() && g.keywords.iter().all(|k| !k.trim().is_empty()));
         }
         // No ASN twice (the first would silently win).
@@ -234,7 +256,8 @@ mod tests {
     fn a_record_without_source_is_rejected_by_the_schema() {
         let bad = DEFAULT_DANGEROUS_ASNS_JSON.replacen("\"source\"", "\"src\"", 1);
         assert!(serde_json::from_str::<DangerousAsns>(&bad).is_err());
-        let bad_type = DEFAULT_DANGEROUS_ASNS_JSON.replacen("\"type\": \"vpn\"", "\"type\": \"magic\"", 1);
+        let bad_type =
+            DEFAULT_DANGEROUS_ASNS_JSON.replacen("\"type\": \"vpn\"", "\"type\": \"magic\"", 1);
         assert!(serde_json::from_str::<DangerousAsns>(&bad_type).is_err());
     }
 
@@ -247,8 +270,14 @@ mod tests {
     #[test]
     fn keyword_kind_hosting_wins_over_residential() {
         let asns = DangerousAsns::load_bundled().unwrap();
-        assert_eq!(asns.keyword_kind("Example Cloud Communications"), Some(NetworkKind::Hosting));
-        assert_eq!(asns.keyword_kind("Example Broadband Ltd"), Some(NetworkKind::Residential));
+        assert_eq!(
+            asns.keyword_kind("Example Cloud Communications"),
+            Some(NetworkKind::Hosting)
+        );
+        assert_eq!(
+            asns.keyword_kind("Example Broadband Ltd"),
+            Some(NetworkKind::Residential)
+        );
         assert_eq!(asns.keyword_kind("Example Net"), None);
     }
 }

@@ -1,6 +1,8 @@
 import type { AppStateData, CheckResult, IpType, NetworkTelemetry, PartialAudit, ProviderId, RiskReport } from "../../types";
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckGroupId, CheckId } from "../../shared/copy/ru";
+import { formatCountryWithCode } from "../../shared/lib/country";
+import { resolvePinnedIp } from "../../shared/lib/format";
 
 /** Что можно сделать с непройденной проверкой. */
 export type CheckAction = "pin" | "sync-timezone" | "guide";
@@ -158,7 +160,7 @@ function dataFor(id: CheckId, report: RiskReport, state: AppStateData | null): C
   };
   switch (id) {
     case "geo_matrix":
-      add(d.country, t.country_code, true);
+      add(d.country, formatCountryWithCode(t.country_code) || t.country_code, false);
       add(d.ip, t.ip, true);
       break;
     case "asn": {
@@ -175,13 +177,15 @@ function dataFor(id: CheckId, report: RiskReport, state: AppStateData | null): C
     case "reverse_dns":
       add(d.ip, t.ip, true);
       break;
-    case "pinning":
-      add(d.pinnedIp, state?.pinned_ip ?? null, true);
-      if (!state?.pinned_ip) out.push({ label: d.pinnedIp, value: d.notPinned, mono: false });
+    case "pinning": {
+      const pinnedIp = resolvePinnedIp(state, report.provider);
+      add(d.pinnedIp, pinnedIp, true);
+      if (!pinnedIp) out.push({ label: d.pinnedIp, value: d.notPinned, mono: false });
       add(d.mode, state?.strict_pinning_enabled ? d.strict : d.notify, false);
       break;
+    }
     case "travel":
-      add(d.country, t.country_code, true);
+      add(d.country, formatCountryWithCode(t.country_code) || t.country_code, false);
       break;
     case "timezone":
       add(d.zoneIp, t.timezone, true);

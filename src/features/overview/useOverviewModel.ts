@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { AppStateData, CheckResult, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
-import { checksWord } from "../../shared/lib/format";
+import { checksWord, resolvePinnedIp } from "../../shared/lib/format";
 import { classify, countChecks, failedChecks, isYellowOnlyUnknown, pickWorstReport } from "../checks/checksModel";
 import { overview as copy } from "../../shared/copy/ru";
 import type { HeroTone, TabItem } from "../../ui";
@@ -140,7 +140,7 @@ export function useOverviewModel({
     const checksPassed = counts.ok;
     const checksTotal = Math.max(counts.applicable, activeReport?.applicable_count ?? 0);
 
-    const pinned = state?.pinned_ip ?? null;
+    const pinned = resolvePinnedIp(state, activeReport?.provider);
     const pinState: PinState = pinned ? (pinned === currentIp ? "pinned" : "changed") : "none";
 
     const providerName = activeReport?.telemetry?.isp || activeReport?.telemetry?.org || null;

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
@@ -12,7 +12,7 @@ use crate::auditor::geo_matrix::{
 use crate::auditor::rules::ProviderMatrix;
 use crate::auditor::seams::{HttpProbeOutcome, IpProbe};
 use crate::routing::net::resolve_entry_checked;
-use crate::routing::{route_fingerprint, route_id_for_raw_key, Entry, EntryProto, Route};
+use crate::routing::{Entry, EntryProto, Route, route_fingerprint, route_id_for_raw_key};
 use crate::state::UpstreamProxyConfig;
 
 pub const CACHE_TTL_SECONDS: u64 = 15;
@@ -122,10 +122,10 @@ fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::Clie
 
     let mut proxy = reqwest::Proxy::all(proxy_url.as_str())
         .map_err(|_| format!("Failed to configure {scheme} entry proxy for the audit client"))?;
-    if entry.proto != EntryProto::Socks5 {
-        if let Some(u) = entry.username.as_deref() {
-            proxy = proxy.basic_auth(u, entry.password.as_deref().unwrap_or(""));
-        }
+    if entry.proto != EntryProto::Socks5
+        && let Some(u) = entry.username.as_deref()
+    {
+        proxy = proxy.basic_auth(u, entry.password.as_deref().unwrap_or(""));
     }
 
     let mut builder = reqwest::Client::builder()
@@ -300,14 +300,47 @@ impl NetworkResolver {
         self.cache.write().await.remove(&Some(route_id.to_string()));
     }
 
+    /// Returns the cached direct-path country code when direct telemetry is fresh and matches `ip`.
+    pub async fn cached_direct_country(&self, ip: &str) -> Option<String> {
+        let target = ip.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let r = self.cache.read().await;
+        let entry = r.get(&None)?;
+        if entry.telemetry.ip.trim() == target && entry.telemetry.is_fresh(CACHE_TTL_SECONDS) {
+            let cc = entry.telemetry.country_code.trim();
+            if !cc.is_empty() {
+                return Some(cc.to_uppercase());
+            }
+        }
+        None
+    }
+
     /// Pre-populate or override cached direct telemetry (deterministic tests and simulation)
     pub async fn set_cached(&self, telemetry: NetworkTelemetry) {
-        self.cache.write().await.insert(None, CachedTelemetry { telemetry, route_fp: None });
+        self.cache.write().await.insert(
+            None,
+            CachedTelemetry {
+                telemetry,
+                route_fp: None,
+            },
+        );
     }
 
     /// Pre-populate cached telemetry for a route id (`None` = direct).
-    pub async fn set_cached_for_route(&self, route_id: Option<String>, telemetry: NetworkTelemetry) {
-        self.cache.write().await.insert(route_id, CachedTelemetry { telemetry, route_fp: None });
+    pub async fn set_cached_for_route(
+        &self,
+        route_id: Option<String>,
+        telemetry: NetworkTelemetry,
+    ) {
+        self.cache.write().await.insert(
+            route_id,
+            CachedTelemetry {
+                telemetry,
+                route_fp: None,
+            },
+        );
     }
 
     /// Legacy: pre-populate cached telemetry for an upstream raw key (mapped to its route id).
@@ -343,14 +376,16 @@ impl NetworkResolver {
         let r = self.cache.read().await;
         let entry = r.get(key)?;
         // The route was re-imported with different nodes / credentials: the entry is stale.
-        if let (Some(cached_fp), Some(fp)) = (entry.route_fp, route_fp) {
-            if cached_fp != fp {
-                return None;
-            }
+        if let (Some(cached_fp), Some(fp)) = (entry.route_fp, route_fp)
+            && cached_fp != fp
+        {
+            return None;
         }
         let telemetry = &entry.telemetry;
-        let ttl = if force_refresh || !telemetry.has_provider_metadata() {
+        let ttl = if !telemetry.has_provider_metadata() {
             2
+        } else if force_refresh {
+            8
         } else {
             CACHE_TTL_SECONDS
         };
@@ -373,10 +408,8 @@ impl NetworkResolver {
         let key: CacheKey = route.map(|r| r.id.clone());
         let fp = route.map(route_fingerprint);
 
-        if !force_refresh {
-            if let Some(t) = self.cached(&key, false, false, fp).await {
-                return Ok(t);
-            }
+        if !force_refresh && let Some(t) = self.cached(&key, false, false, fp).await {
+            return Ok(t);
         }
 
         // Coalesce concurrent cold-start / multi-provider probes so we don't fire 4 simultaneous
@@ -391,10 +424,13 @@ impl NetworkResolver {
             Some(r) => self.cascade_via_route(r).await?,
         };
 
-        self.cache
-            .write()
-            .await
-            .insert(key, CachedTelemetry { telemetry: telemetry.clone(), route_fp: fp });
+        self.cache.write().await.insert(
+            key,
+            CachedTelemetry {
+                telemetry: telemetry.clone(),
+                route_fp: fp,
+            },
+        );
         Ok(telemetry)
     }
 
@@ -537,7 +573,9 @@ impl NetworkResolver {
 
         let parsed: FreeIpApiResponse = resp.json().await.map_err(|e| e.to_string())?;
 
-        let ip = parsed.ip_address.ok_or("freeipapi.com missing 'ipAddress'")?;
+        let ip = parsed
+            .ip_address
+            .ok_or("freeipapi.com missing 'ipAddress'")?;
         let country_code = parsed
             .country_code
             .ok_or("freeipapi.com missing 'countryCode'")?
@@ -549,9 +587,13 @@ impl NetworkResolver {
             digits.parse::<u32>().ok()
         });
         let org = parsed.asn_organization;
-        let timezone = parsed
-            .time_zones
-            .and_then(|mut v| if v.is_empty() { None } else { Some(v.remove(0)) });
+        let timezone = parsed.time_zones.and_then(|mut v| {
+            if v.is_empty() {
+                None
+            } else {
+                Some(v.remove(0))
+            }
+        });
 
         Ok(NetworkTelemetry {
             ip,
@@ -565,7 +607,10 @@ impl NetworkResolver {
         })
     }
 
-    async fn query_cloudflare_trace(&self, client: &reqwest::Client) -> Result<NetworkTelemetry, String> {
+    async fn query_cloudflare_trace(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<NetworkTelemetry, String> {
         let resp = client
             .get("https://1.1.1.1/cdn-cgi/trace")
             .send()
@@ -908,12 +953,10 @@ pub fn parse_cloudflare_trace(text: &str) -> Option<CloudflareTrace> {
 fn looks_like_html(body: &str) -> bool {
     let trimmed = body.trim_start();
     trimmed.starts_with('<')
-        || trimmed
-            .get(..64)
-            .is_some_and(|head| {
-                let lower = head.to_ascii_lowercase();
-                lower.contains("<!doctype") || lower.contains("<html")
-            })
+        || trimmed.get(..64).is_some_and(|head| {
+            let lower = head.to_ascii_lowercase();
+            lower.contains("<!doctype") || lower.contains("<html")
+        })
 }
 
 fn parse_gemini_exit_probe(body: &str) -> Option<(String, Option<String>)> {
@@ -948,29 +991,21 @@ async fn probe_url_with_client(
     url: &str,
     timeout: Duration,
 ) -> Result<(u16, String), ProbeFetchError> {
-    let resp = client
-        .get(url)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                ProbeFetchError::Timeout
-            } else {
-                ProbeFetchError::Unreachable(e.to_string())
-            }
-        })?;
+    let resp = client.get(url).timeout(timeout).send().await.map_err(|e| {
+        if e.is_timeout() {
+            ProbeFetchError::Timeout
+        } else {
+            ProbeFetchError::Unreachable(e.to_string())
+        }
+    })?;
     let status = resp.status().as_u16();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                ProbeFetchError::Timeout
-            } else {
-                ProbeFetchError::Unreachable(e.to_string())
-            }
-        })?;
+    let body = resp.text().await.map_err(|e| {
+        if e.is_timeout() {
+            ProbeFetchError::Timeout
+        } else {
+            ProbeFetchError::Unreachable(e.to_string())
+        }
+    })?;
     Ok((status, body))
 }
 
@@ -1018,7 +1053,9 @@ pub fn evaluate_reverse_dns_ptr(telemetry: &NetworkTelemetry) -> CheckResult {
 
     CheckResult::ok(
         "REVERSE_DNS_CLEAN",
-        format!("В имени узла/провайдера выходного IP ({detail}) нет маркеров публичных анонимайзеров из встроенного списка. PTR-запись не запрашивалась: проверены данные сервиса геолокации."),
+        format!(
+            "В имени узла/провайдера выходного IP ({detail}) нет маркеров публичных анонимайзеров из встроенного списка. PTR-запись не запрашивалась: проверены данные сервиса геолокации."
+        ),
     )
 }
 
@@ -1055,7 +1092,9 @@ pub fn evaluate_dns_country_consistency(
 
     CheckResult::ok(
         "DNS_COUNTRY_CONSISTENT",
-        format!("Географическая юрисдикция DNS и выходного узла ({exit_country}) полностью согласованы."),
+        format!(
+            "Географическая юрисдикция DNS и выходного узла ({exit_country}) полностью согласованы."
+        ),
     )
 }
 
@@ -1154,7 +1193,9 @@ mod tests {
 
         // Cache NL upstream proxy IP under specific proxy key
         let key = Some("socks5://185.10.10.1:1080".to_string());
-        resolver.set_cached_for_key(key.clone(), tel_nl.clone()).await;
+        resolver
+            .set_cached_for_key(key.clone(), tel_nl.clone())
+            .await;
 
         let cfg = UpstreamProxyConfig {
             enabled: true,
@@ -1167,7 +1208,10 @@ mod tests {
             label: None,
         };
 
-        let res2 = resolver.resolve_with_upstream(false, Some(&cfg)).await.unwrap();
+        let res2 = resolver
+            .resolve_with_upstream(false, Some(&cfg))
+            .await
+            .unwrap();
         assert_eq!(res2.ip, "185.10.10.1");
         assert_eq!(res2.country_code, "NL");
     }
@@ -1185,7 +1229,10 @@ mod tests {
             resolved_at: current_timestamp(),
         };
         let bad_res = evaluate_reverse_dns_ptr(&bad_tel);
-        assert_eq!(bad_res.status, crate::auditor::geo_matrix::CheckStatus::Warning);
+        assert_eq!(
+            bad_res.status,
+            crate::auditor::geo_matrix::CheckStatus::Warning
+        );
         assert_eq!(bad_res.code, "REVERSE_DNS_ANONYMIZER_MARKER");
 
         let clean_tel = NetworkTelemetry {
@@ -1199,7 +1246,10 @@ mod tests {
             resolved_at: current_timestamp(),
         };
         let clean_res = evaluate_reverse_dns_ptr(&clean_tel);
-        assert_eq!(clean_res.status, crate::auditor::geo_matrix::CheckStatus::Ok);
+        assert_eq!(
+            clean_res.status,
+            crate::auditor::geo_matrix::CheckStatus::Ok
+        );
         assert_eq!(clean_res.code, "REVERSE_DNS_CLEAN");
     }
 
@@ -1218,12 +1268,18 @@ mod tests {
 
         // Split country
         let split_res = evaluate_dns_country_consistency(&tel, Some("RU"));
-        assert_eq!(split_res.status, crate::auditor::geo_matrix::CheckStatus::Warning);
+        assert_eq!(
+            split_res.status,
+            crate::auditor::geo_matrix::CheckStatus::Warning
+        );
         assert_eq!(split_res.code, "DNS_COUNTRY_SPLIT");
 
         // Matching country
         let clean_res = evaluate_dns_country_consistency(&tel, Some("NL"));
-        assert_eq!(clean_res.status, crate::auditor::geo_matrix::CheckStatus::Ok);
+        assert_eq!(
+            clean_res.status,
+            crate::auditor::geo_matrix::CheckStatus::Ok
+        );
         assert_eq!(clean_res.code, "DNS_COUNTRY_CONSISTENT");
 
         // No independent source: unknown, never "consistent"
@@ -1284,11 +1340,9 @@ mod tests {
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let ca_key = rcgen::KeyPair::generate().unwrap();
         let ca = ca_params.self_signed(&ca_key).unwrap();
-        let leaf_params = rcgen::CertificateParams::new(vec![
-            "localhost".to_string(),
-            "audit.test".to_string(),
-        ])
-        .unwrap();
+        let leaf_params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string(), "audit.test".to_string()])
+                .unwrap();
         let leaf_key = rcgen::KeyPair::generate().unwrap();
         let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
 
@@ -1351,7 +1405,10 @@ mod tests {
         };
         assert_eq!(body, "ok");
         let seen = seen_rx.await.unwrap();
-        assert!(seen.starts_with("CONNECT audit.test:443 HTTP/1.1"), "{seen}");
+        assert!(
+            seen.starts_with("CONNECT audit.test:443 HTTP/1.1"),
+            "{seen}"
+        );
         // base64("alice:wonderland")
         assert!(seen.contains("YWxpY2U6d29uZGVybGFuZA=="), "{seen}");
 
@@ -1374,8 +1431,12 @@ mod tests {
             resolved_at: current_timestamp(),
         };
         resolver.set_cached(tel("109.1.1.1")).await;
-        resolver.set_cached_for_route(Some("route-a".into()), tel("185.1.1.1")).await;
-        resolver.set_cached_for_route(Some("route-b".into()), tel("185.2.2.2")).await;
+        resolver
+            .set_cached_for_route(Some("route-a".into()), tel("185.1.1.1"))
+            .await;
+        resolver
+            .set_cached_for_route(Some("route-b".into()), tel("185.2.2.2"))
+            .await;
         let mk = |id: &str| Route {
             id: id.to_string(),
             label: id.to_string(),
@@ -1388,11 +1449,30 @@ mod tests {
             added_at: 0,
         };
         assert_eq!(resolver.resolve(false).await.unwrap().ip, "109.1.1.1");
-        assert_eq!(resolver.resolve_with_route(false, Some(&mk("route-a"))).await.unwrap().ip, "185.1.1.1");
-        assert_eq!(resolver.resolve_with_route(false, Some(&mk("route-b"))).await.unwrap().ip, "185.2.2.2");
+        assert_eq!(
+            resolver
+                .resolve_with_route(false, Some(&mk("route-a")))
+                .await
+                .unwrap()
+                .ip,
+            "185.1.1.1"
+        );
+        assert_eq!(
+            resolver
+                .resolve_with_route(false, Some(&mk("route-b")))
+                .await
+                .unwrap()
+                .ip,
+            "185.2.2.2"
+        );
         resolver.invalidate_route("route-a").await;
         // No entries -> cannot resolve, and never falls back to the direct cache.
-        assert!(resolver.resolve_with_route(false, Some(&mk("route-a"))).await.is_err());
+        assert!(
+            resolver
+                .resolve_with_route(false, Some(&mk("route-a")))
+                .await
+                .is_err()
+        );
     }
 
     async fn spawn_http_mock(
@@ -1586,7 +1666,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_provider_exit_gemini_direct_is_not_applicable_and_bound_route_uses_route_label() {
+    async fn probe_provider_exit_gemini_direct_is_not_applicable_and_bound_route_uses_route_label()
+    {
         let url = spawn_http_mock(
             "200 OK",
             "application/json",
@@ -1636,6 +1717,9 @@ mod tests {
             )
             .await;
         assert_eq!(bound.status, CheckStatus::Ok);
-        assert_eq!(bound.measured_via.as_deref(), Some("gemini (ipinfo.io) (маршрут ключа)"));
+        assert_eq!(
+            bound.measured_via.as_deref(),
+            Some("gemini (ipinfo.io) (маршрут ключа)")
+        );
     }
 }

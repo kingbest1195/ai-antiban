@@ -53,6 +53,15 @@ export function applyProgress(prev: PartialAudit | undefined, event: AuditProgre
   return { ...prev, checks };
 }
 
+/** Точечно обновляет отчёт одного сервиса, не затрагивая отчёты остальных. */
+export function mergeProviderReport(
+  prev: Partial<Record<ProviderId, RiskReport>>,
+  providerId: ProviderId,
+  report: RiskReport,
+): Partial<Record<ProviderId, RiskReport>> {
+  return { ...prev, [providerId]: report };
+}
+
 interface Options {
   showToast: ShowToast;
   refreshGatewayStats: () => Promise<void>;
@@ -166,8 +175,8 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
         setReportAt(refreshedAt);
 
         const [gptSettled, geminiSettled] = await Promise.allSettled([
-          auditConnection("openai", false),
-          auditConnection("gemini", false),
+          auditConnection("openai", force),
+          auditConnection("gemini", force),
         ]);
 
         setReports((prev) => ({
@@ -202,6 +211,39 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
       }
     },
     [showToast, refreshGatewayStats, beginRun, refreshRoutes, refreshCoverage],
+  );
+
+  /** Точечный аудит одного сервиса: обновляет только его отчёт, не трогая остальные. */
+  const runProviderAudit = useCallback(
+    async (providerId: ProviderId, forceRefresh: boolean = true) => {
+      setRefreshing(true);
+      inFlight.current += 1;
+      try {
+        const report = await auditConnection(providerId, forceRefresh, beginRun(providerId));
+        setReports((prev) => mergeProviderReport(prev, providerId, report));
+        setPartials((prev) => ({ ...prev, [providerId]: undefined }));
+        setAuditError(null);
+        const refreshedAt = Date.now();
+        reportAtRef.current = refreshedAt;
+        setReportAt(refreshedAt);
+        try {
+          const freshState = await fetchAppState();
+          setState(freshState);
+          if (freshState.auto_update_enabled !== undefined) setAutoUpdateEnabled(freshState.auto_update_enabled);
+        } catch {}
+        await refreshGatewayStats();
+      } catch (err: any) {
+        console.error(`Failed to run audit for ${providerId}:`, err);
+        setPartials((prev) => ({ ...prev, [providerId]: undefined }));
+        setAuditError(err?.message || String(err));
+        showToast(t.auditError, err?.message || String(err), "error");
+      } finally {
+        inFlight.current -= 1;
+        if (inFlight.current <= 0) setRefreshing(false);
+        refreshGatewayStats();
+      }
+    },
+    [showToast, refreshGatewayStats, beginRun],
   );
 
   // Куски идущего аудита: адрес выхода и каждая проверка приходят, как только готовы.
@@ -386,6 +428,7 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     refreshRoutes,
     refreshState,
     runFullAudit,
+    runProviderAudit,
     coverageSnapshot,
     setCoverageSnapshot,
     refreshCoverage,

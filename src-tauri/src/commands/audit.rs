@@ -18,7 +18,9 @@ struct AuditProgressEvent<'a> {
 }
 
 #[tauri::command]
-pub async fn get_state(state: tauri::State<'_, state::AppState>) -> Result<state::AppStateData, String> {
+pub async fn get_state(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<state::AppStateData, String> {
     // Route secrets are blanked; `upstream_proxy` keeps its v1.3.x shape (legacy/default route).
     Ok(state.get_data().await.redacted_for_ui())
 }
@@ -82,13 +84,8 @@ pub async fn audit_connection(
     // Sync system tray status whenever Anthropic or primary audit runs
     if provider_id == auditor::ProviderId::Anthropic || force_refresh.unwrap_or(false) {
         let st = state.get_data().await;
-        let is_pinned = st
-            .pinned_ip
-            .as_ref()
-            .map(|p| p.trim() == report.telemetry.ip.trim())
-            .unwrap_or(false);
-        let has_blocked =
-            !st.blocked_providers.is_empty() || guard.gate() != proxy::Gate::Open;
+        let is_pinned = is_ip_pinned_for_state(&st, provider_id, &report.telemetry.ip);
+        let has_blocked = !st.blocked_providers.is_empty() || guard.gate() != proxy::Gate::Open;
         let tray_report = proxy::guard::effective_tray_report(&report, has_blocked, &st);
         update_tray_from_report(&app, &tray_report, is_pinned, has_blocked);
     }
@@ -96,20 +93,102 @@ pub async fn audit_connection(
     Ok(report)
 }
 
-#[tauri::command]
-pub async fn pin_current_ip(
+fn is_ip_pinned_for_state(
+    st: &state::AppStateData,
+    provider_id: auditor::ProviderId,
+    exit_ip: &str,
+) -> bool {
+    let is_routed = matches!(
+        crate::routing::select_route(st, provider_id.as_str()),
+        crate::routing::RouteSelection::Route(_)
+    );
+    if is_routed {
+        if let Some(pin) = st.pinned_ip_for_provider(provider_id.as_str(), true) {
+            return pin == exit_ip.trim();
+        }
+        // A bound Zastava key already locks this provider to the key endpoint IP.
+        return true;
+    }
+    st.pinned_ip_for_provider(provider_id.as_str(), false)
+        .map(|p| p == exit_ip.trim())
+        .unwrap_or(false)
+}
+
+async fn resolve_pin_scope(
+    state: &state::AppState,
+    provider: Option<&str>,
+) -> Result<String, String> {
+    let Some(raw) = provider.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok("default".to_string());
+    };
+    if raw.eq_ignore_ascii_case("default") {
+        return Ok("default".to_string());
+    }
+    let pid =
+        auditor::ProviderId::from_id(raw).ok_or_else(|| format!("Неизвестный провайдер: {raw}"))?;
+    let is_routed = matches!(
+        state.route_selection(pid.as_str()).await,
+        crate::routing::RouteSelection::Route(_)
+    );
+    if is_routed {
+        Ok(pid.as_str().to_string())
+    } else {
+        Ok("default".to_string())
+    }
+}
+
+async fn pin_ip_inner(
+    state: &state::AppState,
     ip: String,
-    state: tauri::State<'_, state::AppState>,
+    provider: Option<String>,
 ) -> Result<(), String> {
+    let scope = resolve_pin_scope(state, provider.as_deref()).await?;
     state
-        .set_pinned_ip(Some(ip))
+        .set_pinned_ip_for(&scope, Some(ip))
         .await
         .map_err(|e| e.to_string())
 }
 
+async fn unpin_ip_inner(state: &state::AppState, provider: Option<String>) -> Result<(), String> {
+    match provider.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => state
+            .clear_all_pinned_ips()
+            .await
+            .map_err(|e| e.to_string()),
+        Some(_) => {
+            let scope = resolve_pin_scope(state, provider.as_deref()).await?;
+            state
+                .set_pinned_ip_for(&scope, None)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Pins `ip` for the routed `provider` key, or for `"default"` when the provider is Direct or omitted.
 #[tauri::command]
-pub async fn unpin_ip(state: tauri::State<'_, state::AppState>) -> Result<(), String> {
-    state.set_pinned_ip(None).await.map_err(|e| e.to_string())
+pub async fn pin_current_ip(
+    ip: String,
+    provider: Option<String>,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    pin_ip_inner(&state, ip, provider).await
+}
+
+/// Unpins the IP for `provider` (or clears all pinned IPs when `provider` is omitted).
+#[tauri::command]
+pub async fn unpin_ip(
+    provider: Option<String>,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    unpin_ip_inner(&state, provider).await
+}
+
+#[tauri::command]
+pub async fn get_pinned_ips(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    Ok(state.get_pinned_ips().await)
 }
 
 #[tauri::command]
@@ -137,15 +216,23 @@ pub async fn allow_provider_session(
 
     // Record current IP in history so Impossible Travel is acknowledged and cleared
     let mut tel_opt = None;
-    if let Some(provider_id) = auditor::ProviderId::from_id(&provider) {
-        if let Ok(tel) = auditor.resolve_for_provider(provider_id, &state, false).await {
-            let entry = state::IpHistoryEntry::new(
-                tel.ip.clone(),
-                tel.country_code.clone(),
-                tel.asn,
-                tel.resolved_at,
-            );
-            let _ = state.record_ip_history(provider_id.as_str(), entry).await;
+    if let Some(provider_id) = auditor::ProviderId::from_id(&provider)
+        && let Ok(tel) = auditor
+            .resolve_for_provider(provider_id, &state, false)
+            .await
+    {
+        let data = state.get_data().await;
+        let selection = crate::routing::select_route(&data, provider_id.as_str());
+        let entry = state::IpHistoryEntry::new(
+            tel.ip.clone(),
+            tel.country_code.clone(),
+            tel.asn,
+            tel.resolved_at,
+        );
+        let _ = state
+            .record_ip_history_for_selection(provider_id.as_str(), &selection, entry)
+            .await;
+        if matches!(selection, crate::routing::RouteSelection::Direct) {
             tel_opt = Some(tel);
         }
     }
@@ -178,15 +265,23 @@ pub async fn unblock_provider_cmd(
 
     // Also update IP history to current IP so a stale Impossible Travel doesn't immediately re-flag
     let mut tel_opt = None;
-    if let Some(provider_id) = auditor::ProviderId::from_id(&provider) {
-        if let Ok(tel) = auditor.resolve_for_provider(provider_id, &state, false).await {
-            let entry = state::IpHistoryEntry::new(
-                tel.ip.clone(),
-                tel.country_code.clone(),
-                tel.asn,
-                tel.resolved_at,
-            );
-            let _ = state.record_ip_history(provider_id.as_str(), entry).await;
+    if let Some(provider_id) = auditor::ProviderId::from_id(&provider)
+        && let Ok(tel) = auditor
+            .resolve_for_provider(provider_id, &state, false)
+            .await
+    {
+        let data = state.get_data().await;
+        let selection = crate::routing::select_route(&data, provider_id.as_str());
+        let entry = state::IpHistoryEntry::new(
+            tel.ip.clone(),
+            tel.country_code.clone(),
+            tel.asn,
+            tel.resolved_at,
+        );
+        let _ = state
+            .record_ip_history_for_selection(provider_id.as_str(), &selection, entry)
+            .await;
+        if matches!(selection, crate::routing::RouteSelection::Direct) {
             tel_opt = Some(tel);
         }
     }
@@ -230,11 +325,7 @@ pub async fn verify_and_unblock_provider(
 
     let st_before = state.get_data().await;
     let manual_ks = guard.is_manual_killswitch();
-    let is_pinned = st_before
-        .pinned_ip
-        .as_deref()
-        .map(|p| p.trim() == report.telemetry.ip.trim())
-        .unwrap_or(false);
+    let is_pinned = is_ip_pinned_for_state(&st_before, provider_id, &report.telemetry.ip);
 
     if !should_verify_unblock(manual_ks, &report, st_before.pinned_ip.as_deref()) {
         let has_blocked =
@@ -243,6 +334,7 @@ pub async fn verify_and_unblock_provider(
         return Ok(false);
     }
 
+    let selection = crate::routing::select_route(&st_before, provider_id.as_str());
     state
         .unblock_provider(provider_id.as_str())
         .await
@@ -253,8 +345,12 @@ pub async fn verify_and_unblock_provider(
         report.telemetry.asn,
         report.telemetry.resolved_at,
     );
-    let _ = state.record_ip_history(provider_id.as_str(), entry).await;
-    guard.ensure_open_for_verified(&report.telemetry).await;
+    let _ = state
+        .record_ip_history_for_selection(provider_id.as_str(), &selection, entry)
+        .await;
+    if matches!(selection, crate::routing::RouteSelection::Direct) {
+        guard.ensure_open_for_verified(&report.telemetry).await;
+    }
 
     let st_after = state.get_data().await;
     let has_blocked = !st_after.blocked_providers.is_empty() || guard.gate() != proxy::Gate::Open;
@@ -271,7 +367,9 @@ pub async fn get_gateway_stats(
 }
 
 #[tauri::command]
-pub async fn get_split_tunnel_mode(state: tauri::State<'_, state::AppState>) -> Result<bool, String> {
+pub async fn get_split_tunnel_mode(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<bool, String> {
     Ok(state.is_split_tunnel_mode().await)
 }
 
@@ -284,6 +382,148 @@ pub async fn set_split_tunnel_mode(
         .set_split_tunnel_mode(enabled)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_onboarding_v2_2_done(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<bool, String> {
+    Ok(state.is_onboarding_v2_2_done().await)
+}
+
+#[tauri::command]
+pub async fn set_onboarding_v2_2_done(
+    done: bool,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    state
+        .set_onboarding_v2_2_done(done)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_hide_ip_mode(state: tauri::State<'_, state::AppState>) -> Result<bool, String> {
+    Ok(state.is_hide_ip_mode().await)
+}
+
+#[tauri::command]
+pub async fn set_hide_ip_mode(
+    enabled: bool,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    state
+        .set_hide_ip_mode(enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+    use crate::routing::{Entry, EntryProto, Route};
+
+    #[tokio::test]
+    async fn pin_ip_isolates_routed_provider_from_default_vpn_and_preserves_route_lock() {
+        let state = state::AppState::new_in_memory();
+        let route = Route {
+            id: "fr-1".to_string(),
+            label: "France".to_string(),
+            country: Some("FR".to_string()),
+            exit_ip: Some("136.244.114.42".to_string()),
+            expires_at: None,
+            entries: vec![Entry {
+                proto: EntryProto::Http,
+                host: "136.244.114.42".to_string(),
+                port: 8443,
+                username: None,
+                password: None,
+                sni: None,
+            }],
+            raw_key: String::new(),
+            enabled: true,
+            added_at: 0,
+        };
+        state.upsert_route(route).await.unwrap();
+        state
+            .bind_provider_route("gemini", Some("fr-1"))
+            .await
+            .unwrap();
+
+        // Direct provider (anthropic) pins under "default".
+        pin_ip_inner(
+            &state,
+            "145.241.193.245".to_string(),
+            Some("anthropic".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let st = state.get_data().await;
+        assert_eq!(st.pinned_ip.as_deref(), Some("145.241.193.245"));
+        assert_eq!(
+            st.pinned_ips.get("default").map(String::as_str),
+            Some("145.241.193.245")
+        );
+        assert!(!st.pinned_ips.contains_key("gemini"));
+
+        // Routed Gemini is pinned by its Zastava key even when its exit differs from global VPN.
+        assert!(is_ip_pinned_for_state(
+            &st,
+            auditor::ProviderId::Gemini,
+            "136.244.114.42"
+        ));
+        assert!(is_ip_pinned_for_state(
+            &st,
+            auditor::ProviderId::Anthropic,
+            "145.241.193.245"
+        ));
+        assert!(!is_ip_pinned_for_state(
+            &st,
+            auditor::ProviderId::Anthropic,
+            "1.2.3.4"
+        ));
+
+        // Explicit pin on routed Gemini goes into pinned_ips["gemini"] without touching "default".
+        pin_ip_inner(
+            &state,
+            "136.244.114.42".to_string(),
+            Some("gemini".to_string()),
+        )
+        .await
+        .unwrap();
+        let st2 = state.get_data().await;
+        assert_eq!(
+            st2.pinned_ips.get("gemini").map(String::as_str),
+            Some("136.244.114.42")
+        );
+        assert_eq!(
+            st2.pinned_ips.get("default").map(String::as_str),
+            Some("145.241.193.245")
+        );
+        assert!(!is_ip_pinned_for_state(
+            &st2,
+            auditor::ProviderId::Gemini,
+            "99.99.99.99"
+        ));
+
+        // Unpinning Gemini only removes Gemini's explicit pin, keeping "default" intact.
+        unpin_ip_inner(&state, Some("gemini".to_string()))
+            .await
+            .unwrap();
+        let st3 = state.get_data().await;
+        assert!(!st3.pinned_ips.contains_key("gemini"));
+        assert_eq!(
+            st3.pinned_ips.get("default").map(String::as_str),
+            Some("145.241.193.245")
+        );
+
+        // Unpinning with None clears all pinned IPs.
+        unpin_ip_inner(&state, None).await.unwrap();
+        let st4 = state.get_data().await;
+        assert!(st4.pinned_ip.is_none());
+        assert!(st4.pinned_ips.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -346,7 +586,10 @@ mod tests {
 
         // Non-critical Yellow warning on allowed geo / pinned IP succeeds.
         let mut yellow = base_report(auditor::OverallStatus::Yellow, "NL");
-        yellow.checks = vec![ok.clone(), auditor::CheckResult::warning("TZ", "diff", None)];
+        yellow.checks = vec![
+            ok.clone(),
+            auditor::CheckResult::warning("TZ", "diff", None),
+        ];
         assert!(should_verify_unblock(false, &yellow, Some("1.1.1.1")));
 
         // Sanctioned country stays blocked even if checks weren't flagged.

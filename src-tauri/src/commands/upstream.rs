@@ -17,7 +17,10 @@ pub async fn set_upstream_proxy(
     let cfg = route
         .to_legacy(true)
         .ok_or_else(|| "Key has no entry nodes".to_string())?;
-    state.install_legacy_route(route).await.map_err(|e| e.to_string())?;
+    state
+        .install_legacy_route(route)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(cfg.without_secrets())
 }
 
@@ -34,9 +37,10 @@ pub async fn toggle_upstream_proxy(
 }
 
 #[tauri::command]
-pub async fn clear_upstream_proxy(
-    state: tauri::State<'_, AppContext>,
-) -> Result<bool, String> {
-    state.clear_legacy_route().await.map_err(|e| e.to_string())?;
+pub async fn clear_upstream_proxy(state: tauri::State<'_, AppContext>) -> Result<bool, String> {
+    state
+        .clear_legacy_route()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(true)
 }

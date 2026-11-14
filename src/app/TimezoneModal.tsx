@@ -13,6 +13,7 @@ interface TimezoneModalProps {
   /** Открыть настройки времени ОС и перейти к гайду. */
   onOpenOsClock: () => void;
   targetTz?: string;
+  hasBrowserTraffic?: boolean;
   osTzStatus?: OsTzSyncStatus | null;
   osTzLoading?: boolean;
   osTzError?: string | null;
@@ -29,6 +30,7 @@ export function TimezoneModal({
   onSync,
   onOpenOsClock,
   targetTz,
+  hasBrowserTraffic = false,
   osTzStatus: propOsStatus,
   osTzLoading: propOsLoading,
   osTzError: propOsError,
@@ -69,6 +71,9 @@ export function TimezoneModal({
         <p className="zs-modal-text">{copy.text}</p>
 
         <Section title={copy.cliTitle}>
+          <p className="zs-modal-text">
+            <Badge tone="ok">{copy.cliBadge}</Badge>
+          </p>
           <p className="zs-modal-text">{copy.cliText}</p>
           {synced && (
             <p className="zs-modal-text">
@@ -78,7 +83,7 @@ export function TimezoneModal({
             </p>
           )}
           <Button
-            variant="secondary"
+            variant="primary"
             disabled={syncing}
             onClick={() => void onSync()}
           >
@@ -87,7 +92,15 @@ export function TimezoneModal({
         </Section>
 
         <Section title={copy.osTitle}>
+          <p className="zs-modal-text">
+            <Badge tone="neutral">{copy.osBadge}</Badge>
+          </p>
           <p className="zs-modal-text">{copy.osText}</p>
+          {hasBrowserTraffic && !osStatus?.synced && (
+            <Banner tone="info" title={copy.osBrowserHintTitle}>
+              {copy.osBrowserHintText}
+            </Banner>
+          )}
           {osStatus?.current_os_tz && (
             <p className="zs-modal-text">
               {copy.osCurrent}: <Mono>{osStatus.current_os_tz}</Mono>
@@ -122,7 +135,7 @@ export function TimezoneModal({
               </Button>
             ) : (
               <Button
-                variant="primary"
+                variant="secondary"
                 disabled={osLoading}
                 onClick={() => void syncOs()}
               >

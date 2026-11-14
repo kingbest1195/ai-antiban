@@ -1,11 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  RollbackReleaseInfo,
   UpdateCheckResult,
   UpdateFailureKind,
   UpdateProgressPayload,
   UpdateStatusPayload,
 } from "../../types";
-import { checkForUpdates, installUpdate, toggleAutoUpdate } from "../../utils/api";
+import {
+  checkForUpdates,
+  installRollbackVersion,
+  installUpdate,
+  listRollbackVersions,
+  toggleAutoUpdate,
+} from "../../utils/api";
 import { toast as t, updates as copy } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
@@ -30,6 +37,11 @@ export function useUpdater({ showToast, setAutoUpdateEnabled }: Options) {
   const [updateProgress, setUpdateProgress] = useState<UpdateProgressPayload | null>(null);
   const [updaterStatus, setUpdaterStatus] = useState<UpdateStatusPayload | null>(null);
   const [showUpdateModal, setShowUpdateModalRaw] = useState<boolean>(false);
+  const [rollbackReleases, setRollbackReleases] = useState<RollbackReleaseInfo[]>([]);
+  const [rollbackLoading, setRollbackLoading] = useState<boolean>(false);
+  const [rollbackLoaded, setRollbackLoaded] = useState<boolean>(false);
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
+  const [rollingBackVersion, setRollingBackVersion] = useState<string | null>(null);
 
   // При закрытии окна сбрасываем прошлую ошибку, чтобы она не всплыла при следующем открытии.
   const setShowUpdateModal = useCallback((open: boolean) => {
@@ -76,22 +88,30 @@ export function useUpdater({ showToast, setAutoUpdateEnabled }: Options) {
       phase: "starting",
     });
 
+    let keepInstalling = false;
     try {
       const res = await installUpdate();
+      keepInstalling = Boolean(res.will_restart);
       showToast(res.will_restart ? t.updates.installed : t.updates.ready, res.message, "success");
-      if (!res.will_restart) {
+      if (res.will_restart) {
+        setUpdaterStatus((prev) => prev ?? { stage: "restarting", message: res.message || copy.restarting });
+      } else {
         setShowUpdateModal(false);
       }
     } catch (err: unknown) {
       // Никакого отката на другой источник: показываем причину в окне, пользователь повторяет или открывает релиз.
+      keepInstalling = false;
       const kind = failureKind(err);
       console.error("[updater] install failed:", err);
       setUpdaterStatus({ stage: "failed", message: copy.errors[kind], error: kind });
       setShowUpdateModalRaw(true);
       showToast(t.updates.installError, copy.errors[kind], "error");
     } finally {
-      setInstallingUpdate(false);
-      setUpdateProgress(null);
+      // При автоматическом перезапуске не сбрасываем прелоадер и прогресс, чтобы окно не мигнуло до рестарта процесса.
+      if (!keepInstalling) {
+        setInstallingUpdate(false);
+        setUpdateProgress(null);
+      }
     }
   }, [updateInfo, showToast, setShowUpdateModal]);
 
@@ -110,6 +130,67 @@ export function useUpdater({ showToast, setAutoUpdateEnabled }: Options) {
       }
     },
     [setAutoUpdateEnabled, showToast],
+  );
+
+  const handleLoadRollbackVersions = useCallback(async () => {
+    setRollbackLoading(true);
+    setRollbackError(null);
+    try {
+      const releases = await listRollbackVersions();
+      setRollbackReleases(releases);
+      setRollbackLoaded(true);
+    } catch (err: unknown) {
+      const kind = (err as { kind?: unknown } | null)?.kind;
+      const message =
+        typeof kind === "string" && FAILURE_KINDS.includes(kind as UpdateFailureKind)
+          ? copy.errors[kind as UpdateFailureKind]
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      setRollbackError(message);
+    } finally {
+      setRollbackLoading(false);
+    }
+  }, []);
+
+  const handleInstallRollback = useCallback(
+    async (version: string) => {
+      if (!version || installingUpdate) return;
+      setRollingBackVersion(version);
+      setRollbackError(null);
+      setInstallingUpdate(true);
+      setUpdaterStatus(null);
+      setUpdateProgress({
+        downloaded_bytes: 0,
+        total_bytes: 0,
+        percent: 0,
+        phase: "starting",
+      });
+
+      let keepInstalling = false;
+      try {
+        const res = await installRollbackVersion(version);
+        keepInstalling = Boolean(res.will_restart);
+        showToast(res.will_restart ? t.updates.installed : t.updates.ready, res.message, "success");
+        if (res.will_restart) {
+          setUpdaterStatus((prev) => prev ?? { stage: "restarting", message: res.message || copy.restarting });
+        }
+      } catch (err: unknown) {
+        keepInstalling = false;
+        const kind = failureKind(err);
+        console.error("[updater] rollback install failed:", err);
+        setUpdaterStatus({ stage: "failed", message: copy.errors[kind], error: kind });
+        setRollbackError(copy.errors[kind]);
+        showToast(t.updates.installError, copy.errors[kind], "error");
+      } finally {
+        if (!keepInstalling) {
+          setInstallingUpdate(false);
+          setUpdateProgress(null);
+          setRollingBackVersion(null);
+        }
+      }
+    },
+    [installingUpdate, showToast],
   );
 
   // Тихая проверка на старте.
@@ -143,6 +224,13 @@ export function useUpdater({ showToast, setAutoUpdateEnabled }: Options) {
     handleCheckUpdates,
     handleInstallUpdate,
     handleToggleAutoUpdate,
+    rollbackReleases,
+    rollbackLoading,
+    rollbackLoaded,
+    rollbackError,
+    rollingBackVersion,
+    handleLoadRollbackVersions,
+    handleInstallRollback,
     applyUpdateProgress,
     applyUpdateAvailable,
     applyUpdateStatus,

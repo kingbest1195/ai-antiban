@@ -1,7 +1,7 @@
 //! Routes in the gateway: fail-closed behavior and interaction with the network guard.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -73,7 +73,9 @@ async fn spawn_socks_echo() -> u16 {
                 let _ = s.read_exact(&mut len).await;
                 let mut rest = vec![0u8; len[0] as usize + 2];
                 let _ = s.read_exact(&mut rest).await;
-                let _ = s.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                let _ = s
+                    .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await;
                 let mut buf = [0u8; 256];
                 while let Ok(n) = s.read(&mut buf).await {
                     if n == 0 || s.write_all(&buf[..n]).await.is_err() {
@@ -130,23 +132,35 @@ async fn test_bound_route_on_closed_port_is_fail_closed() {
     let state = AppState::new_in_memory();
     let route = socks_route("dead", closed_port().await);
     state.upsert_route(route).await.unwrap();
-    state.bind_provider_route("anthropic", Some("dead")).await.unwrap();
+    state
+        .bind_provider_route("anthropic", Some("dead"))
+        .await
+        .unwrap();
 
     let (sink, sink_hits) = direct_sink().await;
     let server = start(state.clone(), Some(sink)).await;
 
     // a) Session allowed (audit skipped): the tunnel through the route fails -> 502, not direct.
     state.allow_provider_for_session("anthropic").await.unwrap();
-    let Some((_c, resp)) = connect(&server, "api.anthropic.com").await else { return };
+    let Some((_c, resp)) = connect(&server, "api.anthropic.com").await else {
+        return;
+    };
     assert!(resp.starts_with("HTTP/1.1 502"), "{resp}");
     assert!(resp.contains("fail-closed"), "{resp}");
 
     // b) No allowance: the audit through the dead route fails -> refused as well.
-    state.revoke_session_allowed_provider("anthropic").await.unwrap();
+    state
+        .revoke_session_allowed_provider("anthropic")
+        .await
+        .unwrap();
     let (_c, resp) = connect(&server, "claude.ai").await.unwrap();
     assert!(resp.starts_with("HTTP/1.1 502"), "{resp}");
 
-    assert_eq!(server.direct_connect_count(), 0, "no direct connection may be attempted");
+    assert_eq!(
+        server.direct_connect_count(),
+        0,
+        "no direct connection may be attempted"
+    );
     assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
     assert_eq!(route_down_events(&state), 2);
     assert_eq!(state.stats().snapshot_sync().direct_bypassed_requests, 0);
@@ -167,8 +181,14 @@ async fn test_expired_disabled_and_missing_routes_are_refused() {
     disabled.enabled = false;
     state.upsert_route(expired).await.unwrap();
     state.upsert_route(disabled).await.unwrap();
-    state.bind_provider_route("anthropic", Some("expired")).await.unwrap();
-    state.bind_provider_route("openai", Some("disabled")).await.unwrap();
+    state
+        .bind_provider_route("anthropic", Some("expired"))
+        .await
+        .unwrap();
+    state
+        .bind_provider_route("openai", Some("disabled"))
+        .await
+        .unwrap();
     for p in ["anthropic", "openai"] {
         state.allow_provider_for_session(p).await.unwrap();
     }
@@ -176,7 +196,9 @@ async fn test_expired_disabled_and_missing_routes_are_refused() {
     let (sink, sink_hits) = direct_sink().await;
     let server = start(state.clone(), Some(sink)).await;
 
-    let Some((_c, resp)) = connect(&server, "api.anthropic.com").await else { return };
+    let Some((_c, resp)) = connect(&server, "api.anthropic.com").await else {
+        return;
+    };
     assert!(resp.starts_with("HTTP/1.1 403"), "{resp}");
     assert!(resp.contains("expired"), "{resp}");
 
@@ -193,8 +215,14 @@ async fn test_expired_disabled_and_missing_routes_are_refused() {
 async fn test_routed_provider_ignores_auto_freeze_but_obeys_manual_killswitch() {
     let state = AppState::new_in_memory();
     let socks = spawn_socks_echo().await;
-    state.upsert_route(socks_route("live", socks)).await.unwrap();
-    state.bind_provider_route("anthropic", Some("live")).await.unwrap();
+    state
+        .upsert_route(socks_route("live", socks))
+        .await
+        .unwrap();
+    state
+        .bind_provider_route("anthropic", Some("live"))
+        .await
+        .unwrap();
     state.allow_provider_for_session("anthropic").await.unwrap();
     state.allow_provider_for_session("gemini").await.unwrap();
 
@@ -202,7 +230,9 @@ async fn test_routed_provider_ignores_auto_freeze_but_obeys_manual_killswitch() 
     let server = start(state.clone(), Some(sink)).await;
 
     // Established routed tunnel.
-    let Some((mut tunnel, resp)) = connect(&server, "api.anthropic.com").await else { return };
+    let Some((mut tunnel, resp)) = connect(&server, "api.anthropic.com").await else {
+        return;
+    };
     assert!(resp.contains("200 Connection Established"), "{resp}");
 
     // Automatic freeze (VPN drop / network change): gate closes, unrouted tunnels are aborted.
@@ -258,7 +288,9 @@ async fn test_default_route_carries_unbound_providers() {
 
     let (sink, sink_hits) = direct_sink().await;
     let server = start(state.clone(), Some(sink)).await;
-    let Some((mut c, resp)) = connect(&server, "api.openai.com").await else { return };
+    let Some((mut c, resp)) = connect(&server, "api.openai.com").await else {
+        return;
+    };
     assert!(resp.contains("200 Connection Established"), "{resp}");
     c.write_all(b"via-default").await.unwrap();
     let mut echo = [0u8; 11];

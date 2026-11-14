@@ -46,6 +46,43 @@ pub fn evaluate_ip_pinning(
     }
 }
 
+/// Evaluates IP pinning taking per-provider Zastava key routing into account.
+///
+/// When `route_label` is `Some(label)` (the provider is routed via a bound Zastava key), the
+/// provider's exit IP is NEVER compared against the global/VPN `pinned_ip` (`global_pinned_ip`).
+/// Only an explicit per-provider pin (`provider_pinned_ip`) is checked if present; otherwise the
+/// active Zastava key itself acts as the IP pin (`PINNED_BY_ZASTAVA_KEY`, `is_pinned = true`).
+pub fn evaluate_ip_pinning_for_route(
+    provider_pinned_ip: Option<&str>,
+    global_pinned_ip: Option<&str>,
+    strict_enabled: bool,
+    current_ip: &str,
+    route_label: Option<&str>,
+) -> (CheckResult, bool) {
+    let current = current_ip.trim();
+    let provider_pin = provider_pinned_ip.map(str::trim).filter(|s| !s.is_empty());
+
+    if let Some(label) = route_label {
+        if let Some(pinned) = provider_pin {
+            let res = evaluate_ip_pinning(Some(pinned), strict_enabled, current);
+            return (res, pinned == current);
+        }
+        let label_clean = label.trim();
+        let msg = if label_clean.is_empty() {
+            format!("IP закреплён ключом Заставы ({current}).")
+        } else {
+            format!("IP закреплён ключом Заставы «{label_clean}» ({current}).")
+        };
+        return (CheckResult::ok("PINNED_BY_ZASTAVA_KEY", msg), true);
+    }
+
+    let effective =
+        provider_pin.or_else(|| global_pinned_ip.map(str::trim).filter(|s| !s.is_empty()));
+    let res = evaluate_ip_pinning(effective, strict_enabled, current);
+    let is_pinned = effective.is_some_and(|p| p == current);
+    (res, is_pinned)
+}
+
 /// Evaluates impossible geographical travel based on provider's session history.
 pub fn evaluate_impossible_travel(
     history: &[IpHistoryEntry],
@@ -139,7 +176,10 @@ mod tests {
 
         // Strict disabled, but the IP is the pinned one: a real match.
         let res = evaluate_ip_pinning(Some("185.10.10.10"), false, "185.10.10.10");
-        assert_eq!((res.status, res.code.as_str()), (CheckStatus::Ok, "PINNED_IP_MATCH"));
+        assert_eq!(
+            (res.status, res.code.as_str()),
+            (CheckStatus::Ok, "PINNED_IP_MATCH")
+        );
 
         // Strict enabled without a pinned IP is a warning, not "not applicable".
         let res = evaluate_ip_pinning(None, true, "185.10.10.10");
@@ -160,9 +200,18 @@ mod tests {
         let same = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1), now - 600)];
         let r = evaluate_impossible_travel(&same, "DE", now, ProviderId::Openai);
         assert!(r.message.contains("совпадает"), "{}", r.message);
-        let old = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1), now - 5 * 3600)];
+        let old = vec![IpHistoryEntry::new(
+            "1.1.1.1",
+            "DE",
+            Some(1),
+            now - 5 * 3600,
+        )];
         let r = evaluate_impossible_travel(&old, "US", now, ProviderId::Openai);
-        assert!(r.message.contains("DE -> US") && r.message.contains("4 ч"), "{}", r.message);
+        assert!(
+            r.message.contains("DE -> US") && r.message.contains("4 ч"),
+            "{}",
+            r.message
+        );
     }
 
     #[test]
@@ -170,7 +219,12 @@ mod tests {
         let now = 100000;
         let one_hour_ago = now - 3600;
 
-        let history = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1234), one_hour_ago)];
+        let history = vec![IpHistoryEntry::new(
+            "1.1.1.1",
+            "DE",
+            Some(1234),
+            one_hour_ago,
+        )];
 
         // Anthropic: DE to US in 1 hour -> Critical
         let res_anthropic = evaluate_impossible_travel(&history, "US", now, ProviderId::Anthropic);
@@ -187,8 +241,71 @@ mod tests {
 
         // DE to US after 5 hours (>4h) -> Ok
         let five_hours_ago = now - (5 * 3600);
-        let history_old = vec![IpHistoryEntry::new("1.1.1.1", "DE", Some(1234), five_hours_ago)];
+        let history_old = vec![IpHistoryEntry::new(
+            "1.1.1.1",
+            "DE",
+            Some(1234),
+            five_hours_ago,
+        )];
         let res_old = evaluate_impossible_travel(&history_old, "US", now, ProviderId::Anthropic);
         assert_eq!(res_old.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn route_bound_to_zastava_key_never_mismatches_global_vpn_pin() {
+        // Global VPN IP is pinned (145.241.193.245) with strict pinning ON,
+        // while Gemini is routed through a France Zastava key (136.244.114.42).
+        let (res, is_pinned) = evaluate_ip_pinning_for_route(
+            None,
+            Some("145.241.193.245"),
+            true,
+            "136.244.114.42",
+            Some("Zastava · Франция"),
+        );
+        assert_eq!(res.status, CheckStatus::Ok);
+        assert_eq!(res.code, "PINNED_BY_ZASTAVA_KEY");
+        assert!(res.message.contains("IP закреплён ключом Заставы"));
+        assert!(is_pinned);
+
+        // Meanwhile Direct VPN provider (Claude) still validates against global VPN pin.
+        let (direct_ok, direct_pinned) = evaluate_ip_pinning_for_route(
+            None,
+            Some("145.241.193.245"),
+            true,
+            "145.241.193.245",
+            None,
+        );
+        assert_eq!(
+            (direct_ok.status, direct_ok.code.as_str()),
+            (CheckStatus::Ok, "PINNED_IP_MATCH")
+        );
+        assert!(direct_pinned);
+
+        // Explicit per-provider pin on routed key works when matching and warns/criticals on mismatch.
+        let (explicit_ok, pinned_ok) = evaluate_ip_pinning_for_route(
+            Some("136.244.114.42"),
+            Some("145.241.193.245"),
+            true,
+            "136.244.114.42",
+            Some("Zastava · Франция"),
+        );
+        assert_eq!(
+            (explicit_ok.status, explicit_ok.code.as_str()),
+            (CheckStatus::Ok, "PINNED_IP_MATCH")
+        );
+        assert!(pinned_ok);
+
+        let (explicit_bad, pinned_bad) = evaluate_ip_pinning_for_route(
+            Some("136.244.114.42"),
+            Some("145.241.193.245"),
+            true,
+            "198.51.100.1",
+            Some("Zastava · Франция"),
+        );
+        assert_eq!(
+            (explicit_bad.status, explicit_bad.code.as_str()),
+            (CheckStatus::Critical, "PINNED_IP_MISMATCH")
+        );
+        assert!(!pinned_bad);
     }
 }

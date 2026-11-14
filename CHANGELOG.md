@@ -7,6 +7,36 @@
 
 ---
 
+## [2.2.0] — 2026-11-14
+
+Релиз с полной совместимостью ключей Заставы поверх TUN VPN (V2Box Pro и др.), автоматическими PAC-политиками браузеров, мгновенной двухуровневой синхронизацией часового пояса для ИИ, DoH-проверкой спам-баз под FakeDNS, прелоадером выхода/обновления, обновлённым онбордингом и UX/диагностическим пакетом v2.2.
+
+### Добавлено
+* **Автоматическая PAC-политика браузеров, `Preferences` профилей Chromium и перезапуск в один клик поверх TUN VPN (`sysproxy/browser_policies.rs`, `proxy/coverage.rs`, `commands/coverage.rs`, `proxy/pac.rs`):** при включении защиты прописываются `ProxyMode = "pac_script"` и `ProxyPacUrl` (в дополнение к `QuicAllowed` и `DnsOverHttpsMode`), а также объект `"proxy"` в файлы `Preferences` профилей Chromium-браузеров (с отложенным согласованием после выхода и откатом через журнал владения); расширена поддержка браузеров (Comet, Yandex Browser, Opera, Opera GX, Dia, OpenAI Atlas, Chrome/Brave Beta) и ИИ-расширений, включая полные эндпоинты Google/Gemini; добавлены команда `reapply_browser_policies_cmd`, перезапуск браузеров в один клик с `--proxy-pac-url` и признаки `browser_pac_policy_active` / `browsers_needing_restart` в `CoverageSnapshot`.
+* **Изолированная привязка IP, `ip_history` и `NetworkGuard` по маршрутам и провайдерам (`state/mod.rs`, `auditor/mod.rs`, `proxy/guard.rs`):** `pinned_ips: HashMap<String, String>` (с миграцией legacy `pinned_ip`) и `ip_history` изолированы по маршрутам (`ip_history_key_for_selection`), а блокировка `NetworkGuard` изолирована по конкретному провайдеру; исключены ложные срабатывания `Impossible Travel` и побочная блокировка других ИИ-провайдеров; сервисы на выделенном ключе Заставы получают статус `PINNED_BY_ZASTAVA_KEY` без конфликта с основным VPN.
+* **Подписанный откат на предыдущие релизы GitHub (`updater/mod.rs`, настройки «Версия и откат»):** добавлена возможность безопасно откатиться на предыдущий релиз GitHub с проверкой криптоподписи minisign.
+* **Резервный канал DoH для DNSBL (`auditor/dnsbl.rs`):** автоматический fallback на `https://dns.google/resolve` при получении Fake-IP или отказе системного резолвера (`< 2` ответивших зон).
+* **Экран завершения работы и обновления (`ShutdownOverlay`, `sysproxy/cleanup.rs`, `tray/events.rs`, `updater/mod.rs`):** единая защита от повторной зачистки при выходе/обновлении и пошаговые события `app://shutdown-progress` по 4 этапам.
+* **Быстрые действия в карточке VPN (`CoverageSection.tsx`):** кнопки «Перезапустить браузеры» (в один клик при открытых браузерах без PAC), «Привязать браузеры» / «Обновить привязку браузеров», «Перепроверить» и «Настройки сети ОС», спокойный информационный стиль при активной браузерной PAC-политике.
+* **Режим «Скрыть IP» (`hide_ip_mode`):** переключатель в шапке (`AppShell.tsx`) и Tauri-команды `get_hide_ip_mode` / `set_hide_ip_mode` для маскировки IP-адресов и подсетей во всём UI.
+* **Предупреждение о заблокированной стране и чистые подписи стран:** плашка-предупреждение в «Подключении» при выходе маршрута в санкционную страну для выбранного ИИ и чистый формат `Страна (CC)` без дублирования кода (`formatCountryWithCode`).
+* **Причина перехвата (`gate_reason`) и пауза «До следующей смены сети»:** поле `gate_reason` в событиях перехвата, режим паузы `UntilNetworkChange` (`InterceptionAction::BlockUntilNetworkChange`) и команды `pause_until_network_change_cmd`, `set_guard_pause_mode_cmd`, `get_guard_pause_status_cmd`.
+* **Экспорт очищенного диагностического отчёта и предпросмотр изменений:** команды `export_diagnostic_bundle_cmd` (санитизированный JSON без ключей, паролей и IP) и `preview_protection_changes_cmd` (список управляемых изменений в `system_pac`, `browser_policy`, `shell_rc`, `cli_settings`, `ide_settings`).
+* **Обновлённый онбординг v2.2 (`src/features/onboarding/`):** переработан под ключи `zastava://` поверх VPN, разделение защиты браузеров и CLI/IDE, двухуровневый часовой пояс и 14 проверок; состояние перенесено в `state.json` (`onboarding_v2_2_done`, команды `get_onboarding_v2_2_done` / `set_onboarding_v2_2_done`).
+
+### Изменено
+* **Двухуровневая синхронизация часового пояса (`auditor/os_env.rs`, `TimezoneModal.tsx`, `CoverageSection.tsx`):** «Синхронизировать для ИИ» (*Рекомендуется*) переводит проверку часового пояса в зелёный статус `TIMEZONE_SYNCED_AI` для приложений, CLI и IDE без смены системных часов ОС; синхронизация часов ОС вынесена как необязательная опция для браузеров с ненавязчивым напоминанием для браузеров/расширений в «Покрытии» и окне часового пояса.
+* **Изоляция проверок на ключах Заставы (`auditor/probes/stun.rs`, `auditor/leaks.rs`, `auditor/mod.rs`):** для сервисов на выделенном ключе Заставы исключены ложные предупреждения `UDP_STUN_MISMATCH` (`UDP_KEY_TCP_PROTECTED` при зарубежном/заблокированном UDP и отключённом QUIC), а также ложные расхождения стран для `dns_country` и `ipv6`.
+
+### Исправлено
+* **Работа с Happ Plus и AmneziaVPN на macOS без ошибки временного DNS при включении защиты (`sysproxy/macos.rs`, `sysproxy/platform.rs`, `sysproxy/mod.rs`, `proxy/coverage.rs`):** обнаружение временных DNS VPN (`temp_dns_overrides`) больше не прерывает `enable_with_mode` и `toggle_sysproxy(true)` — системный `networksetup` PAC бережно откладывается (`os_pac_deferred`), а управляемые PAC-политики браузеров и защита CLI/IDE включаются сразу (с автоматическим доприменением системного PAC после отключения VPN); в `RealPlatform::temp_dns_overrides` отфильтрованы неактивные физические службы без `State:/Network/Service/*/IPv4|IPv6`, чтобы устаревшие записи на отключённых адаптерах (например, `P30T`) не блокировали включение и откат.
+* **Мгновенная инвалидация кэша часового пояса (`auditor/cache.rs`, `commands/sysproxy.rs`, `useGatewayState.ts`):** включение `system_tz` и `sync_ai_tz_enabled`/`sync_ai_tz_active` в ключ кэша `cache.os`, немедленный сброс кэша при любом действии с TZ и принудительное обновление отчётов всех трёх провайдеров.
+* **DNS-проба под FakeDNS (`auditor/probes/whoami.rs`):** `combine_sources` использует подтверждённый публичный DNS-резолвер, если второй источник вернул Fake-IP (`198.18.0.0/15`), и возвращает `Ok` (`DNS_TUN_FAKE_IP_SAFE`) в чистом Fake-IP режиме без резолверов РФ.
+* **Таймаут IPv6-пробы за kill-switch VPN (`auditor/leaks.rs`):** таймаут IPv6-пробы на хосте с IPv6 (или без ответа ОС) при блокировке со стороны VPN kill-switch корректно считается безопасным (`Ok`), а не сбоем проверки.
+* **Сохранение завершающего переноса строки (`sysproxy/cli_protection.rs`):** при удалении блока Заставы из профилей оболочки (`restore_profile`) сохраняется исходный trailing newline.
+
+---
+
 ## [2.1.2] — 2026-11-14
 
 Релиз с жёстким перехватом браузерного ИИ-трафика (включая Google Gemini), синхронизацией системного часового пояса ОС, проверкой реального выхода до ИИ-сервисов и исправлением автозапуска на Windows 11 Pro.

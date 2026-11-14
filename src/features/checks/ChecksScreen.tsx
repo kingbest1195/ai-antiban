@@ -6,6 +6,7 @@ import { providers as providerCopy, status as words } from "../../shared/copy/ru
 import { checks as copy } from "../../shared/copy/ru";
 import type { CheckId } from "../../shared/copy/ru";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
+import { formatIp, maskIpsInText, resolvePinnedIp } from "../../shared/lib/format";
 import { CoverageSection } from "../coverage/CoverageSection";
 import { openOsNetworkSettings } from "../../utils/api";
 import {
@@ -34,13 +35,14 @@ export interface ChecksScreenProps {
   provider?: ProviderId;
   state: AppStateData | null;
   coverageSnapshot?: CoverageSnapshot | null;
+  hideIpMode?: boolean;
   /** Явные «включить» и «выключить» защиты для карточек «Покрытия»; без них кнопка скрыта. */
   protection?: ProtectionActions;
   /** Тосты секции покрытия (например, ошибка копирования адреса). */
   onToast?: ShowToast;
   onNavigateToGuide: (guideId?: string) => void;
   onSimulate: () => void;
-  onPinCurrentIp: (ip: string) => void;
+  onPinCurrentIp: (ip: string, provider?: ProviderId) => void;
   onSyncTimezone: () => void;
   onOpenCrashTest: () => void;
   /** Повторный аудит сети. Без обработчика кнопка «Перепроверить» не показывается. */
@@ -87,7 +89,7 @@ const CAN_OPEN_NETWORK_SETTINGS =
   typeof navigator !== "undefined" && /Mac|Win/i.test(navigator.platform || navigator.userAgent || "");
 
 /** Единый словарь: Чисто / Нужна проверка / Утечка / Выключено. */
-function statusOf(item: CheckItem, state: AppStateData | null): StatusView {
+function statusOf(item: CheckItem, state: AppStateData | null, provider: ProviderId): StatusView {
   if (item.pending) return { tone: "neutral", word: copy.pending.badge, busy: true };
   if (item.ok) return { tone: "ok", word: words.clean, icon: "check" };
   if (item.missing) return { tone: "neutral", word: words.noData, icon: UNKNOWN_ICON };
@@ -96,7 +98,7 @@ function statusOf(item: CheckItem, state: AppStateData | null): StatusView {
   if (isCriticalStatus(item.result)) {
     return { tone: "danger", word: LEAK_CHECKS.includes(item.id) ? words.leak : words.review, icon: "alert" };
   }
-  if (item.id === "pinning" && !state?.pinned_ip) return { tone: "neutral", word: words.off };
+  if (item.id === "pinning" && !resolvePinnedIp(state, provider)) return { tone: "neutral", word: words.off };
   return { tone: "warn", word: words.review, icon: "alert" };
 }
 
@@ -113,6 +115,7 @@ export function ChecksScreen({
   provider,
   state,
   coverageSnapshot,
+  hideIpMode = false,
   protection,
   onToast,
   onNavigateToGuide,
@@ -203,7 +206,7 @@ export function ChecksScreen({
   const ratioTotal = waiting ? progress.total : total;
 
   const runAction = (item: CheckItem) => {
-    if (item.action === "pin") onPinCurrentIp(ip);
+    if (item.action === "pin") onPinCurrentIp(ip, activeProvider);
     else if (item.action === "sync-timezone") onSyncTimezone();
     else if (item.action === "guide") onNavigateToGuide(item.result.guide_ref || undefined);
   };
@@ -286,7 +289,8 @@ export function ChecksScreen({
               item={item}
               providerName={providerName}
               showPriority
-              view={statusOf(item, state)}
+              hideIpMode={hideIpMode}
+              view={statusOf(item, state, activeProvider)}
               open={expanded[item.id] ?? needsLook(item)}
               onToggle={() => setExpanded((prev) => ({ ...prev, [item.id]: !(prev[item.id] ?? needsLook(item)) }))}
               onAction={() => runAction(item)}
@@ -316,7 +320,8 @@ export function ChecksScreen({
                     item={item}
                     providerName={providerName}
                     showPriority={false}
-                    view={statusOf(item, state)}
+                    hideIpMode={hideIpMode}
+                    view={statusOf(item, state, activeProvider)}
                     open={Boolean(expanded[item.id])}
                     onToggle={() => setExpanded((prev) => ({ ...prev, [item.id]: !prev[item.id] }))}
                     onAction={() => runAction(item)}
@@ -363,6 +368,7 @@ interface CheckRowProps {
   item: PrioritizedCheckItem;
   providerName: string;
   showPriority: boolean;
+  hideIpMode: boolean;
   view: StatusView;
   open: boolean;
   onToggle: () => void;
@@ -373,7 +379,7 @@ interface CheckRowProps {
   retrying?: boolean;
 }
 
-function CheckRow({ item, providerName, showPriority, view, open, onToggle, onAction, onGuide, onRetry, retrying }: CheckRowProps) {
+function CheckRow({ item, providerName, showPriority, hideIpMode, view, open, onToggle, onAction, onGuide, onRetry, retrying }: CheckRowProps) {
   const actionLabel =
     item.action === "pin" ? copy.actions.pin : item.action === "sync-timezone" ? copy.actions.syncTimezone : copy.actions.openGuide;
   // Инструкция отдельной ссылкой — только если главное действие другое.
@@ -417,7 +423,7 @@ function CheckRow({ item, providerName, showPriority, view, open, onToggle, onAc
           {item.cls === "unknown" && !item.help && (
             <p className="zs-check__message">{copy.reasons[item.missing ? "no_data" : (item.result.reason ?? "unknown")]}</p>
           )}
-          <p className="zs-check__message">{item.result.message}</p>
+          <p className="zs-check__message">{maskIpsInText(item.result.message, hideIpMode)}</p>
           {(item.id === "dns" || item.id === "dns_country") &&
             item.cls === "unknown" &&
             item.result.code !== "DNS_WHOAMI_FAKE_IP" && <p className="zs-check__label">{copy.dnsHelp.mutedNote}</p>}
@@ -434,7 +440,7 @@ function CheckRow({ item, providerName, showPriority, view, open, onToggle, onAc
           <ul className="zs-check__sources">
             {sources.map((src) => (
               <li key={src.source} className="zs-check__message">
-                {copy.sources.line(src.source, describeSource(src))}
+                {copy.sources.line(src.source, describeSource(src, hideIpMode))}
               </li>
             ))}
           </ul>
@@ -467,12 +473,16 @@ function CheckRow({ item, providerName, showPriority, view, open, onToggle, onAc
       )}
       {item.data.length > 0 && (
         <dl className="zs-check__data">
-          {item.data.map((d) => (
-            <div key={d.label} className="zs-check__pair">
-              <dt>{d.label}</dt>
-              <dd>{d.mono ? <Mono>{d.value}</Mono> : d.value}</dd>
-            </div>
-          ))}
+          {item.data.map((d) => {
+            const val =
+              d.label === copy.data.ip || d.label === copy.data.pinnedIp ? formatIp(d.value, hideIpMode) : d.value;
+            return (
+              <div key={d.label} className="zs-check__pair">
+                <dt>{d.label}</dt>
+                <dd>{d.mono ? <Mono>{val}</Mono> : val}</dd>
+              </div>
+            );
+          })}
         </dl>
       )}
       {(item.action || showGuideLink || (item.cls === "unknown" && onRetry) || showNetworkSettings) && (
@@ -511,9 +521,10 @@ function CheckRow({ item, providerName, showPriority, view, open, onToggle, onAc
 }
 
 /** «172.70.161.26 · Cloudflare (публичный DNS)», «вернул служебный адрес 198.18.0.7», «не ответил вовремя». */
-function describeSource(src: SourceView): string {
+function describeSource(src: SourceView, hideIpMode: boolean): string {
   const state = copy.sources.state[src.state] ?? copy.sources.state.empty;
   if (!src.addr) return state;
+  const addr = formatIp(src.addr, hideIpMode);
   const operator = src.operator ? ` · ${copy.sources.operator(src.operator)}` : "";
-  return src.state === "answered" ? `${src.addr}${operator}` : `${state} ${src.addr}${operator}`;
+  return src.state === "answered" ? `${addr}${operator}` : `${state} ${addr}${operator}`;
 }

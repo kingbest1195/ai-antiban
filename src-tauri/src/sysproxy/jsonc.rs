@@ -828,7 +828,10 @@ mod tests {
             assert_eq!(raw(&out, &["k"]), Some("true"), "{t:?}");
             // The comment is still on the line of "a".
             let a_line = out.lines().find(|l| l.contains("\"a\"")).unwrap();
-            assert!(a_line.contains("note") || a_line.contains("/* two"), "{out:?}");
+            assert!(
+                a_line.contains("note") || a_line.contains("/* two"),
+                "{out:?}"
+            );
             assert_eq!(remove(&out, &["k"]).unwrap(), t, "{t:?}");
         }
         // Nested object.

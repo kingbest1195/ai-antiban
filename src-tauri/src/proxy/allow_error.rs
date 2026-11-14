@@ -54,7 +54,10 @@ mod tests {
     fn serializes_as_code_and_message_with_snake_case_codes() {
         let cases = [
             (AllowErrorCode::GuardNotRunning, "guard_not_running"),
-            (AllowErrorCode::BlockedByManualKillswitch, "blocked_by_manual_killswitch"),
+            (
+                AllowErrorCode::BlockedByManualKillswitch,
+                "blocked_by_manual_killswitch",
+            ),
             (AllowErrorCode::AlertStale, "alert_stale"),
             (AllowErrorCode::AuditPending, "audit_pending"),
             (AllowErrorCode::Internal, "internal"),

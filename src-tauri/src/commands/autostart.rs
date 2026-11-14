@@ -7,9 +7,9 @@ pub async fn get_autostart_status(
     state: tauri::State<'_, state::AppState>,
 ) -> Result<autostart::AutostartStatus, String> {
     let saved = state.is_autostart_enabled().await;
-    Ok(tokio::task::spawn_blocking(move || autostart::get_status(saved))
+    tokio::task::spawn_blocking(move || autostart::get_status(saved))
         .await
-        .map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

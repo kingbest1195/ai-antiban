@@ -1,6 +1,6 @@
 import type { CheckResult, ProviderId, RiskReport } from "../../types";
 import type { HeroTone } from "../../ui";
-import { countryName } from "../../shared/lib/country";
+import { formatCountryWithCode } from "../../shared/lib/country";
 import { classify, countChecks, isYellowOnlyUnknown } from "../checks/checksModel";
 
 /** Главная причина, по которой сеть не годится. Каждой соответствует человеческий текст в copy/onboarding.ts. */
@@ -18,7 +18,7 @@ export interface NetworkVerdict {
   /** Сколько проверок не удалось выполнить. */
   unknown: number;
   reason: NetworkReason | null;
-  /** Страна адреса словом (для текста о стране), пусто если неизвестна. */
+  /** Страна адреса с кодом («Нидерланды (NL)»), пусто если неизвестна. */
   country: string;
 }
 
@@ -44,7 +44,7 @@ const NO_SERVICE_COUNTRIES = ["RU", "BY"];
 /**
  * Вердикт по сети для шага «Проверка» — без жаргона и без побочных эффектов.
  * «Годится» считается так же, как вердикт «Обзора»: ни один сервис не красный и не жёлтый, нет утечки IPv6,
- * часовой пояс совпадает, спам-базы чистые. Проверка закрепления IP не мешает: это рекомендация.
+ * часовой пояс совпадает (или синхронизирован для ИИ), спам-базы чистые. Проверка закрепления IP не мешает: это рекомендация.
  */
 export function evaluateNetwork(
   reports: Partial<Record<ProviderId, RiskReport>>,
@@ -68,7 +68,7 @@ export function evaluateNetwork(
   const total = Math.max(counts.applicable, activeReport?.applicable_count ?? 0);
   const unknown = counts.unknown;
   const country = activeReport?.telemetry?.country_code ?? "";
-  const countryWord = countryName(country);
+  const countryFormatted = formatCountryWithCode(country);
 
   // Реальные замечания по всем сервисам; «не удалось проверить» сюда не входит.
   const hasRealProblem = [activeReport, ...PROVIDERS.map((id) => reports[id])].some((r) =>
@@ -77,14 +77,14 @@ export function evaluateNetwork(
 
   const good = !anyRed && !anyYellow && !ipv6Leak && !tzMismatch && !dnsblBad;
   if (good && unknown === 0) {
-    return { good, tone: "ok", verdict: "ok", passed, total, unknown, reason: null, country: countryWord };
+    return { good, tone: "ok", verdict: "ok", passed, total, unknown, reason: null, country: countryFormatted };
   }
   // Замечаний нет, но часть проверок не выполнена: не «в порядке», но и не «не подходит».
   if (!anyRed && !ipv6Leak && !tzMismatch && !dnsblBad && !hasRealProblem) {
-    return { good: true, tone: "warn", verdict: "partial", passed, total, unknown, reason: null, country: countryWord };
+    return { good: true, tone: "warn", verdict: "partial", passed, total, unknown, reason: null, country: countryFormatted };
   }
 
-  // Все не зелёные проверки по всем сервисам: у Gemini и Claude география может различаться.
+  // Все не зелёные проверки по всем сервисам: у Gemini и Claude география и маршруты могут различаться.
   const problems: CheckResult[] = [];
   for (const report of [activeReport, ...PROVIDERS.map((id) => reports[id])]) {
     for (const c of checksOf(report)) if (bad(c) && !problems.includes(c)) problems.push(c);
@@ -96,7 +96,16 @@ export function evaluateNetwork(
     reason = NO_SERVICE_COUNTRIES.includes(country.toUpperCase()) ? "noVpn" : "restricted";
   } else if (NO_SERVICE_COUNTRIES.includes(country.toUpperCase()) && anyRed) {
     reason = "noVpn";
-  } else if (has((c) => c.startsWith("IPV6_LEAK") || c === "DNS_YANDEX_LEAK" || c === "DNS_DOMESTIC_WARNING")) {
+  } else if (
+    has(
+      (c) =>
+        c.startsWith("IPV6_LEAK") ||
+        c === "DNS_YANDEX_LEAK" ||
+        c === "DNS_DOMESTIC_WARNING" ||
+        c.startsWith("UDP_STUN_LEAK") ||
+        c === "UDP_STUN_MISMATCH",
+    )
+  ) {
     reason = "leak";
   } else if (has((c) => c.startsWith("DNSBL_LISTED"))) {
     reason = "spam";
@@ -116,6 +125,6 @@ export function evaluateNetwork(
     total,
     unknown,
     reason,
-    country: countryWord,
+    country: countryFormatted,
   };
 }

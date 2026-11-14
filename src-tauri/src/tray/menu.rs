@@ -1,12 +1,15 @@
 //! Builds the tray menu (status header, kill-switch, submenus) and the tray icon itself.
 
-use super::{events, TrayKillswitchMenuItem, TrayStatsMenuItem, TrayStatusMenuItem, MAIN_TRAY_ID, TRAY_ICON_RED, TRAY_ICON_YELLOW};
+use super::{
+    MAIN_TRAY_ID, TRAY_ICON_RED, TRAY_ICON_YELLOW, TrayKillswitchMenuItem, TrayStatsMenuItem,
+    TrayStatusMenuItem, events,
+};
 use crate::auditor;
 use tauri::{
+    Manager,
     image::Image,
     menu::{IconMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
-    Manager,
 };
 
 /// Native Russian tray menu with pro-utility typography & branded icons.
@@ -30,13 +33,7 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
     app.manage(TrayStatsMenuItem(stats_i.clone()));
     let sep1 = PredefinedMenuItem::separator(app)?;
-    let show_i = MenuItem::with_id(
-        app,
-        "show",
-        "Открыть панель Заставы",
-        true,
-        None::<&str>,
-    )?;
+    let show_i = MenuItem::with_id(app, "show", "Открыть панель Заставы", true, None::<&str>)?;
     let killswitch_i = IconMenuItem::with_id(
         app,
         "toggle_killswitch_tray",
@@ -53,11 +50,29 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let mut profile_menu_items = Vec::new();
     if let Some(resp) = &profiles_res {
         for p in resp.profiles.iter().take(10) {
-            let mark = if p.is_active { "● Активен: " } else { "○ " };
-            let email_or_label = p.bound_ip.as_deref().or(p.bound_country.as_deref()).unwrap_or("Основной");
-            let proxy_badge = if p.bound_upstream_key.is_some() { " [Прокси]" } else { "" };
+            let mark = if p.is_active {
+                "● Активен: "
+            } else {
+                "○ "
+            };
+            let email_or_label = p
+                .bound_ip
+                .as_deref()
+                .or(p.bound_country.as_deref())
+                .unwrap_or("Основной");
+            let proxy_badge = if p.bound_upstream_key.is_some() {
+                " [Прокси]"
+            } else {
+                ""
+            };
             let label = format!("{mark}{} ({email_or_label}){proxy_badge}", p.name);
-            if let Ok(item) = MenuItem::with_id(app, format!("switch_profile:{}", p.id), label, true, None::<&str>) {
+            if let Ok(item) = MenuItem::with_id(
+                app,
+                format!("switch_profile:{}", p.id),
+                label,
+                true,
+                None::<&str>,
+            ) {
                 profile_menu_items.push(item);
             }
         }
@@ -78,7 +93,8 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         sub1_items.push(&sep_profiles);
     }
     sub1_items.push(&manage_profiles_i);
-    let submenu_profiles = Submenu::with_items(app, "Профили Claude (Мульти-аккаунт)", true, &sub1_items)?;
+    let submenu_profiles =
+        Submenu::with_items(app, "Профили Claude (Мульти-аккаунт)", true, &sub1_items)?;
 
     // Submenu 2: Контур защиты и сеть
     let toggle_sysproxy_i = MenuItem::with_id(
@@ -188,11 +204,7 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         app,
         "Диагностика и бэкап",
         true,
-        &[
-            &crash_test_i,
-            &backup_claude_i,
-            &rescan_i,
-        ],
+        &[&crash_test_i, &backup_claude_i, &rescan_i],
     )?;
 
     // Submenu 5: Справка и обновления
@@ -221,21 +233,11 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         app,
         "Справка и обновления",
         true,
-        &[
-            &guide_i,
-            &support_i,
-            &update_i,
-        ],
+        &[&guide_i, &support_i, &update_i],
     )?;
 
     let sep3 = PredefinedMenuItem::separator(app)?;
-    let quit_i = MenuItem::with_id(
-        app,
-        "quit",
-        "Выйти и отключить защиту",
-        true,
-        None::<&str>,
-    )?;
+    let quit_i = MenuItem::with_id(app, "quit", "Выйти и отключить защиту", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,

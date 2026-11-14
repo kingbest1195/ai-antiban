@@ -8,8 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const COWORK_SERVICE_NAME: &str = "CoworkVMService";
-pub const COWORK_SERVICE_REG_PATH: &str =
-    r"HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService";
+pub const COWORK_SERVICE_REG_PATH: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\CoworkVMService";
 #[cfg(target_os = "windows")]
 const COWORK_SERVICE_REG_SUBKEY: &str = r"SYSTEM\CurrentControlSet\Services\CoworkVMService";
 pub const COWORK_TASK_PATH: &str = r"\Zastava\";
@@ -151,7 +150,8 @@ pub fn build_windows_summary(
 ) -> (bool, String) {
     let bad_start = start_type == Some(2) || start_type == Some(4);
     let task_ok = task_installed && task_healthy;
-    let needs_repair = (service_present && (bad_start || !task_ok)) || (task_installed && !task_healthy);
+    let needs_repair =
+        (service_present && (bad_start || !task_ok)) || (task_installed && !task_healthy);
 
     let summary = if !service_present && !task_installed {
         "Служба CoworkVMService не обнаружена (Microsoft Store версия Claude Desktop не установлена)."
@@ -214,7 +214,10 @@ fn query_windows_status() -> CoworkGuardStatus {
         false
     };
 
-    let task_xml = run_hidden_cmd("schtasks.exe", &["/Query", "/TN", COWORK_TASK_FULL_NAME, "/XML"]);
+    let task_xml = run_hidden_cmd(
+        "schtasks.exe",
+        &["/Query", "/TN", COWORK_TASK_FULL_NAME, "/XML"],
+    );
     let (task_installed, task_healthy) = match task_xml {
         Some(ref out) if out.status.success() => {
             let xml = String::from_utf8_lossy(&out.stdout);
@@ -358,21 +361,23 @@ fn query_macos_status() -> CoworkGuardStatus {
     let mut detected = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    if let Ok(out) = std::process::Command::new("ps").args(["-axo", "comm="]).output() {
-        if out.status.success() {
-            for item in parse_macos_ps_output(&String::from_utf8_lossy(&out.stdout)) {
-                if seen_names.insert(item.name.clone()) {
-                    detected.push(item);
-                }
+    if let Ok(out) = std::process::Command::new("ps")
+        .args(["-axo", "comm="])
+        .output()
+        && out.status.success()
+    {
+        for item in parse_macos_ps_output(&String::from_utf8_lossy(&out.stdout)) {
+            if seen_names.insert(item.name.clone()) {
+                detected.push(item);
             }
         }
     }
-    if let Ok(out) = std::process::Command::new("launchctl").arg("list").output() {
-        if out.status.success() {
-            for item in parse_launchctl_output(&String::from_utf8_lossy(&out.stdout)) {
-                if seen_names.insert(item.name.clone()) {
-                    detected.push(item);
-                }
+    if let Ok(out) = std::process::Command::new("launchctl").arg("list").output()
+        && out.status.success()
+    {
+        for item in parse_launchctl_output(&String::from_utf8_lossy(&out.stdout)) {
+            if seen_names.insert(item.name.clone()) {
+                detected.push(item);
             }
         }
     }
@@ -521,7 +526,10 @@ mod tests {
         let disabled = "    Start    REG_DWORD    0x4\n";
         assert_eq!(parse_reg_start_dword(disabled), Some(4));
 
-        assert_eq!(parse_reg_start_dword("ERROR: The system was unable to find"), None);
+        assert_eq!(
+            parse_reg_start_dword("ERROR: The system was unable to find"),
+            None
+        );
     }
 
     #[test]
@@ -592,9 +600,11 @@ mod tests {
         assert!(agents[0].running);
         assert_eq!(agents[1].name, "com.todesktop.cursor.ShipIt");
         assert!(!agents[1].running);
-        assert!(!agents
-            .iter()
-            .any(|a| a.name.contains("CursorUIViewService")));
+        assert!(
+            !agents
+                .iter()
+                .any(|a| a.name.contains("CursorUIViewService"))
+        );
     }
 
     #[test]

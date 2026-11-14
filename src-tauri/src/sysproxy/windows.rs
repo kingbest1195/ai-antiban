@@ -323,13 +323,20 @@ mod tests {
         assert!(rep.changed);
         assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz(PAC)));
         assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(0)));
-        assert!(p.calls().iter().any(|c| c.starts_with("notify_inet_refresh")));
+        assert!(
+            p.calls()
+                .iter()
+                .any(|c| c.starts_with("notify_inet_refresh"))
+        );
 
         // Clean restore brings back the VPN's empty AutoConfigURL and ProxyEnable=1 without
         // touching ProxyServer.
         j.restore_all(&p);
         assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz("")));
         assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(1)));
-        assert_eq!(p.inet_of(PROXY_SERVER), Some(RegValue::sz("127.0.0.1:10808")));
+        assert_eq!(
+            p.inet_of(PROXY_SERVER),
+            Some(RegValue::sz("127.0.0.1:10808"))
+        );
     }
 }

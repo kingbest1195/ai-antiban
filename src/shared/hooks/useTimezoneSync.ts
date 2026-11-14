@@ -177,7 +177,7 @@ export function useTimezoneSync({ activeReport, runFullAudit, showToast }: Optio
         const res = await syncAiAgentsTimezone(tz);
         setTzSyncedNotice(true);
         showToast(t.timezone.done, res, "success");
-        await runFullAudit(true);
+        await runFullAudit(true, true);
       } catch (err: unknown) {
         showToast(t.timezone.error, err instanceof Error ? err.message : String(err), "error");
       } finally {

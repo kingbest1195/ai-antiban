@@ -170,9 +170,9 @@ pub fn query_os_autostart_active() -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        return user_home_dir()
+        user_home_dir()
             .map(|h| is_launch_agent_installed_in(&h))
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(target_os = "windows")]
     {
@@ -252,9 +252,13 @@ mod tests {
 
     #[test]
     fn plist_contains_label_minimized_and_run_at_load() {
-        let plist = build_launch_agent_plist(Path::new("/Applications/Zastava & Co.app/Contents/MacOS/zastava"));
+        let plist = build_launch_agent_plist(Path::new(
+            "/Applications/Zastava & Co.app/Contents/MacOS/zastava",
+        ));
         assert!(plist.contains("<string>io.zastava.desktop</string>"));
-        assert!(plist.contains("<string>/Applications/Zastava &amp; Co.app/Contents/MacOS/zastava</string>"));
+        assert!(plist.contains(
+            "<string>/Applications/Zastava &amp; Co.app/Contents/MacOS/zastava</string>"
+        ));
         assert!(plist.contains("<string>--minimized</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>\n    <true/>"));
     }

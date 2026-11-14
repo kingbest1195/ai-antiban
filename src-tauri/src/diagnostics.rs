@@ -20,7 +20,13 @@ fn uptime_secs() -> u64 {
 fn sanitize_single_line(raw: &str) -> String {
     let collapsed = raw
         .chars()
-        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
         .filter(|c| !c.is_control())
         .collect::<String>();
     let trimmed = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -74,7 +80,12 @@ mod tests {
         let entries = dump();
         assert_eq!(entries.len(), MAX_ENTRIES);
         assert!(entries.first().unwrap().contains("line #15"));
-        assert!(entries.last().unwrap().contains(&format!("line #{}", MAX_ENTRIES + 14)));
+        assert!(
+            entries
+                .last()
+                .unwrap()
+                .contains(&format!("line #{}", MAX_ENTRIES + 14))
+        );
         assert!(!entries.last().unwrap().contains('\n'));
     }
 }

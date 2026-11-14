@@ -14,13 +14,13 @@
 
 use std::net::IpAddr;
 
-use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use url::Url;
 
 use super::net::{is_gateway_loop, is_user_local_ip};
-use super::{route_id_for_raw_key, Entry, EntryProto, Route, MAX_ENTRIES};
+use super::{Entry, EntryProto, MAX_ENTRIES, Route, route_id_for_raw_key};
 use crate::proxy::server::{is_forbidden_ip, is_internal_hostname};
 
 /// Prefix of keys that come from outside.
@@ -63,7 +63,11 @@ fn json_error(e: &serde_json::Error) -> String {
         serde_json::error::Category::Data => "missing or mistyped field",
         serde_json::error::Category::Eof => "unexpected end of data",
     };
-    format!("Invalid key JSON: {kind} at line {}, column {}", e.line(), e.column())
+    format!(
+        "Invalid key JSON: {kind} at line {}, column {}",
+        e.line(),
+        e.column()
+    )
 }
 
 fn has_control(s: &str) -> bool {
@@ -71,14 +75,19 @@ fn has_control(s: &str) -> bool {
 }
 
 fn clean_label(label: Option<String>, fallback: &str) -> Result<String, String> {
-    match label.map(|l| l.trim().to_string()).filter(|l| !l.is_empty()) {
+    match label
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+    {
         None => Ok(fallback.chars().take(MAX_LABEL_LEN).collect()),
         Some(l) => {
             if has_control(&l) {
                 return Err("Key label contains control characters".to_string());
             }
             if l.chars().count() > MAX_LABEL_LEN {
-                return Err(format!("Key label is longer than {MAX_LABEL_LEN} characters"));
+                return Err(format!(
+                    "Key label is longer than {MAX_LABEL_LEN} characters"
+                ));
             }
             Ok(l)
         }
@@ -89,7 +98,10 @@ fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > MAX_ID_LEN {
         return Err(format!("Key id must be 1..={MAX_ID_LEN} characters"));
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Key id may contain only latin letters, digits, '-' and '_'".to_string());
     }
     Ok(())
@@ -165,7 +177,11 @@ fn validate_host(raw: &str, allow_local: bool) -> Result<String, String> {
     Ok(h)
 }
 
-fn validate_cred(value: Option<String>, what: &str, proto: EntryProto) -> Result<Option<String>, String> {
+fn validate_cred(
+    value: Option<String>,
+    what: &str,
+    proto: EntryProto,
+) -> Result<Option<String>, String> {
     let Some(v) = value.filter(|v| !v.is_empty()) else {
         return Ok(None);
     };
@@ -200,7 +216,10 @@ fn build_entry(
     } else {
         host.parse::<IpAddr>().ok()
     };
-    if loopback_ip.map(|ip| is_gateway_loop(&ip, port, 0)).unwrap_or(false) {
+    if loopback_ip
+        .map(|ip| is_gateway_loop(&ip, port, 0))
+        .unwrap_or(false)
+    {
         return Err("Entry host:port is the Zastava gateway itself".to_string());
     }
     let username = validate_cred(username, "username", proto)?;
@@ -208,7 +227,10 @@ fn build_entry(
     if password.is_some() && username.is_none() {
         return Err("Entry password is set without a username".to_string());
     }
-    let sni = match sni.map(|s| s.trim().trim_end_matches('.').to_ascii_lowercase()).filter(|s| !s.is_empty()) {
+    let sni = match sni
+        .map(|s| s.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+    {
         None => None,
         Some(s) => {
             if proto != EntryProto::Https {
@@ -217,11 +239,19 @@ fn build_entry(
             if s.parse::<IpAddr>().is_ok() {
                 return Err("Entry 'sni' must be a domain name".to_string());
             }
-            validate_domain(&s).map_err(|_| "Entry 'sni' is not a valid public domain name".to_string())?;
+            validate_domain(&s)
+                .map_err(|_| "Entry 'sni' is not a valid public domain name".to_string())?;
             Some(s)
         }
     };
-    Ok(Entry { proto, host, port, username, password, sni })
+    Ok(Entry {
+        proto,
+        host,
+        port,
+        username,
+        password,
+        sni,
+    })
 }
 
 #[derive(Deserialize)]
@@ -265,7 +295,12 @@ struct KeyV2 {
     entry: Vec<EntryV2>,
 }
 
-fn single_entry_route(entry: Entry, label: Option<String>, raw_key: &str, now: u64) -> Result<Route, String> {
+fn single_entry_route(
+    entry: Entry,
+    label: Option<String>,
+    raw_key: &str,
+    now: u64,
+) -> Result<Route, String> {
     let label = clean_label(label, &entry.host)?;
     Ok(Route {
         id: route_id_for_raw_key(raw_key),
@@ -290,28 +325,46 @@ fn parse_v2(value: serde_json::Value, raw_key: &str, now: u64) -> Result<Route, 
     }
     let mut entries = Vec::with_capacity(key.entry.len());
     for (i, e) in key.entry.into_iter().enumerate() {
-        let proto = EntryProto::from_scheme(&e.proto)
-            .ok_or_else(|| format!("Entry #{}: unsupported proto (expected https, socks5 or http)", i + 1))?;
+        let proto = EntryProto::from_scheme(&e.proto).ok_or_else(|| {
+            format!(
+                "Entry #{}: unsupported proto (expected https, socks5 or http)",
+                i + 1
+            )
+        })?;
         let entry = build_entry(proto, &e.host, e.port, e.username, e.password, e.sni, false)
             .map_err(|err| format!("Entry #{}: {err}", i + 1))?;
         entries.push(entry);
     }
-    let id = match key.id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    let id = match key
+        .id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         Some(id) => {
             validate_id(&id)?;
             id
         }
         None => route_id_for_raw_key(raw_key),
     };
-    let country = match key.country.map(|c| c.trim().to_ascii_uppercase()).filter(|c| !c.is_empty()) {
+    let country = match key
+        .country
+        .map(|c| c.trim().to_ascii_uppercase())
+        .filter(|c| !c.is_empty())
+    {
         None => None,
         Some(c) if c.len() == 2 && c.chars().all(|ch| ch.is_ascii_uppercase()) => Some(c),
         Some(_) => return Err("Key country must be a 2-letter ISO code".to_string()),
     };
-    let exit_ip = match key.exit_ip.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    let exit_ip = match key
+        .exit_ip
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         None => None,
         Some(s) => {
-            let ip: IpAddr = s.parse().map_err(|_| "Key exit_ip is not a valid IP address".to_string())?;
+            let ip: IpAddr = s
+                .parse()
+                .map_err(|_| "Key exit_ip is not a valid IP address".to_string())?;
             if is_forbidden_ip(&ip) {
                 return Err("Key exit_ip must be a public IP".to_string());
             }
@@ -334,9 +387,18 @@ fn parse_v2(value: serde_json::Value, raw_key: &str, now: u64) -> Result<Route, 
 
 fn parse_v1(value: serde_json::Value, raw_key: &str, now: u64) -> Result<Route, String> {
     let key: KeyV1 = serde_json::from_value(value).map_err(|e| json_error(&e))?;
-    let proto = EntryProto::from_scheme(&key.protocol)
-        .ok_or_else(|| "Unsupported protocol in key (expected https, socks5 or http)".to_string())?;
-    let entry = build_entry(proto, &key.host, key.port, key.username, key.password, None, false)?;
+    let proto = EntryProto::from_scheme(&key.protocol).ok_or_else(|| {
+        "Unsupported protocol in key (expected https, socks5 or http)".to_string()
+    })?;
+    let entry = build_entry(
+        proto,
+        &key.host,
+        key.port,
+        key.username,
+        key.password,
+        None,
+        false,
+    )?;
     single_entry_route(entry, key.label, raw_key, now)
 }
 
@@ -371,12 +433,13 @@ fn percent_decode_clean(input: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push(h * 16 + l);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -384,7 +447,12 @@ fn percent_decode_clean(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn parse_proxy_url(url_str: &str, raw_key: &str, now: u64, allow_local: bool) -> Result<Route, String> {
+fn parse_proxy_url(
+    url_str: &str,
+    raw_key: &str,
+    now: u64,
+    allow_local: bool,
+) -> Result<Route, String> {
     let trimmed = url_str.trim();
     // Support unescaped spaces or Cyrillic text in the fragment (#Label)
     let (url_part, raw_fragment) = match trimmed.split_once('#') {
@@ -408,7 +476,9 @@ fn parse_proxy_url(url_str: &str, raw_key: &str, now: u64, allow_local: bool) ->
     let port = parsed.port().unwrap_or(proto.default_port());
     let username = (!parsed.username().is_empty()).then(|| percent_decode_clean(parsed.username()));
     let password = parsed.password().map(percent_decode_clean);
-    let label = raw_fragment.filter(|f| !f.is_empty()).map(percent_decode_clean);
+    let label = raw_fragment
+        .filter(|f| !f.is_empty())
+        .map(percent_decode_clean);
 
     let entry = build_entry(proto, host, port, username, password, None, allow_local)?;
     single_entry_route(entry, label, raw_key, now)
@@ -487,16 +557,24 @@ mod tests {
         let port0 = zkey(r#"{"v":2,"entry":[{"proto":"https","host":"a.example.net","port":0}]}"#);
         assert!(parse_route_key(&port0, 0).is_err());
 
-        let sni_socks = zkey(r#"{"v":2,"entry":[{"proto":"socks5","host":"a.example.net","port":1080,"sni":"x.example.net"}]}"#);
+        let sni_socks = zkey(
+            r#"{"v":2,"entry":[{"proto":"socks5","host":"a.example.net","port":1080,"sni":"x.example.net"}]}"#,
+        );
         assert!(parse_route_key(&sni_socks, 0).is_err());
 
-        let bad_id = zkey(r#"{"v":2,"id":"../etc","entry":[{"proto":"https","host":"a.example.net","port":443}]}"#);
+        let bad_id = zkey(
+            r#"{"v":2,"id":"../etc","entry":[{"proto":"https","host":"a.example.net","port":443}]}"#,
+        );
         assert!(parse_route_key(&bad_id, 0).is_err());
 
-        let bad_exit = zkey(r#"{"v":2,"exit_ip":"127.0.0.1","entry":[{"proto":"https","host":"a.example.net","port":443}]}"#);
+        let bad_exit = zkey(
+            r#"{"v":2,"exit_ip":"127.0.0.1","entry":[{"proto":"https","host":"a.example.net","port":443}]}"#,
+        );
         assert!(parse_route_key(&bad_exit, 0).is_err());
 
-        let crlf = zkey(r#"{"v":2,"entry":[{"proto":"http","host":"a.example.net","port":80,"username":"a\r\nX-Evil: 1","password":"p"}]}"#);
+        let crlf = zkey(
+            r#"{"v":2,"entry":[{"proto":"http","host":"a.example.net","port":80,"username":"a\r\nX-Evil: 1","password":"p"}]}"#,
+        );
         assert!(parse_route_key(&crlf, 0).is_err());
 
         let long_label = zkey(&format!(
@@ -509,7 +587,9 @@ mod tests {
     #[test]
     fn test_errors_never_contain_password() {
         // Password given with a wrong type: serde would normally quote the value.
-        let k = zkey(r#"{"v":2,"entry":[{"proto":"https","host":"a.example.net","port":"TopSecret42"}]}"#);
+        let k = zkey(
+            r#"{"v":2,"entry":[{"proto":"https","host":"a.example.net","port":"TopSecret42"}]}"#,
+        );
         let err = parse_route_key(&k, 0).unwrap_err();
         assert!(!err.contains("TopSecret42"), "{err}");
 
@@ -572,25 +652,48 @@ mod tests {
             assert!(r.allows_local_entries(), "{k}");
         }
         // The gateway itself is never allowed (loop) ...
-        for k in ["socks5://127.0.0.1:8899", "http://localhost:8900", "socks5://[::1]:8899"] {
+        for k in [
+            "socks5://127.0.0.1:8899",
+            "http://localhost:8900",
+            "socks5://[::1]:8899",
+        ] {
             assert!(parse_route_key(k, 0).is_err(), "{k}");
         }
         // ... nor reserved / link-local / unspecified ranges.
-        for k in ["socks5://0.0.0.0:1080", "socks5://169.254.1.1:1080", "socks5://240.0.0.1:1080"] {
+        for k in [
+            "socks5://0.0.0.0:1080",
+            "socks5://169.254.1.1:1080",
+            "socks5://240.0.0.1:1080",
+        ] {
             assert!(parse_route_key(k, 0).is_err(), "{k}");
         }
     }
 
     #[test]
     fn test_local_policy_zastava_keys_are_public_only() {
-        for h in ["127.0.0.1", "10.0.0.1", "192.168.1.1", "100.64.0.1", "localhost", "::1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "::10.0.0.1"] {
-            let k = zkey(&format!(r#"{{"v":2,"entry":[{{"proto":"socks5","host":"{h}","port":1080}}]}}"#));
+        for h in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "100.64.0.1",
+            "localhost",
+            "::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::a00:1",
+            "::10.0.0.1",
+        ] {
+            let k = zkey(&format!(
+                r#"{{"v":2,"entry":[{{"proto":"socks5","host":"{h}","port":1080}}]}}"#
+            ));
             assert!(parse_route_key(&k, 0).is_err(), "v2 {h}");
         }
         let v1 = zkey(r#"{"protocol":"socks5","host":"127.0.0.1","port":1080}"#);
         assert!(parse_route_key(&v1, 0).is_err());
         // A URL wrapped into zastava:// is still external.
-        let wrapped = format!("zastava://{}", URL_SAFE_NO_PAD.encode(b"socks5://127.0.0.1:10808"));
+        let wrapped = format!(
+            "zastava://{}",
+            URL_SAFE_NO_PAD.encode(b"socks5://127.0.0.1:10808")
+        );
         assert!(parse_route_key(&wrapped, 0).is_err());
         let ok = zkey(r#"{"v":2,"entry":[{"proto":"socks5","host":"185.1.1.1","port":1080}]}"#);
         assert!(!parse_route_key(&ok, 0).unwrap().allows_local_entries());
@@ -598,12 +701,27 @@ mod tests {
 
     #[test]
     fn test_numeric_and_hex_host_spellings_rejected() {
-        for h in ["127.1", "0x7f.1", "0x7f000001.example.net", "10.1", "2130706433", "1.2.3", "a.0x1f.example.net", "localtest.123"] {
-            let k = zkey(&format!(r#"{{"v":2,"entry":[{{"proto":"socks5","host":"{h}","port":1080}}]}}"#));
+        for h in [
+            "127.1",
+            "0x7f.1",
+            "0x7f000001.example.net",
+            "10.1",
+            "2130706433",
+            "1.2.3",
+            "a.0x1f.example.net",
+            "localtest.123",
+        ] {
+            let k = zkey(&format!(
+                r#"{{"v":2,"entry":[{{"proto":"socks5","host":"{h}","port":1080}}]}}"#
+            ));
             assert!(parse_route_key(&k, 0).is_err(), "v2 {h}");
         }
         // Not even for the user's own URL keys: write the dotted address.
-        for u in ["socks5://127.1:1080", "socks5://0x7f.1:1080", "socks5://2130706433:1080"] {
+        for u in [
+            "socks5://127.1:1080",
+            "socks5://0x7f.1:1080",
+            "socks5://2130706433:1080",
+        ] {
             assert!(parse_route_key(u, 0).is_err(), "{u}");
         }
         // Ordinary names are untouched.

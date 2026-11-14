@@ -197,7 +197,8 @@ mod win {
         let sub = encode_utf16_nul(subkey);
         let mut handle: *mut c_void = core::ptr::null_mut();
         // SAFETY: `sub` is NUL-terminated; `handle` receives the opened key handle.
-        let st = unsafe { RegOpenKeyExW(root_handle(root), sub.as_ptr(), 0, sam_desired, &mut handle) };
+        let st =
+            unsafe { RegOpenKeyExW(root_handle(root), sub.as_ptr(), 0, sam_desired, &mut handle) };
         if st == 0 {
             Ok(KeyHandle(handle))
         } else {
@@ -560,7 +561,10 @@ mod tests {
     fn decode_utf16_handles_empty_extra_nuls_and_rejects_malformed() {
         assert_eq!(decode_utf16_le_string(&[]).unwrap(), "");
         assert_eq!(decode_utf16_le_string(&[0, 0]).unwrap(), "");
-        assert_eq!(decode_utf16_le_string(&[0x41, 0x00, 0, 0, 0, 0]).unwrap(), "A");
+        assert_eq!(
+            decode_utf16_le_string(&[0x41, 0x00, 0, 0, 0, 0]).unwrap(),
+            "A"
+        );
         // Odd byte length
         assert!(decode_utf16_le_string(&[0x41, 0x00, 0x42]).is_err());
         // Unpaired UTF-16 high surrogate
@@ -576,7 +580,11 @@ mod tests {
         bytes.extend([0, 0]);
         assert_eq!(
             decode_multi_sz(&bytes).unwrap(),
-            vec!["ru-RU".to_string(), "en-US".to_string(), "de-DE".to_string()]
+            vec![
+                "ru-RU".to_string(),
+                "en-US".to_string(),
+                "de-DE".to_string()
+            ]
         );
         assert!(decode_multi_sz(&[0x41]).is_err());
     }
@@ -584,7 +592,10 @@ mod tests {
     #[test]
     fn decode_dword_requires_four_bytes() {
         assert_eq!(decode_dword(&3u32.to_le_bytes()).unwrap(), 3);
-        assert_eq!(decode_dword(&0xdead_beefu32.to_le_bytes()).unwrap(), 0xdead_beef);
+        assert_eq!(
+            decode_dword(&0xdead_beefu32.to_le_bytes()).unwrap(),
+            0xdead_beef
+        );
         assert!(decode_dword(&[1, 2, 3]).is_err());
     }
 

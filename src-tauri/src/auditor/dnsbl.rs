@@ -4,10 +4,16 @@ use std::time::Duration;
 
 use crate::auditor::geo_matrix::{CheckResult, GUIDE_PERSONAL_VPN, UnknownReason};
 use crate::auditor::rules::{DangerousAsns, DnsblZoneConfig};
-use crate::auditor::seams::{DnsLookup, LookupOutcome, SystemDns};
+use crate::auditor::seams::{
+    BoxFuture, DnsLookup, HttpProbeOutcome, IpProbe, LookupOutcome, SystemDns,
+};
 
 /// Time limit of one lookup (the zone's real query and its control query run side by side).
 pub const DNSBL_TIMEOUT_MS: u64 = 1500;
+
+/// Time limit of one DNS-over-HTTPS fallback lookup (`https://dns.google/resolve`).
+pub const DNSBL_DOH_TIMEOUT_MS: u64 = 2000;
+const DOH_RESOLVE_URL: &str = "https://dns.google/resolve";
 
 /// Control address: every working DNSBL zone lists `127.0.0.2` (RFC 5782, section 5).
 const CONTROL_REVERSED_IP: &str = "2.0.0.127";
@@ -56,7 +62,8 @@ impl DnsblReport {
             // The zones list IPv4 only: for an IPv6 exit the check does not apply.
             return Some(UnknownReason::NotApplicable);
         }
-        if self.total_checked > 0 && self.answered() >= MIN_ANSWERING_ZONES.min(self.total_checked) {
+        if self.total_checked > 0 && self.answered() >= MIN_ANSWERING_ZONES.min(self.total_checked)
+        {
             return None;
         }
         let count = |r: UnknownReason| self.failures.iter().filter(|f| **f == r).count();
@@ -105,7 +112,10 @@ pub fn reverse_ipv4(ip_str: &str) -> Result<String, String> {
         let _ = num;
     }
 
-    Ok(format!("{}.{}.{}.{}", parts[3], parts[2], parts[1], parts[0]))
+    Ok(format!(
+        "{}.{}.{}.{}",
+        parts[3], parts[2], parts[1], parts[0]
+    ))
 }
 
 /// Formats DNSBL query domain: "5.101.220.185.zen.spamhaus.org".
@@ -160,7 +170,8 @@ fn read_lookup(outcome: LookupOutcome) -> Reading {
 
 /// Spamhaus PBL: an answer that says nothing about the reputation of the IP.
 fn is_policy_only(zone: &str, addr: &Ipv4Addr) -> bool {
-    zone.trim_matches('.').eq_ignore_ascii_case(SPAMHAUS_ZEN_ZONE)
+    zone.trim_matches('.')
+        .eq_ignore_ascii_case(SPAMHAUS_ZEN_ZONE)
         && SPAMHAUS_PBL_CODES.contains(&addr.octets()[3])
 }
 
@@ -211,14 +222,162 @@ pub async fn query_zone(
     }
 }
 
-/// Queries all configured DNSBL zones in parallel through the OS resolver.
-pub async fn check_all_dnsbl(ip: &str, dangerous_asns: &DangerousAsns) -> DnsblReport {
-    check_all_dnsbl_with(Arc::new(SystemDns), ip, dangerous_asns).await
+/// Parses a Google Public DNS JSON response (`https://dns.google/resolve?name=...&type=A`)
+/// into [`LookupOutcome`].
+pub fn parse_doh_json_a_response(body: &str) -> LookupOutcome {
+    #[derive(serde::Deserialize)]
+    struct DohAnswer {
+        #[serde(default)]
+        r#type: u16,
+        #[serde(default)]
+        data: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct DohResponse {
+        #[serde(rename = "Status")]
+        status: i32,
+        #[serde(rename = "Answer", default)]
+        answer: Vec<DohAnswer>,
+    }
+
+    let Ok(parsed) = serde_json::from_str::<DohResponse>(body) else {
+        return LookupOutcome::Failed;
+    };
+    match parsed.status {
+        0 => {
+            let addrs: Vec<IpAddr> = parsed
+                .answer
+                .into_iter()
+                .filter(|a| a.r#type == 1)
+                .filter_map(|a| a.data.trim().parse::<Ipv4Addr>().ok())
+                .map(IpAddr::V4)
+                .collect();
+            if addrs.is_empty() {
+                LookupOutcome::NotFound
+            } else {
+                LookupOutcome::Addrs(addrs)
+            }
+        }
+        3 => LookupOutcome::NotFound,
+        _ => LookupOutcome::Failed,
+    }
 }
 
-/// [`check_all_dnsbl`] through `dns` (injectable for tests).
+/// DNS-over-HTTPS fallback resolver (`https://dns.google/resolve`) bypassing local FakeDNS
+/// interception (`198.18.x.x`) and open-resolver Spamhaus refusals (`127.255.255.x`).
+pub enum DohDns {
+    Reqwest(reqwest::Client),
+    Probe(Arc<dyn IpProbe>),
+}
+
+impl DohDns {
+    /// Creates a shared `.no_proxy()` client for `https://dns.google/resolve`.
+    pub fn real() -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        Ok(Self::Reqwest(client))
+    }
+
+    /// Creates a DoH resolver backed by an [`IpProbe`] (for deterministic offline tests).
+    pub fn with_probe(probe: Arc<dyn IpProbe>) -> Self {
+        Self::Probe(probe)
+    }
+}
+
+impl DnsLookup for DohDns {
+    fn lookup<'a>(&'a self, host: &'a str, limit: Duration) -> BoxFuture<'a, LookupOutcome> {
+        Box::pin(async move {
+            match self {
+                Self::Reqwest(client) => {
+                    let req = client
+                        .get(DOH_RESOLVE_URL)
+                        .query(&[("name", host), ("type", "A")])
+                        .header(reqwest::header::ACCEPT, "application/dns-json")
+                        .timeout(limit);
+                    let resp = match req.send().await {
+                        Ok(r) => r,
+                        Err(e) if e.is_timeout() => return LookupOutcome::Timeout,
+                        Err(_) => return LookupOutcome::Failed,
+                    };
+                    if !resp.status().is_success() {
+                        return LookupOutcome::Failed;
+                    }
+                    match resp.text().await {
+                        Ok(body) => parse_doh_json_a_response(&body),
+                        Err(_) => LookupOutcome::Failed,
+                    }
+                }
+                Self::Probe(probe) => {
+                    let url = format!("{DOH_RESOLVE_URL}?name={host}&type=A");
+                    match probe.get(&url, limit).await {
+                        HttpProbeOutcome::Response { status, body }
+                            if (200..300).contains(&status) =>
+                        {
+                            parse_doh_json_a_response(&body)
+                        }
+                        HttpProbeOutcome::Timeout => LookupOutcome::Timeout,
+                        _ => LookupOutcome::Failed,
+                    }
+                }
+            }
+        })
+    }
+}
+
+async fn run_zone_queries(
+    dns: &Arc<dyn DnsLookup>,
+    reversed: &str,
+    zones: &[(usize, DnsblZoneConfig)],
+    limit: Duration,
+) -> Vec<(usize, Option<ZoneAnswer>)> {
+    let mut tasks = Vec::with_capacity(zones.len());
+    for (idx, zone) in zones {
+        let idx = *idx;
+        let (dns, reversed, zone) = (dns.clone(), reversed.to_string(), zone.clone());
+        tasks.push(tokio::spawn(async move {
+            let answer = query_zone(&*dns, &reversed, &zone, limit).await;
+            (idx, answer)
+        }));
+    }
+
+    let mut out = Vec::with_capacity(tasks.len());
+    for (pos, task) in tasks.into_iter().enumerate() {
+        let idx = zones[pos].0;
+        match task.await {
+            Ok((i, ans)) => out.push((i, Some(ans))),
+            // A panicked zone task counts as an internal error rather than a silent clean answer.
+            Err(_) => out.push((idx, None)),
+        }
+    }
+    out
+}
+
+fn is_decisive_answer(ans: Option<&ZoneAnswer>) -> bool {
+    matches!(ans, Some(ZoneAnswer::Listed(_) | ZoneAnswer::NotListed))
+}
+
+/// Queries all configured DNSBL zones in parallel through the OS resolver, falling back to
+/// DNS-over-HTTPS (`https://dns.google/resolve`) when `< MIN_ANSWERING_ZONES` zones respond.
+pub async fn check_all_dnsbl(ip: &str, dangerous_asns: &DangerousAsns) -> DnsblReport {
+    let doh = DohDns::real()
+        .ok()
+        .map(|d| Arc::new(d) as Arc<dyn DnsLookup>);
+    check_all_dnsbl_with_doh(Arc::new(SystemDns), doh, ip, dangerous_asns).await
+}
+
+/// [`check_all_dnsbl`] through `dns` without network DoH fallback (for offline unit tests).
 pub async fn check_all_dnsbl_with(
     dns: Arc<dyn DnsLookup>,
+    ip: &str,
+    dangerous_asns: &DangerousAsns,
+) -> DnsblReport {
+    check_all_dnsbl_with_doh(dns, None, ip, dangerous_asns).await
+}
+
+/// [`check_all_dnsbl`] through primary `dns` and optional DoH fallback `doh` when primary yields
+/// fewer than [`MIN_ANSWERING_ZONES`] decisive zone answers (FakeDNS / `127.255.255.x` refusals).
+pub async fn check_all_dnsbl_with_doh(
+    dns: Arc<dyn DnsLookup>,
+    doh: Option<Arc<dyn DnsLookup>>,
     ip: &str,
     dangerous_asns: &DangerousAsns,
 ) -> DnsblReport {
@@ -236,26 +395,61 @@ pub async fn check_all_dnsbl_with(
         }
     };
 
-    let limit = Duration::from_millis(DNSBL_TIMEOUT_MS);
-    let mut tasks = Vec::new();
-    for zone in &dangerous_asns.dnsbl_zones {
-        let (dns, reversed, zone) = (dns.clone(), reversed.clone(), zone.clone());
-        tasks.push(tokio::spawn(async move {
-            query_zone(&*dns, &reversed, &zone, limit).await
-        }));
+    let indexed_zones: Vec<(usize, DnsblZoneConfig)> = dangerous_asns
+        .dnsbl_zones
+        .iter()
+        .cloned()
+        .enumerate()
+        .collect();
+    let mut answers: Vec<Option<ZoneAnswer>> = vec![None; total];
+    for (idx, ans) in run_zone_queries(
+        &dns,
+        &reversed,
+        &indexed_zones,
+        Duration::from_millis(DNSBL_TIMEOUT_MS),
+    )
+    .await
+    {
+        answers[idx] = ans;
+    }
+
+    let primary_answered = answers
+        .iter()
+        .filter(|a| is_decisive_answer(a.as_ref()))
+        .count();
+    if primary_answered < MIN_ANSWERING_ZONES.min(total)
+        && let Some(doh_dns) = doh
+    {
+        let retry_zones: Vec<(usize, DnsblZoneConfig)> = indexed_zones
+            .into_iter()
+            .filter(|(idx, _)| !is_decisive_answer(answers[*idx].as_ref()))
+            .collect();
+        if !retry_zones.is_empty() {
+            for (idx, fallback_ans) in run_zone_queries(
+                &doh_dns,
+                &reversed,
+                &retry_zones,
+                Duration::from_millis(DNSBL_DOH_TIMEOUT_MS),
+            )
+            .await
+            {
+                if is_decisive_answer(fallback_ans.as_ref()) {
+                    answers[idx] = fallback_ans;
+                }
+            }
+        }
     }
 
     let mut hits = Vec::new();
     let mut failures = Vec::new();
-    for task in tasks {
-        match task.await {
-            Ok(ZoneAnswer::Listed(hit)) => hits.push(hit),
-            Ok(ZoneAnswer::NotListed) => {}
-            Ok(ZoneAnswer::Refused) => failures.push(UnknownReason::SourceRefused),
-            Ok(ZoneAnswer::Timeout) => failures.push(UnknownReason::Timeout),
-            Ok(ZoneAnswer::Error) => failures.push(UnknownReason::NetworkError),
-            // A zone task that died is an error of that zone, never a clean answer.
-            Err(_) => failures.push(UnknownReason::InternalError),
+    for ans in answers {
+        match ans {
+            Some(ZoneAnswer::Listed(hit)) => hits.push(hit),
+            Some(ZoneAnswer::NotListed) => {}
+            Some(ZoneAnswer::Refused) => failures.push(UnknownReason::SourceRefused),
+            Some(ZoneAnswer::Timeout) => failures.push(UnknownReason::Timeout),
+            Some(ZoneAnswer::Error) => failures.push(UnknownReason::NetworkError),
+            None => failures.push(UnknownReason::InternalError),
         }
     }
 
@@ -321,9 +515,17 @@ pub fn evaluate_dnsbl_report(report: &DnsblReport) -> CheckResult {
     );
 
     if has_critical {
-        CheckResult::critical("DNSBL_LISTED_CRITICAL", msg, Some(GUIDE_PERSONAL_VPN.to_string()))
+        CheckResult::critical(
+            "DNSBL_LISTED_CRITICAL",
+            msg,
+            Some(GUIDE_PERSONAL_VPN.to_string()),
+        )
     } else {
-        CheckResult::warning("DNSBL_LISTED_WARNING", msg, Some(GUIDE_PERSONAL_VPN.to_string()))
+        CheckResult::warning(
+            "DNSBL_LISTED_WARNING",
+            msg,
+            Some(GUIDE_PERSONAL_VPN.to_string()),
+        )
     }
 }
 
@@ -349,7 +551,9 @@ mod tests {
     /// The bundled rules with the zone list replaced by `z1.test` .. `zN.test`.
     fn asns_with_zones(n: usize, severity: &str) -> DangerousAsns {
         let mut asns = DangerousAsns::load_bundled().unwrap();
-        asns.dnsbl_zones = (1..=n).map(|i| zone(&format!("z{i}.test"), severity)).collect();
+        asns.dnsbl_zones = (1..=n)
+            .map(|i| zone(&format!("z{i}.test"), severity))
+            .collect();
         asns
     }
 
@@ -380,7 +584,10 @@ mod tests {
     fn bundled_zone_list_has_no_dead_zones() {
         let asns = DangerousAsns::load_bundled().unwrap();
         let zones: Vec<&str> = asns.dnsbl_zones.iter().map(|z| z.zone.as_str()).collect();
-        assert!(!zones.iter().any(|z| z.contains("sorbs")), "SORBS is shut down");
+        assert!(
+            !zones.iter().any(|z| z.contains("sorbs")),
+            "SORBS is shut down"
+        );
         assert!(zones.contains(&"zen.spamhaus.org"));
         assert!(asns.dnsbl_zones.len() >= MIN_ANSWERING_ZONES);
     }
@@ -388,7 +595,11 @@ mod tests {
     // (1) every zone times out
     #[tokio::test]
     async fn all_zones_timing_out_is_unknown_timeout() {
-        let (rep, res) = run(FakeDns::new(LookupOutcome::Timeout), &asns_with_zones(4, "warning")).await;
+        let (rep, res) = run(
+            FakeDns::new(LookupOutcome::Timeout),
+            &asns_with_zones(4, "warning"),
+        )
+        .await;
         assert_eq!(rep.total_checked, 4);
         assert_eq!(res.status, CheckStatus::Unknown);
         assert_eq!(res.reason, Some(UnknownReason::Timeout));
@@ -411,7 +622,10 @@ mod tests {
     #[tokio::test]
     async fn two_answering_zones_are_enough_one_is_not() {
         let asns = asns_with_zones(4, "warning");
-        let two = healthy(healthy(FakeDns::new(LookupOutcome::Timeout), "z1.test"), "z2.test");
+        let two = healthy(
+            healthy(FakeDns::new(LookupOutcome::Timeout), "z1.test"),
+            "z2.test",
+        );
         let (rep, res) = run(two, &asns).await;
         assert_eq!(res.status, CheckStatus::Ok);
         assert_eq!(res.code, "DNSBL_CLEAN");
@@ -535,7 +749,10 @@ mod tests {
             ));
         }
         // PBL together with SBL is still a listing.
-        let both = LookupOutcome::Addrs(vec!["127.0.0.10".parse().unwrap(), "127.0.0.2".parse().unwrap()]);
+        let both = LookupOutcome::Addrs(vec![
+            "127.0.0.10".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+        ]);
         match query_zone(&base(both), REVERSED, &cfg, lim).await {
             ZoneAnswer::Listed(hit) => assert_eq!(hit.return_ip, "127.0.0.2"),
             other => panic!("{other:?}"),
@@ -579,11 +796,26 @@ mod tests {
     #[test]
     fn report_classification() {
         use UnknownReason::*;
-        assert_eq!(evaluate_dnsbl_report(&report(4, vec![])).status, CheckStatus::Ok);
-        assert_eq!(evaluate_dnsbl_report(&report(4, vec![Timeout; 2])).status, CheckStatus::Ok);
-        assert_eq!(evaluate_dnsbl_report(&report(4, vec![Timeout; 3])).status, CheckStatus::Unknown);
-        assert_eq!(evaluate_dnsbl_report(&report(0, vec![])).status, CheckStatus::Unknown);
-        let mixed = evaluate_dnsbl_report(&report(4, vec![Timeout, SourceRefused, NetworkError, SourceRefused]));
+        assert_eq!(
+            evaluate_dnsbl_report(&report(4, vec![])).status,
+            CheckStatus::Ok
+        );
+        assert_eq!(
+            evaluate_dnsbl_report(&report(4, vec![Timeout; 2])).status,
+            CheckStatus::Ok
+        );
+        assert_eq!(
+            evaluate_dnsbl_report(&report(4, vec![Timeout; 3])).status,
+            CheckStatus::Unknown
+        );
+        assert_eq!(
+            evaluate_dnsbl_report(&report(0, vec![])).status,
+            CheckStatus::Unknown
+        );
+        let mixed = evaluate_dnsbl_report(&report(
+            4,
+            vec![Timeout, SourceRefused, NetworkError, SourceRefused],
+        ));
         assert_eq!(mixed.reason, Some(Timeout));
         let hit = DnsblZoneHit {
             zone: "z".into(),
@@ -595,7 +827,89 @@ mod tests {
         let mut listed = report(4, vec![Timeout; 3]);
         listed.hits.push(hit);
         let r = evaluate_dnsbl_report(&listed);
-        assert_eq!((r.status, r.code.as_str()), (CheckStatus::Critical, "DNSBL_LISTED_CRITICAL"));
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Critical, "DNSBL_LISTED_CRITICAL")
+        );
         assert!(r.message.contains("Spamhaus ZEN"));
+    }
+
+    #[test]
+    fn parse_doh_json_a_response_handles_listed_nxdomain_empty_and_refused() {
+        let listed = r#"{"Status":0,"Answer":[{"name":"2.0.0.127.z1.test.","type":1,"TTL":300,"data":"127.0.0.2"}]}"#;
+        assert_eq!(
+            parse_doh_json_a_response(listed),
+            LookupOutcome::Addrs(vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))])
+        );
+
+        let nx = r#"{"Status":3,"Question":[{"name":"5.101.220.185.z1.test.","type":1}]}"#;
+        assert_eq!(parse_doh_json_a_response(nx), LookupOutcome::NotFound);
+
+        let empty_ok = r#"{"Status":0,"Answer":[]}"#;
+        assert_eq!(parse_doh_json_a_response(empty_ok), LookupOutcome::NotFound);
+
+        let servfail = r#"{"Status":2}"#;
+        assert_eq!(parse_doh_json_a_response(servfail), LookupOutcome::Failed);
+    }
+
+    #[tokio::test]
+    async fn fake_dns_and_open_resolver_refusal_fall_back_to_doh_json() {
+        use crate::auditor::seams::fakes::FakeProbe;
+
+        let zones = vec![
+            zone("zen.spamhaus.org", "critical"),
+            zone("dnsbl.dronebl.org", "critical"),
+            zone("b.barracudacentral.org", "warning"),
+        ];
+        let rules = DangerousAsns {
+            dnsbl_zones: zones,
+            ..DangerousAsns::load_bundled().unwrap()
+        };
+
+        // Simulate V2Box FakeDNS returning 198.18.0.x for all zones plus 1.1.1.1-style
+        // 127.255.255.254 refusal on Spamhaus; DoH rescues DroneBL and Barracuda (>= 2 zones).
+        let primary = Arc::new(
+            FakeDns::new(LookupOutcome::Addrs(vec![IpAddr::V4(Ipv4Addr::new(
+                198, 18, 0, 44,
+            ))]))
+            .with("2.0.0.127.zen.spamhaus.org", addr("127.255.255.254"))
+            .with("42.114.244.136.zen.spamhaus.org", addr("127.255.255.254")),
+        );
+
+        let doh_probe = Arc::new(
+            FakeProbe::body(200, r#"{"Status":3}"#)
+                .with_route(
+                    "name=2.0.0.127.zen.spamhaus.org",
+                    HttpProbeOutcome::Response {
+                        status: 200,
+                        body: r#"{"Status":0,"Answer":[{"type":1,"data":"127.255.255.254"}]}"#
+                            .into(),
+                    },
+                )
+                .with_route(
+                    "name=2.0.0.127.dnsbl.dronebl.org",
+                    HttpProbeOutcome::Response {
+                        status: 200,
+                        body: r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.2"}]}"#.into(),
+                    },
+                )
+                .with_route(
+                    "name=2.0.0.127.b.barracudacentral.org",
+                    HttpProbeOutcome::Response {
+                        status: 200,
+                        body: r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.2"}]}"#.into(),
+                    },
+                ),
+        );
+        let doh = Arc::new(DohDns::with_probe(doh_probe)) as Arc<dyn DnsLookup>;
+
+        let report = check_all_dnsbl_with_doh(primary, Some(doh), "136.244.114.42", &rules).await;
+        assert_eq!(report.answered(), 2);
+        assert!(report.hits.is_empty());
+        let res = evaluate_dnsbl_report(&report);
+        assert_eq!(
+            (res.status, res.code.as_str()),
+            (CheckStatus::Ok, "DNSBL_CLEAN")
+        );
     }
 }

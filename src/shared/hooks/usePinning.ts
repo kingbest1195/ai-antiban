@@ -37,9 +37,9 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
   }, [currentIp, showToast]);
 
   const handlePinIp = useCallback(
-    async (ip: string) => {
+    async (ip: string, provider?: ProviderId) => {
       try {
-        await pinCurrentIp(ip);
+        await pinCurrentIp(ip, provider);
         await refreshState();
         showToast(t.pinned, t.pinnedText(ip), "success");
         runFullAudit(false);
@@ -50,16 +50,19 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
     [refreshState, runFullAudit, showToast],
   );
 
-  const handleUnpinIp = useCallback(async () => {
-    try {
-      await unpinIp();
-      await refreshState();
-      showToast(t.unpinned, t.unpinnedText, "info");
-      runFullAudit(false);
-    } catch (err: any) {
-      showToast(t.genericError, err?.message || String(err), "error");
-    }
-  }, [refreshState, runFullAudit, showToast]);
+  const handleUnpinIp = useCallback(
+    async (provider?: ProviderId) => {
+      try {
+        await unpinIp(provider);
+        await refreshState();
+        showToast(t.unpinned, t.unpinnedText, "info");
+        runFullAudit(false);
+      } catch (err: any) {
+        showToast(t.genericError, err?.message || String(err), "error");
+      }
+    },
+    [refreshState, runFullAudit, showToast],
+  );
 
   const handleToggleStrict = useCallback(async () => {
     if (!state) return;
