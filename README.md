@@ -1,11 +1,11 @@
 <div align="center">
   <img src="public/icon.png" alt="Застава Logo" width="88" height="88" />
 
-  # Застава (`Zastava`) v2.2.0
+  # Застава (`Zastava`) v2.2.1
 
   **Локальный сторож для работы с Claude, ChatGPT, Cursor, Antigravity, Gemini и CLI-агентами.** Проверяет сеть до отправки запроса и останавливает трафик к ИИ, если VPN отвалился, DNS ушёл к провайдеру или сменилась страна.
 
-  [![Скачать Застава v2.2.0](https://img.shields.io/github/v/release/kingbest1195/ai-antiban?style=for-the-badge&color=10b981&label=%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C%20%D0%97%D0%B0%D1%81%D1%82%D0%B0%D0%B2%D1%83%20v2.2.0)](https://github.com/kingbest1195/ai-antiban/releases/latest)
+  [![Скачать Застава v2.2.1](https://img.shields.io/github/v/release/kingbest1195/ai-antiban?style=for-the-badge&color=10b981&label=%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C%20%D0%97%D0%B0%D1%81%D1%82%D0%B0%D0%B2%D1%83%20v2.2.1)](https://github.com/kingbest1195/ai-antiban/releases/latest)
   [![Платформы](https://img.shields.io/badge/macOS%20(Apple%20Silicon%20%2B%20Intel)%20%7C%20Windows%2010%2F11-18181b?style=for-the-badge)](#установка)
   [![Приватность](https://img.shields.io/badge/Zero--MITM-0f172a?style=for-the-badge)](#приватность-и-безопасность)
   [![Лицензия MIT](https://img.shields.io/badge/Open%20Source-MIT-334155?style=for-the-badge)](LICENSE)
@@ -53,8 +53,8 @@
 
 | Платформа | Установщик | Как поставить |
 | :--- | :--- | :--- |
-| **macOS** *(Apple Silicon и Intel)* | **[Скачать `.dmg` (v2.2.0)](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Откройте `.dmg` и перетащите **Zastava** в `Applications`. Приложение не подписано Apple Developer ID — если macOS предупреждает, выполните в Терминале:<br>`xattr -cr /Applications/Zastava.app` |
-| **Windows 10 / 11** *(x64)* | **[Скачать `-setup.exe` или `.msi` (v2.2.0)](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Запустите установщик. Приложение не подписано Microsoft Authenticode, SmartScreen может предупредить. |
+| **macOS** *(Apple Silicon и Intel)* | **[Скачать `.dmg` (v2.2.1)](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Откройте `.dmg` и перетащите **Zastava** в `Applications`. Приложение не подписано Apple Developer ID — если macOS предупреждает, выполните в Терминале:<br>`xattr -cr /Applications/Zastava.app` |
+| **Windows 10 / 11** *(x64)* | **[Скачать `-setup.exe` или `.msi` (v2.2.1)](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Запустите установщик. Приложение не подписано Microsoft Authenticode, SmartScreen может предупредить. |
 
 > **Уже стоит 1.3.x или 2.0.0?** Откройте меню `···` → **«Проверить обновления»**. Начиная с 2.1.0 пакет обновления проверяется криптоподписью minisign до установки.
 
@@ -66,7 +66,7 @@
 
 Застава работает в трёх контурах и показывает, где трафик реально идёт под защитой:
 
-* **Браузеры и расширения** (`Chrome`, `Safari`, `Arc`, `Edge`, `Brave`, `Vivaldi`, `Yandex Browser`, `Firefox`, `Comet`, `Opera`, `Opera GX`, `Dia`, `OpenAI Atlas`, `Chrome/Brave Beta` и встроенные ИИ-расширения) — через системный PAC, управляемые политики браузеров и профильные `Preferences` Chromium: на шлюз уходят только домены ИИ (включая полный набор эндпоинтов Google/Gemini), остальной интернет идёт вашим обычным маршрутом (напрямую или через ваш VPN/прокси). При включённой защите Застава через журнал владения прописывает `ProxyMode = "pac_script"`, `ProxyPacUrl` (в том числе в `Preferences` Chromium), а также временно отключает QUIC/HTTP3 и встроенный DoH в браузерах на базе Chromium и Firefox; уже открытые браузеры можно перезапустить одной кнопкой **«Перезапустить браузеры»** (`--proxy-pac-url`), благодаря чему ключи Заставы работают поверх TUN VPN (V2Box Pro и др.), а при выключении возвращаются прежние значения. Службы самих VPN-клиентов на macOS Застава не изменяет.
+* **Браузеры и расширения** (`Chrome`, `Safari`, `Arc`, `Edge`, `Brave`, `Vivaldi`, `Yandex Browser`, `Firefox`, `Comet`, `Opera`, `Opera GX`, `Dia`, `OpenAI Atlas`, `Chrome/Brave Beta` и встроенные ИИ-расширения) — через системный PAC, управляемые политики браузеров и (на macOS) профильные `Preferences` Chromium: на шлюз уходят только домены ИИ (включая полный набор эндпоинтов Google/Gemini), остальной интернет идёт вашим обычным маршрутом (напрямую или через ваш VPN/прокси). При включённой защите Застава через журнал владения прописывает `ProxyMode = "pac_script"`, `ProxyPacUrl`, а также временно отключает QUIC/HTTP3 и встроенный DoH в браузерах на базе Chromium и Firefox (на Windows — только через политики `HKCU\Software\Policies` без чтения папок профилей); на macOS уже открытые браузеры можно перезапустить одной кнопкой **«Перезапустить браузеры»** (`--proxy-pac-url`), благодаря чему ключи Заставы работают поверх TUN VPN (V2Box Pro и др.), а при выключении возвращаются прежние значения. Службы самих VPN-клиентов на macOS Застава не изменяет.
 * **Десктопные клиенты** (`Claude Desktop`, `ChatGPT Desktop`) — через системный прокси; если у вас несколько аккаунтов, в разделе «Бэкап» есть изолированные профили Claude Desktop с персональной привязкой маршрута (`zastava://`) и архив контекста Claude Code (`~/.claude`). В разделе «Гайды → Оплата» также доступны проверка BIN карты и справочник платёжных адресов.
 * **IDE и CLI** (`Claude Code`, `Gemini CLI`, `Cursor`, `VS Code`, `Windsurf`, `Antigravity`) — через конфиги (`settings.json`) или запуск с адресом шлюза. Для **Antigravity 2.x** на macOS есть кнопка перезапуска с защитой прямо из Заставы. `JetBrains` пока в статусе «Неизвестно», пока формат настроек не подтверждён.
 
@@ -93,7 +93,7 @@
 | **11** | **Часовой пояс (`Timezone`)** | Двухуровневая проверка: кнопка **«Синхронизировать для ИИ»** сразу даёт зелёный статус (`TIMEZONE_SYNCED_AI`) для приложений, CLI и IDE без смены системных часов ОС; синхронизация часов ОС доступна как необязательная опция для веб-браузеров. |
 | **12** | **Язык и окружение CLI/IDE** | Переменные `TZ`, `LANG`, `LC_TIME`, которые видят терминал и редакторы. |
 | **13** | **UDP (`STUN`)** | Не идёт ли UDP мимо VPN-туннеля (STUN-проба через Cloudflare и Google). На выделенном TCP-ключе Заставы (при отключённом QUIC) зарубежный или заблокированный UDP не вызывает ложного предупреждения (`UDP_KEY_TCP_PROTECTED`). |
-| **14** | **Выход до ИИ-сервисов** | Проверяет фактический выходной IP и страну напрямую до `claude.ai/cdn-cgi/trace`, `chatgpt.com/cdn-cgi/trace` и `ipinfo.io/json` через привязанный маршрут Gemini (`measured_via`), выявляя расхождение при split tunneling или обходе прокси. |
+| **14** | **Выход до ИИ-сервисов** | Проверяет фактический выходной IP и страну через привязанный маршрут (или через нейтральный `1.1.1.1/cdn-cgi/trace`, если отдельный маршрут не привязан — без лишних прямых обращений к доменам ИИ с домашнего IP), выявляя расхождение при split tunneling или обходе прокси. |
 
 Полный список внешних адресов, куда обращаются проверки, — в [PRIVACY.md](PRIVACY.md).
 
