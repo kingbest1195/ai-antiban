@@ -13,13 +13,15 @@ export interface AppHeaderProps {
   /** Пункты меню «Ещё». Без них кнопка не выводится. */
   menuItems?: MenuEntry[];
   menuLabel?: string;
+  /** Индикатор на кнопке меню (например, доступно обновление). */
+  menuDot?: boolean;
   /** Дополнительные элементы справа перед пингом. */
   children?: ReactNode;
   className?: string;
 }
 
 /** Шапка окна в одну строку: щит на brand-soft, название, пинг, меню «Ещё». */
-export function AppHeader({ name = "Застава", ping, menuItems, menuLabel = "Ещё", children, className }: AppHeaderProps) {
+export function AppHeader({ name = "Застава", ping, menuItems, menuLabel = "Ещё", menuDot = false, children, className }: AppHeaderProps) {
   return (
     <header className={cx("zs-app__bar", className)}>
       <span className="zs-app__logo">
@@ -29,7 +31,7 @@ export function AppHeader({ name = "Застава", ping, menuItems, menuLabel 
       <span className="zs-app__spacer" />
       {children}
       {ping && <Badge aria-label={`Пинг ${ping}`}>{ping}</Badge>}
-      {menuItems && <Menu items={menuItems} label={menuLabel} />}
+      {menuItems && <Menu items={menuItems} label={menuLabel} triggerDot={menuDot} />}
     </header>
   );
 }

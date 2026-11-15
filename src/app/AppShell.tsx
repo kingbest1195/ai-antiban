@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AppHeader, Banner, Button, Mono, TabPanel, Tabs, Toast, ToastViewport } from "../ui";
+import { AppHeader, Banner, Button, Icon, Mono, TabPanel, Tabs, Tip, Toast, ToastViewport } from "../ui";
 import type { MenuEntry, TabItem } from "../ui";
 import { overview as overviewCopy, shell as copy, tabs as tabCopy, toast as toastCopy } from "../shared/copy/ru";
 import { formatCountryWithCode } from "../shared/lib/country";
@@ -352,6 +352,7 @@ export function AppShell() {
           : updater.updateInfo?.update_available
             ? copy.menu.updateTo(updater.updateInfo.latest_version)
             : copy.menu.checkUpdates,
+        badge: updater.updateInfo?.update_available ? "Доступно" : undefined,
         disabled: updater.checkingUpdate,
         onSelect: () => {
           if (updater.updateInfo?.update_available) updater.setShowUpdateModal(true);
@@ -403,7 +404,23 @@ export function AppShell() {
           ping={gw.activeReport ? copy.pingLabel(gw.scanLatencyMs) : undefined}
           menuItems={menuItems}
           menuLabel={copy.menuLabel}
+          menuDot={Boolean(updater.updateInfo?.update_available)}
         >
+          {updater.updateInfo?.update_available && (
+            <Tip
+              title={overviewCopy.banner.update.title(updater.updateInfo.latest_version)}
+              text="Нажмите, чтобы посмотреть, что нового, и установить обновление."
+            >
+              <button
+                type="button"
+                className="zs-update-pill"
+                onClick={() => updater.setShowUpdateModal(true)}
+              >
+                <Icon name="download" size={13} />
+                Обновить
+              </button>
+            </Tip>
+          )}
           <Button
             variant={hideIpMode ? "secondary" : "quiet"}
             size="sm"
@@ -507,7 +524,7 @@ export function AppShell() {
                 role="alert"
                 title={`Маршрут для ${routeUnavailableBanner.provider.toUpperCase()} недоступен`}
                 action={
-                  <>
+                  <div className="zs-banner__actions">
                     <Button
                       size="sm"
                       onClick={() => {
@@ -516,11 +533,16 @@ export function AppShell() {
                       }}
                     >
                       Открыть подключение
-                    </Button>{" "}
+                    </Button>
+                    <CopyErrorLogButton
+                      title={`Маршрут для ${routeUnavailableBanner.provider.toUpperCase()} недоступен`}
+                      message={routeUnavailableBanner.message}
+                      variant="secondary"
+                    />
                     <Button size="sm" variant="quiet" onClick={() => setRouteUnavailableBanner(null)}>
                       {copy.intercept.dismiss}
                     </Button>
-                  </>
+                  </div>
                 }
               >
                 {routeUnavailableBanner.message}
@@ -655,8 +677,8 @@ export function AppShell() {
               key={t.id}
               tone={t.tone}
               title={t.title}
-              duration={t.tone === "danger" ? undefined : 3500}
-              action={t.tone === "danger" ? <CopyErrorLogButton title={t.title} message={t.description} /> : undefined}
+              duration={t.tone === "danger" ? undefined : 4500}
+              action={t.tone === "danger" ? <CopyErrorLogButton title={t.title} message={t.description} variant="secondary" /> : undefined}
               onClose={() => dismissToast(t.id)}
             >
               {t.description}

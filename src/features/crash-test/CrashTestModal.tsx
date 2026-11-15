@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { resetCrashTestDrop, runVpnCrashTestStep, triggerCrashTestDrop } from "../../utils/api";
-import { Badge, Banner, Button, Modal, Mono, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
+import { Badge, Banner, Button, cx, Icon, Modal, Mono, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
 import type { StepItem } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { crashTest as copy } from "../../shared/copy/ru";
@@ -12,6 +12,8 @@ export interface CrashTestModalProps {
   open: boolean;
   onClose: () => void;
   onToast: ShowToast;
+  /** Компактная статичная раскладка без прокрутки (440×470). */
+  compact?: boolean;
 }
 
 const STEP_MS = 350;
@@ -20,7 +22,7 @@ const STREAM_LIMIT = 5;
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** Тест обрыва VPN: живой поток тестовых запросов, обрыв туннеля и реакция шлюза по шагам. */
-export function CrashTestModal({ open, onClose, onToast }: CrashTestModalProps) {
+export function CrashTestModal({ open, onClose, onToast, compact = true }: CrashTestModalProps) {
   const [packets, setPackets] = useState<CrashStreamEntry[]>([]);
   const [sentCount, setSentCount] = useState(0);
   const [lastLatency, setLastLatency] = useState(0.28);
@@ -140,6 +142,78 @@ export function CrashTestModal({ open, onClose, onToast }: CrashTestModalProps) 
       ) : undefined,
     },
   ];
+
+  if (compact) {
+    // Один экран без прокрутки: шаги в строку, текущий шаг одной строкой, действие — в подвале,
+    // поток запросов в окне фиксированной высоты (последние 4).
+    const stepIdx = intercepted ? 3 : isDropped ? 2 : flowing ? 1 : 0;
+    const current = items[stepIdx];
+    const labels = ["Поток", "Обрыв", "Реакция", "Возврат"];
+    return (
+      <Modal
+        open={open}
+        onClose={handleManualClose}
+        title={copy.title}
+        className="zs-crash-modal"
+        footer={
+          <>
+            <Button variant="quiet" onClick={handleManualClose}>
+              {copy.close}
+            </Button>
+            {current.action}
+          </>
+        }
+      >
+        <div className="zs-crash zs-crash--compact">
+          <p className="zs-crash__lead">{copy.text}</p>
+          <Stats>
+            <Stat value={copy.metrics.sentValue(sentCount)} label={copy.metrics.sent} />
+            <Stat value={copy.metrics.latencyValue(lastLatency)} label={copy.metrics.latency} />
+            <Stat value={copy.metrics.stoppedValue(intercepted)} label={copy.metrics.stopped} />
+          </Stats>
+          <ol className="zs-crash__track" aria-label="Шаги теста">
+            {labels.map((label, i) => (
+              <li key={label} className={cx(i < stepIdx && "is-done", i === stepIdx && "is-current")}>
+                <span className="zs-crash__dot">{i < stepIdx ? <Icon name="check" size={12} /> : i + 1}</span>
+                {label}
+              </li>
+            ))}
+          </ol>
+          <div className="zs-crash__now" role="status">
+            <b>{current.title}</b>
+            {current.text && <span>{current.text}</span>}
+          </div>
+          <div className="zs-crash__box">
+            {intercepted ? (
+              <Banner tone="ok" icon="shield" title={copy.result.title}>
+                {copy.result.text}
+              </Banner>
+            ) : packets.length === 0 ? (
+              <p className="zs-crash__note">{copy.stream.empty}</p>
+            ) : (
+              <ul className="zs-crash__mini">
+                {packets.slice(0, 4).map((pkt, i) => (
+                  <li key={`${pkt.at}-${i}`}>
+                    <Mono className="zs-crash__host">{pkt.host}</Mono>
+                    <span className="zs-crash__ms">{copy.stream.latency(pkt.latencyMs)}</span>
+                    {pkt.intercepted ? (
+                      <Badge tone="danger" icon="alert">
+                        {copy.stream.blocked}
+                      </Badge>
+                    ) : (
+                      <Badge tone="ok" icon="check">
+                        {copy.stream.allowed}
+                      </Badge>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal open={open} onClose={handleManualClose} title={copy.title} footer={<Button onClick={handleManualClose}>{copy.close}</Button>}>

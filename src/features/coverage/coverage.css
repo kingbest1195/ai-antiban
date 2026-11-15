@@ -22,3 +22,14 @@
 .zs-cov__row .zs-row__trail{grid-column:3;grid-row:1;justify-self:end}
 .zs-cov__row .zs-row__sub{grid-column:1/-1;grid-row:2;margin:0;min-width:0;overflow-wrap:break-word}
 @media (max-width:420px){.zs-cov__head{flex-direction:column;align-items:flex-start}}
+
+/* «Покрытие приложений»: компактная сворачиваемая расшифровка статусов */
+.zs-cov__legend{margin:0 0 var(--space-2)}
+.zs-cov__legend-toggle{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0;border:0;background:none;color:var(--ink-2);font:inherit;font-size:12px;font-weight:600;cursor:pointer}
+.zs-cov__legend-toggle:hover{color:var(--ink)}
+.zs-cov__legend-chev{width:14px;height:14px;transition:transform .15s ease}
+.zs-cov__legend-toggle[aria-expanded=true] .zs-cov__legend-chev{transform:rotate(90deg)}
+.zs-cov__legend-list{margin:var(--space-2) 0 0;padding:var(--space-3);list-style:none;display:grid;grid-template-columns:max-content minmax(0,1fr);align-items:start;gap:8px var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);font-size:12px;line-height:16px;color:var(--ink-2)}
+.zs-cov__legend-list li{display:contents}
+.zs-cov__legend-list li span:last-child{padding-top:3px}
+.zs-cov__legend-list .zs-badge{justify-self:start}

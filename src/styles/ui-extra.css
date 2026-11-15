@@ -168,3 +168,41 @@
 /* Select: стилизация нативного select токенами ДС */
 .zs-select{cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='gray' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right var(--space-3) center;padding-right:var(--space-6)}
 .zs-select option{background:var(--bg-1);color:var(--ink)}
+
+/* Menu: точка-индикатор на триггере и метка у пункта */
+.zs-menu__dot{position:absolute;top:6px;right:6px;width:8px;height:8px;border-radius:var(--radius-pill);background:var(--warn);box-shadow:0 0 0 2px var(--bg-0);pointer-events:none}
+.zs-menu__badge{margin-left:auto;padding:0 var(--space-2);height:20px;display:inline-flex;align-items:center;border-radius:var(--radius-pill);background:var(--warn-soft);color:var(--warn-text);font-size:11px;font-weight:600}
+
+/* Ошибочное уведомление: чёткая рамка, кнопка «Скопировать лог» выделяется */
+.zs-toast--danger{border:1px solid color-mix(in srgb,var(--danger) 40%,transparent)}
+
+/* Подсказка при наведении (рисуется поверх окна и не выходит за его края) */
+.zs-tip{position:relative;display:inline-flex;align-items:center}
+.zs-tip__pop{position:fixed;z-index:80;padding:10px 12px;border-radius:var(--radius-md);background:var(--bg-3);box-shadow:var(--shadow-pop);border:1px solid var(--line-strong);color:var(--ink-2);font-family:var(--font-sans);font-size:12px;line-height:17px;font-weight:400;letter-spacing:normal;text-transform:none;text-align:left;white-space:normal;overflow-wrap:break-word;pointer-events:none}
+.zs-tip__title{display:block;margin-bottom:2px;color:var(--ink);font-weight:600}
+.zs-info-i{display:inline-grid;place-items:center;width:16px;height:16px;border-radius:var(--radius-pill);border:1px solid var(--line-strong);color:var(--ink-3);font-size:10px;font-weight:700;line-height:1;cursor:help;flex:none}
+.zs-info-i:hover,.zs-info-i:focus-visible{color:var(--ink);border-color:var(--ink-2)}
+
+/* Кнопка обновления в шапке: видна поверх любых баннеров и на любой вкладке */
+.zs-update-pill{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 9px;border:0;border-radius:var(--radius-pill);background:var(--warn-soft);color:var(--warn-text);font:inherit;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;flex:none}
+.zs-update-pill:hover{filter:brightness(1.15)}
+@media (max-width:440px){
+  .zs-app__bar{gap:var(--space-1)}
+  .zs-hide-ip-btn{padding:0 var(--space-2)}
+}
+
+/* Связанная группа «Браузеры» + «Десктопные приложения» (общий системный прокси) */
+.zs-linked-group{padding-bottom:var(--space-2);border-bottom:1px solid var(--line)}
+.zs-linked-group__head{display:flex;align-items:center;gap:6px;margin-bottom:var(--space-1);font-size:12px;line-height:16px;font-weight:500;color:var(--ink-3)}
+.zs-linked-group__rows{padding-left:var(--space-3);border-left:2px solid var(--line-strong)}
+.zs-linked-group--on .zs-linked-group__rows{border-left-color:var(--brand)}
+.zs-linked-group__rows .zs-row:first-child{padding-top:var(--space-1)}
+.zs-linked-group__rows .zs-row:last-child{padding-bottom:var(--space-1)}
+.zs-linked-group+.zs-row{border-top:0}
+
+/* Нейтральная строка-пояснение на списке сервисов при выключенной защите */
+.zs-services-off-note{margin:0 0 var(--space-2);padding:var(--space-2) var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);font-size:12px;line-height:16px;color:var(--ink-2)}
+
+/* Кнопка «Остановить сеть» с подсказкой «!» */
+.zs-app__action-stop{display:flex;align-items:center;gap:var(--space-2);min-width:0}
+.zs-app__action-stop .zs-btn{flex:1;min-width:0}

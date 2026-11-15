@@ -71,6 +71,15 @@ export const overview = {
     },
     missing: "Данных пока нет",
     checking: "Проверяем…",
+    unprotected: "Без защиты",
+    unprotectedNote: "Защита выключена — запросы к ИИ идут напрямую, минуя Заставу.",
+    stopped: "Остановлен",
+  },
+  linkedProxy: {
+    label: "Общий системный прокси · переключаются вместе",
+    tooltipTitle: "Браузеры и десктопные приложения",
+    tooltipText:
+      "Оба пункта используют общий системный прокси Заставы. Переключение любого из них включает или выключает защиту сразу для браузеров и десктопных приложений (а при выключении снимает и защиту IDE и терминала).",
   },
   browsers: { title: "Браузеры", sub: "Chrome, Safari, Arc, Edge, Яндекс" },
   desktopApps: { title: "Десктопные приложения", sub: "Claude Desktop, ChatGPT Desktop" },
@@ -92,6 +101,11 @@ export const overview = {
     crashTest: "Тест обрыва VPN",
     stopNetwork: "Остановить сеть",
     resumeNetwork: "Возобновить сеть",
+    stopTooltipTitle: "Аварийная остановка ИИ",
+    stopTooltipText:
+      "Мгновенно блокирует запросы к Claude, ChatGPT и Gemini через шлюз Заставы (например, если вы не уверены в VPN). Работает при включённой защите.",
+    resumeTooltipTitle: "Сеть ИИ остановлена",
+    resumeTooltipText: "Все запросы к Claude, ChatGPT и Gemini заморожены. Нажмите «Возобновить сеть», чтобы снова их пропускать.",
   },
   banner: {
     openChecks: "Открыть проверки",

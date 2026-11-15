@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AppCoverageItem, CoverageSnapshot } from "../../types";
 import { openOsNetworkSettings, reapplyBrowserPolicies, relaunchBrowsersWithPac, restartAppWithGateway } from "../../utils/api";
-import { Badge, Banner, Button, Card, ConfirmModal, CopyBlock, ExpandRow, Progress, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
+import { Badge, Banner, Button, Card, ConfirmModal, CopyBlock, ExpandRow, Icon, Progress, Row, Rows, Section, Skeleton, Spinner, Steps } from "../../ui";
 import { CopyErrorLogButton } from "../../shared/components/CopyErrorLogButton";
 import type { BadgeTone, IconName, RowTone } from "../../ui";
 import { coverage as copy } from "../../shared/copy/ru";
@@ -27,6 +27,46 @@ export interface CoverageSectionProps {
   /** Явные «включить» и «выключить» защиты; без них кнопка защиты в карточке не показывается. */
   protection?: ProtectionActions;
   onToast?: ShowToast;
+  /** Показать сворачиваемую расшифровку статусов под заголовком. */
+  legend?: boolean;
+}
+
+/** Что значит каждый статус — одной строкой. Порядок как у пользователя на пути: от «не подключено» к «работает». */
+const LEGEND: { view: Exclude<CoverageView, "not_installed">; text: string }[] = [
+  { view: "off", text: "приложение не подключено к Заставе." },
+  { view: "configured", text: "Застава настроила приложение, но запросов через неё ещё не было." },
+  { view: "waiting", text: "вы нажали «Я настроил», Застава ждёт первый запрос." },
+  { view: "waiting_timeout", text: "запрос так и не пришёл — проверьте настройку." },
+  { view: "confirmed", text: "запросы этого приложения уже идут через Заставу." },
+  { view: "direct", text: "обычная программа терминала, идёт мимо Заставы специально — это нормально." },
+  { view: "unknown", text: "Застава не смогла прочитать настройки приложения." },
+];
+
+function CoverageLegend() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="zs-cov__legend">
+      <button type="button" className="zs-cov__legend-toggle" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        Что значат статусы
+        <Icon name="chev" className="zs-cov__legend-chev" />
+      </button>
+      {open && (
+        <ul className="zs-cov__legend-list">
+          {LEGEND.map((l) => {
+            const b = BADGES[l.view];
+            return (
+              <li key={l.view}>
+                <Badge tone={b.tone} icon={b.icon}>
+                  {b.label}
+                </Badge>
+                <span>{l.text}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 interface BadgeView {
@@ -50,7 +90,7 @@ const ICONS: Record<AppCoverageItem["category"], IconName> = { browser: "globe",
 const rowTone = (view: CoverageView): RowTone => (view === "confirmed" ? "ok" : view === "off" ? "warn" : "neutral");
 
 /** Секция «Покрытие приложений»: одна реализация для «Обзора» и «Проверок». */
-export function CoverageSection({ variant, initialSnapshot, pending, protection, onToast }: CoverageSectionProps) {
+export function CoverageSection({ variant, initialSnapshot, pending, protection, onToast, legend = true }: CoverageSectionProps) {
   const { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup, applySnapshot } = useCoverage(initialSnapshot);
   const { copiedId, copy: copyText } = useCopy(onToast);
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -191,6 +231,7 @@ export function CoverageSection({ variant, initialSnapshot, pending, protection,
             {checking ? copy.rechecking : copy.recheck}
           </Button>
         </div>
+        {legend && <CoverageLegend />}
         {showPending ? (
           <div role="status" aria-busy="true">
             <p className="zs-cov__pending">

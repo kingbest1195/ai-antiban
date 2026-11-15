@@ -14,6 +14,8 @@ export interface MenuItem {
   /** danger — для опасного пункта (текст и иконка danger-text). */
   tone?: "danger";
   disabled?: boolean;
+  /** Короткая метка справа от пункта, например «Доступно». */
+  badge?: string;
   onSelect: () => void;
 }
 
@@ -31,13 +33,17 @@ export interface MenuProps {
   /** С какого края выравнивать список. */
   align?: "end" | "start";
   className?: string;
+  /** Иконка кнопки-триггера (по умолчанию «⋯»). */
+  triggerIcon?: IconName;
+  /** Точка-индикатор на кнопке-триггере (например, есть обновление). */
+  triggerDot?: boolean;
 }
 
 /** Отступ списка от края окна, px. */
 const EDGE = 16;
 
 /** Выпадающее меню «Ещё»: Esc и клик вне закрывают, стрелки двигают по пунктам. */
-export function Menu({ items, label = "Ещё", align = "end", className }: MenuProps) {
+export function Menu({ items, label = "Ещё", align = "end", className, triggerIcon = "more", triggerDot = false }: MenuProps) {
   const [open, setOpen] = useState(false);
   /** Список перевёрнут относительно align: не помещался у своего края окна. */
   const [flip, setFlip] = useState(false);
@@ -133,7 +139,7 @@ export function Menu({ items, label = "Ещё", align = "end", className }: Menu
         ref={triggerRef}
         variant="quiet"
         iconOnly
-        icon="more"
+        icon={triggerIcon}
         aria-label={label}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -141,6 +147,7 @@ export function Menu({ items, label = "Ещё", align = "end", className }: Menu
         onClick={() => (open ? close(false) : openMenu("first"))}
         onKeyDown={onTriggerKey}
       />
+      {triggerDot && <span className="zs-menu__dot" aria-hidden="true" />}
       {open && (
         <ul
           ref={listRef}
@@ -169,6 +176,7 @@ export function Menu({ items, label = "Ещё", align = "end", className }: Menu
                 >
                   {entry.icon && <Icon name={entry.icon} />}
                   {entry.label}
+                  {entry.badge && <span className="zs-menu__badge">{entry.badge}</span>}
                 </button>
               </li>
             ),

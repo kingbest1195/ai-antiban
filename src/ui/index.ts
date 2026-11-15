@@ -54,3 +54,5 @@ export { AppHeader } from "./AppHeader";
 export type { AppHeaderProps } from "./AppHeader";
 export { Select } from "./Select";
 export type { SelectProps, SelectOption } from "./Select";
+export { Tip, InfoTip, clampTooltipPosition } from "./Tooltip";
+export type { TipProps, InfoTipProps, TooltipBounds } from "./Tooltip";

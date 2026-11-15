@@ -91,13 +91,20 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
       .catch(() => {});
   }, []);
 
+  const syncCliProtectionStatus = useCallback(async () => {
+    try {
+      const active = await checkCliProtectionStatus();
+      setCliProtected(active);
+    } catch {
+      // ignore transient status read failures
+    }
+  }, []);
+
   // Статус защиты CLI читаем, когда фоновый запуск закончен: раньше защита ещё не включена, ответ был бы ложным «выключено».
   useEffect(() => {
     if (startupPending) return;
-    checkCliProtectionStatus()
-      .then((active) => setCliProtected(active))
-      .catch(() => {});
-  }, [startupPending]);
+    void syncCliProtectionStatus();
+  }, [startupPending, syncCliProtectionStatus]);
 
   const handleToggleSysproxy = useCallback(async () => {
     try {
@@ -105,12 +112,14 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
       const res = await toggleSysproxy(next);
       setSysproxyActive(res);
       setAdminAuthMessage(null);
+      await syncCliProtectionStatus();
       showToast(res ? t.guard.onTitle : t.guard.offTitle, res ? t.guard.onText : t.guard.offText, res ? "success" : "info");
     } catch (err: any) {
       const deferredMsg = parseTempDnsDeferredError(err);
       if (deferredMsg !== null) {
         setSysproxyActive(false);
         setAdminAuthMessage(null);
+        await syncCliProtectionStatus();
         showToast(t.guard.offTitle, deferredMsg, "info");
         return;
       }
@@ -122,13 +131,14 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
         showToast(t.guard.error, err?.message || String(err), "error");
       }
     }
-  }, [sysproxyActive, setSysproxyActive, showToast]);
+  }, [sysproxyActive, setSysproxyActive, showToast, syncCliProtectionStatus]);
 
   const enableSysproxyPrivileged = useCallback(async () => {
     setRetryingAdminAuth(true);
     try {
       const res = await toggleSysproxyPrivileged();
       setSysproxyActive(res);
+      await syncCliProtectionStatus();
       if (res) {
         setAdminAuthMessage(null);
         showToast(t.guard.onTitle, t.guard.onText, "success");
@@ -143,7 +153,7 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
     } finally {
       setRetryingAdminAuth(false);
     }
-  }, [setSysproxyActive, showToast]);
+  }, [setSysproxyActive, showToast, syncCliProtectionStatus]);
 
   const handleToggleCliProtection = useCallback(async (options?: CliToggleOptions) => {
     // Switch.onChange может передать своё значение, поэтому смотрим строго на флаг.
@@ -181,6 +191,7 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
           const res = await toggleSysproxy(true);
           setSysproxyActive(res);
           setAdminAuthMessage(null);
+          await syncCliProtectionStatus();
           return res;
         } catch (err: any) {
           const adminMsg = parseAdminAuthError(err);
@@ -199,12 +210,14 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
           const res = await toggleSysproxy(false);
           setSysproxyActive(res);
           setAdminAuthMessage(null);
+          await syncCliProtectionStatus();
           return !res;
         } catch (err: any) {
           const deferredMsg = parseTempDnsDeferredError(err);
           if (deferredMsg !== null) {
             setSysproxyActive(false);
             setAdminAuthMessage(null);
+            await syncCliProtectionStatus();
             return { deferred: deferredMsg };
           }
           showToast(t.guard.error, err?.message || String(err), "error");
@@ -235,7 +248,7 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
       retryingAdminAuth,
       dismissAdminAuth: () => setAdminAuthMessage(null),
     }),
-    [setSysproxyActive, showToast, enableSysproxyPrivileged, adminAuthMessage, retryingAdminAuth],
+    [setSysproxyActive, showToast, enableSysproxyPrivileged, adminAuthMessage, retryingAdminAuth, syncCliProtectionStatus],
   );
 
   const handleToggleKillswitch = useCallback(async () => {

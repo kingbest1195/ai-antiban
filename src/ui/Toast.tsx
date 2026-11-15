@@ -53,7 +53,7 @@ export function Toast({ tone = "neutral", title, children, action, onClose, dura
   return (
     <div
       role={tone === "danger" ? "alert" : "status"}
-      className={cx("zs-toast", className)}
+      className={cx("zs-toast", tone !== "neutral" && `zs-toast--${tone}`, className)}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}

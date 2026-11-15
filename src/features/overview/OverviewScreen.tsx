@@ -18,6 +18,7 @@ import {
   ConfirmModal,
   EmptyState,
   ExpandRow,
+  InfoTip,
   Menu,
   Row,
   Rows,
@@ -27,6 +28,7 @@ import {
   Stats,
   StatusHero,
   Switch,
+  cx,
 } from "../../ui";
 import { CopyErrorLogButton } from "../../shared/components/CopyErrorLogButton";
 import type { MenuEntry } from "../../ui";
@@ -239,9 +241,16 @@ export function OverviewScreen(props: OverviewScreenProps) {
             icon="alert"
             title={copy.error.title}
             action={
-              <Button variant="primary" icon="refresh" onClick={props.onRetry} disabled={refreshing}>
-                {copy.error.action}
-              </Button>
+              <div className="zs-banner__actions">
+                <Button variant="primary" icon="refresh" onClick={props.onRetry} disabled={refreshing}>
+                  {copy.error.action}
+                </Button>
+                <CopyErrorLogButton
+                  title={copy.error.title}
+                  message={auditError ?? undefined}
+                  variant="secondary"
+                />
+              </div>
             }
           >
             {copy.error.text}
@@ -269,20 +278,57 @@ export function OverviewScreen(props: OverviewScreenProps) {
       {!failed && (
         <Section title={copy.sectionServices}>
           <Card>
-            <Rows>
-              {model.services.map((service) => (
-                <ServiceRow
-                  key={service.id}
-                  service={service}
-                  report={reports[service.id]}
-                  state={state}
-                  onFix={props.onFixService}
-                  onAllow={requestAllow}
-                  blockedByUser={Boolean(state?.blocked_providers?.includes(service.id))}
-                  verifying={verifyingAllow === service.id}
-                />
-              ))}
-            </Rows>
+            {killswitchFrozen ? (
+              <Rows>
+                {model.services.map((service) => (
+                  <Row
+                    key={service.id}
+                    icon="alert"
+                    tone="danger"
+                    title={providerCopy[service.id].name}
+                    sub={providerCopy[service.id].domains}
+                    trail={
+                      <Badge tone="danger" icon="alert">
+                        {copy.service.stopped}
+                      </Badge>
+                    }
+                  />
+                ))}
+              </Rows>
+            ) : !startupPending && !sysproxyActive ? (
+              <>
+                <p className="zs-services-off-note" role="status">
+                  {copy.service.unprotectedNote}
+                </p>
+                <Rows>
+                  {model.services.map((service) => (
+                    <Row
+                      key={service.id}
+                      icon="shield"
+                      tone="neutral"
+                      title={providerCopy[service.id].name}
+                      sub={providerCopy[service.id].domains}
+                      trail={<Badge tone="neutral">{copy.service.unprotected}</Badge>}
+                    />
+                  ))}
+                </Rows>
+              </>
+            ) : (
+              <Rows>
+                {model.services.map((service) => (
+                  <ServiceRow
+                    key={service.id}
+                    service={service}
+                    report={reports[service.id]}
+                    state={state}
+                    onFix={props.onFixService}
+                    onAllow={requestAllow}
+                    blockedByUser={Boolean(state?.blocked_providers?.includes(service.id))}
+                    verifying={verifyingAllow === service.id}
+                  />
+                ))}
+              </Rows>
+            )}
           </Card>
         </Section>
       )}
@@ -320,6 +366,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
                 <CopyErrorLogButton
                   title={coverageCopy.protection.adminAuthTitle}
                   message={props.protection.adminAuthMessage}
+                  variant="secondary"
                 />
               </div>
             }
@@ -329,20 +376,34 @@ export function OverviewScreen(props: OverviewScreenProps) {
         )}
         <Card>
           <Rows>
-            <Row
-              icon="globe"
-              title={copy.browsers.title}
-              sub={copy.browsers.sub}
-              trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.browsers.title} />}
-            />
-            <Row
-              icon="shield"
-              title={copy.desktopApps.title}
-              sub={copy.desktopApps.sub}
-              trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.desktopApps.title} />}
-            />
+            <li className={cx("zs-linked-group", sysproxyActive && !startupPending && "zs-linked-group--on")}>
+              <div className="zs-linked-group__head">
+                <span>{copy.linkedProxy.label}</span>
+                <InfoTip
+                  title={copy.linkedProxy.tooltipTitle}
+                  text={copy.linkedProxy.tooltipText}
+                />
+              </div>
+              <ul className="zs-rows zs-linked-group__rows">
+                <Row
+                  icon="globe"
+                  tone={startupPending ? "neutral" : sysproxyActive ? "ok" : "neutral"}
+                  title={copy.browsers.title}
+                  sub={copy.browsers.sub}
+                  trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.browsers.title} />}
+                />
+                <Row
+                  icon="shield"
+                  tone={startupPending ? "neutral" : sysproxyActive ? "ok" : "neutral"}
+                  title={copy.desktopApps.title}
+                  sub={copy.desktopApps.sub}
+                  trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.desktopApps.title} />}
+                />
+              </ul>
+            </li>
             <Row
               icon="term"
+              tone={startupPending ? "neutral" : cliProtected ? "ok" : "neutral"}
               title={copy.editors.title}
               sub={copy.editors.sub}
               trail={startupPending ? <PendingBadge /> : <Switch checked={cliProtected} onChange={props.onToggleCli} aria-label={copy.editors.title} />}
@@ -376,15 +437,21 @@ export function OverviewScreen(props: OverviewScreenProps) {
         <Button icon="pulse" onClick={props.onOpenCrashTest}>
           {copy.actions.crashTest}
         </Button>
-        {killswitchFrozen ? (
-          <Button variant="primary" icon="refresh" onClick={props.onToggleKillswitch}>
-            {copy.actions.resumeNetwork}
-          </Button>
-        ) : (
-          <Button variant="danger" icon="power" onClick={props.onToggleKillswitch}>
-            {copy.actions.stopNetwork}
-          </Button>
-        )}
+        <div className="zs-app__action-stop">
+          {killswitchFrozen ? (
+            <Button variant="primary" icon="refresh" onClick={props.onToggleKillswitch}>
+              {copy.actions.resumeNetwork}
+            </Button>
+          ) : (
+            <Button variant="danger" icon="power" onClick={props.onToggleKillswitch}>
+              {copy.actions.stopNetwork}
+            </Button>
+          )}
+          <InfoTip
+            title={killswitchFrozen ? copy.actions.resumeTooltipTitle : copy.actions.stopTooltipTitle}
+            text={killswitchFrozen ? copy.actions.resumeTooltipText : copy.actions.stopTooltipText}
+          />
+        </div>
       </div>
     </>
   );

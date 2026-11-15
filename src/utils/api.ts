@@ -970,6 +970,7 @@ export async function toggleSysproxy(enable: boolean): Promise<boolean> {
     throw new Error("ADMIN_AUTH_REQUIRED:Для включения системного прокси на macOS требуются права администратора.");
   }
   mockSysproxyActive = enable;
+  mockCliProtection = enable;
   return mockSysproxyActive;
 }
 
@@ -978,6 +979,7 @@ export async function toggleSysproxyPrivileged(): Promise<boolean> {
     return await invoke<boolean>("toggle_sysproxy_privileged");
   }
   mockSysproxyActive = true;
+  mockCliProtection = true;
   return mockSysproxyActive;
 }
 

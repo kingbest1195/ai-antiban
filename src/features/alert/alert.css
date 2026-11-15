@@ -8,3 +8,13 @@
 .zs-alert-win .zs-dialog__head{gap:var(--space-2)}
 .zs-alert-win .zs-dialog__head .zs-btn--icon{width:28px;flex:none}
 .zs-alert-reason{display:block;margin-bottom:var(--space-1);color:var(--ink);font-weight:600}
+
+/* Компактно: окно 440×470 вмещает все состояния (с подтверждением тоже) без прокрутки. */
+.zs-alert-win .zs-dialog,.zs-alert-overlay .zs-dialog{padding:var(--space-4)}
+.zs-alert-win .zs-dialog__title,.zs-alert-overlay .zs-dialog__title{font-size:17px;line-height:22px}
+.zs-alert-win .zs-dialog__text,.zs-alert-overlay .zs-dialog__text{margin-top:6px;font-size:13px;line-height:18px}
+.zs-alert-win .zs-route-diff,.zs-alert-overlay .zs-route-diff,.zs-alert-win .zs-route,.zs-alert-overlay .zs-route{margin-top:var(--space-3);padding:10px var(--space-3)}
+.zs-alert-win .zs-dialog__actions,.zs-alert-overlay .zs-dialog__actions,.zs-alert-win .zs-dialog__confirm,.zs-alert-overlay .zs-dialog__confirm{margin-top:var(--space-3)}
+.zs-alert-win .zs-btn--lg,.zs-alert-overlay .zs-btn--lg{height:40px}
+.zs-alert-win .zs-dialog__confirm,.zs-alert-overlay .zs-dialog__confirm{gap:var(--space-2);padding:10px var(--space-3)}
+.zs-alert-win .zs-dialog__confirm-text,.zs-alert-overlay .zs-dialog__confirm-text{font-size:12px;line-height:16px}
