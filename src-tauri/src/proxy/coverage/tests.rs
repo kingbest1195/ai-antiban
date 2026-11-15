@@ -1507,7 +1507,7 @@ fn browser_pac_policy_active_ignores_plist_only_and_detects_preferences_and_flag
         vec!["Google Chrome".to_string()]
     );
 
-    // Windows (`AppData/Local/...`) Preferences JSON with our PAC -> active.
+    // Windows ignores `User Data/.../Preferences` and reads HKCU policy keys + WinINet instead.
     let win_prefs = rig
         .ctx
         .local_appdata
@@ -1517,8 +1517,6 @@ fn browser_pac_policy_active_ignores_plist_only_and_detects_preferences_and_flag
         br#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac","pac_mandatory":false}}"#,
         0o600,
     );
-    let win_domain = WINDOWS_CHROMIUM_DOMAIN_NAMES[0];
-    rig.policy_store.set_domain_applicable(win_domain, true);
     let (_, win_tracker) = {
         let (t_clock, clock) = clock_at(10_000_000);
         (
@@ -1527,11 +1525,40 @@ fn browser_pac_policy_active_ignores_plist_only_and_detects_preferences_and_flag
         )
     };
     win_tracker.set_gateway_addr(gw(8899));
+    let win_no_policy = win_tracker.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert!(!win_no_policy.browser_pac_policy_active);
+    assert!(win_no_policy.browsers_pac_active.is_empty());
+
+    // WinINet AutoConfigURL alone marks Windows PAC active.
+    rig.platform
+        .seed_inet("AutoConfigURL", RegValue::sz(OUR_PAC));
+    let win_inet = win_tracker.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert!(win_inet.browser_pac_policy_active);
+    assert_eq!(
+        win_inet.browsers_pac_active,
+        vec!["Windows Internet Settings (WinINet)".to_string()]
+    );
+
+    // HKCU\Software\Policies\Microsoft\Edge keeps browser protection active even if WinINet is overridden.
+    let win_domain = WINDOWS_CHROMIUM_DOMAIN_NAMES[1];
+    rig.policy_store.set_domain_applicable(win_domain, true);
+    rig.policy_store.preset(
+        win_domain,
+        KEY_PROXY_MODE,
+        PolicyValue::Sz(PROXY_MODE_PAC_SCRIPT.into()),
+    );
+    rig.policy_store
+        .preset(win_domain, KEY_PROXY_PAC_URL, PolicyValue::Sz(OUR_PAC.into()));
+    rig.platform.seed_inet("AutoConfigURL", RegValue::sz(""));
     let win_snap = win_tracker.snapshot(&rig.env(PacSource::Inet, false), true);
     assert!(win_snap.browser_pac_policy_active);
     assert_eq!(
         win_snap.browsers_pac_active,
         vec!["Microsoft Edge".to_string()]
+    );
+    assert_eq!(
+        app(&win_snap, "browsers").status,
+        CoverageStatus::Configured
     );
 }
 

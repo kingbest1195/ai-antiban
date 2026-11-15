@@ -92,13 +92,9 @@ pub struct ChromiumBrowserDef {
     pub macos_bundles: &'static [&'static str],
     /// Relative paths under `~/Library/Application Support` holding Chromium User Data.
     pub macos_user_data_rels: &'static [&'static str],
-    /// Relative paths under `%LOCALAPPDATA%` holding Chromium User Data on Windows.
-    pub win_local_appdata_rels: &'static [&'static str],
-    /// Relative paths under `%APPDATA%` (`AppData/Roaming`) holding Chromium User Data on Windows.
-    pub win_roaming_appdata_rels: &'static [&'static str],
     /// Relative paths under `~/.config` holding Chromium User Data on Linux.
     pub linux_config_rels: &'static [&'static str],
-    /// Lowercase executable names for Windows (`tasklist`) / Linux (`ps`) process matching.
+    /// Lowercase executable names for macOS/Linux (`ps`) process matching.
     pub process_names: &'static [&'static str],
 }
 
@@ -109,8 +105,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Google Chrome",
         macos_bundles: &["Google Chrome.app"],
         macos_user_data_rels: &["Google/Chrome"],
-        win_local_appdata_rels: &["Google/Chrome/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["google-chrome"],
         process_names: &["chrome.exe", "google-chrome", "chrome"],
     },
@@ -119,8 +113,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Google Chrome Beta",
         macos_bundles: &["Google Chrome Beta.app"],
         macos_user_data_rels: &["Google/Chrome Beta"],
-        win_local_appdata_rels: &["Google/Chrome Beta/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["google-chrome-beta"],
         process_names: &["chrome.exe", "google-chrome-beta"],
     },
@@ -129,8 +121,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Google Chrome Canary",
         macos_bundles: &["Google Chrome Canary.app"],
         macos_user_data_rels: &["Google/Chrome Canary"],
-        win_local_appdata_rels: &["Google/Chrome SxS/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["google-chrome-unstable"],
         process_names: &["chrome.exe", "google-chrome-unstable"],
     },
@@ -139,8 +129,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Comet",
         macos_bundles: &["Comet.app"],
         macos_user_data_rels: &["Comet"],
-        win_local_appdata_rels: &["Perplexity/Comet/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["comet"],
         process_names: &["comet.exe", "comet"],
     },
@@ -149,8 +137,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Yandex Browser",
         macos_bundles: &["Yandex.app", "Yandex Browser.app"],
         macos_user_data_rels: &["Yandex/YandexBrowser"],
-        win_local_appdata_rels: &["Yandex/YandexBrowser/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["yandex-browser", "yandex-browser-beta"],
         process_names: &["browser.exe", "yandex.exe", "yandex-browser"],
     },
@@ -159,8 +145,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Brave",
         macos_bundles: &["Brave Browser.app"],
         macos_user_data_rels: &["BraveSoftware/Brave-Browser"],
-        win_local_appdata_rels: &["BraveSoftware/Brave-Browser/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["BraveSoftware/Brave-Browser"],
         process_names: &["brave.exe", "brave-browser", "brave"],
     },
@@ -169,8 +153,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Brave Beta",
         macos_bundles: &["Brave Browser Beta.app"],
         macos_user_data_rels: &["BraveSoftware/Brave-Browser-Beta"],
-        win_local_appdata_rels: &["BraveSoftware/Brave-Browser-Beta/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["BraveSoftware/Brave-Browser-Beta"],
         process_names: &["brave.exe", "brave-browser-beta"],
     },
@@ -179,8 +161,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Microsoft Edge",
         macos_bundles: &["Microsoft Edge.app"],
         macos_user_data_rels: &["Microsoft Edge"],
-        win_local_appdata_rels: &["Microsoft/Edge/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["microsoft-edge"],
         process_names: &["msedge.exe", "microsoft-edge", "msedge"],
     },
@@ -189,11 +169,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Arc",
         macos_bundles: &["Arc.app"],
         macos_user_data_rels: &["Arc/User Data", "Arc"],
-        win_local_appdata_rels: &[
-            "Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc/User Data",
-            "Arc/User Data",
-        ],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &[],
         process_names: &["arc.exe", "arc"],
     },
@@ -202,8 +177,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Dia",
         macos_bundles: &["Dia.app"],
         macos_user_data_rels: &["Dia/User Data", "Dia"],
-        win_local_appdata_rels: &["Dia/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &[],
         process_names: &["dia.exe", "dia"],
     },
@@ -212,8 +185,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Opera",
         macos_bundles: &["Opera.app"],
         macos_user_data_rels: &["com.operasoftware.Opera", "Opera"],
-        win_local_appdata_rels: &["Programs/Opera/User Data"],
-        win_roaming_appdata_rels: &["Opera Software/Opera Stable"],
         linux_config_rels: &["opera"],
         process_names: &["opera.exe", "opera"],
     },
@@ -222,8 +193,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Opera GX",
         macos_bundles: &["Opera GX.app"],
         macos_user_data_rels: &["com.operasoftware.OperaGX", "Opera GX"],
-        win_local_appdata_rels: &["Programs/Opera GX/User Data"],
-        win_roaming_appdata_rels: &["Opera Software/Opera GX Stable"],
         linux_config_rels: &["opera-gx"],
         process_names: &["opera.exe", "opera-gx"],
     },
@@ -232,8 +201,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Vivaldi",
         macos_bundles: &["Vivaldi.app"],
         macos_user_data_rels: &["Vivaldi"],
-        win_local_appdata_rels: &["Vivaldi/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["vivaldi"],
         process_names: &["vivaldi.exe", "vivaldi-bin", "vivaldi"],
     },
@@ -242,8 +209,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "Chromium",
         macos_bundles: &["Chromium.app"],
         macos_user_data_rels: &["Chromium"],
-        win_local_appdata_rels: &["Chromium/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &["chromium", "chromium-browser"],
         process_names: &["chrome.exe", "chromium", "chromium-browser"],
     },
@@ -252,8 +217,6 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
         display_name: "ChatGPT Atlas",
         macos_bundles: &["ChatGPT Atlas.app"],
         macos_user_data_rels: &["ChatGPT Atlas", "com.openai.atlas", "OpenAI/ChatGPT Atlas"],
-        win_local_appdata_rels: &["OpenAI/ChatGPT Atlas/User Data", "ChatGPT Atlas/User Data"],
-        win_roaming_appdata_rels: &[],
         linux_config_rels: &[],
         process_names: &["chatgpt atlas.exe", "atlas.exe"],
     },
@@ -292,6 +255,25 @@ pub const WINDOWS_CHROMIUM_DOMAIN_NAMES: [&str; 12] = [
     r"Software\Policies\Opera Software\Opera GX Stable",
     r"Software\Policies\TheBrowserCompany\Arc",
     r"Software\Policies\TheBrowserCompany\Dia",
+];
+
+/// Mapping from Windows Chromium HKCU policy subkeys to human-friendly browser names.
+pub const WINDOWS_CHROMIUM_POLICY_BROWSERS: [(&str, &str); 12] = [
+    (r"Software\Policies\Google\Chrome", "Google Chrome"),
+    (r"Software\Policies\Microsoft\Edge", "Microsoft Edge"),
+    (r"Software\Policies\BraveSoftware\Brave", "Brave"),
+    (r"Software\Policies\Chromium", "Chromium"),
+    (r"Software\Policies\Vivaldi", "Vivaldi"),
+    (r"Software\Policies\YandexBrowser", "Yandex Browser"),
+    (r"Software\Policies\Yandex\YandexBrowser", "Yandex Browser"),
+    (r"Software\Policies\Perplexity\Comet", "Comet"),
+    (r"Software\Policies\Opera Software\Opera Stable", "Opera"),
+    (
+        r"Software\Policies\Opera Software\Opera GX Stable",
+        "Opera GX",
+    ),
+    (r"Software\Policies\TheBrowserCompany\Arc", "Arc"),
+    (r"Software\Policies\TheBrowserCompany\Dia", "Dia"),
 ];
 
 fn clean_pac_url(pac_url: Option<&str>) -> Option<&str> {
@@ -677,7 +659,9 @@ pub fn apply_browser_policies_with_pac_in(
         && let Some(file_ctx) = ctx
     {
         apply_browser_prefs_with_pac(j, p, url, file_ctx, os, probe, &mut report);
-        let status = detect_browser_pac_status_in(file_ctx, os, probe, Some(url));
+        let store = j.policy_store_arc();
+        let status =
+            detect_browser_pac_status_with(Some(file_ctx), os, probe, Some(url), &*store, p);
         report.pac_policy_active = !status.browsers_pac_active.is_empty();
     }
     report
@@ -937,6 +921,11 @@ pub fn write_browser_proxy_pref(fs: &dyn Fs, path: &Path, proxy_json: Option<&st
 }
 
 /// Returns existing User Data directories for `browser` under `ctx` for `os`.
+///
+/// On Windows, intentionally returns an empty list so Zastava never enumerates Chromium
+/// `User Data` / `Profile *` directories or reads `Local State` / `Preferences` (avoids
+/// BroPass AV heuristics; Windows enforcement uses `HKCU\Software\Policies\...` and WinINet
+/// `AutoConfigURL` instead).
 pub fn browser_user_data_dirs(browser: &ChromiumBrowserDef, ctx: &FileCtx, os: Os) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     match os {
@@ -946,15 +935,7 @@ pub fn browser_user_data_dirs(browser: &ChromiumBrowserDef, ctx: &FileCtx, os: O
                 candidates.push(base.join(rel));
             }
         }
-        Os::Windows => {
-            for rel in browser.win_local_appdata_rels {
-                candidates.push(ctx.local_appdata.join(rel));
-            }
-            let roaming = ctx.home.join("AppData").join("Roaming");
-            for rel in browser.win_roaming_appdata_rels {
-                candidates.push(roaming.join(rel));
-            }
-        }
+        Os::Windows => return Vec::new(),
         Os::Linux => {
             let base = ctx.home.join(".config");
             for rel in browser.linux_config_rels {
@@ -975,51 +956,65 @@ pub fn browser_user_data_dirs(browser: &ChromiumBrowserDef, ctx: &FileCtx, os: O
 /// Discovers all profile `Preferences` files inside one Chromium User Data directory
 /// (direct `Preferences`, `Default`, `Profile *`, `Guest Profile`, `System Profile`, and any
 /// profile key listed in `Local State`'s `profile.info_cache`).
+///
+/// Compiled out on Windows non-test builds so `Local State` / `Profile *` scanning strings are
+/// absent from Windows release binaries.
 pub fn discover_browser_prefs_files_in(fs: &dyn Fs, user_data_dir: &Path) -> Vec<PathBuf> {
-    let mut found = BTreeSet::new();
-    let direct = user_data_dir.join("Preferences");
-    if fs.exists(&direct) {
-        found.insert(direct);
-    }
-
-    for child in fs.list_dir(user_data_dir) {
-        let Some(name) = child.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let is_profile_dir = name == "Default"
-            || name == "Guest Profile"
-            || name == "System Profile"
-            || name.starts_with("Profile ");
-        if is_profile_dir {
-            let prefs = child.join("Preferences");
-            if fs.exists(&prefs) {
-                found.insert(prefs);
-            }
-        }
-    }
-
-    // Also inspect Chromium's `Local State` -> `profile.info_cache` for non-standard profile folders.
-    let local_state = user_data_dir.join("Local State");
-    if let Ok(Some(bytes)) = fs.read(&local_state)
-        && let Ok(root) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        && let Some(cache) = root
-            .get("profile")
-            .and_then(|p| p.get("info_cache"))
-            .and_then(|c| c.as_object())
+    #[cfg(all(target_os = "windows", not(test)))]
     {
-        for key in cache.keys() {
-            let prefs = user_data_dir.join(key).join("Preferences");
-            if fs.exists(&prefs) {
-                found.insert(prefs);
+        let _ = (fs, user_data_dir);
+        Vec::new()
+    }
+    #[cfg(any(not(target_os = "windows"), test))]
+    {
+        let mut found = BTreeSet::new();
+        let direct = user_data_dir.join("Preferences");
+        if fs.exists(&direct) {
+            found.insert(direct);
+        }
+
+        for child in fs.list_dir(user_data_dir) {
+            let Some(name) = child.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let is_profile_dir = name == "Default"
+                || name == "Guest Profile"
+                || name == "System Profile"
+                || name.starts_with("Profile ");
+            if is_profile_dir {
+                let prefs = child.join("Preferences");
+                if fs.exists(&prefs) {
+                    found.insert(prefs);
+                }
             }
         }
-    }
 
-    found.into_iter().collect()
+        // Also inspect Chromium's `Local State` -> `profile.info_cache` for non-standard profile folders.
+        let local_state = user_data_dir.join("Local State");
+        if let Ok(Some(bytes)) = fs.read(&local_state)
+            && let Ok(root) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && let Some(cache) = root
+                .get("profile")
+                .and_then(|p| p.get("info_cache"))
+                .and_then(|c| c.as_object())
+        {
+            for key in cache.keys() {
+                let prefs = user_data_dir.join(key).join("Preferences");
+                if fs.exists(&prefs) {
+                    found.insert(prefs);
+                }
+            }
+        }
+
+        found.into_iter().collect()
+    }
 }
 
 /// Discovers all `Preferences` files for `browser` across all existing User Data dirs.
 pub fn browser_prefs_files_in(browser: &ChromiumBrowserDef, ctx: &FileCtx, os: Os) -> Vec<PathBuf> {
+    if os == Os::Windows {
+        return Vec::new();
+    }
     let mut found = BTreeSet::new();
     for dir in browser_user_data_dirs(browser, ctx, os) {
         for prefs in discover_browser_prefs_files_in(&*ctx.fs, &dir) {
@@ -1047,6 +1042,9 @@ pub fn find_macos_app_bundle_in(browser: &ChromiumBrowserDef, ctx: &FileCtx) -> 
 }
 
 fn any_chromium_browser_present(ctx: &FileCtx, os: Os) -> bool {
+    if os == Os::Windows {
+        return false;
+    }
     CHROMIUM_BROWSERS.iter().any(|b| {
         !browser_user_data_dirs(b, ctx, os).is_empty()
             || (os == Os::Macos && find_macos_app_bundle_in(b, ctx).is_some())
@@ -1183,16 +1181,60 @@ fn all_prefs_match_pac(fs: &dyn Fs, prefs_files: &[PathBuf], expected_pac_url: &
     matched == prefs_files.len()
 }
 
-/// Evaluates which installed Chromium browsers actually have PAC enforced (`Preferences` JSON or
-/// `--proxy-pac-url` flag) vs which running browsers still need a restart.
-pub fn detect_browser_pac_status_in(
-    ctx: &FileCtx,
+/// Returns `true` when WinINet's `AutoConfigURL` registry value points to `pac_url`.
+pub fn is_wininet_pac_active(platform: &dyn Platform, pac_url: &str) -> bool {
+    let Some(expected) = clean_pac_url(Some(pac_url)) else {
+        return false;
+    };
+    matches!(
+        platform.get_inet("AutoConfigURL"),
+        Ok(Some(val)) if same_pac_url(val.data.trim(), expected)
+    )
+}
+
+fn detect_windows_browser_pac_status(
+    store: &dyn PolicyStore,
+    platform: &dyn Platform,
+    expected: &str,
+) -> BrowserPacStatus {
+    let mut status = BrowserPacStatus::default();
+    let mut seen = BTreeSet::new();
+    for (subkey, display_name) in WINDOWS_CHROMIUM_POLICY_BROWSERS {
+        if is_pac_policy_active_in(store, &[subkey], expected) && seen.insert(display_name) {
+            status.browsers_pac_active.push(display_name.to_string());
+        }
+    }
+    if status.browsers_pac_active.is_empty() && is_wininet_pac_active(platform, expected) {
+        status
+            .browsers_pac_active
+            .push("Windows Internet Settings (WinINet)".to_string());
+    }
+    status
+}
+
+/// Inspects whether browsers are actively enforcing `pac_url`.
+///
+/// On Windows, checks `HKCU\Software\Policies\...` (`ProxyMode = "pac_script"` + matching
+/// `ProxyPacUrl`) and WinINet `AutoConfigURL` without touching Chromium `User Data` /
+/// `Local State` / `Preferences`. On macOS/Linux, checks `Preferences` files and running
+/// `--proxy-pac-url=` flags.
+pub fn detect_browser_pac_status_with(
+    ctx: Option<&FileCtx>,
     os: Os,
     probe: &dyn SystemProbe,
     pac_url: Option<&str>,
+    store: &dyn PolicyStore,
+    platform: &dyn Platform,
 ) -> BrowserPacStatus {
-    let mut status = BrowserPacStatus::default();
     let Some(expected) = clean_pac_url(pac_url) else {
+        return BrowserPacStatus::default();
+    };
+    if os == Os::Windows {
+        return detect_windows_browser_pac_status(store, platform, expected);
+    }
+
+    let mut status = BrowserPacStatus::default();
+    let Some(ctx) = ctx else {
         return status;
     };
     if !any_chromium_browser_present(ctx, os) {
@@ -1223,6 +1265,24 @@ pub fn detect_browser_pac_status_in(
     }
 
     status
+}
+
+/// Inspects running browsers (`--proxy-pac-url=`) and profile `Preferences` files (or HKCU
+/// policies + WinINet on Windows) to classify which Chromium browsers already enforce `pac_url`.
+pub fn detect_browser_pac_status_in(
+    ctx: &FileCtx,
+    os: Os,
+    probe: &dyn SystemProbe,
+    pac_url: Option<&str>,
+) -> BrowserPacStatus {
+    detect_browser_pac_status_with(
+        Some(ctx),
+        os,
+        probe,
+        pac_url,
+        &RealPolicyStore,
+        &super::platform::RealPlatform,
+    )
 }
 
 fn apply_browser_prefs_for_browser(
@@ -1265,7 +1325,7 @@ fn apply_browser_prefs_with_pac(
     probe: &dyn SystemProbe,
     report: &mut PolicyApplyReport,
 ) {
-    if !any_chromium_browser_present(ctx, os) {
+    if os == Os::Windows || !any_chromium_browser_present(ctx, os) {
         return;
     }
     let Some(running_map) = inspect_running_browsers(probe, os, Some(pac_url)) else {
@@ -1294,6 +1354,9 @@ pub fn any_non_running_browser_needs_pac_sync_in(
     probe: &dyn SystemProbe,
     pac_url: &str,
 ) -> bool {
+    if os == Os::Windows {
+        return false;
+    }
     let Some(expected) = clean_pac_url(Some(pac_url)) else {
         return false;
     };
@@ -1338,6 +1401,9 @@ pub fn reconcile_browser_pac_prefs_in(
     os: Os,
     probe: &dyn SystemProbe,
 ) -> bool {
+    if os == Os::Windows {
+        return false;
+    }
     if let Some(url) = clean_pac_url(pac_url) {
         let mut report = PolicyApplyReport::default();
         apply_browser_prefs_with_pac(j, p, url, ctx, os, probe, &mut report);
@@ -1373,7 +1439,7 @@ pub fn reconcile_browser_pac_prefs_in(
 /// Removes `"proxy"` from `Preferences` files of non-running browsers ONLY when `proxy.pac_url`
 /// points to `http://127.0.0.1:<any>/proxy.pac`. Returns the count of cleaned files.
 pub fn clear_stale_browser_pac_prefs_in(ctx: &FileCtx, os: Os, probe: &dyn SystemProbe) -> usize {
-    if !any_chromium_browser_present(ctx, os) {
+    if os == Os::Windows || !any_chromium_browser_present(ctx, os) {
         return 0;
     }
     let Some(running_map) = inspect_running_browsers(probe, os, None) else {
@@ -2726,5 +2792,200 @@ mod tests {
         assert!(summary.skipped.is_empty());
         assert!(summary.failed.is_empty());
         assert!(launcher.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn windows_skips_user_data_local_state_and_preferences_scanning() {
+        use super::super::fs::Fs;
+
+        let pac = "http://127.0.0.1:8899/proxy.pac";
+        let fs = Arc::new(FakeFs::new());
+        let plat = FakePlatform::new();
+        let store = FakePolicyStore::new();
+        let ctx = test_ctx(&fs);
+        let probe = StubProbe::fixed(Some(""));
+
+        let chrome_ud = ctx.local_appdata.join("Google/Chrome/User Data");
+        let default_prefs = chrome_ud.join("Default/Preferences");
+        let profile1_prefs = chrome_ud.join("Profile 1/Preferences");
+        let custom_prefs = chrome_ud.join("CustomProfile/Preferences");
+        let local_state = chrome_ud.join("Local State");
+        let opera_prefs = ctx
+            .home
+            .join("AppData/Roaming/Opera Software/Opera Stable/Preferences");
+
+        put_prefs(&fs, &default_prefs, r#"{"homepage":"about:blank"}"#);
+        put_prefs(
+            &fs,
+            &profile1_prefs,
+            r#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac"}}"#,
+        );
+        put_prefs(&fs, &custom_prefs, "{}");
+        put_prefs(&fs, &opera_prefs, "{}");
+        fs.put(
+            &local_state,
+            br#"{"profile":{"info_cache":{"CustomProfile":{}}}}"#,
+            0o600,
+        );
+
+        for browser in &CHROMIUM_BROWSERS {
+            assert!(
+                browser_user_data_dirs(browser, &ctx, Os::Windows).is_empty(),
+                "{}",
+                browser.id
+            );
+            assert!(
+                browser_prefs_files_in(browser, &ctx, Os::Windows).is_empty(),
+                "{}",
+                browser.id
+            );
+        }
+
+        store.set_domain_applicable(r"Software\Policies\Google\Chrome", true);
+        let mut j = Journal::open(fs.clone(), Path::new(DIR))
+            .unwrap()
+            .with_policy_store(store.clone());
+
+        // apply_browser_policies_with_pac_in must not touch Windows Preferences even on Os::Windows.
+        let rep = apply_browser_policies_with_pac_in(
+            &mut j,
+            &plat,
+            Some(pac),
+            Some(&ctx),
+            Os::Windows,
+            &probe,
+        );
+        assert_eq!(rep.failed, 0);
+        // Apply Windows policy specs explicitly so cross-platform tests verify all 4 HKCU values
+        // regardless of host compile target.
+        let win_rep = apply_policy_specs(&mut j, &plat, &policy_specs_for_windows(Some(pac)));
+        assert_eq!(win_rep.failed, 0);
+        assert!(
+            !j.entries()
+                .iter()
+                .any(|e| matches!(e.resource, Resource::BrowserPacPref { .. }))
+        );
+        assert_eq!(
+            store.get(r"Software\Policies\Google\Chrome", KEY_QUIC_ALLOWED),
+            Some(PolicyValue::Dword(0))
+        );
+        assert_eq!(
+            store.get(r"Software\Policies\Google\Chrome", KEY_DOH_MODE),
+            Some(PolicyValue::Sz("off".to_string()))
+        );
+        assert_eq!(
+            store.get(r"Software\Policies\Google\Chrome", KEY_PROXY_MODE),
+            Some(PolicyValue::Sz("pac_script".to_string()))
+        );
+        assert_eq!(
+            store.get(r"Software\Policies\Google\Chrome", KEY_PROXY_PAC_URL),
+            Some(PolicyValue::Sz(pac.to_string()))
+        );
+        assert_eq!(
+            fs.read(&default_prefs).unwrap().as_deref(),
+            Some(br#"{"homepage":"about:blank"}"#.as_slice())
+        );
+
+        assert!(!any_non_running_browser_needs_pac_sync_in(
+            &ctx,
+            Os::Windows,
+            &probe,
+            pac
+        ));
+        assert!(!reconcile_browser_pac_prefs_in(
+            &mut j,
+            &plat,
+            Some(pac),
+            &ctx,
+            Os::Windows,
+            &probe
+        ));
+        assert_eq!(
+            clear_stale_browser_pac_prefs_in(&ctx, Os::Windows, &probe),
+            0
+        );
+        // Existing Windows Profile 1 Preferences was not touched by cleanup either.
+        assert!(
+            fs.read(&profile1_prefs)
+                .unwrap()
+                .is_some_and(|b| !b.is_empty())
+        );
+    }
+
+    #[test]
+    fn windows_detect_browser_pac_status_uses_hkcu_policies_and_wininet() {
+        use super::super::platform::RegValue;
+
+        let pac = "http://127.0.0.1:8899/proxy.pac";
+        let fs = Arc::new(FakeFs::new());
+        let plat = FakePlatform::new();
+        let store = FakePolicyStore::new();
+        let ctx = test_ctx(&fs);
+        let probe = StubProbe::fixed(Some(""));
+
+        // Even if a Preferences file with Zastava PAC exists in Edge User Data,
+        // Windows status ignores User Data / Preferences.
+        let edge_prefs = ctx
+            .local_appdata
+            .join("Microsoft/Edge/User Data/Default/Preferences");
+        put_prefs(
+            &fs,
+            &edge_prefs,
+            r#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac"}}"#,
+        );
+        let s0 = detect_browser_pac_status_with(
+            Some(&ctx),
+            Os::Windows,
+            &probe,
+            Some(pac),
+            &*store,
+            &plat,
+        );
+        assert!(s0.browsers_pac_active.is_empty());
+        assert!(s0.browsers_needing_restart.is_empty());
+
+        // When only WinINet AutoConfigURL matches, WinINet is reported.
+        plat.seed_inet("AutoConfigURL", RegValue::sz(pac));
+        let s1 = detect_browser_pac_status_with(
+            None,
+            Os::Windows,
+            &probe,
+            Some(pac),
+            &*store,
+            &plat,
+        );
+        assert_eq!(
+            s1.browsers_pac_active,
+            vec!["Windows Internet Settings (WinINet)".to_string()]
+        );
+
+        // When HKCU policy keys are applied (even across both Yandex keys), Chromium browsers
+        // are reported and deduped, and remain active even if WinINet is overridden by a VPN.
+        for domain in WINDOWS_CHROMIUM_DOMAIN_NAMES {
+            store.set_domain_applicable(domain, false);
+        }
+        store.set_domain_applicable(r"Software\Policies\Microsoft\Edge", true);
+        store.set_domain_applicable(r"Software\Policies\YandexBrowser", true);
+        store.set_domain_applicable(r"Software\Policies\Yandex\YandexBrowser", true);
+        let mut j = Journal::open(fs.clone(), Path::new(DIR))
+            .unwrap()
+            .with_policy_store(store.clone());
+        let rep = apply_policy_specs(&mut j, &plat, &policy_specs_for_windows(Some(pac)));
+        assert_eq!(rep.failed, 0);
+
+        plat.seed_inet("AutoConfigURL", RegValue::sz(""));
+        let s2 = detect_browser_pac_status_with(
+            Some(&ctx),
+            Os::Windows,
+            &probe,
+            Some(pac),
+            &*store,
+            &plat,
+        );
+        assert_eq!(
+            s2.browsers_pac_active,
+            vec!["Microsoft Edge".to_string(), "Yandex Browser".to_string()]
+        );
+        assert!(s2.browsers_needing_restart.is_empty());
     }
 }

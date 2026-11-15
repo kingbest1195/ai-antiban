@@ -13,9 +13,7 @@
 
 use crate::state::CliMode;
 use crate::sysproxy::FileCtx;
-use crate::sysproxy::browser_policies::{
-    BrowserPacStatus, PolicyStore, detect_browser_pac_status_in,
-};
+use crate::sysproxy::browser_policies::{PolicyStore, detect_browser_pac_status_with};
 use crate::sysproxy::fs::Fs;
 use crate::sysproxy::platform::{Platform, PlatformError, ServiceKind, classify_services};
 use serde::{Deserialize, Serialize};
@@ -750,7 +748,6 @@ impl PacSource {
 /// Everything the status computation reads from outside.
 pub(crate) struct CoverageEnv<'a> {
     pub platform: &'a dyn Platform,
-    #[allow(dead_code)]
     pub policy_store: &'a dyn PolicyStore,
     /// `None` when the user's directories cannot be determined: file based facts are `unknown`.
     pub files: Option<&'a FileCtx>,
@@ -802,10 +799,14 @@ fn compute_config_facts(
     probe: &dyn SystemProbe,
 ) -> ConfigFacts {
     let pac_url = gateway.map(pac_url_for);
-    let browser_pac = match env.files {
-        Some(ctx) => detect_browser_pac_status_in(ctx, os, probe, pac_url.as_deref()),
-        None => BrowserPacStatus::default(),
-    };
+    let browser_pac = detect_browser_pac_status_with(
+        env.files,
+        os,
+        probe,
+        pac_url.as_deref(),
+        env.policy_store,
+        env.platform,
+    );
     let browser_pac_policy_active = !browser_pac.browsers_pac_active.is_empty();
 
     let mut facts = ConfigFacts {
@@ -873,8 +874,12 @@ fn compute_config_facts(
                     } else if facts.system_proxy_effective == Some(false)
                         || pac_verdict != Verdict::Configured
                     {
-                        "Настройки браузеров (Preferences) направляют трафик в Заставу поверх VPN"
-                            .to_string()
+                        if os == Os::Windows {
+                            "Политики браузеров направляют трафик в Заставу поверх VPN".to_string()
+                        } else {
+                            "Настройки браузеров (Preferences) направляют трафик в Заставу поверх VPN"
+                                .to_string()
+                        }
                     } else {
                         "Настройки браузеров и системный PAC направляют трафик в Заставу, ждём первый запрос"
                             .to_string()

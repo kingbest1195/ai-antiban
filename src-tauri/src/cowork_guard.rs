@@ -14,6 +14,7 @@ const COWORK_SERVICE_REG_SUBKEY: &str = r"SYSTEM\CurrentControlSet\Services\Cowo
 pub const COWORK_TASK_PATH: &str = r"\Zastava\";
 pub const COWORK_TASK_NAME: &str = "CoworkVMServiceManualGuard";
 pub const COWORK_TASK_FULL_NAME: &str = r"Zastava\CoworkVMServiceManualGuard";
+pub const INSTALL_COWORK_GUARD_ARG: &str = "--install-cowork-guard";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DetectedAiProcess {
@@ -105,7 +106,7 @@ pub fn cowork_guard_inline_ps() -> &'static str {
        ForEach-Object { if ($_.PSChildName -and ($names -notcontains $_.PSChildName)) { $names += $_.PSChildName } };\
      $claudeRunning = @(Get-Process -Name 'claude' -ErrorAction SilentlyContinue).Count -gt 0;\
      foreach ($n in $names) {\
-       $reg=\"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n\";\
+       $reg='HKLM:\\SYSTEM\\CurrentControlSet\\Services\\'+$n;\
        if (Test-Path $reg) {\
          $cur=(Get-ItemProperty -Path $reg -Name 'Start').Start;\
          if ($cur -ne 3) {\
@@ -120,25 +121,85 @@ pub fn cowork_guard_inline_ps() -> &'static str {
      }"
 }
 
-/// Builds the elevated PowerShell installer command that registers the `ONSTART` SYSTEM task
-/// AND immediately enforces `Start = 3` + stops `CoworkVMService` if `claude.exe` is closed.
-pub fn build_windows_install_ps() -> String {
-    let guard_payload = cowork_guard_inline_ps().replace('\'', "''");
-    let task_arg = format!(
-        "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command '{guard_payload}'"
-    );
-    let task_arg_escaped = task_arg.replace('\'', "''");
+fn xml_escape_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Builds the Task Scheduler 1.2 XML for `\Zastava\CoworkVMServiceManualGuard` (`AtStartup` as
+/// `NT AUTHORITY\SYSTEM`, `HighestAvailable`). Uses `System32\WindowsPowerShell\v1.0\powershell.exe`
+/// (no user-writable paths, no `-EncodedCommand`, no `-ExecutionPolicy Bypass`).
+pub fn build_windows_task_xml_with_system_root(system_root: &str) -> String {
+    let root = system_root.trim_end_matches(['\\', '/']);
+    let ps_exe = xml_escape_text(&format!(
+        r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"
+    ));
+    let ps_args = xml_escape_text(&format!(
+        "-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{}\"",
+        cowork_guard_inline_ps()
+    ));
     format!(
-        "$ErrorActionPreference='Stop';\
-         $psExe=\"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\";\
-         $action=New-ScheduledTaskAction -Execute $psExe -Argument '{task_arg_escaped}';\
-         $trigger=New-ScheduledTaskTrigger -AtStartup;\
-         $principal=New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\\SYSTEM' -LogonType ServiceAccount -RunLevel Highest;\
-         $settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2);\
-         Register-ScheduledTask -TaskPath '{COWORK_TASK_PATH}' -TaskName '{COWORK_TASK_NAME}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null;\
-         {guard_inline}",
-        guard_inline = cowork_guard_inline_ps()
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Zastava CoworkVMService Manual Guard</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{ps_exe}</Command>
+      <Arguments>{ps_args}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#
     )
+}
+
+/// Builds the Task Scheduler XML using `%SystemRoot%` (defaulting to `C:\Windows`).
+pub fn build_windows_task_xml() -> String {
+    let sys_root = std::env::var("SystemRoot")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| r"C:\Windows".to_string());
+    build_windows_task_xml_with_system_root(&sys_root)
 }
 
 pub fn build_windows_summary(
@@ -458,8 +519,251 @@ pub fn get_cowork_guard_status() -> CoworkGuardStatus {
     }
 }
 
+/// Parses `tasklist /FI "IMAGENAME eq claude.exe" /FO CSV /NH` output to check whether `claude.exe` is running.
+pub fn parse_tasklist_has_claude(output: &str) -> bool {
+    output.lines().any(|line| {
+        let trimmed = line.trim();
+        let Some(first) = trimmed.split(',').next() else {
+            return false;
+        };
+        let exe = first.trim().trim_matches('"').trim();
+        exe.eq_ignore_ascii_case("claude.exe")
+    })
+}
+
+/// Builds the argument list for `schtasks.exe /Create` using a Task Scheduler XML file.
+pub fn build_schtasks_create_args(xml_path: &str) -> [&str; 6] {
+    ["/Create", "/TN", COWORK_TASK_FULL_NAME, "/XML", xml_path, "/F"]
+}
+
+#[cfg(target_os = "windows")]
+mod win_elevate {
+    use super::INSTALL_COWORK_GUARD_ARG;
+    use crate::win_reg::encode_utf16_nul;
+    use core::ffi::c_void;
+    use std::path::Path;
+
+    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
+    const SEE_MASK_NO_CONSOLE: u32 = 0x0000_8000;
+    const SW_HIDE: i32 = 0;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    const ERROR_CANCELLED: u32 = 1223;
+    const ELEVATION_TIMEOUT_MS: u32 = 30_000;
+
+    #[repr(C)]
+    struct ShellExecuteInfoW {
+        cb_size: u32,
+        f_mask: u32,
+        hwnd: *mut c_void,
+        lp_verb: *const u16,
+        lp_file: *const u16,
+        lp_parameters: *const u16,
+        lp_directory: *const u16,
+        n_show: i32,
+        h_inst_app: *mut c_void,
+        lp_id_list: *mut c_void,
+        lp_class: *const u16,
+        hkey_class: *mut c_void,
+        dw_hot_key: u32,
+        h_icon_or_monitor: *mut c_void,
+        h_process: *mut c_void,
+    }
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteExW(p_exec_info: *mut ShellExecuteInfoW) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+        fn GetExitCodeProcess(h_process: *mut c_void, lp_exit_code: *mut u32) -> i32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    struct ProcessHandle(*mut c_void);
+
+    impl Drop for ProcessHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `self.0` was returned in `SHELLEXECUTEINFOW.hProcess`.
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+    }
+
+    pub fn run_elevated_install(exe_path: &Path) -> Result<(), String> {
+        let verb = encode_utf16_nul("runas");
+        let file = encode_utf16_nul(&exe_path.to_string_lossy());
+        let params = encode_utf16_nul(INSTALL_COWORK_GUARD_ARG);
+
+        let mut info = ShellExecuteInfoW {
+            cb_size: core::mem::size_of::<ShellExecuteInfoW>() as u32,
+            f_mask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE,
+            hwnd: core::ptr::null_mut(),
+            lp_verb: verb.as_ptr(),
+            lp_file: file.as_ptr(),
+            lp_parameters: params.as_ptr(),
+            lp_directory: core::ptr::null(),
+            n_show: SW_HIDE,
+            h_inst_app: core::ptr::null_mut(),
+            lp_id_list: core::ptr::null_mut(),
+            lp_class: core::ptr::null(),
+            hkey_class: core::ptr::null_mut(),
+            dw_hot_key: 0,
+            h_icon_or_monitor: core::ptr::null_mut(),
+            h_process: core::ptr::null_mut(),
+        };
+
+        // SAFETY: `verb`, `file`, and `params` remain alive and NUL-terminated across the call.
+        let ok = unsafe { ShellExecuteExW(&mut info) };
+        if ok == 0 {
+            // SAFETY: thread-local Win32 error from the immediately preceding `ShellExecuteExW`.
+            let err = unsafe { GetLastError() };
+            return Err(if err == ERROR_CANCELLED {
+                "Настройка задачи планировщика отменена или не хватило прав администратора."
+                    .to_string()
+            } else {
+                format!("Не удалось запустить настройку задачи планировщика (Win32 error {err}).")
+            });
+        }
+
+        if info.h_process.is_null() {
+            return Err(
+                "Не удалось дождаться завершения настройки задачи планировщика.".to_string(),
+            );
+        }
+        let proc_handle = ProcessHandle(info.h_process);
+
+        // SAFETY: `proc_handle.0` is a valid process handle from `ShellExecuteExW`.
+        let wait_rc = unsafe { WaitForSingleObject(proc_handle.0, ELEVATION_TIMEOUT_MS) };
+        if wait_rc == WAIT_TIMEOUT {
+            return Err("Превышено время ожидания настройки задачи планировщика.".to_string());
+        }
+        if wait_rc != WAIT_OBJECT_0 {
+            // SAFETY: thread-local Win32 error from `WaitForSingleObject`.
+            let err = unsafe { GetLastError() };
+            return Err(format!(
+                "Ошибка ожидания процесса настройки задачи (Win32 error {err})."
+            ));
+        }
+
+        let mut exit_code: u32 = 1;
+        // SAFETY: `proc_handle.0` is signaled and `exit_code` is writable.
+        if unsafe { GetExitCodeProcess(proc_handle.0, &mut exit_code) } == 0 {
+            // SAFETY: thread-local Win32 error from `GetExitCodeProcess`.
+            let err = unsafe { GetLastError() };
+            return Err(format!(
+                "Не удалось получить код возврата настройки задачи (Win32 error {err})."
+            ));
+        }
+        if exit_code != 0 {
+            return Err(format!(
+                "Ошибка настройки задачи планировщика (код {exit_code})."
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_claude_process_running() -> bool {
+    run_hidden_cmd(
+        "tasklist.exe",
+        &["/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"],
+    )
+    .filter(|o| o.status.success())
+    .map(|o| parse_tasklist_has_claude(&String::from_utf8_lossy(&o.stdout)))
+    .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn register_cowork_guard_task() -> Result<(), String> {
+    let xml = build_windows_task_xml();
+    let xml_path = std::env::temp_dir().join(format!(
+        "zastava-cowork-task-{}.xml",
+        std::process::id()
+    ));
+    std::fs::write(&xml_path, xml.as_bytes())
+        .map_err(|e| format!("failed to write task XML: {e}"))?;
+    let xml_path_str = xml_path.to_string_lossy().into_owned();
+    let args = build_schtasks_create_args(&xml_path_str);
+    let out = run_hidden_cmd("schtasks.exe", &args);
+    let _ = std::fs::remove_file(&xml_path);
+
+    let Some(out) = out else {
+        return Err("failed to spawn schtasks.exe".to_string());
+    };
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return Err(format!(
+            "schtasks.exe /Create failed (code={:?}): {stderr} {stdout}",
+            out.status.code()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn enforce_cowork_service_manual_and_stop() -> Result<(), String> {
+    use crate::win_reg::{RootKey, get_dword, set_dword};
+
+    let current_start = get_dword(RootKey::HkeyLocalMachine, COWORK_SERVICE_REG_SUBKEY, "Start")?;
+    let Some(cur) = current_start else {
+        return Ok(());
+    };
+    if cur != 3 {
+        set_dword(
+            RootKey::HkeyLocalMachine,
+            COWORK_SERVICE_REG_SUBKEY,
+            "Start",
+            3,
+        )?;
+        let _ = run_hidden_cmd("sc.exe", &["config", COWORK_SERVICE_NAME, "start=", "demand"]);
+    }
+    let running = run_hidden_cmd("sc.exe", &["query", COWORK_SERVICE_NAME])
+        .filter(|o| o.status.success())
+        .map(|o| parse_sc_running(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false);
+    if running && !is_claude_process_running() {
+        let _ = run_hidden_cmd("sc.exe", &["stop", COWORK_SERVICE_NAME]);
+    }
+    Ok(())
+}
+
+/// Elevated helper entrypoint (`--install-cowork-guard`) launched via `ShellExecuteExW` (`runas`).
+/// Registers `\Zastava\CoworkVMServiceManualGuard` via `schtasks.exe /Create`, enforces `Start = 3`
+/// via `win_reg` on HKLM, and stops `CoworkVMService` via `sc.exe stop` when `claude.exe` is closed.
+pub fn run_install_cowork_guard_cli() -> i32 {
+    if !crate::sysproxy::os_effects_enabled() {
+        return 0;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(err) = register_cowork_guard_task() {
+            crate::diagnostics::record("cowork_guard", &err);
+            return 1;
+        }
+        if let Err(err) = enforce_cowork_service_manual_and_stop() {
+            crate::diagnostics::record("cowork_guard", &err);
+            return 1;
+        }
+        0
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        0
+    }
+}
+
 /// User-triggered install/repair of `\Zastava\CoworkVMServiceManualGuard` on Windows
-/// (requests UAC once via `Start-Process ... -Verb RunAs`), plus immediate `Start = 3` + stop fix.
+/// (requests UAC once via Win32 `ShellExecuteExW` with `lpVerb = "runas"`, `nShow = SW_HIDE`),
+/// plus immediate `Start = 3` + stop fix.
 pub fn install_or_repair_cowork_guard() -> Result<CoworkGuardStatus, String> {
     if !crate::sysproxy::os_effects_enabled() {
         return Ok(get_cowork_guard_status());
@@ -467,42 +771,9 @@ pub fn install_or_repair_cowork_guard() -> Result<CoworkGuardStatus, String> {
 
     #[cfg(target_os = "windows")]
     {
-        use base64::Engine;
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        let script = build_windows_install_ps();
-        let utf16: Vec<u8> = script
-            .encode_utf16()
-            .flat_map(|u| u.to_le_bytes())
-            .collect();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
-
-        let launcher = format!(
-            "$p = Start-Process -FilePath \"$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand','{encoded}') -Verb RunAs -PassThru -Wait; exit $p.ExitCode"
-        );
-        let out = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                &launcher,
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|e| format!("Не удалось запустить PowerShell для настройки задачи: {e}"))?;
-
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(if stderr.is_empty() {
-                "Настройка задачи планировщика отменена или не хватило прав администратора."
-                    .to_string()
-            } else {
-                format!("Ошибка настройки задачи планировщика: {stderr}")
-            });
-        }
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("Не удалось определить путь к приложению: {e}"))?;
+        win_elevate::run_elevated_install(&exe)?;
         Ok(query_windows_status())
     }
     #[cfg(not(target_os = "windows"))]
@@ -564,14 +835,42 @@ mod tests {
     }
 
     #[test]
-    fn install_ps_uses_manual_never_disabled_and_no_localappdata() {
-        let ps = build_windows_install_ps();
-        assert!(ps.contains("Manual"));
-        assert!(ps.contains("3"));
-        assert!(!ps.contains("Disabled"));
-        assert!(!ps.contains("LOCALAPPDATA"));
-        assert!(ps.contains("CoworkVMService"));
-        assert!(ps.contains("cowork-svc.exe"));
+    fn task_xml_uses_manual_never_disabled_no_encoded_command_and_no_localappdata() {
+        let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+        assert!(is_task_xml_healthy(&xml));
+        assert!(xml.contains("Manual"));
+        assert!(xml.contains("3"));
+        assert!(!xml.contains("Disabled"));
+        assert!(!xml.contains("LOCALAPPDATA"));
+        assert!(!xml.contains("-EncodedCommand"));
+        assert!(!xml.contains("-ExecutionPolicy"));
+        assert!(!xml.contains("Bypass"));
+        assert!(xml.contains("CoworkVMService"));
+        assert!(xml.contains("cowork-svc.exe"));
+        assert!(!cowork_guard_inline_ps().contains('"'));
+        assert_eq!(
+            build_schtasks_create_args(r"C:\Temp\task.xml"),
+            [
+                "/Create",
+                "/TN",
+                COWORK_TASK_FULL_NAME,
+                "/XML",
+                r"C:\Temp\task.xml",
+                "/F"
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_tasklist_for_claude_exe() {
+        assert!(parse_tasklist_has_claude(
+            "\"claude.exe\",\"1234\",\"Console\",\"1\",\"120,000 K\"\r\n"
+        ));
+        assert!(parse_tasklist_has_claude("\"Claude.exe\",\"99\",\"Services\",\"0\",\"10 K\""));
+        assert!(!parse_tasklist_has_claude(
+            "INFO: No tasks are running which match the specified criteria.\r\n"
+        ));
+        assert!(!parse_tasklist_has_claude("\"chrome.exe\",\"555\",\"Console\",\"1\",\"50 K\""));
     }
 
     #[test]
@@ -614,5 +913,6 @@ mod tests {
         assert!(!st.needs_repair);
         assert!(!trigger_cowork_guard_task());
         assert!(install_or_repair_cowork_guard().is_ok());
+        assert_eq!(run_install_cowork_guard_cli(), 0);
     }
 }
