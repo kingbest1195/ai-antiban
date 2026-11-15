@@ -623,21 +623,24 @@ pub(crate) struct FileCtx {
     pub fs: Arc<dyn fs::Fs>,
     pub home: PathBuf,
     pub ide_roots: Vec<PathBuf>,
+    #[cfg(test)]
     pub local_appdata: PathBuf,
 }
 
 impl FileCtx {
     pub(crate) fn new(fs: Arc<dyn fs::Fs>, home: PathBuf, ide_roots: Vec<PathBuf>) -> Self {
+        #[cfg(test)]
         let local_appdata = home.join("AppData").join("Local");
         Self {
             fs,
             home,
             ide_roots,
+            #[cfg(test)]
             local_appdata,
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(all(test, target_os = "windows"))]
     fn with_local_appdata(mut self, local_appdata: PathBuf) -> Self {
         self.local_appdata = local_appdata;
         self
@@ -658,7 +661,7 @@ impl FileCtx {
         #[cfg(all(unix, not(target_os = "macos")))]
         let roots = vec![home.join(".config")];
         let ctx = Self::new(fs, home, roots);
-        #[cfg(target_os = "windows")]
+        #[cfg(all(test, target_os = "windows"))]
         let ctx = if let Some(local) = std::env::var_os("LOCALAPPDATA")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
