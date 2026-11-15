@@ -18,6 +18,10 @@ use crate::state::UpstreamProxyConfig;
 pub const CACHE_TTL_SECONDS: u64 = 15;
 pub const REQUEST_TIMEOUT_MS: u64 = 3500;
 
+/// Neutral browser-like User-Agent for telemetry and exit probes (never identifies Zastava).
+pub const NEUTRAL_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
 pub const SUSPICIOUS_ANONYMIZER_MARKERS: &[&str] = &[
     "tor-exit",
     "anonymizer",
@@ -131,7 +135,7 @@ fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::Clie
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
         .pool_max_idle_per_host(0)
-        .user_agent("Zastava/1.0")
+        .user_agent(NEUTRAL_USER_AGENT)
         .proxy(proxy);
     if entry.proto == EntryProto::Https {
         let name = entry.tls_server_name();
@@ -156,6 +160,14 @@ pub async fn build_entry_client(
         .map_err(|e| format!("Failed to build audit client: {e}"))
 }
 
+fn format_checked_entry_error(endpoint: &str, err: &std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        format!("Entry node {endpoint} rejected: {err}")
+    } else {
+        format!("Entry node {endpoint} DNS lookup failed: {err}")
+    }
+}
+
 async fn checked_entry_addr(
     entry: &Entry,
     allow_local: bool,
@@ -163,7 +175,7 @@ async fn checked_entry_addr(
 ) -> Result<SocketAddr, String> {
     let addrs = resolve_entry_checked(entry, allow_local, gateway_port)
         .await
-        .map_err(|e| format!("Entry node {} rejected: {e}", entry.endpoint()))?;
+        .map_err(|e| format_checked_entry_error(&entry.endpoint(), &e))?;
     addrs
         .first()
         .copied()
@@ -262,7 +274,7 @@ impl NetworkResolver {
             // Fresh socket per lookup: a pooled keep-alive connection could still use the old route
             // after a VPN switch and report the previous IP / ASN.
             .pool_max_idle_per_host(0)
-            .user_agent("Zastava/1.0")
+            .user_agent(NEUTRAL_USER_AGENT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -659,7 +671,7 @@ impl NetworkResolver {
         matrix: &ProviderMatrix,
         direct_probe: Option<&dyn IpProbe>,
     ) -> CheckResult {
-        let url_override = default_exit_probe_url(provider);
+        let url_override = default_exit_probe_url(provider, route.is_some());
         self.probe_provider_exit_inner(
             provider,
             route,
@@ -711,17 +723,6 @@ impl NetworkResolver {
         direct_probe: Option<&dyn IpProbe>,
         timeout: Duration,
     ) -> CheckResult {
-        let via_host = match provider {
-            ProviderId::Anthropic => "claude.ai",
-            ProviderId::Openai => "chatgpt.com",
-            ProviderId::Gemini => "gemini (ipinfo.io)",
-        };
-        let via_label = if route.is_some() {
-            format!("{via_host} (маршрут ключа)")
-        } else {
-            via_host.to_string()
-        };
-
         if provider == ProviderId::Gemini && route.is_none() {
             return CheckResult::unknown(
                 "PROVIDER_EXIT_NOT_APPLICABLE",
@@ -731,8 +732,48 @@ impl NetworkResolver {
             .with_measured_via("gemini (без отдельного маршрута)");
         }
 
+        // Never send unbound (route: None) probes to provider domains (claude.ai / chatgpt.com)
+        // from the user's real IP; use neutral IP/geo endpoints (or chained proxy if configured).
+        let effective_url = if route.is_none() && is_provider_domain_url(probe_url) {
+            NEUTRAL_EXIT_PROBE_URL
+        } else {
+            probe_url
+        };
+
+        let gateway_port = self.gateway_port();
+        let chained_client = if route.is_none() && client_override.is_none() && direct_probe.is_none()
+        {
+            crate::sysproxy::get_chained_proxy()
+                .filter(|cp| {
+                    !crate::sysproxy::is_gateway_host_port(
+                        cp,
+                        (gateway_port > 0).then_some(gateway_port),
+                    )
+                })
+                .and_then(|cp| build_chained_probe_client(&cp, timeout))
+        } else {
+            None
+        };
+
+        let via_host = if route.is_some() {
+            match provider {
+                ProviderId::Anthropic => "claude.ai",
+                ProviderId::Openai => "chatgpt.com",
+                ProviderId::Gemini => "gemini (ipinfo.io)",
+            }
+        } else {
+            "1.1.1.1"
+        };
+        let via_label = if route.is_some() {
+            format!("{via_host} (маршрут ключа)")
+        } else if chained_client.is_some() {
+            format!("{via_host} (chained proxy)")
+        } else {
+            via_host.to_string()
+        };
+
         let response = if let Some(c) = client_override {
-            probe_url_with_client(c, probe_url, timeout).await
+            probe_url_with_client(c, effective_url, timeout).await
         } else if let Some(r) = route {
             if r.entries.is_empty() {
                 return CheckResult::unknown(
@@ -746,12 +787,11 @@ impl NetworkResolver {
                 .with_measured_via(via_label);
             }
             let allow_local = r.allows_local_entries();
-            let gateway_port = self.gateway_port();
             let mut last_err = ProbeFetchError::Unreachable("no route entry attempted".into());
             let mut fetched = None;
             for entry in &r.entries {
                 match build_entry_client(entry, allow_local, gateway_port).await {
-                    Ok(c) => match probe_url_with_client(&c, probe_url, timeout).await {
+                    Ok(c) => match probe_url_with_client(&c, effective_url, timeout).await {
                         Ok(payload) => {
                             fetched = Some(payload);
                             break;
@@ -766,7 +806,7 @@ impl NetworkResolver {
                 None => Err(last_err),
             }
         } else if let Some(probe) = direct_probe {
-            match probe.get(probe_url, timeout).await {
+            match probe.get(effective_url, timeout).await {
                 HttpProbeOutcome::Response { status, body } => Ok((status, body)),
                 HttpProbeOutcome::Timeout => Err(ProbeFetchError::Timeout),
                 HttpProbeOutcome::ConnectFailed
@@ -775,8 +815,10 @@ impl NetworkResolver {
                     Err(ProbeFetchError::Unreachable("probe transport error".into()))
                 }
             }
+        } else if let Some(c) = chained_client.as_ref() {
+            probe_url_with_client(c, effective_url, timeout).await
         } else {
-            probe_url_with_client(&self.client, probe_url, timeout).await
+            probe_url_with_client(&self.client, effective_url, timeout).await
         };
 
         let (status, body) = match response {
@@ -973,7 +1015,40 @@ fn parse_gemini_exit_probe(body: &str) -> Option<(String, Option<String>)> {
     None
 }
 
-fn default_exit_probe_url(provider: ProviderId) -> &'static str {
+const NEUTRAL_EXIT_PROBE_URL: &str = "https://1.1.1.1/cdn-cgi/trace";
+
+fn is_provider_domain_url(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .is_some_and(|h| {
+            h == "claude.ai"
+                || h.ends_with(".claude.ai")
+                || h == "chatgpt.com"
+                || h.ends_with(".chatgpt.com")
+        })
+}
+
+fn build_chained_probe_client(chained: &str, timeout: Duration) -> Option<reqwest::Client> {
+    let proxy_url = if chained.contains("://") {
+        chained.to_string()
+    } else {
+        format!("http://{chained}")
+    };
+    let proxy = reqwest::Proxy::all(&proxy_url).ok()?;
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .pool_max_idle_per_host(0)
+        .user_agent(NEUTRAL_USER_AGENT)
+        .proxy(proxy)
+        .build()
+        .ok()
+}
+
+fn default_exit_probe_url(provider: ProviderId, has_route: bool) -> &'static str {
+    if !has_route {
+        return NEUTRAL_EXIT_PROBE_URL;
+    }
     match provider {
         ProviderId::Anthropic => "https://claude.ai/cdn-cgi/trace",
         ProviderId::Openai => "https://chatgpt.com/cdn-cgi/trace",
@@ -1537,7 +1612,7 @@ mod tests {
             .await;
         assert_eq!(res.status, CheckStatus::Ok);
         assert_eq!(res.code, "PROVIDER_EXIT_VERIFIED");
-        assert_eq!(res.measured_via.as_deref(), Some("claude.ai"));
+        assert_eq!(res.measured_via.as_deref(), Some("1.1.1.1"));
         assert!(res.message.contains("185.10.20.30"));
         assert!(res.message.contains("AMS"));
     }
@@ -1624,7 +1699,7 @@ mod tests {
                 .await;
             assert_eq!(res.status, CheckStatus::Unknown);
             assert_eq!(res.reason, Some(UnknownReason::SourceRefused));
-            assert_eq!(res.measured_via.as_deref(), Some("chatgpt.com"));
+            assert_eq!(res.measured_via.as_deref(), Some("1.1.1.1"));
         }
     }
 
@@ -1721,5 +1796,166 @@ mod tests {
             bound.measured_via.as_deref(),
             Some("gemini (ipinfo.io) (маршрут ключа)")
         );
+    }
+
+    #[tokio::test]
+    async fn resolver_and_entry_clients_use_neutral_user_agent_without_zastava() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        assert!(!NEUTRAL_USER_AGENT.to_ascii_lowercase().contains("zastava"));
+
+        // 1. Direct client in NetworkResolver::new
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let resolver = NetworkResolver::new();
+        let _ = resolver
+            .client
+            .get(format!("http://127.0.0.1:{port}/test"))
+            .send()
+            .await
+            .unwrap();
+        let raw_req = rx.await.unwrap();
+        let lower = raw_req.to_ascii_lowercase();
+        assert!(
+            !lower.contains("zastava"),
+            "User-Agent must never reveal Zastava: {raw_req}"
+        );
+        assert!(
+            raw_req.contains(NEUTRAL_USER_AGENT),
+            "Expected neutral UA in request: {raw_req}"
+        );
+
+        // 2. Entry proxy client in entry_client_builder
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let (ptx, prx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = proxy_listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let _ = ptx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .await;
+            }
+        });
+        let entry = Entry {
+            proto: EntryProto::Http,
+            host: "127.0.0.1".to_string(),
+            port: proxy_port,
+            username: None,
+            password: None,
+            sni: None,
+        };
+        let entry_client = build_entry_client(&entry, true, 0).await.unwrap();
+        let _ = entry_client.get("http://probe.invalid/").send().await;
+        let proxy_req = prx.await.unwrap();
+        assert!(!proxy_req.to_ascii_lowercase().contains("zastava"));
+        assert!(proxy_req.contains(NEUTRAL_USER_AGENT));
+    }
+
+    #[tokio::test]
+    async fn probe_provider_exit_with_no_route_never_contacts_claude_or_chatgpt() {
+        use std::sync::Mutex;
+
+        struct RecordingProbe {
+            urls: Mutex<Vec<String>>,
+        }
+        impl IpProbe for RecordingProbe {
+            fn get<'a>(
+                &'a self,
+                url: &'a str,
+                _limit: Duration,
+            ) -> crate::auditor::seams::BoxFuture<'a, HttpProbeOutcome> {
+                self.urls.lock().unwrap().push(url.to_string());
+                Box::pin(async move {
+                    HttpProbeOutcome::Response {
+                        status: 200,
+                        body: "fl=1\nip=185.10.20.30\nloc=NL\ncolo=AMS\n".to_string(),
+                    }
+                })
+            }
+        }
+
+        assert_eq!(
+            default_exit_probe_url(ProviderId::Anthropic, false),
+            "https://1.1.1.1/cdn-cgi/trace"
+        );
+        assert_eq!(
+            default_exit_probe_url(ProviderId::Openai, false),
+            "https://1.1.1.1/cdn-cgi/trace"
+        );
+        assert_eq!(
+            default_exit_probe_url(ProviderId::Anthropic, true),
+            "https://claude.ai/cdn-cgi/trace"
+        );
+        assert_eq!(
+            default_exit_probe_url(ProviderId::Openai, true),
+            "https://chatgpt.com/cdn-cgi/trace"
+        );
+
+        let resolver = NetworkResolver::new();
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let telemetry = NetworkTelemetry {
+            ip: "185.10.20.30".to_string(),
+            country_code: "NL".to_string(),
+            hostname: None,
+            asn: Some(20473),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: current_timestamp(),
+        };
+        let probe = RecordingProbe {
+            urls: Mutex::new(Vec::new()),
+        };
+
+        for pid in [
+            ProviderId::Anthropic,
+            ProviderId::Openai,
+            ProviderId::Gemini,
+        ] {
+            let _ = resolver
+                .probe_provider_exit_with_probe(pid, None, &telemetry, &matrix, Some(&probe))
+                .await;
+        }
+
+        let urls = probe.urls.lock().unwrap();
+        assert!(!urls.is_empty());
+        for u in urls.iter() {
+            assert!(
+                !u.contains("claude.ai") && !u.contains("chatgpt.com"),
+                "Unbound probe must NEVER contact provider domains directly: {u}"
+            );
+            assert_eq!(u, "https://1.1.1.1/cdn-cgi/trace");
+        }
+    }
+
+    #[test]
+    fn checked_entry_error_separates_dns_failure_from_policy_rejection() {
+        let dns_err = std::io::Error::from_raw_os_error(11001);
+        let dns_msg = format_checked_entry_error("node.example:443", &dns_err);
+        assert!(dns_msg.contains("DNS lookup failed:"), "{dns_msg}");
+        assert!(!dns_msg.contains("rejected:"), "{dns_msg}");
+
+        let policy_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "entry node points to the Zastava gateway itself",
+        );
+        let policy_msg = format_checked_entry_error("127.0.0.1:8899", &policy_err);
+        assert!(policy_msg.contains("rejected:"), "{policy_msg}");
+        assert!(!policy_msg.contains("DNS lookup failed:"), "{policy_msg}");
     }
 }

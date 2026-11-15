@@ -1163,23 +1163,15 @@ mod tests {
         )
     }
 
-    /// Attaches healthy direct AI trace responses matching `rich_telemetry()`.
+    /// Attaches healthy direct neutral trace responses matching `rich_telemetry()` (never claude.ai / chatgpt.com).
     fn with_ai_traces(probe: FakeProbe) -> FakeProbe {
-        probe
-            .with_route(
-                "claude.ai/cdn-cgi/trace",
-                HttpProbeOutcome::Response {
-                    status: 200,
-                    body: "fl=1\nip=203.0.113.9\nloc=NL\ncolo=AMS\n".into(),
-                },
-            )
-            .with_route(
-                "chatgpt.com/cdn-cgi/trace",
-                HttpProbeOutcome::Response {
-                    status: 200,
-                    body: "fl=1\nip=203.0.113.9\nloc=NL\ncolo=AMS\n".into(),
-                },
-            )
+        probe.with_route(
+            "1.1.1.1/cdn-cgi/trace",
+            HttpProbeOutcome::Response {
+                status: 200,
+                body: "fl=1\nip=203.0.113.9\nloc=NL\ncolo=AMS\n".into(),
+            },
+        )
     }
 
     /// The geo services place the resolver in `country`; IPv6 and provider-exit probes report NL.
@@ -1435,7 +1427,7 @@ mod tests {
             Some("whoami:akamai+google")
         );
         assert_eq!(udp.measured_via.as_deref(), Some("stun:cloudflare+google"));
-        assert_eq!(exit.measured_via.as_deref(), Some("claude.ai"));
+        assert_eq!(exit.measured_via.as_deref(), Some("1.1.1.1"));
         // Only pinning, first session and location do not apply: everything else was verified.
         assert_eq!(report.unknown_count, 0);
         assert_eq!(report.applicable_count, 11);
@@ -1673,7 +1665,7 @@ mod tests {
         assert_eq!(
             probe.calls(),
             calls_after_first + 1,
-            "only OpenAI probes chatgpt.com/cdn-cgi/trace; Tor list, IPv6 and ipwho.is reuse cache"
+            "only OpenAI probes 1.1.1.1/cdn-cgi/trace; Tor list, IPv6 and ipwho.is reuse cache"
         );
     }
 
@@ -2105,14 +2097,7 @@ mod tests {
 
         let probe = with_tor_list(FakeProbe::body(200, "loc=GB\n"))
             .with_route(
-                "claude.ai/cdn-cgi/trace",
-                HttpProbeOutcome::Response {
-                    status: 200,
-                    body: "fl=1\nip=203.0.113.9\nloc=GB\ncolo=LHR\n".into(),
-                },
-            )
-            .with_route(
-                "chatgpt.com/cdn-cgi/trace",
+                "1.1.1.1/cdn-cgi/trace",
                 HttpProbeOutcome::Response {
                     status: 200,
                     body: "fl=1\nip=203.0.113.9\nloc=GB\ncolo=LHR\n".into(),

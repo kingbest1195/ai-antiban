@@ -572,7 +572,7 @@ impl NetworkGuard {
             .timeout(Duration::from_millis(2000))
             // Never reuse keep-alive sockets: they may still point to the previous route.
             .pool_max_idle_per_host(0)
-            .user_agent("Zastava/1.0")
+            .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -4300,5 +4300,101 @@ mod tests {
         assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
         assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
         assert_eq!(h.io.count("interceptor://risk-detected"), 0);
+    }
+
+    #[tokio::test]
+    async fn network_guard_client_uses_neutral_user_agent() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nip=1.2.3.4\n",
+                    )
+                    .await;
+            }
+        });
+
+        let guard = NetworkGuard::new();
+        let _ = guard
+            .client
+            .get(format!("http://127.0.0.1:{port}/cdn-cgi/trace"))
+            .send()
+            .await
+            .unwrap();
+        let raw_req = rx.await.unwrap();
+        assert!(
+            !raw_req.to_ascii_lowercase().contains("zastava"),
+            "Guard client User-Agent must never reveal Zastava: {raw_req}"
+        );
+        assert!(raw_req.contains(crate::auditor::network::NEUTRAL_USER_AGENT));
+    }
+
+    #[tokio::test]
+    async fn guard_audit_all_with_unbound_routes_never_probes_provider_domains() {
+        use crate::auditor::seams::fakes::{FakeDns, FakeSystem, FakeUdp};
+        use crate::auditor::seams::{AuditEnv, HttpProbeOutcome, IpProbe, LookupOutcome};
+
+        struct RecordingProbe {
+            urls: std::sync::Mutex<Vec<String>>,
+        }
+        impl IpProbe for RecordingProbe {
+            fn get<'a>(
+                &'a self,
+                url: &'a str,
+                _limit: Duration,
+            ) -> crate::auditor::seams::BoxFuture<'a, HttpProbeOutcome> {
+                self.urls.lock().unwrap().push(url.to_string());
+                let body = if url.contains("ipwho.is") {
+                    r#"{"success":true,"country_code":"NL","connection":{"asn":20473,"org":"Choopa"}}"#
+                } else {
+                    "fl=1\nip=203.0.113.9\nloc=NL\ncolo=AMS\n"
+                };
+                Box::pin(async move {
+                    HttpProbeOutcome::Response {
+                        status: 200,
+                        body: body.to_string(),
+                    }
+                })
+            }
+        }
+
+        let probe = Arc::new(RecordingProbe {
+            urls: std::sync::Mutex::new(Vec::new()),
+        });
+        let env = AuditEnv {
+            dns: Arc::new(FakeDns::new(LookupOutcome::Timeout)),
+            probe: probe.clone(),
+            udp: Arc::new(FakeUdp::new()),
+            system: Arc::new(FakeSystem::healthy()),
+        };
+        let auditor = Auditor::with_env(env).unwrap();
+        let tel = test_report(ProviderId::Anthropic, OverallStatus::Green, "203.0.113.9", "NL")
+            .telemetry;
+        auditor.resolver.set_cached(tel).await;
+
+        let state = AppState::new_in_memory();
+        let audit: AuditFn = Arc::new(move |provider, force| {
+            let (auditor, state) = (auditor.clone(), state.clone());
+            Box::pin(async move { auditor.evaluate_all(provider, &state, force).await })
+        });
+
+        let results = audit_all(&audit).await;
+        assert_eq!(results.len(), 3);
+        let seen = probe.urls.lock().unwrap();
+        assert!(!seen.is_empty());
+        for url in seen.iter() {
+            assert!(
+                !url.contains("claude.ai") && !url.contains("chatgpt.com"),
+                "audit_all with route: None must never probe provider domains: {url}"
+            );
+        }
     }
 }
