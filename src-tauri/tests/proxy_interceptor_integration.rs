@@ -3,12 +3,32 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use zastava_lib::auditor::Auditor;
 use zastava_lib::auditor::network::{NetworkTelemetry, current_timestamp};
+use zastava_lib::auditor::seams::fakes::{FakeDns, FakeProbe, FakeSystem, FakeUdp, addr};
+use zastava_lib::auditor::seams::{HttpProbeOutcome, LookupOutcome, TxtOutcome};
+use zastava_lib::auditor::{AuditEnv, Auditor, OverallStatus, ProviderId};
 use zastava_lib::proxy::ProxyServer;
 use zastava_lib::proxy::hold_queue::{HoldQueue, HoldResolution};
+use zastava_lib::routing::RouteSelection;
 use zastava_lib::state::AppState;
 use zastava_lib::sysproxy::SysProxy;
+
+fn offline_test_auditor_with(dns: FakeDns, probe: FakeProbe) -> Auditor {
+    let env = AuditEnv {
+        dns: Arc::new(dns),
+        probe: Arc::new(probe),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    };
+    Auditor::with_env(env).expect("offline test auditor")
+}
+
+fn offline_test_auditor() -> Auditor {
+    offline_test_auditor_with(
+        FakeDns::new(LookupOutcome::NotFound),
+        FakeProbe::new(HttpProbeOutcome::Timeout),
+    )
+}
 
 /// Integration Test 1: PAC File Generation & Routing Validation
 /// Spec: GET http://127.0.0.1:8899/proxy.pac returns 200 OK and valid JS code
@@ -16,7 +36,7 @@ use zastava_lib::sysproxy::SysProxy;
 #[tokio::test]
 async fn test_pac_file_generation() {
     zastava_lib::sysproxy::force_os_dry_run();
-    let auditor = Auditor::new().expect("Auditor initialization failed");
+    let auditor = offline_test_auditor();
     let state = AppState::new_in_memory();
     let hold_queue = Arc::new(HoldQueue::new());
 
@@ -87,7 +107,7 @@ async fn test_pac_file_generation() {
 #[tokio::test]
 async fn test_connect_hold_and_block() {
     zastava_lib::sysproxy::force_os_dry_run();
-    let auditor = Auditor::new().expect("Auditor initialization failed");
+    let auditor = offline_test_auditor();
 
     // Pre-populate telemetry with Critical blocked location: Russia (RU)
     let dangerous_telemetry = NetworkTelemetry {
@@ -193,7 +213,7 @@ async fn test_connect_hold_and_allow_session() {
         }
     });
 
-    let auditor = Auditor::new().expect("Auditor initialization failed");
+    let auditor = offline_test_auditor();
     // Telemetry with Critical risk: Russia (RU)
     let dangerous_telemetry = NetworkTelemetry {
         ip: "185.220.101.5".to_string(),
@@ -286,18 +306,34 @@ async fn test_connect_hold_and_allow_session() {
 }
 
 /// Integration Test 3b: Yellow (allowed geo, warning checks, zero critical) passes silently
-/// without holding in HoldQueue or blocking under both AskPopup and AutoLockSilent.
+/// without holding in HoldQueue or blocking under both AskPopup and AutoLockSilent,
+/// including when DNS whoami sources disagree (`DNS_WHOAMI_DISAGREE`).
 #[tokio::test]
 async fn test_connect_yellow_passes_without_hold_or_block() {
     use zastava_lib::state::InterceptionBehavior;
 
     zastava_lib::sysproxy::force_os_dry_run();
-    for (behavior, cc, host) in [
-        (InterceptionBehavior::AskPopup, "TR", "gemini.google.com"),
+    for (behavior, cc, host, provider, simulate_dns_disagree) in [
+        (
+            InterceptionBehavior::AskPopup,
+            "TR",
+            "gemini.google.com",
+            ProviderId::Gemini,
+            false,
+        ),
         (
             InterceptionBehavior::AutoLockSilent,
             "KZ",
             "api.anthropic.com",
+            ProviderId::Anthropic,
+            false,
+        ),
+        (
+            InterceptionBehavior::AskPopup,
+            "TR",
+            "gemini.google.com",
+            ProviderId::Gemini,
+            true,
         ),
     ] {
         let mock_target = TcpListener::bind("127.0.0.1:0")
@@ -316,7 +352,17 @@ async fn test_connect_yellow_passes_without_hold_or_block() {
             }
         });
 
-        let auditor = Auditor::new().expect("Auditor initialization failed");
+        let auditor = if simulate_dns_disagree {
+            let dns = FakeDns::new(LookupOutcome::NotFound)
+                .with("whoami.akamai.net", addr("195.10.20.30"))
+                .with_txt(
+                    "o-o.myaddr.l.google.com",
+                    TxtOutcome::Records(vec!["212.10.20.30".to_string()]),
+                );
+            offline_test_auditor_with(dns, FakeProbe::new(HttpProbeOutcome::Timeout))
+        } else {
+            offline_test_auditor()
+        };
         let yellow_telemetry = NetworkTelemetry {
             ip: "185.220.101.5".to_string(),
             country_code: cc.to_string(),
@@ -334,9 +380,14 @@ async fn test_connect_yellow_passes_without_hold_or_block() {
         let hold_queue = Arc::new(HoldQueue::new());
 
         let server = Arc::new(
-            ProxyServer::bind_ephemeral(auditor, state.clone(), Arc::clone(&hold_queue), Some(mock_addr))
-                .await
-                .expect("Proxy server bind failed"),
+            ProxyServer::bind_ephemeral(
+                auditor.clone(),
+                state.clone(),
+                Arc::clone(&hold_queue),
+                Some(mock_addr),
+            )
+            .await
+            .expect("Proxy server bind failed"),
         );
 
         let bound_addr = server.bound_addr;
@@ -378,6 +429,24 @@ async fn test_connect_yellow_passes_without_hold_or_block() {
 
         assert!(hold_queue.current_alert().is_none());
         assert!(state.get_data().await.blocked_providers.is_empty());
+
+        let report = auditor
+            .evaluate_all_with(provider, &state, &RouteSelection::Direct, false)
+            .await
+            .expect("offline yellow audit");
+        assert_eq!(report.overall_status, OverallStatus::Yellow);
+        assert!(
+            report.checks.iter().all(|c| !c.status.is_critical()),
+            "yellow report must have zero critical checks: {:?}",
+            report.checks
+        );
+        if simulate_dns_disagree {
+            assert!(
+                report.checks.iter().any(|c| c.code == "DNS_WHOAMI_DISAGREE"),
+                "expected DNS_WHOAMI_DISAGREE in checks: {:?}",
+                report.checks
+            );
+        }
 
         srv_handle.abort();
         mock_handle.abort();
@@ -455,7 +524,7 @@ async fn test_upstream_proxy_selective_routing() {
         socket.write_all(&buf[..n]).await.unwrap();
     });
 
-    let auditor = Auditor::new().expect("Auditor initialization failed");
+    let auditor = offline_test_auditor();
     let clean_telemetry = NetworkTelemetry {
         ip: "185.10.10.1".to_string(),
         country_code: "NL".to_string(),
