@@ -374,13 +374,16 @@ function reportRank(report: RiskReport): number {
   return 0;
 }
 
-/** Худший отчёт из трёх; при равенстве — первый по порядку Claude, ChatGPT, Gemini. Без отчётов — null. */
+/** Худший отчёт из трёх; при равенстве — первый по порядку Claude, ChatGPT, Gemini. Отключённые сервисы пропускаются. Без отчётов — null. */
 export function pickWorstReport(
   reports: Partial<Record<ProviderId, RiskReport>>,
+  disabledProviders?: string[],
 ): { provider: ProviderId; report: RiskReport } | null {
+  const disabled = new Set((disabledProviders ?? []).map((p) => p.toLowerCase()));
   let best: { provider: ProviderId; report: RiskReport } | null = null;
   let bestRank = -1;
   for (const provider of PROVIDER_ORDER) {
+    if (disabled.has(provider)) continue;
     const report = reports[provider];
     if (!report) continue;
     const rank = reportRank(report);
@@ -392,9 +395,15 @@ export function pickWorstReport(
   return best;
 }
 
-/** Худший провайдер из доступных отчётов; при равенстве — Claude, ChatGPT, Gemini. Без отчётов — Claude. */
-export function pickWorstProvider(reports: Partial<Record<ProviderId, RiskReport>>): ProviderId {
-  return pickWorstReport(reports)?.provider ?? "anthropic";
+/** Худший провайдер из доступных отчётов; при равенстве — Claude, ChatGPT, Gemini. Отключённые сервисы пропускаются. */
+export function pickWorstProvider(
+  reports: Partial<Record<ProviderId, RiskReport>>,
+  disabledProviders?: string[],
+): ProviderId {
+  const picked = pickWorstReport(reports, disabledProviders)?.provider;
+  if (picked) return picked;
+  const disabled = new Set((disabledProviders ?? []).map((p) => p.toLowerCase()));
+  return PROVIDER_ORDER.find((p) => !disabled.has(p)) ?? "anthropic";
 }
 
 export type CheckPriorityTier = 1 | 2 | 3;

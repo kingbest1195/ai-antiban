@@ -57,17 +57,32 @@ pub async fn list_routes(state: tauri::State<'_, AppContext>) -> Result<RoutesSn
 #[tauri::command]
 pub async fn add_route(
     key: String,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppContext>,
     auditor: tauri::State<'_, auditor::Auditor>,
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
 ) -> Result<RouteView, String> {
     let route = routing::parse_route_key(&key, current_timestamp())?;
+    let _runtime_lock = super::claude::lock_profile_runtime().await;
     let raw_key = route.raw_key.clone();
     let id = state.upsert_route(route).await.map_err(|e| e.to_string())?;
     auditor.resolver.invalidate_route(&id).await;
-    if let Ok(Some(active_key)) =
-        auditor::profile_switcher::sync_profiles_for_route_update(&id, Some(&raw_key))
-    {
-        let _ = routing::apply_profile_key(&state, active_key.as_deref()).await;
+    match auditor::profile_switcher::sync_profiles_for_route_update(&id, Some(&raw_key)) {
+        Ok(Some(active_key)) => {
+            crate::commands::claude::sync_active_profile_route_to_runtime(
+                &state,
+                &guard,
+                active_key.as_deref(),
+            )
+            .await?;
+            crate::tray::menu::refresh_profiles_submenu(&app);
+        }
+        Ok(None) => {
+            crate::tray::menu::refresh_profiles_submenu(&app);
+        }
+        Err(err) => {
+            crate::diagnostics::record("routes", &err);
+        }
     }
     let data = state.get_data().await;
     let route = data
@@ -86,18 +101,45 @@ pub async fn add_route(
 #[tauri::command]
 pub async fn remove_route(
     id: String,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppContext>,
     auditor: tauri::State<'_, auditor::Auditor>,
+    guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
 ) -> Result<RoutesSnapshot, String> {
+    let _runtime_lock = super::claude::lock_profile_runtime().await;
+    let was_active_profile_route =
+        state.get_data().await.profile_route_id.as_deref() == Some(id.as_str());
     if !state.remove_route(&id).await.map_err(|e| e.to_string())? {
         return Err(format!("Маршрут не найден: {id}"));
     }
     auditor.resolver.invalidate_route(&id).await;
-    if let Ok(Some(active_key)) =
-        auditor::profile_switcher::sync_profiles_for_route_update(&id, None)
-    {
-        let _ = routing::apply_profile_key(&state, active_key.as_deref()).await;
+
+    let profile_sync = auditor::profile_switcher::mark_profiles_route_removed(&id);
+    let active_profile_affected = match &profile_sync {
+        Ok(affected) => *affected || was_active_profile_route,
+        Err(err) => {
+            crate::diagnostics::record("routes", err);
+            was_active_profile_route
+        }
+    };
+    if active_profile_affected {
+        // Fail-closed: preserve `profile_route_id = Some(id)` so `select_route("anthropic")`
+        // returns `RouteSelection::Missing(id)` (`DanglingBinding`, 403) instead of falling back
+        // to Direct / `default_route_id`.
+        state
+            .set_profile_route_dangling(id.clone())
+            .await
+            .map_err(|e| e.to_string())?;
     }
+    if profile_sync.is_ok() {
+        crate::tray::menu::refresh_profiles_submenu(&app);
+    }
+
+    let anthropic_routed = matches!(
+        state.route_selection(crate::state::PROVIDER_ANTHROPIC).await,
+        routing::RouteSelection::Route(_)
+    );
+    guard.sync_provider_route_change(crate::state::PROVIDER_ANTHROPIC, anthropic_routed);
     Ok(snapshot(&state).await)
 }
 
@@ -130,6 +172,11 @@ pub async fn bind_provider_route(
         .await
         .map_err(|e| e.to_string())?;
     release_routed_blocks(&state, &guard).await;
+    let is_routed = matches!(
+        state.route_selection(provider).await,
+        routing::RouteSelection::Route(_)
+    );
+    guard.sync_provider_route_change(provider, is_routed);
     Ok(snapshot(&state).await)
 }
 
@@ -144,6 +191,13 @@ pub async fn set_default_route(
         .await
         .map_err(|e| e.to_string())?;
     release_routed_blocks(&state, &guard).await;
+    for provider in crate::state::KNOWN_PROVIDERS {
+        let is_routed = matches!(
+            state.route_selection(provider).await,
+            routing::RouteSelection::Route(_)
+        );
+        guard.sync_provider_route_change(provider, is_routed);
+    }
     Ok(snapshot(&state).await)
 }
 

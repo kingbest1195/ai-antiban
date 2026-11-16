@@ -215,7 +215,7 @@ pub async fn check_ipv6_leak_with_route(
             return CheckResult::ok(
                 "IPV6_KEY_TCP_ISOLATED",
                 format!(
-                    "Трафик AI изолирован через ключ Заставы ({ipv4_country}) по TCP CONNECT; системный IPv6 выходит через VPN ({ipv6_loc}) — утечки реального IP нет."
+                    "Трафик AI изолирован через ВПН Заставы ({ipv4_country}) по TCP CONNECT; системный IPv6 выходит через VPN ({ipv6_loc}) — утечки реального IP нет."
                 ),
             );
         }
@@ -388,7 +388,7 @@ fn resolve_dns_verdict(
             if config_finding {
                 let mut kept = config;
                 kept.message = format!(
-                    "{} Трафик AI изолирован через ключ Заставы ({exit}), но в настройках ОС есть замечание.",
+                    "{} Трафик AI изолирован через ВПН Заставы ({exit}), но в настройках ОС есть замечание.",
                     kept.message
                 );
                 return kept.with_measured_via(MEASURED_VIA);
@@ -396,7 +396,7 @@ fn resolve_dns_verdict(
             return CheckResult::ok(
                 "DNS_KEY_REMOTE_RESOLVE",
                 format!(
-                    "DNS-резолвер ОС ({ip}, {country}) относится к системному VPN, а запросы к AI-провайдеру резолвятся удалённо на ключе Заставы ({exit}) через TCP CONNECT. Настройки DNS ОС (справочно): {config_note}."
+                    "DNS-резолвер ОС ({ip}, {country}) относится к системному VPN, а запросы к AI-провайдеру резолвятся удалённо на ВПН Заставы ({exit}) через TCP CONNECT. Настройки DNS ОС (справочно): {config_note}."
                 ),
             )
             .with_measured_via(MEASURED_VIA);

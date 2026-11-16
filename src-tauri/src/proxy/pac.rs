@@ -1,4 +1,6 @@
+use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::rules::ProviderMatrix;
+use std::collections::HashSet;
 
 pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     // Anthropic / Claude / Cursor / OpenRouter / Perplexity
@@ -87,6 +89,8 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "people-pa.googleapis.com",
     "signaler-pa.googleapis.com",
     "jnn-pa.googleapis.com",
+    "oauth2.googleapis.com",
+    "iamcredentials.googleapis.com",
     "myactivity.google.com",
     "myaccount.google.com",
 ];
@@ -114,14 +118,69 @@ pub fn get_all_ai_domains_with_custom(
     matrix: &ProviderMatrix,
     custom_domains: &[String],
 ) -> Vec<String> {
-    let mut domains = get_all_ai_domains(matrix);
+    get_all_ai_domains_filtered(matrix, custom_domains, &HashSet::new())
+}
+
+/// Collects configured AI domains and custom domains, excluding any provider in `disabled_providers`
+/// so disabled services (e.g., Gemini + general Google domains) go DIRECT cleanly.
+pub fn get_all_ai_domains_filtered(
+    matrix: &ProviderMatrix,
+    custom_domains: &[String],
+    disabled_providers: &HashSet<String>,
+) -> Vec<String> {
+    let disabled: HashSet<String> = disabled_providers
+        .iter()
+        .filter_map(|p| {
+            let trimmed = p.trim();
+            if trimmed.is_empty() {
+                None
+            } else if let Some(pid) = ProviderId::from_id(trimmed) {
+                Some(pid.as_str().to_string())
+            } else {
+                Some(trimmed.to_ascii_lowercase())
+            }
+        })
+        .collect();
+
+    let mut domains = Vec::new();
+    if matrix.providers.is_empty() {
+        for &d in DEFAULT_AI_DOMAINS {
+            let is_disabled = ProviderId::from_host(d)
+                .map(|p| disabled.contains(p.as_str()))
+                .unwrap_or(false);
+            if !is_disabled {
+                domains.push(d.to_string());
+            }
+        }
+    } else {
+        for (provider_id, provider) in &matrix.providers {
+            let key = ProviderId::from_id(provider_id)
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase());
+            if disabled.contains(&key) {
+                continue;
+            }
+            for domain in &provider.domains {
+                if !domains.iter().any(|d| d.eq_ignore_ascii_case(domain)) {
+                    domains.push(domain.clone());
+                }
+            }
+        }
+    }
+
     for cd in custom_domains {
         let clean = cd
             .trim()
             .trim_start_matches("*.")
             .trim_start_matches('.')
             .to_lowercase();
-        if !clean.is_empty() && !domains.iter().any(|d| d.eq_ignore_ascii_case(&clean)) {
+        if clean.is_empty() {
+            continue;
+        }
+        let owner_disabled = ProviderId::from_host_with_custom(&clean, std::slice::from_ref(&clean))
+            .map(|p| disabled.contains(p.as_str()))
+            .unwrap_or(false);
+        if !owner_disabled && !domains.iter().any(|d| d.eq_ignore_ascii_case(&clean)) {
             domains.push(clean);
         }
     }
@@ -316,6 +375,8 @@ mod tests {
             "people-pa.googleapis.com",
             "signaler-pa.googleapis.com",
             "jnn-pa.googleapis.com",
+            "oauth2.googleapis.com",
+            "iamcredentials.googleapis.com",
             "myactivity.google.com",
             "myaccount.google.com",
         ];
@@ -371,6 +432,8 @@ mod tests {
             "people-pa.googleapis.com",
             "signaler-pa.googleapis.com",
             "jnn-pa.googleapis.com",
+            "oauth2.googleapis.com",
+            "iamcredentials.googleapis.com",
             "myactivity.google.com",
             "myaccount.google.com",
         ] {
@@ -398,5 +461,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn disabling_gemini_excludes_gemini_and_google_domains_from_pac() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let mut disabled = HashSet::new();
+        disabled.insert("gemini".to_string());
+
+        let domains = get_all_ai_domains_filtered(&matrix, &["custom-ai.org".to_string()], &disabled);
+        let pac = generate_pac_script(&domains, "127.0.0.1:8899", None);
+
+        for excluded in [
+            "gemini.google.com",
+            "aistudio.google.com",
+            "www.google.com",
+            "accounts.google.com",
+            "generativelanguage.googleapis.com",
+            "play.google.com",
+        ] {
+            assert!(
+                !domains.iter().any(|d| d == excluded),
+                "disabled gemini domain still in PAC: {excluded}"
+            );
+            assert!(
+                !pac.contains(&format!("\"{excluded}\"")),
+                "PAC script still contains disabled gemini domain: {excluded}"
+            );
+        }
+        for kept in ["claude.ai", "anthropic.com", "chatgpt.com", "openai.com", "custom-ai.org"] {
+            assert!(
+                domains.iter().any(|d| d == kept),
+                "enabled domain missing from PAC: {kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabling_all_providers_produces_empty_ai_domains_in_pac() {
+        let matrix = ProviderMatrix::load_bundled().unwrap();
+        let disabled: HashSet<String> = ["anthropic", "openai", "gemini"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let domains = get_all_ai_domains_filtered(&matrix, &["custom-ai.org".to_string()], &disabled);
+        assert!(domains.is_empty(), "expected empty domains: {domains:?}");
+        let pac = generate_pac_script(&domains, "127.0.0.1:8899", None);
+        assert!(pac.contains("var aiDomains = [];"));
+        assert!(pac.contains("return \"DIRECT\";"));
     }
 }

@@ -10,7 +10,6 @@ export interface VpsProvider {
   locations: string[];
   payments: string[];
   specs: string;
-  promoCode: string;
   url: string;
   description: string;
 }
@@ -64,7 +63,6 @@ export const VPS_PROVIDERS: VpsProvider[] = [
     locations: ["NL", "US", "FI", "FR"],
     payments: ["Карты", "СБП", "Crypto"],
     specs: "1 vCPU · 1 ГБ RAM · NVMe · IPv4 + /64 IPv6",
-    promoCode: "HOSTVDS",
     url: "https://hostvds.com/?affiliate_uuid=3d2b6c0c-5d99-4065-9d37-a941a46e9282",
     description:
       "Самый доступный выделенный статический IPv4 и чистая /64 подсеть IPv6 в Амстердаме, Хельсинки и США. Идеален как зарубежный узел.",
@@ -78,7 +76,6 @@ export const VPS_PROVIDERS: VpsProvider[] = [
     locations: ["NL", "DE", "US", "FI", "UK"],
     payments: ["Карты РФ", "СБП", "Crypto", "Cards"],
     specs: "1 vCPU · 2 ГБ RAM · NVMe · IPv4 + IPv6",
-    promoCode: "ISHOSTING",
     url: "https://ishosting.com/affiliate/ODA5NyM4",
     description:
       "Безупречная репутация IP в базах Spamhaus и антифроде Anthropic/OpenAI. Поддержка Ubuntu 24.04 и выделенных подсетей IPv6.",
@@ -92,7 +89,6 @@ export const VPS_PROVIDERS: VpsProvider[] = [
     locations: ["RU", "NL", "DE", "KZ"],
     payments: ["Карты РФ", "СБП", "T-Pay"],
     specs: "1 vCPU · 1 ГБ RAM · Dual-Stack IPv4/IPv6",
-    promoCode: "TIMEWEB",
     url: "https://timeweb.cloud/?i=138893",
     description:
       "Лучший выбор для транзитного российского VPS (Москва / СПб) при сборке каскадного VPN (РФ → Зарубежье), а также узлов в Амстердаме и Франкфурте.",

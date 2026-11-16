@@ -142,8 +142,8 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
       }
 
       try {
-        await resolveInterception(payload.id, action, payload.provider, payload.scope);
-        if (action === "BlockUntilNetworkChange" && payload.scope !== "network") {
+        const applied = await resolveInterception(payload.id, action, payload.provider, payload.scope);
+        if (applied && action === "BlockUntilNetworkChange" && payload.scope !== "network") {
           await pauseUntilNetworkChange(payload.gate_reason ?? undefined).catch(() => {});
         }
         if (onResolved) onResolved(action);

@@ -12,7 +12,7 @@ export const connect = {
     },
   },
   key: {
-    title: "Ключ Заставы",
+    title: "ВПН Заставы",
     text: "Только трафик ИИ пойдёт через выделенный IP. Банки, рабочие сайты и загрузки — напрямую, на полной скорости.",
     fieldLabel: "Ключ или адрес прокси",
     placeholder: "zastava://… / https://… / socks5://…",
@@ -24,7 +24,7 @@ export const connect = {
     },
     connect: "Добавить ключ",
     connecting: "Подключаем…",
-    get: "Получить ключ",
+    get: "Получить ВПН",
     renew: "Продлить",
     expiringSoon: (remaining: string) => `Истекает (${remaining})`,
     empty: "Введите ключ или адрес прокси.",

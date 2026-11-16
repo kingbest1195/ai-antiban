@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -213,6 +213,12 @@ pub struct AppStateData {
     pub session_allowed_providers: HashSet<String>,
     #[serde(default)]
     pub blocked_providers: HashSet<String>,
+    /// Persistent per-(provider, exit_ip) forced-allow exceptions that survive restarts and network changes.
+    #[serde(default)]
+    pub trusted_exceptions: BTreeMap<String, Vec<String>>,
+    /// Providers for which monitoring, PAC routing, auditing, blocking, and alerts are disabled.
+    #[serde(default)]
+    pub disabled_providers: HashSet<String>,
     #[serde(default)]
     pub upstream_proxy: Option<UpstreamProxyConfig>,
     #[serde(default)]
@@ -284,6 +290,8 @@ impl std::fmt::Debug for AppStateData {
             .field("ip_history", &self.ip_history)
             .field("session_allowed_providers", &self.session_allowed_providers)
             .field("blocked_providers", &self.blocked_providers)
+            .field("trusted_exceptions", &self.trusted_exceptions)
+            .field("disabled_providers", &self.disabled_providers)
             .field("upstream_proxy", &self.upstream_proxy)
             .field("warmup_started_at", &self.warmup_started_at)
             .field("synced_ai_timezone", &self.synced_ai_timezone)
@@ -339,6 +347,15 @@ impl AppStateData {
         // (blocked), never silently "direct".
         self.sync_legacy_mirror();
         *self != before
+    }
+
+    /// True when `pinned_ips` has a non-empty explicit per-provider entry for `provider`.
+    pub fn has_explicit_pinned_ip(&self, provider: &str) -> bool {
+        self.pinned_ips
+            .get(provider)
+            .map(String::as_str)
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
     }
 
     /// Returns the pinned IP that applies to `provider`.
@@ -449,6 +466,45 @@ impl AppStateData {
             .collect()
     }
 
+    /// Returns `true` when monitoring/PAC/audits are disabled for `provider`.
+    pub fn is_provider_disabled(&self, provider: &str) -> bool {
+        let key = canonical_provider_key(provider);
+        !key.is_empty()
+            && self
+                .disabled_providers
+                .iter()
+                .any(|p| canonical_provider_key(p) == key)
+    }
+
+    /// Known providers whose monitoring is currently enabled.
+    pub fn enabled_providers(&self) -> Vec<&'static str> {
+        KNOWN_PROVIDERS
+            .into_iter()
+            .filter(|p| !self.is_provider_disabled(p))
+            .collect()
+    }
+
+    /// Known enabled providers whose traffic goes directly through the local network / VPN.
+    pub fn enabled_unrouted_providers(&self) -> Vec<&'static str> {
+        KNOWN_PROVIDERS
+            .into_iter()
+            .filter(|p| !self.is_provider_disabled(p) && select_route_id(self, p).is_none())
+            .collect()
+    }
+
+    /// Returns `true` if `(provider, ip)` was persisted in `trusted_exceptions`.
+    pub fn is_ip_trusted_for_provider(&self, provider: &str, ip: &str) -> bool {
+        let key = canonical_provider_key(provider);
+        let norm_ip = normalize_ip_str(ip);
+        if key.is_empty() || norm_ip.is_empty() {
+            return false;
+        }
+        self.trusted_exceptions
+            .iter()
+            .filter(|(k, _)| canonical_provider_key(k) == key)
+            .any(|(_, ips)| ips.iter().any(|stored| normalize_ip_str(stored) == norm_ip))
+    }
+
     /// Key into `ip_history` for `provider` under `selection`.
     pub fn ip_history_key_for_selection(
         &self,
@@ -520,6 +576,8 @@ impl Default for AppStateData {
             ip_history,
             session_allowed_providers: HashSet::new(),
             blocked_providers: HashSet::new(),
+            trusted_exceptions: BTreeMap::new(),
+            disabled_providers: HashSet::new(),
             upstream_proxy: None,
             warmup_started_at: None,
             synced_ai_timezone: None,
@@ -1038,6 +1096,10 @@ impl AppState {
         self.inner.read().await.pinned_ips.clone()
     }
 
+    pub async fn has_explicit_pinned_ip(&self, provider: &str) -> bool {
+        self.inner.read().await.has_explicit_pinned_ip(provider)
+    }
+
     /// Sets or clears a pinned IP for a specific scope (`"default"` or provider ID such as
     /// `"anthropic"`, `"openai"`, `"gemini"`). Updating `"default"` keeps `pinned_ip` in sync
     /// for backwards compatibility.
@@ -1425,13 +1487,27 @@ impl AppState {
         self.save_async().await
     }
 
-    /// Imports the key of the active Claude profile as a route and makes it the profile route, in
-    /// one step (the previous profile's route is never left in place).
-    pub async fn apply_profile_route(&self, route: Route) -> Result<(), StateError> {
+    /// Sets `profile_route_id` even if `route_id` no longer exists in `routes` (preserves a
+    /// fail-closed `DanglingBinding` / `RouteSelection::Missing` across switches and restarts).
+    pub async fn set_profile_route_dangling(&self, route_id: String) -> Result<(), StateError> {
         {
             let mut w = self.inner.write().await;
+            w.profile_route_id = Some(route_id);
+            w.profile_route_invalid = None;
+            self.bump_routing();
+        }
+        self.save_async().await
+    }
+
+    /// Imports the key of the active Claude profile as a route and makes it the profile route, in
+    /// one step (the previous profile's route is never left in place). Binding an existing
+    /// disabled route activates it (`enabled = true`).
+    pub async fn apply_profile_route(&self, mut route: Route) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            route.enabled = true;
             let id = route.id.clone();
-            Self::upsert_route_locked(&mut w, route, true);
+            Self::upsert_route_locked(&mut w, route, false);
             w.profile_route_id = Some(id.clone());
             w.profile_route_invalid = None;
             w.sync_legacy_mirror();
@@ -1478,6 +1554,10 @@ impl AppState {
 
     pub async fn unrouted_providers(&self) -> Vec<&'static str> {
         self.inner.read().await.unrouted_providers()
+    }
+
+    pub async fn enabled_unrouted_providers(&self) -> Vec<&'static str> {
+        self.inner.read().await.enabled_unrouted_providers()
     }
 
     /// Effective route id for a provider without cloning the route.
@@ -1777,6 +1857,234 @@ impl AppState {
         }
         self.save_async().await
     }
+
+    // --- Persistent per-(provider, exit_ip) Trusted Exceptions ---
+
+    pub async fn is_ip_trusted_for_provider(&self, provider: &str, ip: &str) -> bool {
+        self.inner
+            .read()
+            .await
+            .is_ip_trusted_for_provider(provider, ip)
+    }
+
+    pub async fn add_trusted_exception(&self, provider: &str, ip: &str) -> Result<(), StateError> {
+        let key = canonical_provider_key(provider);
+        let norm_ip = normalize_ip_str(ip);
+        if key.is_empty() || norm_ip.is_empty() {
+            return Ok(());
+        }
+        let changed = {
+            let mut w = self.inner.write().await;
+            let list = w.trusted_exceptions.entry(key).or_default();
+            if list.iter().any(|existing| normalize_ip_str(existing) == norm_ip) {
+                false
+            } else {
+                list.push(norm_ip);
+                true
+            }
+        };
+        if changed {
+            self.save_async().await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn remove_trusted_exception(
+        &self,
+        provider: &str,
+        ip: &str,
+    ) -> Result<(), StateError> {
+        let key = canonical_provider_key(provider);
+        let norm_ip = normalize_ip_str(ip);
+        if key.is_empty() || norm_ip.is_empty() {
+            return Ok(());
+        }
+        let changed = {
+            let mut w = self.inner.write().await;
+            let mut modified = false;
+            let matching_keys: Vec<String> = w
+                .trusted_exceptions
+                .keys()
+                .filter(|k| canonical_provider_key(k) == key)
+                .cloned()
+                .collect();
+            for k in matching_keys {
+                if let Some(list) = w.trusted_exceptions.get_mut(&k) {
+                    let before = list.len();
+                    list.retain(|stored| normalize_ip_str(stored) != norm_ip);
+                    if list.len() != before {
+                        modified = true;
+                    }
+                    if list.is_empty() {
+                        w.trusted_exceptions.remove(&k);
+                    }
+                }
+            }
+            modified
+        };
+        if changed {
+            self.save_async().await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn clear_trusted_exceptions(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<(), StateError> {
+        let changed = {
+            let mut w = self.inner.write().await;
+            match provider.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(p) => {
+                    let key = canonical_provider_key(p);
+                    let matching_keys: Vec<String> = w
+                        .trusted_exceptions
+                        .keys()
+                        .filter(|k| canonical_provider_key(k) == key)
+                        .cloned()
+                        .collect();
+                    let mut modified = false;
+                    for k in matching_keys {
+                        if w.trusted_exceptions.remove(&k).is_some() {
+                            modified = true;
+                        }
+                    }
+                    modified
+                }
+                None => {
+                    let was_non_empty = !w.trusted_exceptions.is_empty();
+                    w.trusted_exceptions.clear();
+                    was_non_empty
+                }
+            }
+        };
+        if changed {
+            self.save_async().await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Clears persisted blocks and ephemeral session allowances for `provider` without touching
+    /// persistent `trusted_exceptions` or sibling providers.
+    pub async fn clear_provider_blocks_and_session(
+        &self,
+        provider: &str,
+    ) -> Result<(), StateError> {
+        let key = canonical_provider_key(provider);
+        let changed = {
+            let mut w = self.inner.write().await;
+            let mut modified = false;
+            let raw = provider.trim();
+            modified |= w.blocked_providers.remove(&key);
+            if !raw.is_empty() {
+                modified |= w.blocked_providers.remove(raw);
+            }
+            modified |= w.session_allowed_providers.remove(&key);
+            if !raw.is_empty() {
+                modified |= w.session_allowed_providers.remove(raw);
+            }
+            modified
+        };
+        if changed {
+            self.save_async().await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Removes ephemeral session allowances for `provider` (or all providers when `None`) without
+    /// altering `blocked_providers`.
+    pub async fn revoke_provider_session_allowance(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<(), StateError> {
+        let changed = {
+            let mut w = self.inner.write().await;
+            match provider {
+                Some(p) => {
+                    let key = canonical_provider_key(p);
+                    let raw = p.trim();
+                    let mut modified = w.session_allowed_providers.remove(&key);
+                    if !raw.is_empty() {
+                        modified |= w.session_allowed_providers.remove(raw);
+                    }
+                    modified
+                }
+                None => {
+                    let was_non_empty = !w.session_allowed_providers.is_empty();
+                    w.session_allowed_providers.clear();
+                    was_non_empty
+                }
+            }
+        };
+        if changed {
+            self.save_async().await
+        } else {
+            Ok(())
+        }
+    }
+
+    // --- Per-Provider Monitoring Toggle (`disabled_providers`) ---
+
+    pub async fn is_provider_disabled(&self, provider: &str) -> bool {
+        self.inner.read().await.is_provider_disabled(provider)
+    }
+
+    pub async fn disabled_providers(&self) -> HashSet<String> {
+        self.inner.read().await.disabled_providers.clone()
+    }
+
+    pub async fn set_provider_monitoring(
+        &self,
+        provider: &str,
+        enabled: bool,
+    ) -> Result<(), StateError> {
+        let key = canonical_provider_key(provider);
+        if key.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut w = self.inner.write().await;
+            let raw = provider.trim();
+            if enabled {
+                w.disabled_providers
+                    .retain(|p| canonical_provider_key(p) != key);
+            } else {
+                w.disabled_providers.insert(key.clone());
+                w.blocked_providers.remove(&key);
+                if !raw.is_empty() {
+                    w.blocked_providers.remove(raw);
+                }
+            }
+        }
+        self.save_async().await
+    }
+}
+
+fn canonical_provider_key(provider: &str) -> String {
+    let trimmed = provider.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(pid) = crate::auditor::ProviderId::from_id(trimmed) {
+        pid.as_str().to_string()
+    } else {
+        trimmed.to_ascii_lowercase()
+    }
+}
+
+fn normalize_ip_str(ip: &str) -> String {
+    let trimmed = ip.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed
+        .parse::<std::net::IpAddr>()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| trimmed.to_string())
 }
 
 /// Returns the canonical `AppStateData::ip_history` key for `(provider, route_id)`.
@@ -2773,6 +3081,189 @@ mod tests {
         assert_eq!(
             reloaded.get_data().await.ip_history_for_provider("gemini")[0].country_code,
             "FR"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_exceptions_persist_across_restarts_and_canonicalize() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState::load_or_default(path.clone());
+
+        state
+            .add_trusted_exception("claude", " 185.220.101.5 ")
+            .await
+            .unwrap();
+        state
+            .add_trusted_exception("anthropic", "185.220.101.5")
+            .await
+            .unwrap();
+        state
+            .add_trusted_exception("openai", "2001:0db8::1")
+            .await
+            .unwrap();
+        state
+            .allow_provider_for_session("anthropic")
+            .await
+            .unwrap();
+
+        assert!(
+            state
+                .is_ip_trusted_for_provider("anthropic", "185.220.101.5")
+                .await
+        );
+        assert!(
+            !state
+                .is_ip_trusted_for_provider("openai", "185.220.101.5")
+                .await
+        );
+        assert!(
+            state
+                .is_ip_trusted_for_provider("openai", "2001:db8::1")
+                .await
+        );
+        assert_eq!(state.get_data().await.trusted_exceptions["anthropic"].len(), 1);
+
+        // Simulate app restart: session allowances clear, trusted exceptions survive.
+        let reloaded = AppState::load_or_default(path.clone());
+        assert!(!reloaded.is_provider_session_allowed("anthropic").await);
+        assert!(
+            reloaded
+                .is_ip_trusted_for_provider("anthropic", "185.220.101.5")
+                .await
+        );
+        assert!(
+            reloaded
+                .is_ip_trusted_for_provider("openai", "2001:0db8::1")
+                .await
+        );
+
+        reloaded
+            .remove_trusted_exception("anthropic", "185.220.101.5")
+            .await
+            .unwrap();
+        assert!(
+            !reloaded
+                .is_ip_trusted_for_provider("anthropic", "185.220.101.5")
+                .await
+        );
+        assert!(
+            !reloaded
+                .get_data()
+                .await
+                .trusted_exceptions
+                .contains_key("anthropic")
+        );
+
+        reloaded.clear_trusted_exceptions(None).await.unwrap();
+        assert!(reloaded.get_data().await.trusted_exceptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_providers_persist_clear_blocks_and_filter_unrouted() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = AppState::load_or_default(path.clone());
+        state.block_provider("gemini").await.unwrap();
+        assert!(state.is_provider_blocked("gemini").await);
+
+        state.set_provider_monitoring("gemini", false).await.unwrap();
+        assert!(state.is_provider_disabled("gemini").await);
+        assert!(!state.is_provider_blocked("gemini").await);
+        assert_eq!(
+            state.enabled_unrouted_providers().await,
+            vec!["anthropic", "openai"]
+        );
+
+        let reloaded = AppState::load_or_default(path);
+        assert!(reloaded.is_provider_disabled("gemini").await);
+        assert!(reloaded.disabled_providers().await.contains("gemini"));
+
+        reloaded
+            .set_provider_monitoring("gemini", true)
+            .await
+            .unwrap();
+        assert!(!reloaded.is_provider_disabled("gemini").await);
+        assert_eq!(
+            reloaded.enabled_unrouted_providers().await,
+            vec!["anthropic", "openai", "gemini"]
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_provider_blocks_and_session_isolates_provider_and_preserves_exceptions() {
+        let state = AppState::new_in_memory();
+        state.block_provider("anthropic").await.unwrap();
+        state.block_provider("openai").await.unwrap();
+        state
+            .allow_provider_for_session("anthropic")
+            .await
+            .unwrap();
+        state
+            .add_trusted_exception("anthropic", "1.2.3.4")
+            .await
+            .unwrap();
+
+        state
+            .clear_provider_blocks_and_session("anthropic")
+            .await
+            .unwrap();
+
+        assert!(!state.is_provider_blocked("anthropic").await);
+        assert!(!state.is_provider_session_allowed("anthropic").await);
+        assert!(state.is_provider_blocked("openai").await);
+        assert!(
+            state
+                .is_ip_trusted_for_provider("anthropic", "1.2.3.4")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_profile_route_reenables_existing_disabled_route() {
+        let state = AppState::new_in_memory();
+        let mut route = crate::routing::parse_route_key("socks5://1.2.3.4:1080#nl", 1).unwrap();
+        let id = route.id.clone();
+        route.enabled = false;
+        state.upsert_route(route.clone()).await.unwrap();
+        assert!(!state.get_route(&id).await.unwrap().enabled);
+
+        state.apply_profile_route(route).await.unwrap();
+        assert!(state.get_route(&id).await.unwrap().enabled);
+        assert_eq!(
+            state.get_data().await.profile_route_id.as_deref(),
+            Some(id.as_str())
+        );
+        assert!(matches!(
+            state.route_selection("anthropic").await,
+            RouteSelection::Route(r) if r.id == id && r.enabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn has_explicit_pinned_ip_distinguishes_provider_pin_from_default() {
+        let state = AppState::new_in_memory();
+        state
+            .set_pinned_ip_for("default", Some("2.2.2.2".to_string()))
+            .await
+            .unwrap();
+        assert!(!state.has_explicit_pinned_ip("anthropic").await);
+
+        state
+            .set_pinned_ip_for("anthropic", Some("1.1.1.1".to_string()))
+            .await
+            .unwrap();
+        assert!(state.has_explicit_pinned_ip("anthropic").await);
+        assert_eq!(
+            state.get_data().await.pinned_ip_for_provider("anthropic", false),
+            Some("1.1.1.1")
+        );
+
+        state.set_pinned_ip_for("anthropic", None).await.unwrap();
+        assert!(!state.has_explicit_pinned_ip("anthropic").await);
+        assert_eq!(
+            state.get_data().await.pinned_ip_for_provider("anthropic", false),
+            Some("2.2.2.2")
         );
     }
 }

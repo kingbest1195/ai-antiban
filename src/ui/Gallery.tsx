@@ -166,7 +166,7 @@ function ScreenConnect() {
         </Rows>
         <Button variant="primary" block style={{ marginTop: "var(--space-3)" }}>Открыть инструкцию</Button>
       </Card>
-      <Card title="Ключ Заставы" aside={<Badge>Скоро</Badge>}>
+      <Card title="ВПН Заставы" aside={<Badge>Скоро</Badge>}>
         <p className="gl__lead" style={{ margin: "0 0 var(--space-3)" }}>
           Только трафик ИИ пойдёт через выделенный IP. Банки, рабочие сайты и загрузки — напрямую, на полной скорости.
         </p>
@@ -542,7 +542,7 @@ export default function Gallery() {
 
         <Sec title="Field">
           <div className="gl__grid">
-            <Field label="Ключ Заставы или свой прокси" placeholder="zastava://… или socks5://…" help="Через этот адрес пойдёт только трафик ИИ-сервисов." action={<Button variant="primary">Подключить</Button>} />
+            <Field label="ВПН Заставы или свой прокси" placeholder="zastava://… или socks5://…" help="Через этот адрес пойдёт только трафик ИИ-сервисов." action={<Button variant="primary">Подключить</Button>} />
             <Field label="IP сервера" defaultValue="45.142.214" error="Адрес неполный — нужны четыре числа через точку." />
             <Field label="Недоступное поле" placeholder="zastava://…" disabled help="Поле заработает после обновления." />
           </div>

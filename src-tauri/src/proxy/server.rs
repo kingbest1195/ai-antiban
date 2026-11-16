@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::auditor::geo_matrix::ProviderId;
-use crate::auditor::{Auditor, OverallStatus};
+use crate::auditor::Auditor;
 use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, wait_open};
 use crate::proxy::hold_queue::{
     DEFAULT_HOLD_TTL_SECS, HoldQueue, HoldResolution, PHASE_READY, RiskInterceptPayload,
@@ -87,6 +87,7 @@ pub struct ProxyServer {
     direct_connects: AtomicU64,
     /// Outbound side for transit (non-AI) traffic: DNS cache, Happy Eyeballs, chained proxy.
     transit: Arc<Transit>,
+    hold_ttl: Duration,
 }
 
 impl ProxyServer {
@@ -124,6 +125,7 @@ impl ProxyServer {
             route_alerts: std::sync::Mutex::new(HashMap::new()),
             direct_connects: AtomicU64::new(0),
             transit: Arc::new(Transit::system()),
+            hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
         })
     }
 
@@ -154,7 +156,14 @@ impl ProxyServer {
             route_alerts: std::sync::Mutex::new(HashMap::new()),
             direct_connects: AtomicU64::new(0),
             transit: Arc::new(Transit::system()),
+            hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_hold_ttl(mut self, ttl: Duration) -> Self {
+        self.hold_ttl = ttl;
+        self
     }
 
     /// Replaces the outbound side for transit traffic (test seam: resolver, dialer, clock and
@@ -263,10 +272,15 @@ impl ProxyServer {
         send_gateway_info(&mut client).await
     }
 
-    async fn handle_pac_request(&self, client: &mut TcpStream) -> Result<(), std::io::Error> {
+    /// Builds the live PAC script excluding domains of any disabled providers.
+    pub async fn build_pac_script(&self) -> String {
         let matrix = self.auditor.rules.provider_matrix.read().await;
-        let custom_domains = self.state.get_custom_ai_domains().await;
-        let domains = crate::proxy::pac::get_all_ai_domains_with_custom(&matrix, &custom_domains);
+        let st = self.state.get_data().await;
+        let domains = crate::proxy::pac::get_all_ai_domains_filtered(
+            &matrix,
+            &st.custom_ai_domains,
+            &st.disabled_providers,
+        );
 
         let gateway_port = self.bound_addr.port();
         let chained_proxy = crate::sysproxy::get_chained_proxy().filter(|cp| {
@@ -277,14 +291,47 @@ impl ProxyServer {
             port != gateway_port && port != 0
         });
 
-        let pac_script = generate_pac_script(
+        generate_pac_script(
             &domains,
             &self.bound_addr.to_string(),
             chained_proxy.as_deref(),
-        );
+        )
+    }
+
+    async fn try_silent_recovery_on_startup(
+        &self,
+        provider: ProviderId,
+        selection: &RouteSelection,
+        routed: bool,
+    ) -> bool {
+        if self.guard.is_manual_killswitch()
+            || self.guard.pause_mode() != crate::proxy::guard::PauseMode::None
+            || self.guard.has_baseline().await
+            || !self.state.is_provider_blocked(provider.as_str()).await
+        {
+            return false;
+        }
+        let Ok(report) = self
+            .auditor
+            .evaluate_all_with(provider, &self.state, selection, false)
+            .await
+        else {
+            return false;
+        };
+        let st = self.state.get_data().await;
+        if crate::proxy::guard::report_allowed_for_state(&report, &st, routed) {
+            let _ = self.state.unblock_provider(provider.as_str()).await;
+            self.guard.ensure_open_for_verified(&report.telemetry).await;
+            return true;
+        }
+        false
+    }
+
+    async fn handle_pac_request(&self, client: &mut TcpStream) -> Result<(), std::io::Error> {
+        let pac_script = self.build_pac_script().await;
 
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             pac_script.len(),
             pac_script
         );
@@ -400,7 +447,9 @@ impl ProxyServer {
         }
 
         let custom_domains = self.state.get_custom_ai_domains().await;
-        if let Some(provider) = ProviderId::from_host_with_custom(&host, &custom_domains) {
+        if let Some(provider) = ProviderId::from_host_with_custom(&host, &custom_domains)
+            && !self.state.is_provider_disabled(provider.as_str()).await
+        {
             self.state
                 .stats()
                 .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
@@ -512,13 +561,14 @@ impl ProxyServer {
         }
 
         let is_canary = host == "canary-test.anthropic.zastava.local";
-        let custom_domains = self.state.get_custom_ai_domains().await;
-        let provider_opt = ProviderId::from_host_with_custom(&host, &custom_domains);
+        let st_snapshot = self.state.get_data().await;
+        let provider_opt = ProviderId::from_host_with_custom(&host, &st_snapshot.custom_ai_domains)
+            .filter(|p| !st_snapshot.is_provider_disabled(p.as_str()));
 
         let provider = match provider_opt {
             Some(p) => {
-                // Only a tunnel to an AI host is an AI request (the canary is Zastava's own probe).
-                // Transit non-AI traffic below is never reported to the coverage radar.
+                // Only a tunnel to an enabled AI host is an AI request (the canary is Zastava's
+                // own probe). Disabled providers & transit traffic pass through directly.
                 if !is_canary {
                     self.coverage.record_incoming(
                         peer_port,
@@ -529,8 +579,8 @@ impl ProxyServer {
                 p
             }
             None => {
-                // Direct pass-through for safe public non-AI domains: allows terminal users to set
-                // HTTPS_PROXY=http://127.0.0.1:8899 safely without breaking git, npm, brew, etc.
+                // Direct pass-through for non-AI or monitoring-disabled domains: allows terminal
+                // users to set HTTPS_PROXY cleanly without interfering with excluded providers.
                 self.state.stats().record_direct_bypassed_host(&host);
                 return self
                     .tunnel_to_target(client, &host, port, None, &RouteSelection::Direct)
@@ -600,8 +650,10 @@ impl ProxyServer {
         } else {
             // Step 0: Fast Kernel Route Check & Network guard — a sudden IP change freezes every connection until the
             // user confirms the new network (or the old IP comes back).
-            if self.guard.check_route_fingerprint_sync(None) {
-                self.auditor.resolver.invalidate_cache().await;
+            if !self.state.is_split_tunnel_mode().await
+                && self.guard.check_route_fingerprint_sync(None)
+            {
+                self.auditor.resolver.invalidate_direct_cache().await;
                 self.guard
                     .clear_pause_on_network_change(Some(&self.state), false)
                     .await;
@@ -629,26 +681,35 @@ impl ProxyServer {
                     }
                 }
                 Gate::Blocked => {
-                    self.state.stats().record_intercepted(
-                        &host,
-                        provider.as_str(),
-                        "BLOCKED",
-                        "??",
-                    );
-                    if is_canary {
-                        return send_canary_intercepted(client).await;
+                    if !self
+                        .try_silent_recovery_on_startup(provider, &selection, route.is_some())
+                        .await
+                    {
+                        self.state.stats().record_intercepted(
+                            &host,
+                            provider.as_str(),
+                            "BLOCKED",
+                            "??",
+                        );
+                        if is_canary {
+                            return send_canary_intercepted(client).await;
+                        }
+                        return send_forbidden(
+                        client,
+                        "Network change blocked by Zastava Risk Auditor: switch back to the trusted IP or confirm the new network.",
+                    )
+                    .await;
                     }
-                    return send_forbidden(
-                    client,
-                    "Network change blocked by Zastava Risk Auditor: switch back to the trusted IP or confirm the new network.",
-                )
-                .await;
                 }
             }
         }
 
         // Step 1: Check if provider is blocked
-        if self.state.is_provider_blocked(provider.as_str()).await {
+        if self.state.is_provider_blocked(provider.as_str()).await
+            && !self
+                .try_silent_recovery_on_startup(provider, &selection, route.is_some())
+                .await
+        {
             self.state
                 .stats()
                 .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
@@ -681,42 +742,68 @@ impl ProxyServer {
                 .await;
         }
 
-        // Step 3: Run comprehensive risk audit (on this provider's own egress)
-        let report = match self
-            .auditor
-            .evaluate_all_with(provider, &self.state, &selection, false)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) if route.is_some() => {
-                let r = route.as_ref().expect("checked");
-                return self
-                    .refuse_route_down(
-                        client,
-                        &host,
-                        provider,
-                        &r.id,
-                        RouteDownReason::Unreachable,
-                        Some(&e),
-                        is_canary,
-                    )
-                    .await;
-            }
-            Err(e) => {
-                eprintln!("Auditor evaluation failed: {e}");
-                self.state
-                    .stats()
-                    .record_intercepted(&host, provider.as_str(), "ERROR", "??");
-                if is_canary {
-                    return send_canary_intercepted(client).await;
+        // Step 3: Run comprehensive risk audit (on this provider's own egress).
+        // If `guard.restore_epoch()` advances mid-audit (network recovered cleanly while probing
+        // the old network), re-run once against the restored state/cache before deciding.
+        let mut attempt = 0u8;
+        let (report, st_after_audit) = loop {
+            let pre_audit_epoch = self.guard.restore_epoch();
+            let eval_res = self
+                .auditor
+                .evaluate_all_with(provider, &self.state, &selection, false)
+                .await;
+            match eval_res {
+                Ok(r) => {
+                    let st_now = self.state.get_data().await;
+                    if route.is_none()
+                        && attempt == 0
+                        && self.guard.restore_epoch() != pre_audit_epoch
+                        && !crate::proxy::guard::report_allowed_for_state(&r, &st_now, false)
+                    {
+                        attempt += 1;
+                        continue;
+                    }
+                    break (r, st_now);
                 }
-                // In case of auditor error, fall back to hold for safety
-                return send_forbidden(client, &format!("Audit error: {e}")).await;
+                Err(e) if route.is_some() => {
+                    let r = route.as_ref().expect("checked");
+                    return self
+                        .refuse_route_down(
+                            client,
+                            &host,
+                            provider,
+                            &r.id,
+                            RouteDownReason::Unreachable,
+                            Some(&e),
+                            is_canary,
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    if route.is_none()
+                        && attempt == 0
+                        && self.guard.restore_epoch() != pre_audit_epoch
+                    {
+                        attempt += 1;
+                        continue;
+                    }
+                    eprintln!("Auditor evaluation failed: {e}");
+                    self.state
+                        .stats()
+                        .record_intercepted(&host, provider.as_str(), "ERROR", "??");
+                    if is_canary {
+                        return send_canary_intercepted(client).await;
+                    }
+                    // In case of auditor error, fall back to hold for safety
+                    return send_forbidden(client, &format!("Audit error: {e}")).await;
+                }
             }
         };
 
-        // Step 4: If verdict is Green -> allow and record history
-        if report.overall_status == OverallStatus::Green {
+        // Step 4: Allow silently when verdict is Green, Yellow (`no_critical_and_geo_ok`),
+        // `(provider, exit_ip)` is in `trusted_exceptions`, or IP matches pinned IP on allowed geo.
+        if crate::proxy::guard::report_allowed_for_state(&report, &st_after_audit, route.is_some())
+        {
             if is_canary {
                 return self
                     .canary_protected(
@@ -728,16 +815,20 @@ impl ProxyServer {
                     )
                     .await;
             }
-            let entry = IpHistoryEntry::new(
-                report.telemetry.ip.clone(),
-                report.telemetry.country_code.clone(),
-                report.telemetry.asn,
-                report.telemetry.resolved_at,
-            );
-            let _ = self
-                .state
-                .record_ip_history_for_selection(provider.as_str(), &selection, entry)
-                .await;
+            if crate::proxy::guard::report_no_critical_and_geo_ok(&report)
+                || crate::proxy::guard::is_report_pinned_travel_only(&report, &st_after_audit)
+            {
+                let entry = IpHistoryEntry::new(
+                    report.telemetry.ip.clone(),
+                    report.telemetry.country_code.clone(),
+                    report.telemetry.asn,
+                    report.telemetry.resolved_at,
+                );
+                let _ = self
+                    .state
+                    .record_ip_history_for_selection(provider.as_str(), &selection, entry)
+                    .await;
+            }
             self.state.stats().record_protected(
                 &host,
                 provider.as_str(),
@@ -748,7 +839,7 @@ impl ProxyServer {
                 .await;
         }
 
-        // If not Green and is canary test, immediately return intercepted status (<5ms response)
+        // If critical/blocked and is canary test, immediately return intercepted status (<5ms response)
         if is_canary {
             self.state.stats().record_intercepted(
                 &host,
@@ -759,9 +850,27 @@ impl ProxyServer {
             return send_canary_intercepted(client).await;
         }
 
-        // Step 5: If verdict is Yellow or Red -> check preset InterceptionBehavior
-        match self.state.get_interception_behavior().await {
-            crate::state::InterceptionBehavior::AutoLockSilent => {
+        // Already-blocked alert suppression: never pop up a new alert if provider is already blocked.
+        if st_after_audit.blocked_providers.contains(provider.as_str())
+            || self.guard.gate_for(provider) == Gate::Blocked
+        {
+            self.state.stats().record_intercepted(
+                &host,
+                provider.as_str(),
+                "BLOCKED",
+                &report.telemetry.country_code,
+            );
+            return send_forbidden(
+                client,
+                "Requests to this provider are blocked until network change.",
+            )
+            .await;
+        }
+
+        // Step 5: Non-excepted Critical / Blocked Geo / Strict Pinning mismatch -> apply preset InterceptionBehavior
+        match st_after_audit.interception_behavior {
+            crate::state::InterceptionBehavior::AutoLockSilent
+            | crate::state::InterceptionBehavior::AutoAllowTrusted => {
                 self.state.stats().record_intercepted(
                     &host,
                     provider.as_str(),
@@ -769,48 +878,8 @@ impl ProxyServer {
                     &report.telemetry.country_code,
                 );
                 let _ = self.state.block_provider(provider.as_str()).await;
-                return send_forbidden(client, "Auto-locked by Zastava silent rule").await;
-            }
-            crate::state::InterceptionBehavior::AutoAllowTrusted => {
-                let matrix = self.auditor.rules.provider_matrix.read().await;
-                let cc = report.telemetry.country_code.trim().to_uppercase();
-                let is_sanctioned = matrix
-                    .global_blocked_countries
-                    .iter()
-                    .any(|b| b.eq_ignore_ascii_case(&cc));
-                if !is_sanctioned {
-                    let entry = IpHistoryEntry::new(
-                        report.telemetry.ip.clone(),
-                        report.telemetry.country_code.clone(),
-                        report.telemetry.asn,
-                        report.telemetry.resolved_at,
-                    );
-                    let _ = self
-                        .state
-                        .record_ip_history_for_selection(provider.as_str(), &selection, entry)
-                        .await;
-                    self.state.stats().record_protected(
-                        &host,
-                        provider.as_str(),
-                        &report.telemetry.country_code,
-                    );
-                    return self
-                        .tunnel_to_target(client, &host, port, Some(provider), &selection)
-                        .await;
-                } else {
-                    self.state.stats().record_intercepted(
-                        &host,
-                        provider.as_str(),
-                        "BLOCKED",
-                        &report.telemetry.country_code,
-                    );
-                    let _ = self.state.block_provider(provider.as_str()).await;
-                    return send_forbidden(
-                        client,
-                        "Auto-locked by Zastava silent rule (sanctioned country)",
-                    )
-                    .await;
-                }
+                self.guard.sync_gates_with_state(&self.state).await;
+                return send_forbidden(client, "Auto-locked by Zastava rule").await;
             }
             crate::state::InterceptionBehavior::AskPopup => {
                 // proceed with hold_queue and show_and_position_alert_popup
@@ -823,41 +892,50 @@ impl ProxyServer {
             "HELD",
             &report.telemetry.country_code,
         );
-        let hold_id = Uuid::new_v4().to_string();
-        let rx = self
+        let hold_epoch = self.guard.restore_epoch();
+        let (hold_id, rx, is_leader) = self
             .hold_queue
-            .register(hold_id.clone(), provider.as_str())
+            .register_or_coalesce_provider(Uuid::new_v4().to_string(), provider.as_str())
             .await;
 
-        let payload = RiskInterceptPayload {
-            id: hold_id.clone(),
-            provider,
-            host: host.clone(),
-            report: Some(report.clone()),
-            ttl_seconds: DEFAULT_HOLD_TTL_SECS,
-            scope: "provider".to_string(),
-            network_change: None,
-            is_simulation: false,
-            detected_at_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            phase: PHASE_READY.to_string(),
-            gate_reason: Some(build_gate_reason(Some(&report), None, false)),
-        };
+        if is_leader {
+            let payload = RiskInterceptPayload {
+                id: hold_id.clone(),
+                provider,
+                host: host.clone(),
+                report: Some(report.clone()),
+                ttl_seconds: DEFAULT_HOLD_TTL_SECS,
+                scope: "provider".to_string(),
+                network_change: None,
+                is_simulation: false,
+                detected_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                phase: PHASE_READY.to_string(),
+                gate_reason: Some(build_gate_reason(Some(&report), None, false)),
+            };
 
-        // Emit event to UI and bring emergency modal to front
-        if let Some(app) = &self.app_handle {
+            // Emit event to UI and bring emergency modal to front once per active provider hold.
             self.hold_queue.set_alert(payload.clone());
-            let _ = app.emit("interceptor://risk-detected", &payload);
-            crate::show_and_position_alert_popup(app);
+            if let Some(app) = &self.app_handle {
+                let _ = app.emit("interceptor://risk-detected", &payload);
+                crate::show_and_position_alert_popup(app);
+            }
         }
 
-        // Wait up to 60 seconds for user action
-        let resolution = tokio::time::timeout(Duration::from_secs(DEFAULT_HOLD_TTL_SECS), rx).await;
+        // Wait up to hold_ttl (default 60s) for user action
+        let resolution = tokio::time::timeout(self.hold_ttl, rx).await;
 
         match resolution {
             Ok(Ok(HoldResolution::Allow)) => {
+                if self.guard.is_manual_killswitch() {
+                    return send_forbidden(
+                        client,
+                        "Network kill-switch is engaged in Zastava.",
+                    )
+                    .await;
+                }
                 let entry = IpHistoryEntry::new(
                     report.telemetry.ip.clone(),
                     report.telemetry.country_code.clone(),
@@ -876,8 +954,154 @@ impl ProxyServer {
                 self.tunnel_to_target(client, &host, port, Some(provider), &selection)
                     .await
             }
-            _ => {
+            Ok(Ok(HoldResolution::Superseded)) => {
                 self.hold_queue.remove(&hold_id).await;
+                if let Some(app) = &self.app_handle
+                    && self.hold_queue.current_alert().is_none()
+                {
+                    crate::popup::hide_alert_popup(app);
+                    let _ = app.emit("interceptor://resolved", "");
+                }
+                let st_now = self.state.get_data().await;
+                let provider_disabled = st_now.is_provider_disabled(provider.as_str());
+                let provider_routed =
+                    crate::routing::select_route_id(&st_now, provider.as_str()).is_some();
+                if !self.guard.is_manual_killswitch() && provider_routed && route.is_none() {
+                    return send_routing_changed(client).await;
+                }
+                if !self.guard.is_manual_killswitch()
+                    && (provider_disabled
+                        || (!st_now.blocked_providers.contains(provider.as_str())
+                            && self.guard.gate_for(provider) == Gate::Open))
+                {
+                    self.state
+                        .stats()
+                        .record_protected(&host, provider.as_str(), "OK");
+                    return self
+                        .tunnel_to_target(client, &host, port, Some(provider), &selection)
+                        .await;
+                }
+                send_forbidden(
+                    client,
+                    "Connection hold superseded by network or policy update.",
+                )
+                .await
+            }
+            Ok(Ok(HoldResolution::Block)) => {
+                self.hold_queue.remove(&hold_id).await;
+                let st_now = self.state.get_data().await;
+                let now_allowed = self.guard.restore_epoch() != hold_epoch
+                    || st_now.is_provider_disabled(provider.as_str())
+                    || crate::routing::select_route_id(&st_now, provider.as_str()).is_some()
+                    || st_now
+                        .session_allowed_providers
+                        .contains(provider.as_str())
+                    || crate::proxy::guard::report_allowed_for_state(
+                        &report,
+                        &st_now,
+                        route.is_some(),
+                    );
+                if !now_allowed && !st_now.blocked_providers.contains(provider.as_str()) {
+                    let _ = self.state.block_provider(provider.as_str()).await;
+                    self.guard.sync_gates_with_state(&self.state).await;
+                }
+                send_forbidden(
+                    client,
+                    "Connection held and blocked by Zastava Risk Auditor.",
+                )
+                .await
+            }
+            Ok(Err(_)) => {
+                self.hold_queue.remove(&hold_id).await;
+                let st_now = self.state.get_data().await;
+                if self.guard.restore_epoch() != hold_epoch
+                    && !self.guard.is_manual_killswitch()
+                    && !st_now.blocked_providers.contains(provider.as_str())
+                    && self.guard.gate_for(provider) == Gate::Open
+                {
+                    return self
+                        .tunnel_to_target(client, &host, port, Some(provider), &selection)
+                        .await;
+                }
+                send_forbidden(
+                    client,
+                    "Connection held and blocked by Zastava Risk Auditor.",
+                )
+                .await
+            }
+            Err(_) => {
+                let st_now = self.state.get_data().await;
+                let epoch_changed = self.guard.restore_epoch() != hold_epoch;
+                let provider_disabled = st_now.is_provider_disabled(provider.as_str());
+                let provider_routed =
+                    crate::routing::select_route_id(&st_now, provider.as_str()).is_some();
+                let session_allowed = st_now
+                    .session_allowed_providers
+                    .contains(provider.as_str());
+                let now_allowed = epoch_changed
+                    || provider_disabled
+                    || provider_routed
+                    || session_allowed
+                    || crate::proxy::guard::report_allowed_for_state(
+                        &report,
+                        &st_now,
+                        route.is_some(),
+                    );
+
+                if now_allowed {
+                    self.hold_queue
+                        .resolve(&hold_id, HoldResolution::Superseded)
+                        .await;
+                    if let Some(app) = &self.app_handle
+                        && self.hold_queue.current_alert().is_none()
+                    {
+                        crate::popup::hide_alert_popup(app);
+                        let _ = app.emit("interceptor://resolved", "");
+                    }
+                    if !self.guard.is_manual_killswitch() && provider_routed && route.is_none() {
+                        return send_routing_changed(client).await;
+                    }
+                    if !self.guard.is_manual_killswitch()
+                        && (provider_disabled
+                            || (!st_now.blocked_providers.contains(provider.as_str())
+                                && self.guard.gate_for(provider) == Gate::Open))
+                    {
+                        self.state
+                            .stats()
+                            .record_protected(&host, provider.as_str(), "OK");
+                        return self
+                            .tunnel_to_target(client, &host, port, Some(provider), &selection)
+                            .await;
+                    }
+                    return send_forbidden(
+                        client,
+                        "Connection hold superseded by network or policy update.",
+                    )
+                    .await;
+                }
+
+                // Hold TTL expired without a user decision: resolve any coalesced waiters as Block
+                // and persist the block so critical providers do not stay inconsistently open.
+                let timed_out_active = self
+                    .hold_queue
+                    .resolve(&hold_id, HoldResolution::Block)
+                    .await;
+                if timed_out_active
+                    || (!session_allowed
+                        && !st_now.is_ip_trusted_for_provider(
+                            provider.as_str(),
+                            &report.telemetry.ip,
+                        ))
+                {
+                    let _ = self.state.block_provider(provider.as_str()).await;
+                    self.guard.sync_gates_with_state(&self.state).await;
+                }
+                if let Some(app) = &self.app_handle
+                    && self.hold_queue.current_alert().is_none()
+                {
+                    crate::popup::hide_alert_popup(app);
+                    let _ = app.emit("interceptor://resolved", "");
+                }
                 send_forbidden(
                     client,
                     "Connection held and blocked by Zastava Risk Auditor.",
@@ -1702,9 +1926,23 @@ mod coverage_count_tests {
     use crate::sysproxy::browser_policies::FakePolicyStore;
     use crate::sysproxy::platform::FakePlatform;
 
+    fn offline_test_auditor() -> Auditor {
+        use crate::auditor::AuditEnv;
+        use crate::auditor::seams::fakes::{FakeDns, FakeProbe, FakeSystem, FakeUdp};
+        use crate::auditor::seams::{HttpProbeOutcome, LookupOutcome};
+
+        let env = AuditEnv {
+            dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+            probe: Arc::new(FakeProbe::new(HttpProbeOutcome::Timeout)),
+            udp: Arc::new(FakeUdp::new()),
+            system: Arc::new(FakeSystem::healthy()),
+        };
+        Auditor::with_env(env).expect("offline test auditor")
+    }
+
     async fn started() -> Arc<ProxyServer> {
         crate::sysproxy::force_os_dry_run();
-        let auditor = Auditor::new().expect("auditor");
+        let auditor = offline_test_auditor();
         let server = Arc::new(
             ProxyServer::bind_ephemeral(
                 auditor,
@@ -1905,6 +2143,581 @@ mod coverage_count_tests {
             "expected browser extension requests to be recorded under browsers: {browsers:?}"
         );
 
+        srv_task.abort();
+        echo_task.abort();
+    }
+
+    #[tokio::test]
+    async fn pac_excludes_disabled_providers_and_disables_cache() {
+        let server = started().await;
+        server
+            .state
+            .set_provider_monitoring("gemini", false)
+            .await
+            .unwrap();
+        let addr = server.bound_addr;
+        let req = format!(
+            "GET http://{addr}/proxy.pac HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        );
+        let Some(resp) = request(addr, &req).await else {
+            return;
+        };
+        assert!(resp.contains("Cache-Control: no-store"), "{resp}");
+        assert!(resp.contains("anthropic.com"), "{resp}");
+        assert!(!resp.contains("gemini.google.com"), "{resp}");
+        assert!(!resp.contains("google.com"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn disabled_provider_connect_is_bypassed_without_blocking_or_ai_coverage() {
+        let server = started().await;
+        // Disable gemini and mark it blocked (e.g. from before) + engage AskPopup:
+        // disabling cleared its block and CONNECT must treat gemini hosts as direct pass-through
+        // without opening hold_queue or counting as AI coverage.
+        server
+            .state
+            .set_provider_monitoring("gemini", false)
+            .await
+            .unwrap();
+        let addr = server.bound_addr;
+        let req = "CONNECT gemini.google.com:443 HTTP/1.1\r\nHost: gemini.google.com:443\r\nUser-Agent: curl/8.7.1\r\n\r\n";
+        let Ok(mut conn) = TcpStream::connect(addr).await else {
+            return;
+        };
+        let _ = conn.write_all(req.as_bytes()).await;
+        let mut head = [0u8; 256];
+        let _ = tokio::time::timeout(Duration::from_millis(500), conn.read(&mut head)).await;
+        assert!(server.hold_queue.current_alert().is_none());
+        let stats = server.state.stats().snapshot().await;
+        assert!(
+            stats.direct_bypassed_requests >= 1
+                && stats
+                    .recent_events
+                    .iter()
+                    .any(|e| e.host == "gemini.google.com"),
+            "expected disabled gemini host to record direct bypass: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn report_allowed_for_state_allows_yellow_and_trusted_exceptions_without_blocking() {
+        use crate::auditor::{CheckResult, NetworkTelemetry, OverallStatus, RiskReport};
+        use crate::state::AppStateData;
+
+        let ok = CheckResult::ok("T", "ok");
+        let base_tel = NetworkTelemetry {
+            ip: "5.5.5.5".to_string(),
+            country_code: "KZ".to_string(),
+            hostname: None,
+            asn: Some(1),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: 0,
+        };
+        let yellow_report = RiskReport {
+            provider: ProviderId::Anthropic,
+            overall_status: OverallStatus::Yellow,
+            trust_score: 70,
+            telemetry: base_tel.clone(),
+            geo_result: CheckResult::ok("GEO_LOCATION", "KZ"),
+            pinning_result: ok.clone(),
+            travel_result: ok.clone(),
+            dnsbl_result: ok.clone(),
+            dnsbl_clean_count: "0/0".to_string(),
+            asn_result: ok.clone(),
+            ipv6_result: ok.clone(),
+            timezone_result: CheckResult::warning("TIMEZONE_MISMATCH", "TZ offset", None),
+            ipv6_exit: false,
+            checks: vec![
+                CheckResult::ok("GEO_LOCATION", "KZ"),
+                CheckResult::warning("TIMEZONE_MISMATCH", "TZ offset", None),
+            ],
+            unknown_count: 0,
+            applicable_count: 14,
+            incomplete: false,
+        };
+        let st = AppStateData::default();
+        assert!(crate::proxy::guard::report_allowed_for_state(
+            &yellow_report,
+            &st,
+            false
+        ));
+
+        let mut red_report = yellow_report.clone();
+        red_report.overall_status = OverallStatus::Red;
+        red_report.telemetry.country_code = "RU".to_string();
+        red_report.geo_result = CheckResult::critical("GEO_BLOCKED", "RU", None);
+        red_report.checks = vec![red_report.geo_result.clone()];
+        assert!(!crate::proxy::guard::report_allowed_for_state(
+            &red_report,
+            &st,
+            false
+        ));
+
+        let mut st_except = st.clone();
+        st_except
+            .trusted_exceptions
+            .insert("anthropic".to_string(), vec!["5.5.5.5".to_string()]);
+        assert!(crate::proxy::guard::report_allowed_for_state(
+            &red_report,
+            &st_except,
+            false
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_critical_connects_coalesce_hold_and_resolve_together() {
+        crate::sysproxy::force_os_dry_run();
+        let echo_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let echo_addr = echo_listener.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    if let Ok(n) = s.read(&mut buf).await
+                        && n > 0
+                    {
+                        let _ = s.write_all(&buf[..n]).await;
+                    }
+                });
+            }
+        });
+
+        let auditor = offline_test_auditor();
+        let ru_tel = crate::auditor::NetworkTelemetry {
+            ip: "5.5.5.5".to_string(),
+            country_code: "RU".to_string(),
+            hostname: None,
+            asn: Some(9009),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: crate::auditor::network::current_timestamp(),
+        };
+        auditor.resolver.set_cached(ru_tel).await;
+
+        let state = AppState::new_in_memory();
+        let hq = Arc::new(HoldQueue::new());
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(auditor, state.clone(), Arc::clone(&hq), Some(echo_addr))
+                .await
+                .expect("bind"),
+        );
+        let addr = server.bound_addr;
+        let srv = Arc::clone(&server);
+        let srv_task = tokio::spawn(async move { srv.run().await });
+
+        let mut c1 = match TcpStream::connect(addr).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let mut c2 = TcpStream::connect(addr).await.unwrap();
+        let req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
+        c1.write_all(req.as_bytes()).await.unwrap();
+        c2.write_all(req.as_bytes()).await.unwrap();
+
+        let mut alert_id = None;
+        for _ in 0..200 {
+            if let Some(alert) = hq.current_alert() {
+                alert_id = Some(alert.id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let alert_id = alert_id.expect("single coalesced alert created");
+        // Give the second CONNECT a moment to coalesce into the same hold entry.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(hq.active_entry_count().await, 1);
+
+        // Resolving the single hold ID unblocks BOTH parallel CONNECTs.
+        assert!(hq.resolve(&alert_id, HoldResolution::Allow).await);
+
+        let mut b1 = [0u8; 128];
+        let mut b2 = [0u8; 128];
+        let n1 = tokio::time::timeout(Duration::from_secs(2), c1.read(&mut b1))
+            .await
+            .unwrap()
+            .unwrap();
+        let n2 = tokio::time::timeout(Duration::from_secs(2), c2.read(&mut b2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&b1[..n1]).starts_with("HTTP/1.1 200"));
+        assert!(String::from_utf8_lossy(&b2[..n2]).starts_with("HTTP/1.1 200"));
+
+        srv_task.abort();
+        echo_task.abort();
+    }
+
+    #[tokio::test]
+    async fn critical_hold_timeout_blocks_provider_and_closes_gate() {
+        crate::sysproxy::force_os_dry_run();
+        let auditor = offline_test_auditor();
+        let ru_tel = crate::auditor::NetworkTelemetry {
+            ip: "5.5.5.5".to_string(),
+            country_code: "RU".to_string(),
+            hostname: None,
+            asn: Some(9009),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: crate::auditor::network::current_timestamp(),
+        };
+        auditor.resolver.set_cached(ru_tel).await;
+
+        let state = AppState::new_in_memory();
+        let hq = Arc::new(HoldQueue::new());
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(auditor, state.clone(), Arc::clone(&hq), None)
+                .await
+                .expect("bind")
+                .with_hold_ttl(Duration::from_millis(80)),
+        );
+        let addr = server.bound_addr;
+        let srv = Arc::clone(&server);
+        let srv_task = tokio::spawn(async move { srv.run().await });
+
+        let mut client = match TcpStream::connect(addr).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(8), client.read_to_end(&mut buf))
+            .await
+            .expect("client gets 403 after hold timeout")
+            .unwrap();
+        let resp = String::from_utf8_lossy(&buf);
+        assert!(resp.contains("HTTP/1.1 403 Forbidden"), "{resp}");
+        assert!(state.is_provider_blocked("anthropic").await);
+        assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
+        assert!(hq.current_alert().is_none());
+
+        srv_task.abort();
+    }
+
+    #[tokio::test]
+    async fn active_per_provider_hold_from_vpn_jump_cannot_reblock_after_restore_to_pinned_ip() {
+        crate::sysproxy::force_os_dry_run();
+        let echo_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let echo_addr = echo_listener.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    if let Ok(n) = s.read(&mut buf).await
+                        && n > 0
+                    {
+                        let _ = s.write_all(&buf[..n]).await;
+                    }
+                });
+            }
+        });
+
+        let auditor = offline_test_auditor();
+        let ru_tel = crate::auditor::NetworkTelemetry {
+            ip: "5.5.5.5".to_string(),
+            country_code: "RU".to_string(),
+            hostname: None,
+            asn: Some(9009),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: crate::auditor::network::current_timestamp(),
+        };
+        auditor.resolver.set_cached(ru_tel).await;
+
+        let state = AppState::new_in_memory();
+        state
+            .set_pinned_ip(Some("145.241.193.245".to_string()))
+            .await
+            .unwrap();
+        state.set_strict_pinning_enabled(true).await.unwrap();
+
+        let hq = Arc::new(HoldQueue::new());
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(
+                auditor.clone(),
+                state.clone(),
+                Arc::clone(&hq),
+                Some(echo_addr),
+            )
+            .await
+            .expect("bind")
+            .with_hold_ttl(Duration::from_millis(160)),
+        );
+        server
+            .guard
+            .install_noop_env_for_test(auditor.clone(), state.clone(), Arc::clone(&hq));
+        let epoch_before = server.guard.restore_epoch();
+
+        let addr = server.bound_addr;
+        let srv = Arc::clone(&server);
+        let srv_task = tokio::spawn(async move { srv.run().await });
+
+        let mut client = match TcpStream::connect(addr).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        // Wait for the per-provider hold to be registered in HoldQueue.
+        let mut hold_seen = false;
+        for _ in 0..400 {
+            if hq.current_alert().is_some() && hq.active_entry_count().await == 1 {
+                hold_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(hold_seen, "expected active per-provider hold in HoldQueue");
+
+        // Now simulate returning to the clean pinned IP (`restore_locked`): bumps `restore_epoch`
+        // and calls `cancel_all_superseded()` before the hold timer expires.
+        server.guard.restore_for_test().await;
+        assert_eq!(server.guard.restore_epoch(), epoch_before + 1);
+        assert_eq!(hq.active_entry_count().await, 0);
+        assert!(hq.current_alert().is_none());
+
+        let mut head = [0u8; 128];
+        let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut head))
+            .await
+            .expect("superseded hold must unblock immediately without waiting for TTL")
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 200"),
+            "expected 200 Connection Established after restore, got: {}",
+            String::from_utf8_lossy(&head[..n])
+        );
+
+        // Wait well past the original hold TTL to prove no orphaned timeout relapses into block.
+        tokio::time::sleep(Duration::from_millis(260)).await;
+        assert!(!state.is_provider_blocked("anthropic").await);
+        assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+        assert!(
+            state
+                .get_data()
+                .await
+                .ip_history
+                .values()
+                .all(Vec::is_empty),
+            "superseded hold must NOT record stale pre-restore IP into ip_history"
+        );
+
+        srv_task.abort();
+        echo_task.abort();
+    }
+
+    #[tokio::test]
+    async fn hold_timeout_with_changed_restore_epoch_or_trusted_exception_never_blocks() {
+        crate::sysproxy::force_os_dry_run();
+        let echo_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let echo_addr = echo_listener.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    let _ = s.read(&mut buf).await;
+                });
+            }
+        });
+
+        // Case 1: `restore_epoch` bumped directly before `Err(_)` fires -> must NOT block.
+        let auditor = offline_test_auditor();
+        let ru_tel = crate::auditor::NetworkTelemetry {
+            ip: "5.5.5.5".to_string(),
+            country_code: "RU".to_string(),
+            hostname: None,
+            asn: Some(9009),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: crate::auditor::network::current_timestamp(),
+        };
+        auditor.resolver.set_cached(ru_tel.clone()).await;
+
+        let state = AppState::new_in_memory();
+        let hq = Arc::new(HoldQueue::new());
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(auditor, state.clone(), Arc::clone(&hq), Some(echo_addr))
+                .await
+                .expect("bind")
+                .with_hold_ttl(Duration::from_millis(120)),
+        );
+        let addr = server.bound_addr;
+        let srv = Arc::clone(&server);
+        let srv_task = tokio::spawn(async move { srv.run().await });
+
+        let mut c1 = match TcpStream::connect(addr).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
+        c1.write_all(req.as_bytes()).await.unwrap();
+
+        let mut seen1 = false;
+        for _ in 0..400 {
+            if hq.current_alert().is_some() {
+                seen1 = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(seen1, "expected active hold before timeout");
+        // Bump restore_epoch without draining `hq` to directly exercise the `Err(_)` epoch guard.
+        server.guard.bump_restore_epoch_for_test();
+
+        let mut head = [0u8; 128];
+        let n = tokio::time::timeout(Duration::from_secs(2), c1.read(&mut head))
+            .await
+            .expect("timeout handler finishes")
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 200"),
+            "unexpected response: {}",
+            String::from_utf8_lossy(&head[..n])
+        );
+        assert!(!state.is_provider_blocked("anthropic").await);
+        assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+        srv_task.abort();
+
+        // Case 2: `(provider, exit_ip)` becomes trusted before timeout expires -> must NOT block.
+        let auditor2 = offline_test_auditor();
+        auditor2.resolver.set_cached(ru_tel).await;
+        let state2 = AppState::new_in_memory();
+        let hq2 = Arc::new(HoldQueue::new());
+        let server2 = Arc::new(
+            ProxyServer::bind_ephemeral(
+                auditor2,
+                state2.clone(),
+                Arc::clone(&hq2),
+                Some(echo_addr),
+            )
+            .await
+            .expect("bind")
+            .with_hold_ttl(Duration::from_millis(120)),
+        );
+        let addr2 = server2.bound_addr;
+        let srv2 = Arc::clone(&server2);
+        let srv_task2 = tokio::spawn(async move { srv2.run().await });
+
+        let mut c2 = TcpStream::connect(addr2).await.unwrap();
+        c2.write_all(req.as_bytes()).await.unwrap();
+        let mut seen2 = false;
+        for _ in 0..400 {
+            if hq2.current_alert().is_some() {
+                seen2 = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(seen2, "expected active hold2 before timeout");
+        state2
+            .add_trusted_exception("anthropic", "5.5.5.5")
+            .await
+            .unwrap();
+
+        let mut head2 = [0u8; 128];
+        let n2 = tokio::time::timeout(Duration::from_secs(2), c2.read(&mut head2))
+            .await
+            .expect("timeout handler finishes")
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&head2[..n2]).starts_with("HTTP/1.1 200"),
+            "unexpected response: {}",
+            String::from_utf8_lossy(&head2[..n2])
+        );
+        assert!(!state2.is_provider_blocked("anthropic").await);
+        assert_eq!(server2.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+
+        srv_task2.abort();
+        echo_task.abort();
+    }
+
+    #[tokio::test]
+    async fn manual_killswitch_blocks_even_disabled_provider_on_superseded_hold() {
+        crate::sysproxy::force_os_dry_run();
+        let echo_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        let echo_addr = echo_listener.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            while let Ok((mut s, _)) = echo_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 64];
+                    let _ = s.read(&mut buf).await;
+                });
+            }
+        });
+
+        let auditor = offline_test_auditor();
+        let ru_tel = crate::auditor::NetworkTelemetry {
+            ip: "5.5.5.5".to_string(),
+            country_code: "RU".to_string(),
+            hostname: None,
+            asn: Some(9009),
+            org: None,
+            isp: None,
+            timezone: None,
+            resolved_at: crate::auditor::network::current_timestamp(),
+        };
+        auditor.resolver.set_cached(ru_tel).await;
+
+        let state = AppState::new_in_memory();
+        let hq = Arc::new(HoldQueue::new());
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(auditor, state.clone(), Arc::clone(&hq), Some(echo_addr))
+                .await
+                .expect("bind")
+                .with_hold_ttl(Duration::from_secs(5)),
+        );
+        let addr = server.bound_addr;
+        let srv = Arc::clone(&server);
+        let srv_task = tokio::spawn(async move { srv.run().await });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
+        client.write_all(req.as_bytes()).await.unwrap();
+
+        let mut hold_seen = false;
+        for _ in 0..400 {
+            if hq.current_alert().is_some() {
+                hold_seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(hold_seen, "expected active hold");
+
+        // Disable monitoring AND engage manual kill-switch, then supersede the hold.
+        state.set_provider_monitoring("anthropic", false).await.unwrap();
+        server.guard.set_manual_killswitch(true, &state).await;
+        hq.cancel_all_superseded().await;
+
+        let mut head = [0u8; 128];
+        let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut head))
+            .await
+            .expect("superseded hold completes")
+            .unwrap();
+        let resp = String::from_utf8_lossy(&head[..n]);
+        assert!(
+            resp.starts_with("HTTP/1.1 403"),
+            "manual killswitch must block even disabled provider, got: {resp}"
+        );
         srv_task.abort();
         echo_task.abort();
     }

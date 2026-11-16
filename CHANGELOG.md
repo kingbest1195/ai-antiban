@@ -7,6 +7,43 @@
 
 ---
 
+## [2.2.2] — 2026-11-16
+
+Патч-релиз с надёжным ядром при обрыве и восстановлении VPN, расширенным покрытием клиентов и доменов Gemini (`oauth2.googleapis.com`, `iamcredentials.googleapis.com`, `OpenCode`, честный статус `Antigravity`), обновлённым интерфейсом для ключей и хостингов, исправлением `CoworkVMServiceManualGuard` на Windows, постоянными исключениями `(Сервис + Exit IP)`, пер-сервисными тумблерами мониторинга и повышенной надёжностью мультиаккаунтинга.
+
+### Добавлено
+* **Обнаружение `OpenCode` и расширение доменного списка Gemini (`proxy/coverage.rs`, `rules/provider_matrix.json`, `proxy/pac.rs`, `auditor/geo_matrix.rs`):** в «Покрытие» и «Обзор» добавлено обнаружение `OpenCode`, а в доменный список Gemini добавлены `oauth2.googleapis.com` и `iamcredentials.googleapis.com`.
+* **Постоянные исключения `(Сервис + Exit IP)` (`state/mod.rs`, `commands/audit.rs`, `commands/interception.rs`, `SettingsModal.tsx`):** нажатие «Разрешить принудительно» (в окне перехвата или на экране «Обзор») сохраняет пару `(provider, exit_ip)` в `trusted_exceptions` в `state.json` (переживает перезапуски и смены сети); в «Настройках» добавлены просмотр активных исключений, удаление отдельных записей (`remove_trusted_exception`) и полная очистка (`clear_trusted_exceptions`).
+* **Пер-сервисные тумблеры мониторинга ИИ (`state/mod.rs`, `commands/audit.rs`, `proxy/pac.rs`, `proxy/server.rs`, `proxy/guard.rs`, `SettingsModal.tsx`):** в «Настройках» добавлены отдельные переключатели мониторинга для **Claude**, **ChatGPT** и **Gemini** (`disabled_providers`, команда `set_provider_monitoring`); отключённый провайдер исключается из фоновых проверок `NetworkGuard`, генерации PAC (`get_all_ai_domains_filtered`) и проксирования, включая общие домены Google при выключении Gemini.
+
+### Изменено
+* **Понятный интерфейс для ВПН Заставы и рекомендованных хостингов (`src/features/connect/`, `src/features/guides/`, `src/shared/copy/ru/`):** переименован «Ключ Заставы» → **«ВПН Заставы»**, добавлена зелёная кнопка **«Получить ВПН»**, удалены пустые окна промокодов, а стрелка у рекомендованных хостингов заменена на понятную кнопку **«Перейти»**.
+* **Политика `Yellow` vs `Critical` в щите ИИ-сервисов (`proxy/guard.rs`, `OverviewScreen.tsx`, `useOverviewModel.ts`):** некритичные `Yellow`-предупреждения (страны `KZ`, `RS`, часовой пояс, предупреждение AI Studio и др.) больше не останавливают трафик и не вызывают всплывающих модалок перехвата, оставаясь информативными в интерфейсе; убраны тихие авто-блокировки на `Yellow`.
+
+### Исправлено
+* **Надёжное ядро при обрыве и восстановлении VPN (`proxy/guard.rs`, `proxy/hold_queue.rs`, `proxy/server.rs`, `auditor/network.rs`, `auditor/history.rs`, `tray/events.rs`):**
+  * устранена 1-секундная перезагрузка аудита `ProbeRegular`, восстановлен мгновенный `Gate::Pending` с асинхронным `alert_first` при смене сети;
+  * устранены «осиротевшие» 60-секундные таймауты `HoldQueue` за счёт `HoldResolution::Superseded` и счётчика `restore_epoch`;
+  * устранена гонка кэша в `NetworkResolver` с помощью `cache_generation`;
+  * исправлен ложный возврат в «СТОП СЕТИ» при возврате на закреплённый IP (`apply_pinned_travel_grace`);
+  * починен клик **«Снять СТОП СЕТИ»** в системном трее.
+* **Честный статус `Antigravity` в «Покрытии» (`proxy/coverage.rs`):** исправлена ложная отметка `Configured` для `Antigravity` — теперь отображается реальный статус до запуска с переменными прокси.
+* **Создание задачи планировщика `CoworkVMServiceManualGuard` на Windows (`cowork_guard.rs`):** XML задания кодируется в `UTF-16 LE` с BOM (`encode_utf16_le_with_bom`) и приведено к валидной XSD-схеме Task Scheduler 1.2 (удалён недопустимый `<LogonType>ServiceAccount</LogonType>` для `S-1-5-18`), добавлена предварительная валидация (`validate_windows_task_xml`), декодирование `UTF-16 LE` вывода утилит (`decode_windows_cmd_text`), резервный перевод службы через `SYSTEM`-задачу при `ERROR_ACCESS_DENIED` к ключу реестра/SCM и проброс точной диагностики ошибки из elevated-процесса (`--error-file`).
+* **Поведение `NetworkGuard` при старте, авто-восстановлении и повторных алертах (`proxy/guard.rs`, `proxy/hold_queue.rs`, `OverviewScreen.tsx`):**
+  * добавлено тихое авто-снятие блокировок при восстановлении допустимого IP и отсутствии критических проверок;
+  * убран ложный алерт при старте приложения на закреплённом или допустимом IP (`report_allowed_for_state`);
+  * подавлены повторные модальные алерты для уже заблокированных сервисов;
+  * устранена параллельная гонка при снятии блокировки и разрешении сервиса на экране «Обзор» (`executeAllowSequence`).
+* **Надёжность мультиаккаунтинга и привязки ключей к профилю (`auditor/profile_switcher.rs`, `commands/claude.rs`, `commands/routes.rs`, `app.rs`, `routing/mod.rs`, `tray/menu.rs`, `tray/events.rs`, `ProfilesSection.tsx`):**
+  * изолирована привязка `pinned_ips["anthropic"]` без затирания `default` и добавлена стартовая синхронизация активного профиля (`reconcile_active_profile_on_startup`);
+  * при смене профиля или ключа автоматически снимаются устаревшие блоки и сессионные уступки (`clear_provider_blocks_and_session`);
+  * все операции чтения/записи `profiles.json` сериализованы через `PROFILES_LOCK`;
+  * исправлено удаление активного профиля (`delete_claude_profile_in` корректно переключается на резервный профиль до удаления, не перезаписывая его);
+  * при удалении маршрута, привязанного к активному профилю, маршрут переводится в `invalidate_profile_route` (`DanglingBinding` / fail-closed) вместо тихого отката на прямой выход;
+  * добавлено живое обновление подменю профилей в трее (`refresh_profiles_submenu`) и синхронизация списка маршрутов/состояния в UI (`ProfilesSection.tsx`, `useTrayEvents.ts`).
+
+---
+
 ## [2.2.1] — 2026-11-15
 
 Патч-релиз с тихими сетевыми пробами без раскрытия Заставы и домашнего IP, устойчивым DNS-резолвом ключей на Windows поверх Happ VPN (`os error 11001`), снятием эвристических триггеров антивирусов (`BroPass`), синхронизацией тумблеров защиты и точечными доработками интерфейса.

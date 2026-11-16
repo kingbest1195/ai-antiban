@@ -10,8 +10,8 @@ export const WAIT_TIMEOUT_MS = 60_000;
 /** Что показываем в бейдже: статус шлюза плюс клиентские waiting/waiting_timeout. */
 export type CoverageView = AppCoverageStatus | "waiting" | "waiting_timeout" | "direct";
 
-/** ИИ-клиенты терминала: их режим «Только ИИ-клиенты и IDE» настраивает. */
-const AI_CLI_IDS = new Set(["claude-code", "gemini-cli"]);
+/** ИИ-клиенты терминала: их режим «Только ИИ-клиенты и IDE» отслеживает как ИИ-приложения. */
+const AI_CLI_IDS = new Set(["claude-code", "gemini-cli", "opencode"]);
 
 /** Обычные терминальные программы (node, python, curl…) в режиме «Только ИИ-клиенты и IDE» идут напрямую намеренно: это не «не настроено». */
 export function isDirectByMode(app: AppCoverageItem, cliMode: CliMode | undefined): boolean {

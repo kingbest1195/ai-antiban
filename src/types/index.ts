@@ -154,11 +154,16 @@ export interface UpstreamProxyConfig {
 }
 
 export interface AppStateData {
+  schema_version?: number;
   pinned_ip: string | null;
   strict_pinning_enabled: boolean;
   ip_history: Record<string, IpHistoryEntry[]>;
   session_allowed_providers: string[];
   blocked_providers: string[];
+  /** Постоянные исключения вида { provider: [ip, ...] }, сохраняются между перезапусками. */
+  trusted_exceptions?: Record<string, string[]>;
+  /** Провайдеры с отключённым мониторингом, PAC-перехватом и алертами. */
+  disabled_providers?: string[];
   upstream_proxy?: UpstreamProxyConfig | null;
   warmup_started_at?: number | null;
   synced_ai_timezone?: string | null;
@@ -182,6 +187,14 @@ export interface AppStateData {
   hide_ip_mode?: boolean;
   /** Пройден ли мастер настройки v2.2. */
   onboarding_v2_2_done?: boolean;
+  /** Маршруты и привязки в state.json. */
+  provider_routes?: Record<string, string>;
+  default_route_id?: string | null;
+  profile_route_id?: string | null;
+  legacy_route_id?: string | null;
+  profile_route_invalid?: string | null;
+  /** Ручной Kill-Switch («СТОП СЕТИ»). */
+  manual_killswitch?: boolean;
 }
 
 /** Состояние синхронизации системного часового пояса ОС (`os_tz::OsTzSyncStatus`). */

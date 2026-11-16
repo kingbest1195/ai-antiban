@@ -5,7 +5,7 @@ import type { CheckResult, CoverageSnapshot, RiskReport } from "../../types";
 import { overview as copy, status as words, toast as toastCopy } from "../../shared/copy/ru";
 import { checkCliProtectionStatus, toggleSysproxy, toggleSysproxyPrivileged } from "../../utils/api";
 import { CoverageSection } from "../coverage/CoverageSection";
-import { OverviewScreen } from "./OverviewScreen";
+import { executeAllowSequence, OverviewScreen } from "./OverviewScreen";
 import type { OverviewScreenProps } from "./OverviewScreen";
 
 const ok = (code: string): CheckResult => ({ status: "ok", code, message: "ok" });
@@ -129,5 +129,90 @@ describe("WP-4 & WP-5: OverviewScreen, CoverageSection и CLI sync", () => {
     expect(html).toContain("Что значат статусы");
     expect(html).toContain("zs-cov__legend-toggle");
     expect(html).toContain('aria-expanded="false"');
+  });
+
+  it("для отключённого в Настройках провайдера показывает нейтральный статус «Мониторинг отключён» без ложной тревоги и CTA", () => {
+    const redGemini = report({
+      provider: "gemini",
+      overall_status: "red",
+      geo_result: { status: "critical", code: "GEMINI_GEO_BLOCKED", message: "blocked" },
+    });
+    const html = renderToStaticMarkup(
+      createElement(
+        OverviewScreen,
+        baseProps({
+          reports: { anthropic: report(), openai: report({ provider: "openai" }), gemini: redGemini },
+          state: {
+            pinned_ip: null,
+            strict_pinning_enabled: false,
+            ip_history: {},
+            session_allowed_providers: [],
+            blocked_providers: [],
+            disabled_providers: ["gemini"],
+          },
+        }),
+      ),
+    );
+
+    expect(html).toContain(copy.service.monitoringDisabled);
+    expect(html).toContain(copy.service.monitoringDisabledNote);
+    expect(html).not.toContain(words.blocked);
+    expect(html).not.toContain(copy.service.forceAllow);
+  });
+
+  it("для жёлтых предупреждений мягко пишет «Есть замечания» без утверждения о блокировке", () => {
+    const warnGpt = report({
+      provider: "openai",
+      overall_status: "yellow",
+      asn_result: { status: "warning", code: "ASN_WARN", message: "shared pool" },
+    });
+    warnGpt.checks[4] = { status: "warning", code: "ASN_WARN", message: "shared pool" };
+
+    const html = renderToStaticMarkup(
+      createElement(
+        OverviewScreen,
+        baseProps({
+          reports: { anthropic: report(), openai: warnGpt },
+        }),
+      ),
+    );
+
+    expect(html).toContain(copy.service.warnBadge);
+    expect(html).toContain(copy.service.warnNote);
+    expect(html).not.toContain(words.blocked);
+  });
+
+  it("executeAllowSequence ждёт завершения unblock строго перед вызовом allow", async () => {
+    const order: string[] = [];
+    let releaseUnblock!: () => void;
+    const unblockGate = new Promise<void>((resolve) => {
+      releaseUnblock = resolve;
+    });
+
+    const p = executeAllowSequence(
+      "anthropic",
+      true,
+      async () => {
+        order.push("unblock:start");
+        await unblockGate;
+        order.push("unblock:done");
+      },
+      async () => {
+        order.push("allow:start");
+        order.push("allow:done");
+      },
+    );
+
+    await Promise.resolve();
+    expect(order).toEqual(["unblock:start"]);
+    releaseUnblock();
+    await p;
+    expect(order).toEqual(["unblock:start", "unblock:done", "allow:start", "allow:done"]);
+  });
+
+  it("копирайт «Разрешить принудительно» объясняет постоянное исключение для сервиса и текущего IP выхода", () => {
+    expect(copy.service.forceHint).toContain("постоянное исключение");
+    expect(copy.service.forceHint).toContain("Настройках");
+    expect(copy.service.confirm.text("Claude")).toContain("Настройках");
   });
 });

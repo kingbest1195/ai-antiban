@@ -23,21 +23,65 @@ export interface ProfilesSectionProps {
   currentCountry: string;
   activeUpstreamKey?: string | null;
   routesSnapshot?: RoutesSnapshot | null;
+  refreshTrigger?: number;
   onRoutesUpdated?: () => Promise<unknown> | void;
-  onProfileSwitched: (profileName: string, pinnedIp?: string | null) => void;
+  onProfileSwitched: (profileName: string, pinnedIp?: string | null) => Promise<unknown> | void;
   onToast: ShowToast;
 }
 
 const CREATE_FORM_ID = "claude-profile-create-form";
 const BIND_FORM_ID = "claude-profile-bind-key-form";
-const KEY_OPTION_NONE = "__none__";
-const KEY_OPTION_NEW = "__new__";
+export const KEY_OPTION_NONE = "__none__";
+export const KEY_OPTION_NEW = "__new__";
+
+export function hasProfileKeyBinding(p: Pick<ClaudeProfile, "bound_upstream_key" | "bound_route_id">): boolean {
+  return Boolean(p.bound_upstream_key || p.bound_route_id);
+}
+
+export function isProfileRouteMissing(
+  p: Pick<ClaudeProfile, "bound_upstream_key" | "bound_route_id">,
+  availableRoutes: Pick<RouteView, "id">[],
+  routesLoaded: boolean,
+): boolean {
+  if (!routesLoaded || p.bound_upstream_key || !p.bound_route_id) return false;
+  return !availableRoutes.some((r) => r.id === p.bound_route_id);
+}
+
+export function resolveCreateProfileIpBinding(
+  bindCurrentOnCreate: boolean,
+  ipKnown: boolean,
+  currentIp: string,
+  currentCountry: string,
+  createKeyChoice: string,
+): { ip: string | null; country: string | null } {
+  if (createKeyChoice !== KEY_OPTION_NONE) {
+    return { ip: null, country: null };
+  }
+  return {
+    ip: bindCurrentOnCreate && ipKnown ? currentIp : null,
+    country: bindCurrentOnCreate && ipKnown && currentCountry !== "--" ? currentCountry : null,
+  };
+}
+
+export function resolveInitialBindChoice(
+  p: Pick<ClaudeProfile, "bound_upstream_key" | "bound_route_id">,
+  availableRoutes: Pick<RouteView, "id">[],
+): { choice: string; keyInput: string } {
+  if (p.bound_route_id && availableRoutes.some((r) => r.id === p.bound_route_id)) {
+    return { choice: p.bound_route_id, keyInput: "" };
+  }
+  if (p.bound_upstream_key) {
+    return { choice: KEY_OPTION_NEW, keyInput: p.bound_upstream_key };
+  }
+  return { choice: KEY_OPTION_NONE, keyInput: "" };
+}
 
 /** Профили Claude: строка на профиль, переключение, привязка IP и ключа, удаление с подтверждением, создание. */
 export function ProfilesSection({
   currentIp,
   currentCountry,
   routesSnapshot: propRoutesSnapshot,
+  refreshTrigger = 0,
   onRoutesUpdated,
   onProfileSwitched,
   onToast,
@@ -45,6 +89,7 @@ export function ProfilesSection({
   const [profiles, setProfiles] = useState<ClaudeProfile[]>([]);
   const [activeProfileId, setActiveProfileId] = useState<string>("default");
   const [routes, setRoutes] = useState<RouteView[]>(propRoutesSnapshot?.routes ?? []);
+  const [routesLoaded, setRoutesLoaded] = useState<boolean>(Boolean(propRoutesSnapshot?.routes));
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
@@ -66,12 +111,15 @@ export function ProfilesSection({
   const t_toast = copy.toast;
   const ipKnown = Boolean(currentIp) && currentIp !== "--";
 
-  const refreshRoutes = async () => {
+  const refreshRoutes = async (): Promise<RouteView[] | null> => {
     try {
       const snap = await getRoutesSnapshot();
-      setRoutes(snap.routes ?? []);
+      const next = snap.routes ?? [];
+      setRoutes(next);
+      setRoutesLoaded(true);
+      return next;
     } catch {
-      // ignore
+      return null;
     }
   };
 
@@ -92,11 +140,12 @@ export function ProfilesSection({
   useEffect(() => {
     fetchProfiles();
     refreshRoutes();
-  }, []);
+  }, [refreshTrigger]);
 
   useEffect(() => {
     if (propRoutesSnapshot?.routes) {
       setRoutes(propRoutesSnapshot.routes);
+      setRoutesLoaded(true);
     }
   }, [propRoutesSnapshot]);
 
@@ -109,8 +158,10 @@ export function ProfilesSection({
       const res = await switchClaudeProfile(profileId);
       setActiveProfileId(res.active_profile.id);
       await fetchProfiles();
+      await refreshRoutes();
+      await onRoutesUpdated?.();
       onToast(t_toast.switched, res.message || t_toast.switchedText(res.active_profile.name), "success");
-      onProfileSwitched(res.active_profile.name, res.pinned_ip_updated);
+      await onProfileSwitched(res.active_profile.name, res.pinned_ip_updated);
     } catch (err) {
       onToast(t_toast.switchError, errText(err), "error");
     } finally {
@@ -135,37 +186,35 @@ export function ProfilesSection({
     }
   };
 
-  const resolveBoundLabel = (p: ClaudeProfile): string | null => {
+  const resolveBoundBadge = (p: ClaudeProfile): { text: string; tone: "info" | "danger" } | null => {
     if (!p.bound_upstream_key && !p.bound_route_id) return null;
+    if (isProfileRouteMissing(p, routes, routesLoaded)) {
+      return { text: "Маршрут удалён", tone: "danger" };
+    }
     if (p.bound_route_id) {
       const match = routes.find((r) => r.id === p.bound_route_id);
       if (match) {
-        return formatRouteBadgeLabel(match.label, match.country);
+        return { text: t.keyBoundLabel(formatRouteBadgeLabel(match.label, match.country)), tone: "info" };
       }
     }
     if (p.bound_upstream_key) {
       const preview = decodeZastavaKeyPreview(p.bound_upstream_key);
       if (preview?.label) {
-        return formatRouteBadgeLabel(preview.label, preview.country);
+        return { text: t.keyBoundLabel(formatRouteBadgeLabel(preview.label, preview.country)), tone: "info" };
       }
-      if (preview?.entrySummary) return preview.entrySummary;
+      if (preview?.entrySummary) {
+        return { text: t.keyBoundLabel(preview.entrySummary), tone: "info" };
+      }
     }
-    return t.keyBound;
+    return { text: t.keyBound, tone: "info" };
   };
 
-  const openBindModal = (p: ClaudeProfile) => {
-    refreshRoutes();
+  const openBindModal = async (p: ClaudeProfile) => {
+    const freshRoutes = (await refreshRoutes()) ?? routes;
+    const initial = resolveInitialBindChoice(p, freshRoutes);
+    setBindChoice(initial.choice);
+    setBindKeyInput(initial.keyInput);
     setBindingTarget(p);
-    if (p.bound_route_id && routes.some((r) => r.id === p.bound_route_id)) {
-      setBindChoice(p.bound_route_id);
-      setBindKeyInput("");
-    } else if (p.bound_upstream_key) {
-      setBindChoice(KEY_OPTION_NEW);
-      setBindKeyInput(p.bound_upstream_key);
-    } else {
-      setBindChoice(routes[0]?.id ?? KEY_OPTION_NEW);
-      setBindKeyInput("");
-    }
   };
 
   const handleSaveBindKey = async (e: FormEvent) => {
@@ -224,6 +273,9 @@ export function ProfilesSection({
     try {
       const res = await deleteClaudeProfile(removing.id);
       setProfiles(res.profiles || []);
+      setActiveProfileId(res.active_profile_id || "default");
+      await refreshRoutes();
+      await onRoutesUpdated?.();
       onToast(t_toast.removed, t_toast.removedText(removing.name), "info");
     } catch (err) {
       onToast(t_toast.removeError, errText(err), "error");
@@ -239,8 +291,13 @@ export function ProfilesSection({
     if (!cleanName) return;
     setCreating(true);
     try {
-      const ipToBind = bindCurrentOnCreate && ipKnown ? currentIp : null;
-      const countryToBind = bindCurrentOnCreate && currentCountry !== "--" ? currentCountry : null;
+      const { ip: ipToBind, country: countryToBind } = resolveCreateProfileIpBinding(
+        bindCurrentOnCreate,
+        ipKnown,
+        currentIp,
+        currentCountry,
+        createKeyChoice,
+      );
       let keyToBind: string | null = null;
       let routeIdToBind: string | null = null;
       if (createKeyChoice === KEY_OPTION_NEW) {
@@ -283,14 +340,17 @@ export function ProfilesSection({
     if (ipKnown && p.bound_ip !== currentIp) {
       items.push({ id: "bind-ip", label: t.bindIp, icon: "lock", disabled: bindingId === p.id, onSelect: () => handleBindCurrentIp(p.id) });
     }
+    const hasBoundKey = hasProfileKeyBinding(p);
     items.push({
       id: "bind-key",
-      label: p.bound_upstream_key ? t.changeKey : t.bindKey,
+      label: hasBoundKey ? t.changeKey : t.bindKey,
       icon: "key",
       disabled: bindingProxyId === p.id,
-      onSelect: () => openBindModal(p),
+      onSelect: () => {
+        void openBindModal(p);
+      },
     });
-    if (p.bound_upstream_key) {
+    if (hasBoundKey) {
       items.push({
         id: "unbind-key",
         label: t.unbindKey,
@@ -339,7 +399,7 @@ export function ProfilesSection({
                 {profiles.map((p) => {
                   const isActive = p.id === activeProfileId;
                   const country = countryName(p.bound_country);
-                  const boundLabel = resolveBoundLabel(p);
+                  const boundBadge = resolveBoundBadge(p);
                   return (
                     <Row
                       key={p.id}
@@ -348,9 +408,9 @@ export function ProfilesSection({
                       title={
                         <span className="zs-profile__name">
                           <span className="zs-profile__text">{p.name}</span>
-                          {boundLabel && (
-                            <Badge tone="info" icon="key">
-                              {boundLabel === t.keyBound ? t.keyBound : t.keyBoundLabel(boundLabel)}
+                          {boundBadge && (
+                            <Badge tone={boundBadge.tone} icon="key">
+                              {boundBadge.text}
                             </Badge>
                           )}
                         </span>
@@ -405,7 +465,16 @@ export function ProfilesSection({
             <Button onClick={() => setCreateOpen(false)} disabled={creating}>
               {commonCopy.cancel}
             </Button>
-            <Button variant="primary" type="submit" form={CREATE_FORM_ID} disabled={creating || !newName.trim()}>
+            <Button
+              variant="primary"
+              type="submit"
+              form={CREATE_FORM_ID}
+              disabled={
+                creating ||
+                !newName.trim() ||
+                (createKeyChoice === KEY_OPTION_NEW && !createKeyInput.trim())
+              }
+            >
               {creating ? copy.create.submitting : copy.create.submit}
             </Button>
           </>
@@ -425,11 +494,17 @@ export function ProfilesSection({
             <Row
               icon="lock"
               title={copy.create.bindIp}
-              sub={ipKnown ? copy.create.bindIpOn(currentIp) : copy.create.bindIpNone}
+              sub={
+                createKeyChoice !== KEY_OPTION_NONE
+                  ? "Отключено: профиль работает через выделенный ключ Заставы"
+                  : ipKnown
+                    ? copy.create.bindIpOn(currentIp)
+                    : copy.create.bindIpNone
+              }
               trail={
                 <Switch
-                  checked={bindCurrentOnCreate && ipKnown}
-                  disabled={!ipKnown}
+                  checked={createKeyChoice === KEY_OPTION_NONE && bindCurrentOnCreate && ipKnown}
+                  disabled={!ipKnown || createKeyChoice !== KEY_OPTION_NONE}
                   onChange={setBindCurrentOnCreate}
                   aria-label={copy.create.bindIp}
                 />

@@ -15,6 +15,7 @@ pub const COWORK_TASK_PATH: &str = r"\Zastava\";
 pub const COWORK_TASK_NAME: &str = "CoworkVMServiceManualGuard";
 pub const COWORK_TASK_FULL_NAME: &str = r"Zastava\CoworkVMServiceManualGuard";
 pub const INSTALL_COWORK_GUARD_ARG: &str = "--install-cowork-guard";
+pub const COWORK_ERROR_FILE_ARG: &str = "--error-file";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DetectedAiProcess {
@@ -147,7 +148,7 @@ pub fn build_windows_task_xml_with_system_root(system_root: &str) -> String {
         cowork_guard_inline_ps()
     ));
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Zastava CoworkVMService Manual Guard</Description>
@@ -269,7 +270,7 @@ fn query_windows_status() -> CoworkGuardStatus {
     let service_running = if service_present {
         run_hidden_cmd("sc.exe", &["query", COWORK_SERVICE_NAME])
             .filter(|o| o.status.success())
-            .map(|o| parse_sc_running(&String::from_utf8_lossy(&o.stdout)))
+            .map(|o| parse_sc_running(&decode_windows_cmd_text(&o.stdout)))
             .unwrap_or(false)
     } else {
         false
@@ -281,7 +282,7 @@ fn query_windows_status() -> CoworkGuardStatus {
     );
     let (task_installed, task_healthy) = match task_xml {
         Some(ref out) if out.status.success() => {
-            let xml = String::from_utf8_lossy(&out.stdout);
+            let xml = decode_windows_cmd_text(&out.stdout);
             (true, is_task_xml_healthy(&xml))
         }
         _ => (false, false),
@@ -314,9 +315,29 @@ pub fn trigger_cowork_guard_task() -> bool {
     if !crate::sysproxy::os_effects_enabled() {
         return false;
     }
-    run_hidden_cmd("schtasks.exe", &["/Run", "/TN", COWORK_TASK_FULL_NAME])
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    match run_hidden_cmd("schtasks.exe", &["/Run", "/TN", COWORK_TASK_FULL_NAME]) {
+        Some(out) if out.status.success() => true,
+        Some(out) => {
+            let err = decode_windows_cmd_text(&out.stderr);
+            let msg = if err.is_empty() {
+                decode_windows_cmd_text(&out.stdout)
+            } else {
+                err
+            };
+            crate::diagnostics::record(
+                "cowork_guard",
+                &format!(
+                    "schtasks.exe /Run failed (code={:?}): {msg}",
+                    out.status.code()
+                ),
+            );
+            false
+        }
+        None => {
+            crate::diagnostics::record("cowork_guard", "failed to spawn schtasks.exe /Run");
+            false
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -536,12 +557,135 @@ pub fn build_schtasks_create_args(xml_path: &str) -> [&str; 6] {
     ["/Create", "/TN", COWORK_TASK_FULL_NAME, "/XML", xml_path, "/F"]
 }
 
+/// Encodes XML text as little-endian UTF-16 with BOM (`0xFF, 0xFE`) for Windows `schtasks.exe /XML`.
+pub fn encode_utf16_le_with_bom(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(2 + text.len() * 2);
+    bytes.push(0xFF);
+    bytes.push(0xFE);
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+/// Decodes stdout/stderr from Windows console tools (handling UTF-16 LE BOM as well as UTF-8).
+pub fn decode_windows_cmd_text(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() >= 2 {
+        let payload = &bytes[2..];
+        let units: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&units)
+            .trim_end_matches('\0')
+            .trim()
+            .to_string();
+    }
+    String::from_utf8_lossy(bytes).trim().to_string()
+}
+
+/// Validates generated Task Scheduler 1.2 XML before passing it to `schtasks.exe /Create`.
+///
+/// Under the Task Scheduler 1.2 XSD (`http://schemas.microsoft.com/windows/2004/02/mit/task`),
+/// `<LogonType>` only accepts `S4U`, `Password`, `InteractiveToken`, or
+/// `InteractiveTokenOrPassword`; for built-in `S-1-5-18` (`NT AUTHORITY\SYSTEM`), `<LogonType>`
+/// should be omitted (values like `ServiceAccount` are PowerShell-only and fail XSD validation).
+pub fn validate_windows_task_xml(xml: &str) -> Result<(), String> {
+    let lower = xml.to_ascii_lowercase();
+    if !lower.contains("encoding=\"utf-16\"") {
+        return Err("Task XML must declare encoding=\"UTF-16\"".to_string());
+    }
+    if !lower.contains("<task version=\"1.2\"")
+        || !lower.contains("http://schemas.microsoft.com/windows/2004/02/mit/task")
+    {
+        return Err("Task XML must target Task Scheduler 1.2 schema".to_string());
+    }
+    if !lower.contains("<principals>") || !lower.contains("<userid>s-1-5-18</userid>") {
+        return Err("Task XML must define S-1-5-18 Principal".to_string());
+    }
+    let mut search_from = 0;
+    while let Some(rel_start) = lower[search_from..].find("<logontype>") {
+        let content_start = search_from + rel_start + "<logontype>".len();
+        let Some(rel_end) = lower[content_start..].find("</logontype>") else {
+            return Err("Task XML contains unclosed <LogonType> element".to_string());
+        };
+        let logon_type = lower[content_start..content_start + rel_end].trim();
+        let valid = matches!(
+            logon_type,
+            "s4u" | "password" | "interactivetoken" | "interactivetokenorpassword"
+        );
+        if !valid {
+            return Err(format!(
+                "Task XML contains invalid <LogonType>{logon_type}</LogonType> for Task Scheduler 1.2 schema"
+            ));
+        }
+        search_from = content_start + rel_end + "</logontype>".len();
+    }
+    if !is_task_xml_healthy(xml) {
+        return Err("Task XML failed security/trigger health check".to_string());
+    }
+    Ok(())
+}
+
+/// Parses `--install-cowork-guard` and optional `--error-file <path>` (or `--error-file=<path>`)
+/// from CLI arguments (excluding argv[0]). Returns `None` if `--install-cowork-guard` is absent.
+pub fn parse_install_cli_args(args: &[String]) -> Option<Option<std::path::PathBuf>> {
+    if !args.iter().any(|a| a == INSTALL_COWORK_GUARD_ARG) {
+        return None;
+    }
+    let mut error_file: Option<std::path::PathBuf> = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let arg = &args[idx];
+        if let Some(val) = arg.strip_prefix(&format!("{COWORK_ERROR_FILE_ARG}=")) {
+            let trimmed = val.trim().trim_matches('"');
+            if !trimmed.is_empty() {
+                error_file = Some(std::path::PathBuf::from(trimmed));
+            }
+        } else if arg == COWORK_ERROR_FILE_ARG
+            && let Some(next) = args.get(idx + 1)
+        {
+            let trimmed = next.trim().trim_matches('"');
+            if !trimmed.is_empty() {
+                error_file = Some(std::path::PathBuf::from(trimmed));
+            }
+            idx += 1;
+        }
+        idx += 1;
+    }
+    Some(error_file)
+}
+
+/// Builds the parameter string passed to `ShellExecuteExW` for elevated execution.
+pub fn build_elevated_cli_params(error_file: Option<&std::path::Path>) -> String {
+    match error_file {
+        Some(path) => format!(
+            "{INSTALL_COWORK_GUARD_ARG} {COWORK_ERROR_FILE_ARG} \"{}\"",
+            path.to_string_lossy()
+        ),
+        None => INSTALL_COWORK_GUARD_ARG.to_string(),
+    }
+}
+
+fn write_install_error_file(error_file: Option<&std::path::Path>, err: &str) {
+    if let Some(path) = error_file {
+        let _ = std::fs::write(path, err.as_bytes());
+    }
+}
+
+fn read_install_error_file(error_file: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(error_file)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(target_os = "windows")]
 mod win_elevate {
-    use super::INSTALL_COWORK_GUARD_ARG;
+    use super::{build_elevated_cli_params, read_install_error_file};
     use crate::win_reg::encode_utf16_nul;
     use core::ffi::c_void;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     const SEE_MASK_NOCLOSEPROCESS: u32 = 0x0000_0040;
     const SEE_MASK_NO_CONSOLE: u32 = 0x0000_8000;
@@ -573,6 +717,7 @@ mod win_elevate {
     #[link(name = "shell32")]
     unsafe extern "system" {
         fn ShellExecuteExW(p_exec_info: *mut ShellExecuteInfoW) -> i32;
+        fn IsUserAnAdmin() -> i32;
     }
 
     #[link(name = "kernel32")]
@@ -596,10 +741,35 @@ mod win_elevate {
         }
     }
 
+    struct TempFileGuard(PathBuf);
+
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    pub fn is_current_process_elevated() -> bool {
+        // SAFETY: `IsUserAnAdmin` takes no pointers and checks Administrators SID in active token.
+        unsafe { IsUserAnAdmin() != 0 }
+    }
+
     pub fn run_elevated_install(exe_path: &Path) -> Result<(), String> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let error_path = std::env::temp_dir().join(format!(
+            "zastava-cowork-err-{}-{nanos}.txt",
+            std::process::id()
+        ));
+        let _err_guard = TempFileGuard(error_path.clone());
+        let _ = std::fs::remove_file(&error_path);
+
         let verb = encode_utf16_nul("runas");
         let file = encode_utf16_nul(&exe_path.to_string_lossy());
-        let params = encode_utf16_nul(INSTALL_COWORK_GUARD_ARG);
+        let params_str = build_elevated_cli_params(Some(&error_path));
+        let params = encode_utf16_nul(&params_str);
 
         let mut info = ShellExecuteInfoW {
             cb_size: core::mem::size_of::<ShellExecuteInfoW>() as u32,
@@ -662,6 +832,12 @@ mod win_elevate {
             ));
         }
         if exit_code != 0 {
+            if let Some(detail) = read_install_error_file(&error_path) {
+                crate::diagnostics::record("cowork_guard", &detail);
+                return Err(format!(
+                    "Ошибка настройки задачи планировщика (код {exit_code}): {detail}"
+                ));
+            }
             return Err(format!(
                 "Ошибка настройки задачи планировщика (код {exit_code})."
             ));
@@ -677,18 +853,20 @@ fn is_claude_process_running() -> bool {
         &["/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"],
     )
     .filter(|o| o.status.success())
-    .map(|o| parse_tasklist_has_claude(&String::from_utf8_lossy(&o.stdout)))
+    .map(|o| parse_tasklist_has_claude(&decode_windows_cmd_text(&o.stdout)))
     .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
 fn register_cowork_guard_task() -> Result<(), String> {
     let xml = build_windows_task_xml();
+    validate_windows_task_xml(&xml)?;
+    let xml_bytes = encode_utf16_le_with_bom(&xml);
     let xml_path = std::env::temp_dir().join(format!(
         "zastava-cowork-task-{}.xml",
         std::process::id()
     ));
-    std::fs::write(&xml_path, xml.as_bytes())
+    std::fs::write(&xml_path, &xml_bytes)
         .map_err(|e| format!("failed to write task XML: {e}"))?;
     let xml_path_str = xml_path.to_string_lossy().into_owned();
     let args = build_schtasks_create_args(&xml_path_str);
@@ -699,71 +877,175 @@ fn register_cowork_guard_task() -> Result<(), String> {
         return Err("failed to spawn schtasks.exe".to_string());
     };
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = decode_windows_cmd_text(&out.stderr);
+        let stdout = decode_windows_cmd_text(&out.stdout);
+        let details = match (stderr.is_empty(), stdout.is_empty()) {
+            (false, false) => format!("{stderr} | {stdout}"),
+            (false, true) => stderr,
+            (true, false) => stdout,
+            (true, true) => "no output from schtasks.exe".to_string(),
+        };
         return Err(format!(
-            "schtasks.exe /Create failed (code={:?}): {stderr} {stdout}",
+            "schtasks.exe /Create failed (code={:?}): {details}",
             out.status.code()
         ));
     }
     Ok(())
 }
 
+/// Applies `Start = 3` (Manual) and stops `CoworkVMService` when `claude.exe` is not running.
+/// Because the scheduled task runs as `NT AUTHORITY\SYSTEM`, any permission/ACL denial when
+/// mutating `HKLM\...\CoworkVMService` or SCM under an Admin token is delegated to
+/// `trigger_cowork_guard_task()` instead of failing installation.
 #[cfg(target_os = "windows")]
 fn enforce_cowork_service_manual_and_stop() -> Result<(), String> {
     use crate::win_reg::{RootKey, get_dword, set_dword};
 
-    let current_start = get_dword(RootKey::HkeyLocalMachine, COWORK_SERVICE_REG_SUBKEY, "Start")?;
-    let Some(cur) = current_start else {
-        return Ok(());
-    };
-    if cur != 3 {
-        set_dword(
-            RootKey::HkeyLocalMachine,
-            COWORK_SERVICE_REG_SUBKEY,
-            "Start",
-            3,
-        )?;
-        let _ = run_hidden_cmd("sc.exe", &["config", COWORK_SERVICE_NAME, "start=", "demand"]);
+    let mut need_system_task = false;
+    match get_dword(RootKey::HkeyLocalMachine, COWORK_SERVICE_REG_SUBKEY, "Start") {
+        Ok(None) => return Ok(()),
+        Ok(Some(cur)) => {
+            if cur != 3 {
+                if let Err(err) = set_dword(
+                    RootKey::HkeyLocalMachine,
+                    COWORK_SERVICE_REG_SUBKEY,
+                    "Start",
+                    3,
+                ) {
+                    crate::diagnostics::record(
+                        "cowork_guard",
+                        &format!("Admin set_dword Start=3 fallback to SYSTEM task: {err}"),
+                    );
+                    need_system_task = true;
+                } else {
+                    match run_hidden_cmd(
+                        "sc.exe",
+                        &["config", COWORK_SERVICE_NAME, "start=", "demand"],
+                    ) {
+                        Some(out) if out.status.success() => {}
+                        Some(out) => {
+                            crate::diagnostics::record(
+                                "cowork_guard",
+                                &format!(
+                                    "Admin sc config demand fallback to SYSTEM task (code={:?}): {}",
+                                    out.status.code(),
+                                    decode_windows_cmd_text(&out.stderr)
+                                ),
+                            );
+                            need_system_task = true;
+                        }
+                        None => {
+                            crate::diagnostics::record(
+                                "cowork_guard",
+                                "Admin sc config demand spawn failed; fallback to SYSTEM task",
+                            );
+                            need_system_task = true;
+                        }
+                    }
+                }
+            }
+        }
+        Err(err) => {
+            crate::diagnostics::record(
+                "cowork_guard",
+                &format!("Admin get_dword Start fallback to SYSTEM task: {err}"),
+            );
+            need_system_task = true;
+        }
     }
+
     let running = run_hidden_cmd("sc.exe", &["query", COWORK_SERVICE_NAME])
         .filter(|o| o.status.success())
-        .map(|o| parse_sc_running(&String::from_utf8_lossy(&o.stdout)))
+        .map(|o| parse_sc_running(&decode_windows_cmd_text(&o.stdout)))
         .unwrap_or(false);
     if running && !is_claude_process_running() {
-        let _ = run_hidden_cmd("sc.exe", &["stop", COWORK_SERVICE_NAME]);
+        match run_hidden_cmd("sc.exe", &["stop", COWORK_SERVICE_NAME]) {
+            Some(out) if out.status.success() => {}
+            Some(out) => {
+                crate::diagnostics::record(
+                    "cowork_guard",
+                    &format!(
+                        "Admin sc stop fallback to SYSTEM task (code={:?}): {}",
+                        out.status.code(),
+                        decode_windows_cmd_text(&out.stderr)
+                    ),
+                );
+                need_system_task = true;
+            }
+            None => {
+                crate::diagnostics::record(
+                    "cowork_guard",
+                    "Admin sc stop spawn failed; fallback to SYSTEM task",
+                );
+                need_system_task = true;
+            }
+        }
+    }
+
+    if need_system_task {
+        if trigger_cowork_guard_task() {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            if let Ok(Some(cur)) =
+                get_dword(RootKey::HkeyLocalMachine, COWORK_SERVICE_REG_SUBKEY, "Start")
+                && cur != 3
+            {
+                let msg = format!(
+                    "SYSTEM task ran, but CoworkVMService Start is still {cur} instead of 3"
+                );
+                crate::diagnostics::record("cowork_guard", &msg);
+                eprintln!("Застава cowork_guard: {msg}");
+            }
+        } else {
+            let msg = "Registry/SCM fallback required SYSTEM task, but trigger_cowork_guard_task() failed";
+            crate::diagnostics::record("cowork_guard", msg);
+            eprintln!("Застава cowork_guard: {msg}");
+        }
     }
     Ok(())
 }
 
-/// Elevated helper entrypoint (`--install-cowork-guard`) launched via `ShellExecuteExW` (`runas`).
-/// Registers `\Zastava\CoworkVMServiceManualGuard` via `schtasks.exe /Create`, enforces `Start = 3`
-/// via `win_reg` on HKLM, and stops `CoworkVMService` via `sc.exe stop` when `claude.exe` is closed.
-pub fn run_install_cowork_guard_cli() -> i32 {
+#[cfg(target_os = "windows")]
+fn install_cowork_guard_direct() -> Result<(), String> {
+    register_cowork_guard_task()?;
+    enforce_cowork_service_manual_and_stop()
+}
+
+/// Runs the CoworkGuard installation logic and optionally writes fatal errors to `error_file`
+/// so an un-elevated parent process can surface exact Win32/`schtasks` diagnostics.
+pub fn run_install_cowork_guard_cli_with_error_file(error_file: Option<&std::path::Path>) -> i32 {
     if !crate::sysproxy::os_effects_enabled() {
         return 0;
     }
     #[cfg(target_os = "windows")]
     {
-        if let Err(err) = register_cowork_guard_task() {
+        if let Err(err) = install_cowork_guard_direct() {
             crate::diagnostics::record("cowork_guard", &err);
-            return 1;
-        }
-        if let Err(err) = enforce_cowork_service_manual_and_stop() {
-            crate::diagnostics::record("cowork_guard", &err);
+            eprintln!("Застава cowork_guard: {err}");
+            write_install_error_file(error_file, &err);
             return 1;
         }
         0
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = (error_file, write_install_error_file, read_install_error_file);
         0
     }
 }
 
-/// User-triggered install/repair of `\Zastava\CoworkVMServiceManualGuard` on Windows
-/// (requests UAC once via Win32 `ShellExecuteExW` with `lpVerb = "runas"`, `nShow = SW_HIDE`),
-/// plus immediate `Start = 3` + stop fix.
+/// Elevated helper entrypoint (`--install-cowork-guard`) launched via `ShellExecuteExW` (`runas`).
+/// Registers `\Zastava\CoworkVMServiceManualGuard` via `schtasks.exe /Create`, enforces `Start = 3`
+/// via `win_reg` on HKLM (falling back to the SYSTEM scheduled task on ACL denial), and stops
+/// `CoworkVMService` via `sc.exe stop` when `claude.exe` is closed.
+pub fn run_install_cowork_guard_cli() -> i32 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let error_file = parse_install_cli_args(&args).flatten();
+    run_install_cowork_guard_cli_with_error_file(error_file.as_deref())
+}
+
+/// User-triggered install/repair of `\Zastava\CoworkVMServiceManualGuard` on Windows.
+/// Runs directly when already elevated; otherwise requests UAC once via Win32 `ShellExecuteExW`
+/// (`lpVerb = "runas"`, `nShow = SW_HIDE`) with `--error-file` diagnostics forwarding.
 pub fn install_or_repair_cowork_guard() -> Result<CoworkGuardStatus, String> {
     if !crate::sysproxy::os_effects_enabled() {
         return Ok(get_cowork_guard_status());
@@ -771,9 +1053,16 @@ pub fn install_or_repair_cowork_guard() -> Result<CoworkGuardStatus, String> {
 
     #[cfg(target_os = "windows")]
     {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("Не удалось определить путь к приложению: {e}"))?;
-        win_elevate::run_elevated_install(&exe)?;
+        if win_elevate::is_current_process_elevated() {
+            if let Err(err) = install_cowork_guard_direct() {
+                crate::diagnostics::record("cowork_guard", &err);
+                return Err(format!("Ошибка настройки задачи планировщика: {err}"));
+            }
+        } else {
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("Не удалось определить путь к приложению: {e}"))?;
+            win_elevate::run_elevated_install(&exe)?;
+        }
         Ok(query_windows_status())
     }
     #[cfg(not(target_os = "windows"))]
@@ -914,5 +1203,90 @@ mod tests {
         assert!(!trigger_cowork_guard_task());
         assert!(install_or_repair_cowork_guard().is_ok());
         assert_eq!(run_install_cowork_guard_cli(), 0);
+        assert_eq!(run_install_cowork_guard_cli_with_error_file(None), 0);
+    }
+
+    #[test]
+    fn task_xml_has_utf16_encoding_and_omits_invalid_logontype() {
+        let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+        assert!(xml.starts_with(r#"<?xml version="1.0" encoding="UTF-16"?>"#));
+        assert!(!xml.contains("<LogonType>"));
+        assert!(!xml.to_ascii_lowercase().contains("serviceaccount"));
+        assert!(xml.contains("<UserId>S-1-5-18</UserId>"));
+        assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
+        assert!(validate_windows_task_xml(&xml).is_ok());
+
+        let utf8_bad = xml.replace("encoding=\"UTF-16\"", "encoding=\"UTF-8\"");
+        assert!(validate_windows_task_xml(&utf8_bad).is_err());
+
+        // PowerShell's ServiceAccount enum is invalid in Task Scheduler 1.2 XML XSD.
+        let invalid_logon = xml.replace(
+            "<UserId>S-1-5-18</UserId>",
+            "<UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType>",
+        );
+        assert!(validate_windows_task_xml(&invalid_logon).is_err());
+
+        let missing_sid = xml.replace("<UserId>S-1-5-18</UserId>", "");
+        assert!(validate_windows_task_xml(&missing_sid).is_err());
+
+        // Valid XSD enum value (e.g. S4U) remains accepted if ever specified.
+        let valid_enum = xml.replace(
+            "<UserId>S-1-5-18</UserId>",
+            "<UserId>S-1-5-18</UserId><LogonType>S4U</LogonType>",
+        );
+        assert!(validate_windows_task_xml(&valid_enum).is_ok());
+    }
+
+    #[test]
+    fn encodes_task_xml_as_utf16_le_with_bom() {
+        let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+        let bytes = encode_utf16_le_with_bom(&xml);
+        assert!(bytes.len() > 2);
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
+        assert_eq!((bytes.len() - 2) % 2, 0);
+        assert_eq!(decode_windows_cmd_text(&bytes), xml.trim());
+    }
+
+    #[test]
+    fn parses_install_cli_args_and_error_file_roundtrip() {
+        assert_eq!(parse_install_cli_args(&[]), None);
+        assert_eq!(
+            parse_install_cli_args(&["--cleanup".to_string()]),
+            None
+        );
+        assert_eq!(
+            parse_install_cli_args(&[INSTALL_COWORK_GUARD_ARG.to_string()]),
+            Some(None)
+        );
+        assert_eq!(
+            parse_install_cli_args(&[
+                INSTALL_COWORK_GUARD_ARG.to_string(),
+                COWORK_ERROR_FILE_ARG.to_string(),
+                r"C:\Temp\err file.txt".to_string()
+            ]),
+            Some(Some(std::path::PathBuf::from(r"C:\Temp\err file.txt")))
+        );
+        assert_eq!(
+            parse_install_cli_args(&[
+                INSTALL_COWORK_GUARD_ARG.to_string(),
+                format!("{COWORK_ERROR_FILE_ARG}=\"C:\\Temp\\err.txt\"")
+            ]),
+            Some(Some(std::path::PathBuf::from(r"C:\Temp\err.txt")))
+        );
+
+        let params = build_elevated_cli_params(Some(std::path::Path::new("/tmp/cowork.err")));
+        assert_eq!(
+            params,
+            "--install-cowork-guard --error-file \"/tmp/cowork.err\""
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let err_path = temp.path().join("err.txt");
+        assert_eq!(read_install_error_file(&err_path), None);
+        write_install_error_file(Some(&err_path), "schtasks.exe /Create failed (code=Some(1))");
+        assert_eq!(
+            read_install_error_file(&err_path).as_deref(),
+            Some("schtasks.exe /Create failed (code=Some(1))")
+        );
     }
 }

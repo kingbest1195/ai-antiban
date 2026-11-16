@@ -297,9 +297,23 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const activeReport = reports.anthropic || reports.openai || reports.gemini || null;
+  const disabledSet = useMemo(
+    () => new Set((state?.disabled_providers ?? []).map((p) => p.toLowerCase())),
+    [state?.disabled_providers],
+  );
+  const activeReport =
+    (!disabledSet.has("anthropic") && reports.anthropic) ||
+    (!disabledSet.has("openai") && reports.openai) ||
+    (!disabledSet.has("gemini") && reports.gemini) ||
+    reports.anthropic ||
+    reports.openai ||
+    reports.gemini ||
+    null;
   /** Худший из трёх отчётов: его показывает «Проверки» без выбранного сервиса, по нему считается бейдж вкладки. */
-  const checksReport = useMemo(() => pickWorstReport(reports)?.report ?? null, [reports]);
+  const checksReport = useMemo(
+    () => pickWorstReport(reports, state?.disabled_providers)?.report ?? null,
+    [reports, state?.disabled_providers],
+  );
 
   // Самолечение на старте: если первый аудит упёрся в холодный старт сети/PAC и вернулся без IP или провайдера,
   // перепроверяем сами, до шести раз с шагом 1,5 с.

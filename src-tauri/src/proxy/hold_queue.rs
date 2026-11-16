@@ -18,6 +18,8 @@ pub const PHASE_FAILED: &str = "failed";
 pub enum HoldResolution {
     Allow,
     Block,
+    /// Pending hold was superseded by network recovery or policy/route change; do not block.
+    Superseded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,7 +170,7 @@ fn default_phase() -> String {
 
 struct HoldEntry {
     provider_id: String,
-    sender: oneshot::Sender<HoldResolution>,
+    senders: Vec<oneshot::Sender<HoldResolution>>,
 }
 
 #[derive(Clone, Default)]
@@ -231,18 +233,67 @@ impl HoldQueue {
             id,
             HoldEntry {
                 provider_id: provider.to_string(),
-                sender: tx,
+                senders: vec![tx],
             },
         );
         rx
     }
 
-    /// Resolves a single held connection by ID.
+    /// Registers a critical provider hold or coalesces onto an already active non-simulation hold
+    /// for `provider`. Returns `(hold_id, rx, is_leader)` where `is_leader == true` only for the
+    /// connection that created the hold (so callers emit/show the popup once per active hold).
+    pub async fn register_or_coalesce_provider(
+        &self,
+        id: String,
+        provider: &str,
+    ) -> (String, oneshot::Receiver<HoldResolution>, bool) {
+        let (tx, rx) = oneshot::channel();
+        let mut w = self.entries.write().await;
+        if let Some((existing_id, entry)) = w
+            .iter_mut()
+            .find(|(k, e)| !k.starts_with("sim-") && e.provider_id == provider)
+        {
+            entry.senders.push(tx);
+            return (existing_id.clone(), rx, false);
+        }
+        w.insert(
+            id.clone(),
+            HoldEntry {
+                provider_id: provider.to_string(),
+                senders: vec![tx],
+            },
+        );
+        (id, rx, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn active_entry_count(&self) -> usize {
+        self.entries.read().await.len()
+    }
+
+    /// Returns `true` when `id` is currently waiting in the hold queue (not yet resolved,
+    /// removed, or superseded).
+    pub async fn is_active(&self, id: &str) -> bool {
+        self.entries.read().await.contains_key(id)
+    }
+
+    /// Returns `true` when any real (non-simulation) hold entry is currently active.
+    pub async fn has_active_non_sim_holds(&self) -> bool {
+        self.entries
+            .read()
+            .await
+            .keys()
+            .any(|k| !k.starts_with("sim-"))
+    }
+
+    /// Resolves a single held connection (and any coalesced waiters on the same hold ID).
     pub async fn resolve(&self, id: &str, resolution: HoldResolution) -> bool {
         let mut w = self.entries.write().await;
         self.clear_alert_if(id);
         if let Some(entry) = w.remove(id) {
-            let _ = entry.sender.send(resolution);
+            for tx in entry.senders {
+                let _ = tx.send(resolution);
+            }
             true
         } else {
             false
@@ -266,8 +317,10 @@ impl HoldQueue {
         for key in keys_to_remove {
             self.clear_alert_if(&key);
             if let Some(entry) = w.remove(&key) {
-                let _ = entry.sender.send(resolution);
-                resolved += 1;
+                for tx in entry.senders {
+                    let _ = tx.send(resolution);
+                    resolved += 1;
+                }
             }
         }
         resolved
@@ -278,6 +331,23 @@ impl HoldQueue {
         let mut w = self.entries.write().await;
         self.clear_alert_if(id);
         w.remove(id);
+    }
+
+    /// Resolves and drains all currently pending holds as [`HoldResolution::Superseded`]
+    /// so orphaned 60s hold timers cannot fire and block providers after network recovery.
+    pub async fn cancel_all_superseded(&self) -> usize {
+        let mut w = self.entries.write().await;
+        let drained: Vec<(String, HoldEntry)> = w.drain().collect();
+        let mut resolved = 0;
+        for (key, entry) in drained {
+            self.clear_alert_if(&key);
+            for tx in entry.senders {
+                let _ = tx.send(HoldResolution::Superseded);
+                resolved += 1;
+            }
+        }
+        *self.alert_slot() = None;
+        resolved
     }
 }
 
@@ -332,5 +402,87 @@ mod tests {
         let res3 = queue.resolve("req-3", HoldResolution::Block).await;
         assert!(res3);
         assert_eq!(rx3.await.unwrap(), HoldResolution::Block);
+    }
+
+    #[tokio::test]
+    async fn test_coalesces_concurrent_provider_holds_and_skips_simulations() {
+        let queue = HoldQueue::new();
+        let _sim_rx = queue
+            .register("sim-123".to_string(), "anthropic")
+            .await;
+
+        let (id1, rx1, leader1) = queue
+            .register_or_coalesce_provider("hold-1".to_string(), "anthropic")
+            .await;
+        assert!(leader1);
+        assert_eq!(id1, "hold-1");
+
+        let (id2, rx2, leader2) = queue
+            .register_or_coalesce_provider("hold-2".to_string(), "anthropic")
+            .await;
+        assert!(!leader2);
+        assert_eq!(id2, "hold-1");
+        assert_eq!(queue.active_entry_count().await, 2); // sim-123 + hold-1
+
+        assert!(queue.resolve(&id1, HoldResolution::Allow).await);
+        assert_eq!(rx1.await.unwrap(), HoldResolution::Allow);
+        assert_eq!(rx2.await.unwrap(), HoldResolution::Allow);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_all_superseded_drains_all_holds_and_clears_alert() {
+        let queue = HoldQueue::new();
+        let (id1, rx1, leader1) = queue
+            .register_or_coalesce_provider("hold-1".to_string(), "anthropic")
+            .await;
+        assert!(leader1);
+        let (_id2, rx2, leader2) = queue
+            .register_or_coalesce_provider("hold-2".to_string(), "anthropic")
+            .await;
+        assert!(!leader2);
+        let rx3 = queue.register("hold-3".to_string(), "openai").await;
+
+        queue.set_alert(RiskInterceptPayload {
+            id: id1,
+            provider: ProviderId::Anthropic,
+            host: "api.anthropic.com".to_string(),
+            report: None,
+            ttl_seconds: DEFAULT_HOLD_TTL_SECS,
+            scope: "provider".to_string(),
+            network_change: None,
+            is_simulation: false,
+            detected_at_ms: 0,
+            phase: PHASE_READY.to_string(),
+            gate_reason: None,
+        });
+        assert!(queue.current_alert().is_some());
+        assert_eq!(queue.active_entry_count().await, 2);
+
+        let cancelled = queue.cancel_all_superseded().await;
+        assert_eq!(cancelled, 3);
+        assert_eq!(queue.active_entry_count().await, 0);
+        assert!(queue.current_alert().is_none());
+        assert_eq!(rx1.await.unwrap(), HoldResolution::Superseded);
+        assert_eq!(rx2.await.unwrap(), HoldResolution::Superseded);
+        assert_eq!(rx3.await.unwrap(), HoldResolution::Superseded);
+    }
+
+    #[tokio::test]
+    async fn test_is_active_and_has_active_non_sim_holds() {
+        let queue = HoldQueue::new();
+        assert!(!queue.is_active("hold-1").await);
+        assert!(!queue.has_active_non_sim_holds().await);
+
+        let _sim_rx = queue.register("sim-1".to_string(), "anthropic").await;
+        assert!(queue.is_active("sim-1").await);
+        assert!(!queue.has_active_non_sim_holds().await);
+
+        let _real_rx = queue.register("hold-1".to_string(), "anthropic").await;
+        assert!(queue.is_active("hold-1").await);
+        assert!(queue.has_active_non_sim_holds().await);
+
+        queue.cancel_all_superseded().await;
+        assert!(!queue.is_active("hold-1").await);
+        assert!(!queue.has_active_non_sim_holds().await);
     }
 }

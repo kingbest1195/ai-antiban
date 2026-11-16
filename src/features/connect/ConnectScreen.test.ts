@@ -94,4 +94,30 @@ describe("resolveProviderExitCountry и ConnectScreen", () => {
     ).toBe("all");
     expect(getAffectedProvidersForRoute("hk-r", null)).toBe("all");
   });
+
+  it("показывает кнопку сброса при profile_route_error у активного профиля", () => {
+    const html = renderToStaticMarkup(
+      createElement(ConnectScreen, {
+        state: {
+          pinned_ip: null,
+          strict_pinning_enabled: true,
+          ip_history: {},
+          session_allowed_providers: [],
+          blocked_providers: [],
+        },
+        routesSnapshot: {
+          ...snapshot,
+          profile_route_error: "Ключ профиля Claude удалён — трафик Anthropic остановлен",
+        },
+        currentIp: "95.165.10.22",
+        currentCountry: "DE",
+        onRefreshState: vi.fn(async () => {}),
+        onOpenGuide: vi.fn(),
+        onToast: vi.fn(),
+      }),
+    );
+
+    expect(html).toContain(copy.routes.profileErrorTitle);
+    expect(html).toContain(copy.routes.resetToDirect);
+  });
 });

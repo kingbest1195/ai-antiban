@@ -15,3 +15,4 @@
 .zs-settings__source{margin:var(--space-3) 0 0}
 .zs-settings__rollback-title{display:inline-flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
 .zs-settings__rollback-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1)}
+.zs-settings__exc-actions{margin-top:var(--space-2);display:flex;justify-content:flex-end}

@@ -18,6 +18,8 @@ pub mod updater;
 pub mod win_reg;
 
 // Backward-compatible re-exports: these used to live in the crate root.
+#[cfg(any(test, feature = "test-support"))]
+pub use app::reconcile_active_profile_binding_async;
 pub use commands::AppContext;
 pub use commands::coverage::get_coverage_snapshot;
 pub use commands::crash_test::CrashTestStepResult;

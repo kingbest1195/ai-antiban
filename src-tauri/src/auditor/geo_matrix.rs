@@ -170,6 +170,8 @@ impl ProviderId {
             "people-pa.googleapis.com",
             "signaler-pa.googleapis.com",
             "jnn-pa.googleapis.com",
+            "oauth2.googleapis.com",
+            "iamcredentials.googleapis.com",
             "myactivity.google.com",
             "myaccount.google.com",
         ];
@@ -838,6 +840,8 @@ mod tests {
             "people-pa.googleapis.com",
             "signaler-pa.googleapis.com",
             "jnn-pa.googleapis.com",
+            "oauth2.googleapis.com",
+            "iamcredentials.googleapis.com",
             "myactivity.google.com",
             "myaccount.google.com",
         ] {

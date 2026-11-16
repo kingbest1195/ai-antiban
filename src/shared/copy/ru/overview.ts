@@ -33,7 +33,7 @@ export const overview = {
       `${passed} из ${total} · ${unknown} не удалось проверить`,
     pinned: "IP закреплён",
     pinChanged: "IP сменился",
-    key: "Ключ Заставы",
+    key: "ВПН Заставы",
   },
   guard: {
     title: "Защита",
@@ -52,8 +52,10 @@ export const overview = {
     strictOff: "Выключить строгий режим",
   },
   service: {
-    session: "Блок снят на эту сессию",
+    session: "Разрешён для текущего IP (исключение в Настройках)",
     review: "Подробности — в «Проверках»",
+    warnBadge: "Есть замечания",
+    warnNote: "Есть замечания — сервис работает и не заблокирован",
     blocked: "Запросы удерживаются шлюзом",
     unblock: "Снять блок",
     unblockHint: "Проверим текущий адрес и снимем блокировку",
@@ -61,16 +63,18 @@ export const overview = {
     detailLabel: "Подробности по сервису",
     fix: "Что исправить",
     forceAllow: "Разрешить принудительно",
-    forceHint: "Действует до смены сети или перезапуска Заставы",
+    forceHint: "Сохранит постоянное исключение для этого сервиса и текущего IP выхода (управляется в Настройках)",
     noReason: "Подробности — в «Проверках».",
     confirm: {
       title: (name: string) => `Разрешить ${name} принудительно?`,
       text: (name: string) =>
-        `Запросы к ${name} пойдут без проверки, реальный IP может раскрыться. Разрешение действует до смены сети или перезапуска Заставы.`,
+        `Запросы к ${name} пойдут без проверки, реальный IP может раскрыться. Постоянное исключение для ${name} и текущего IP выхода сохранится и будет управляться в Настройках.`,
       action: "Разрешить без проверки",
     },
     missing: "Данных пока нет",
     checking: "Проверяем…",
+    monitoringDisabled: "Мониторинг отключён",
+    monitoringDisabledNote: "Перехват, проверки и уведомления отключены в Настройках",
     unprotected: "Без защиты",
     unprotectedNote: "Защита выключена — запросы к ИИ идут напрямую, минуя Заставу.",
     stopped: "Остановлен",
@@ -83,7 +87,7 @@ export const overview = {
   },
   browsers: { title: "Браузеры", sub: "Chrome, Safari, Arc, Edge, Яндекс" },
   desktopApps: { title: "Десктопные приложения", sub: "Claude Desktop, ChatGPT Desktop" },
-  editors: { title: "IDE и терминал", sub: "Antigravity, Cursor, VS Code, Windsurf, Claude Code, Gemini CLI" },
+  editors: { title: "IDE и терминал", sub: "Antigravity, Cursor, VS Code, Windsurf, Claude Code, Gemini CLI, OpenCode" },
   stats: {
     requests: "запросов к ИИ проверено",
     leaks: "утечек остановлено",
@@ -140,7 +144,7 @@ export const overview = {
     },
     review: {
       title: "У адреса есть замечания",
-      text: "ИИ-сервис может запросить дополнительную проверку. Подробности — во вкладке «Проверки».",
+      text: "Доступ к ИИ открыт, но сервис может запросить дополнительную проверку. Подробности — во вкладке «Проверки».",
     },
     incomplete: {
       title: "Проверено частично",
@@ -153,8 +157,8 @@ export const overview = {
       action: "Что нового",
     },
     expiringKey: {
-      titleSoon: "Срок ключа Заставы заканчивается",
-      titleExpired: "Срок ключа Заставы истёк",
+      titleSoon: "Срок ВПН Заставы заканчивается",
+      titleExpired: "Срок ВПН Заставы истёк",
       text: (label: string, remaining: string) =>
         `Ключ «${label}» (${remaining}). Продлите его в @zastava_app_bot, чтобы ИИ-сервисы не остановились.`,
       renew: "Продлить",

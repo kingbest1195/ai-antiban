@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
@@ -254,6 +254,9 @@ pub struct NetworkResolver {
     client: reqwest::Client,
     cache: Arc<RwLock<HashMap<CacheKey, CachedTelemetry>>>,
     resolve_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Monotonic generation bumped on every `invalidate_cache()` / `invalidate_route()` call so
+    /// an in-flight `cascade_query` that started before invalidation never poisons `cache`.
+    cache_generation: Arc<AtomicU64>,
     /// Port of the local gateway (0 = unknown), used to refuse entry nodes that point back at it.
     gateway_port: Arc<AtomicU16>,
     /// Provider-independent check results (DNSBL, IPv6, OS); dropped together with the telemetry
@@ -282,6 +285,7 @@ impl NetworkResolver {
             client,
             cache: Arc::new(RwLock::new(HashMap::new())),
             resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
+            cache_generation: Arc::new(AtomicU64::new(0)),
             gateway_port: Arc::new(AtomicU16::new(0)),
             check_cache: Arc::default(),
         }
@@ -303,12 +307,74 @@ impl NetworkResolver {
 
     /// Invalidate all cached telemetry (direct and every route).
     pub async fn invalidate_cache(&self) {
+        self.cache_generation.fetch_add(1, Ordering::SeqCst);
         self.cache.write().await.clear();
         self.check_cache.clear().await;
     }
 
+    /// Invalidate only the direct-path telemetry cache (preserving per-route remote egress telemetry
+    /// when only the local host VPN/network interface changes).
+    pub async fn invalidate_direct_cache(&self) {
+        self.cache_generation.fetch_add(1, Ordering::SeqCst);
+        self.cache.write().await.remove(&None);
+        self.check_cache.clear().await;
+    }
+
+    /// Resolve direct egress telemetry using a pluggable `IpProbe` (for offline tests with
+    /// `Auditor::with_env`), honoring `cache[&None]` so pre-seeded `set_cached` telemetry works.
+    pub async fn resolve_direct_via_probe(
+        &self,
+        probe: &dyn IpProbe,
+        force_refresh: bool,
+    ) -> Result<NetworkTelemetry, String> {
+        self.resolve_cached_or_fetch(None, None, force_refresh, || async {
+            let limit = Duration::from_millis(REQUEST_TIMEOUT_MS);
+            if let HttpProbeOutcome::Response { status: 200..=299, body } =
+                probe.get("https://ipwho.is/", limit).await
+                && let Ok(parsed) = serde_json::from_str::<IpWhoIsResponse>(&body)
+                && let (Some(ip), Some(cc)) = (parsed.ip, parsed.country_code)
+            {
+                let (asn, org, isp, hostname) = match parsed.connection {
+                    Some(conn) => (conn.asn, conn.org, conn.isp, conn.domain),
+                    None => (None, None, None, None),
+                };
+                return Ok(NetworkTelemetry {
+                    ip,
+                    country_code: cc.to_uppercase(),
+                    hostname,
+                    asn,
+                    org,
+                    isp,
+                    timezone: parsed.timezone.and_then(|tz| tz.id),
+                    resolved_at: current_timestamp(),
+                });
+            }
+
+            if let HttpProbeOutcome::Response { status: 200..=299, body } =
+                probe.get("https://1.1.1.1/cdn-cgi/trace", limit).await
+                && let Some(trace) = parse_cloudflare_trace(&body)
+                && let Some(cc) = trace.loc
+            {
+                return Ok(NetworkTelemetry {
+                    ip: trace.ip,
+                    country_code: cc.to_uppercase(),
+                    hostname: None,
+                    asn: None,
+                    org: None,
+                    isp: None,
+                    timezone: None,
+                    resolved_at: current_timestamp(),
+                });
+            }
+
+            Err("All offline geo probes failed".to_string())
+        })
+        .await
+    }
+
     /// Invalidate cached telemetry of one route.
     pub async fn invalidate_route(&self, route_id: &str) {
+        self.cache_generation.fetch_add(1, Ordering::SeqCst);
         self.cache.write().await.remove(&Some(route_id.to_string()));
     }
 
@@ -411,6 +477,44 @@ impl NetworkResolver {
         usable.then(|| telemetry.clone())
     }
 
+    async fn resolve_cached_or_fetch<F, Fut>(
+        &self,
+        key: CacheKey,
+        fp: Option<u64>,
+        force_refresh: bool,
+        fetch: F,
+    ) -> Result<NetworkTelemetry, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<NetworkTelemetry, String>>,
+    {
+        if !force_refresh && let Some(t) = self.cached(&key, false, false, fp).await {
+            return Ok(t);
+        }
+
+        // Coalesce concurrent cold-start / multi-provider probes so we don't fire 4 simultaneous
+        // requests to ipwho.is / ipinfo.io and trigger rate limits or timeouts on startup.
+        let _guard = self.resolve_lock.lock().await;
+        let generation = self.cache_generation.load(Ordering::SeqCst);
+        if let Some(t) = self.cached(&key, force_refresh, true, fp).await {
+            return Ok(t);
+        }
+
+        let telemetry = fetch().await?;
+
+        let mut cache = self.cache.write().await;
+        if self.cache_generation.load(Ordering::SeqCst) == generation {
+            cache.insert(
+                key,
+                CachedTelemetry {
+                    telemetry: telemetry.clone(),
+                    route_fp: fp,
+                },
+            );
+        }
+        Ok(telemetry)
+    }
+
     /// Resolve egress telemetry directly (`None`) or through a route's entries (tried in order).
     pub async fn resolve_with_route(
         &self,
@@ -419,31 +523,13 @@ impl NetworkResolver {
     ) -> Result<NetworkTelemetry, String> {
         let key: CacheKey = route.map(|r| r.id.clone());
         let fp = route.map(route_fingerprint);
-
-        if !force_refresh && let Some(t) = self.cached(&key, false, false, fp).await {
-            return Ok(t);
-        }
-
-        // Coalesce concurrent cold-start / multi-provider probes so we don't fire 4 simultaneous
-        // requests to ipwho.is / ipinfo.io and trigger rate limits or timeouts on startup.
-        let _guard = self.resolve_lock.lock().await;
-        if let Some(t) = self.cached(&key, force_refresh, true, fp).await {
-            return Ok(t);
-        }
-
-        let telemetry = match route {
-            None => self.cascade_query(&self.client).await?,
-            Some(r) => self.cascade_via_route(r).await?,
-        };
-
-        self.cache.write().await.insert(
-            key,
-            CachedTelemetry {
-                telemetry: telemetry.clone(),
-                route_fp: fp,
-            },
-        );
-        Ok(telemetry)
+        self.resolve_cached_or_fetch(key, fp, force_refresh, || async {
+            match route {
+                None => self.cascade_query(&self.client).await,
+                Some(r) => self.cascade_via_route(r).await,
+            }
+        })
+        .await
     }
 
     async fn cascade_via_route(&self, route: &Route) -> Result<NetworkTelemetry, String> {
@@ -1957,5 +2043,105 @@ mod tests {
         let policy_msg = format_checked_entry_error("127.0.0.1:8899", &policy_err);
         assert!(policy_msg.contains("rejected:"), "{policy_msg}");
         assert!(!policy_msg.contains("DNS lookup failed:"), "{policy_msg}");
+    }
+
+    #[tokio::test]
+    async fn invalidate_cache_mid_flight_discards_stale_telemetry_and_clears_check_cache() {
+        use std::sync::atomic::AtomicUsize;
+
+        let resolver = NetworkResolver::new();
+        let _ = resolver
+            .check_cache()
+            .os
+            .get_or_compute("tz:stale", Duration::from_secs(60), |_| true, async {
+                CheckResult::ok("T", "stale")
+            })
+            .await;
+        assert!(resolver.check_cache().os.contains_key("tz:stale").await);
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let started_bg = Arc::clone(&started);
+        let release_bg = Arc::clone(&release);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_bg = Arc::clone(&calls);
+
+        let resolver_bg = resolver.clone();
+        let inflight = tokio::spawn(async move {
+            resolver_bg
+                .resolve_cached_or_fetch(None, None, false, || async move {
+                    calls_bg.fetch_add(1, Ordering::SeqCst);
+                    started_bg.notify_one();
+                    release_bg.notified().await;
+                    Ok(NetworkTelemetry {
+                        ip: "5.5.5.5".to_string(),
+                        country_code: "RU".to_string(),
+                        hostname: None,
+                        asn: Some(9009),
+                        org: None,
+                        isp: Some("OldVPN".to_string()),
+                        timezone: None,
+                        resolved_at: current_timestamp(),
+                    })
+                })
+                .await
+        });
+
+        // Wait until the slow resolve is mid-flight inside `resolve_lock`, then invalidate.
+        started.notified().await;
+        resolver.invalidate_cache().await;
+        assert!(
+            resolver.check_cache().os.is_empty().await,
+            "invalidate_cache must clear CheckCache immediately"
+        );
+
+        release.notify_one();
+        let stale_ret = inflight.await.unwrap().unwrap();
+        assert_eq!(stale_ret.ip, "5.5.5.5");
+
+        // Stale result MUST NOT poison `self.cache` for subsequent lookups.
+        assert!(
+            resolver.cached_direct_country("5.5.5.5").await.is_none(),
+            "stale IP must be discarded instead of poisoning cache"
+        );
+
+        let calls_next = Arc::clone(&calls);
+        let fresh = resolver
+            .resolve_cached_or_fetch(None, None, false, || async move {
+                calls_next.fetch_add(1, Ordering::SeqCst);
+                Ok(NetworkTelemetry {
+                    ip: "145.241.193.245".to_string(),
+                    country_code: "GB".to_string(),
+                    hostname: None,
+                    asn: Some(31898),
+                    org: None,
+                    isp: Some("PinnedVPS".to_string()),
+                    timezone: None,
+                    resolved_at: current_timestamp(),
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(fresh.ip, "145.241.193.245");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            resolver
+                .cached_direct_country("145.241.193.245")
+                .await
+                .as_deref(),
+            Some("GB")
+        );
+
+        // Next lookup uses the newly populated clean cache without re-fetching.
+        let calls_cached = Arc::clone(&calls);
+        let hit = resolver
+            .resolve_cached_or_fetch(None, None, false, || async move {
+                calls_cached.fetch_add(1, Ordering::SeqCst);
+                Err("should hit cache".to_string())
+            })
+            .await
+            .unwrap();
+        assert_eq!(hit.ip, "145.241.193.245");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

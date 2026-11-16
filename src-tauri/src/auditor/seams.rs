@@ -1149,7 +1149,7 @@ impl AuditEnv {
 // Fakes for tests (no network, no processes)
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod fakes {
     use super::*;
     use std::collections::HashMap;

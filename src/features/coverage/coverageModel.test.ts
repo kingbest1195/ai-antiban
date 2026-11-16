@@ -44,6 +44,8 @@ describe("режим «Только ИИ-клиенты и IDE»", () => {
   });
   it("ИИ-клиенты терминала и приложения не из терминала этого статуса не получают", () => {
     expect(viewOf(app("claude-code", "off", { category: "cli" }), {}, 0, "ai_only")).toBe("off");
+    expect(viewOf(app("gemini-cli", "off", { category: "cli" }), {}, 0, "ai_only")).toBe("off");
+    expect(viewOf(app("opencode", "off", { category: "cli" }), {}, 0, "ai_only")).toBe("off");
     expect(viewOf(app("vscode", "off", { category: "ide" }), {}, 0, "ai_only")).toBe("off");
   });
   it("«напрямую» не заставляет опрашивать каждые 5 секунд", () => {
@@ -120,6 +122,8 @@ describe("uncoveredAiApps и coverageNeedsAttention: основание жёлт
     expect(uncoveredAiApps(snap([app("cursor", "off")])).map((a) => a.id)).toEqual(["cursor"]);
     expect(uncoveredAiApps(snap([app("claude-desktop", "off", { category: "desktop" })])).map((a) => a.id)).toEqual(["claude-desktop"]);
     expect(uncoveredAiApps(snap([app("claude-code", "off", { category: "cli" })])).map((a) => a.id)).toEqual(["claude-code"]);
+    expect(uncoveredAiApps(snap([app("opencode", "off", { category: "cli" })])).map((a) => a.id)).toEqual(["opencode"]);
+    expect(coverageNeedsAttention(snap([app("opencode", "off", { category: "cli", bypass_suspected: true })]))).toBe(true);
   });
   it("confirmed и configured покрыты, not_installed не считается", () => {
     expect(coverageNeedsAttention(snap([app("a", "confirmed"), app("b", "configured"), app("c", "not_installed")]))).toBe(false);

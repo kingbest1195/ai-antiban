@@ -20,7 +20,7 @@
 .guides-mail .guides-label{margin:0}
 .guides-mail .zs-row__trail{color:var(--ink)}
 
-/* Карточки хостингов и сервисов карт: строка с переходом, описание, бейджи, промокод */
+/* Карточки хостингов и сервисов карт: строка с переходом, описание, бейджи */
 .guides-offers{margin:0;padding:0;list-style:none}
 .guides-offer{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3) 0;border-top:1px solid var(--line)}
 .guides-offer:first-child{border-top:0;padding-top:var(--space-1)}

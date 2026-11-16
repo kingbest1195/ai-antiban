@@ -31,6 +31,25 @@ describe("resolvePinnedIp: попровайдерный и глобальный 
     expect(resolvePinnedIp({ pinned_ip: "1.1.1.1" }, "gemini")).toBe("1.1.1.1");
     expect(resolvePinnedIp(null, "anthropic")).toBeNull();
   });
+
+  it("не подмешивает default/pinned_ip для провайдера на активном маршруте Заставы", () => {
+    const routedState = {
+      pinned_ip: "1.1.1.1",
+      pinned_ips: { default: "2.2.2.2", openai: "3.3.3.3" },
+      profile_route_id: "route-a",
+      default_route_id: null,
+      provider_routes: {},
+    };
+    expect(resolvePinnedIp(routedState, "anthropic")).toBeNull();
+    expect(resolvePinnedIp(routedState, "openai")).toBe("3.3.3.3");
+    expect(resolvePinnedIp(routedState, "gemini")).toBe("2.2.2.2");
+
+    const routedWithKeyPin = {
+      ...routedState,
+      pinned_ips: { default: "2.2.2.2", anthropic: "45.45.45.45" },
+    };
+    expect(resolvePinnedIp(routedWithKeyPin, "anthropic")).toBe("45.45.45.45");
+  });
 });
 
 describe("formatCountryWithCode и isCountryBlockedForProvider", () => {

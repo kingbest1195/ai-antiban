@@ -5,31 +5,8 @@ import { VPS_PROVIDERS } from "./providers";
 import type { VpsProvider } from "./providers";
 import { useGuide } from "./context";
 
-/** Кнопка «скопировать промокод»: подпись — сам код, после клика — «Скопировано». */
-export function PromoButton({ id, code, name }: { id: string; code: string; name: string }) {
-  const { copiedId, copy } = useGuide();
-  const done = copiedId === id;
-  return (
-    <>
-      <Button
-        size="sm"
-        icon={done ? "check" : "copy"}
-        aria-label={guides.actions.copyPromoAria(code, name)}
-        onClick={() =>
-          copy(id, code, { title: guides.toast.promoCopied, text: guides.toast.promoCopiedText(code, name) })
-        }
-      >
-        {done ? common.copied : <span className="zs-mono">{code}</span>}
-      </Button>
-      <span className="zs-sr" role="status">
-        {done ? common.copied : ""}
-      </span>
-    </>
-  );
-}
-
 /**
- * Хостинги: строка с переходом на сайт (партнёрская ссылка без изменений) и промокод под ней.
+ * Хостинги: строка с кнопкой перехода на сайт (партнёрская ссылка без изменений).
  * compact — название, конфигурация, цена; full — ещё описание, бейдж и локации.
  */
 export function HostingList({ variant }: { variant: "compact" | "full" }) {
@@ -47,14 +24,13 @@ export function HostingList({ variant }: { variant: "compact" | "full" }) {
           <Row
             as="div"
             icon="globe"
-            title={
-              <>
-                {vps.name}
-                <span className="zs-sr">{common.openSite}</span>
-              </>
-            }
+            title={vps.name}
             sub={variant === "compact" ? `${vps.specs} · ${vps.locations.join(", ")}` : vps.tier}
-            onClick={() => open(vps)}
+            trail={
+              <Button size="sm" variant="secondary" onClick={() => open(vps)}>
+                {common.goTo}
+              </Button>
+            }
           />
           {variant === "full" && (
             <>
@@ -73,7 +49,6 @@ export function HostingList({ variant }: { variant: "compact" | "full" }) {
           )}
           <div className="guides-offer__meta">
             {variant === "compact" ? <Badge tone="info">{vps.price}</Badge> : <Badge tone="info">{vps.badge}</Badge>}
-            <PromoButton id={vps.id} code={vps.promoCode} name={vps.name} />
           </div>
         </li>
       ))}

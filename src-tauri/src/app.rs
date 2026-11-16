@@ -51,6 +51,7 @@ pub fn run() {
             init_alert_popup(app);
 
             let (app_state, risk_auditor) = init_services(app)?;
+            reconcile_active_profile_on_startup(&app_state);
 
             let (guard_for_watcher, pac_url) = start_proxy(app, &risk_auditor, &app_state);
             app.manage(guard_for_watcher.clone());
@@ -138,6 +139,9 @@ pub fn run() {
             commands::audit::allow_provider_session,
             commands::audit::unblock_provider_cmd,
             commands::audit::verify_and_unblock_provider,
+            commands::audit::set_provider_monitoring,
+            commands::audit::remove_trusted_exception,
+            commands::audit::clear_trusted_exceptions,
             commands::interception::resolve_interception,
             commands::interception::simulate_interception,
             commands::interception::take_pending_alert,
@@ -272,6 +276,84 @@ fn init_services(
     Ok((app_state, risk_auditor))
 }
 
+/// Reconciles the active Claude profile's route and `"anthropic"` pinned IP from
+/// `profiles.json` into `state.json` before the proxy server and guard start.
+pub async fn reconcile_active_profile_binding_async(
+    app_state: &state::AppState,
+    binding: auditor::profile_switcher::ActiveProfileBindingState,
+) {
+    let st = app_state.get_data().await;
+    let current_anthropic_pin = st
+        .pinned_ips
+        .get(state::PROVIDER_ANTHROPIC)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let target_pin = binding
+        .bound_ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if current_anthropic_pin != target_pin
+        && let Err(err) = app_state
+            .set_pinned_ip_for(state::PROVIDER_ANTHROPIC, target_pin.map(str::to_string))
+            .await
+    {
+        crate::diagnostics::record("startup_profile", &err.to_string());
+    }
+
+    if let Some(ref key) = binding.bound_upstream_key {
+        let route_matches = binding.bound_route_id.as_deref().is_some_and(|rid| {
+            st.routes
+                .iter()
+                .any(|r| r.id == rid && r.raw_key == *key)
+        });
+        let needs_apply = st.profile_route_invalid.is_some()
+            || st.profile_route_id.as_deref() != binding.bound_route_id.as_deref()
+            || !route_matches;
+        if needs_apply
+            && let Err(err) = crate::routing::apply_profile_key(app_state, Some(key)).await
+        {
+            crate::diagnostics::record("startup_profile", &err);
+        }
+        // Clear any stale local-VPN block on Anthropic left from before restart when the active
+        // profile has a valid Zastava key route (non-profile providers stay intact).
+        let st_after = app_state.get_data().await;
+        if st_after.profile_route_invalid.is_none()
+            && st_after.profile_route_id.is_some()
+            && st_after.blocked_providers.contains(state::PROVIDER_ANTHROPIC)
+            && let Err(err) = app_state.unblock_provider(state::PROVIDER_ANTHROPIC).await
+        {
+            crate::diagnostics::record("startup_profile", &err.to_string());
+        }
+    } else if let Some(ref dangling_rid) = binding.bound_route_id {
+        if st.profile_route_id.as_deref() != Some(dangling_rid.as_str())
+            && let Err(err) = app_state
+                .set_profile_route_dangling(dangling_rid.clone())
+                .await
+        {
+            crate::diagnostics::record("startup_profile", &err.to_string());
+        }
+    } else if st.profile_route_id.is_some()
+        && let Err(err) = crate::routing::apply_profile_key(app_state, None).await
+    {
+        crate::diagnostics::record("startup_profile", &err);
+    }
+}
+
+fn reconcile_active_profile_on_startup(app_state: &state::AppState) {
+    let binding = match auditor::profile_switcher::active_profile_binding_state() {
+        Ok(Some(b)) => b,
+        Ok(None) => return,
+        Err(err) => {
+            crate::diagnostics::record("startup_profile", &err);
+            return;
+        }
+    };
+
+    tauri::async_runtime::block_on(reconcile_active_profile_binding_async(app_state, binding));
+}
+
 /// Initializes and starts the local selective PAC + Hold Proxy. Returns the network guard and the PAC URL.
 fn start_proxy(
     app: &tauri::App,
@@ -397,40 +479,185 @@ fn spawn_tray_status_watcher(
         let mut failures: u32 = 0;
         // Local time (HH:MM) of the last audit that produced a report.
         let mut last_checked: Option<String> = None;
+        let mut last_synced_ip: Option<String> = None;
+        let mut last_synced_status: Option<(auditor::OverallStatus, bool)> = None;
+        let mut last_observed_ip: Option<String> = None;
         loop {
+            if watcher_guard.any_provider_gate_pending() {
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                continue;
+            }
+            let st_pre = watcher_state.get_data().await;
+            let enabled_pids: Vec<auditor::ProviderId> = st_pre
+                .enabled_providers()
+                .into_iter()
+                .filter_map(auditor::ProviderId::from_id)
+                .collect();
+            let Some(&pid) = enabled_pids.first() else {
+                crate::tray::update_tray_status(
+                    &watcher_handle,
+                    "green",
+                    Some("Мониторинг провайдеров отключён"),
+                );
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                continue;
+            };
             match watcher_auditor
-                .evaluate_all(auditor::ProviderId::Anthropic, &watcher_state, false)
+                .evaluate_all(pid, &watcher_state, false)
                 .await
             {
-                Ok(report) => {
+                Ok(mut report) => {
                     failures = 0;
                     last_checked = Some(chrono::Local::now().format("%H:%M").to_string());
+                    if watcher_guard.any_provider_gate_pending() {
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        continue;
+                    }
                     let st = watcher_state.get_data().await;
-                    let is_pinned = st
-                        .pinned_ip
-                        .as_ref()
-                        .map(|p| p.trim() == report.telemetry.ip.trim())
-                        .unwrap_or(false);
+                    let is_pinned = commands::audit::is_ip_pinned_for_state(
+                        &st,
+                        pid,
+                        &report.telemetry.ip,
+                    );
+                    auditor::history::apply_pinned_travel_grace(&mut report, is_pinned);
                     let has_blocked = !st.blocked_providers.is_empty()
-                        || watcher_guard.gate() != proxy::Gate::Open;
+                        || watcher_guard.any_provider_gate_closed();
 
-                    let tray_report =
-                        proxy::guard::effective_tray_report(&report, has_blocked, &st);
-                    update_tray_from_report(&watcher_handle, &tray_report, is_pinned, has_blocked);
+                    let mut tray_report =
+                        proxy::guard::effective_tray_report(&report, has_blocked, &st)
+                            .into_owned();
+                    let mut tray_is_pinned = is_pinned;
                     let _ = watcher_handle.emit("audit://refreshed", &report);
+
+                    let cur_observed_ip = watcher_guard.current_observed_ip().await;
+                    let ip_changed = last_synced_ip
+                        .as_deref()
+                        .is_some_and(|prev| prev != report.telemetry.ip.as_str());
+                    let observed_changed =
+                        last_observed_ip.is_some() && cur_observed_ip != last_observed_ip;
+
+                    let mut sibling_status_changed = false;
+                    if !initial_synced || ip_changed || observed_changed || has_blocked {
+                        for &other_pid in enabled_pids.iter().skip(1) {
+                            if watcher_guard.any_provider_gate_pending() {
+                                break;
+                            }
+                            let is_routed =
+                                crate::routing::select_route_id(&st, other_pid.as_str()).is_some();
+                            if is_routed {
+                                continue;
+                            }
+                            if let Ok(mut other_report) = watcher_auditor
+                                .evaluate_all(other_pid, &watcher_state, false)
+                                .await
+                            {
+                                let other_pinned = commands::audit::is_ip_pinned_for_state(
+                                    &st,
+                                    other_pid,
+                                    &other_report.telemetry.ip,
+                                );
+                                auditor::history::apply_pinned_travel_grace(
+                                    &mut other_report,
+                                    other_pinned,
+                                );
+                                let _ = watcher_handle.emit("audit://refreshed", &other_report);
+                                if !proxy::guard::report_allowed_for_state(
+                                    &other_report,
+                                    &st,
+                                    false,
+                                ) {
+                                    let rank = |s: auditor::OverallStatus| match s {
+                                        auditor::OverallStatus::Red => 2u8,
+                                        auditor::OverallStatus::Yellow => 1u8,
+                                        auditor::OverallStatus::Green => 0u8,
+                                    };
+                                    if rank(other_report.overall_status)
+                                        > rank(tray_report.overall_status)
+                                    {
+                                        tray_report = proxy::guard::effective_tray_report(
+                                            &other_report,
+                                            has_blocked,
+                                            &st,
+                                        )
+                                        .into_owned();
+                                        tray_is_pinned = other_pinned;
+                                        sibling_status_changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    update_tray_from_report(
+                        &watcher_handle,
+                        &tray_report,
+                        tray_is_pinned,
+                        has_blocked,
+                    );
+
+                    let cur_status = (tray_report.overall_status, has_blocked);
+                    let status_changed = last_synced_status
+                        .is_some_and(|prev| prev != cur_status)
+                        || sibling_status_changed;
+
+                    // If status changed on the same IP, still refresh sibling unrouted providers
+                    // when they were not already refreshed above.
+                    if initial_synced
+                        && status_changed
+                        && !ip_changed
+                        && !observed_changed
+                        && !has_blocked
+                    {
+                        for &other_pid in enabled_pids.iter().skip(1) {
+                            if watcher_guard.any_provider_gate_pending() {
+                                break;
+                            }
+                            if crate::routing::select_route_id(&st, other_pid.as_str()).is_some() {
+                                continue;
+                            }
+                            if let Ok(mut other_report) = watcher_auditor
+                                .evaluate_all(other_pid, &watcher_state, false)
+                                .await
+                            {
+                                let other_pinned = commands::audit::is_ip_pinned_for_state(
+                                    &st,
+                                    other_pid,
+                                    &other_report.telemetry.ip,
+                                );
+                                auditor::history::apply_pinned_travel_grace(
+                                    &mut other_report,
+                                    other_pinned,
+                                );
+                                let _ = watcher_handle.emit("audit://refreshed", &other_report);
+                            }
+                        }
+                    }
+
+                    last_synced_ip = Some(report.telemetry.ip.clone());
+                    last_synced_status = Some(cur_status);
+                    last_observed_ip = cur_observed_ip;
 
                     if !initial_synced {
                         initial_synced = true;
+                        let _ = watcher_handle.emit("network://changed", &report);
+                    } else if ip_changed || status_changed || observed_changed {
+                        if ip_changed || observed_changed {
+                            watcher_guard.wake();
+                        }
                         let _ = watcher_handle.emit("network://changed", &report);
                     }
                     tokio::time::sleep(Duration::from_secs(10)).await;
                 }
                 Err(_) => {
+                    if watcher_guard.any_provider_gate_pending() {
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        continue;
+                    }
                     // Never leave the previous (possibly green) state on screen after a failed
                     // audit. A stop/block state is more important than "no data": keep it.
                     let st = watcher_state.get_data().await;
                     let has_blocked = !st.blocked_providers.is_empty()
-                        || watcher_guard.gate() != proxy::Gate::Open;
+                        || watcher_guard.any_provider_gate_closed();
                     failures += 1;
                     if !has_blocked {
                         if !initial_synced && failures < STARTUP_FAILURES_BEFORE_NO_DATA {
@@ -507,4 +734,62 @@ fn spawn_cowork_guard_watcher(app: &tauri::App) {
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reconcile_active_profile_clears_stale_anthropic_pin_even_when_route_matches() {
+        let app_state = state::AppState::new_in_memory();
+        let route = crate::routing::parse_route_key("socks5://1.2.3.4:1080#nl", 1).unwrap();
+        let route_id = route.id.clone();
+        let raw_key = route.raw_key.clone();
+        app_state.apply_profile_route(route).await.unwrap();
+        app_state
+            .set_pinned_ip_for(state::PROVIDER_ANTHROPIC, Some("9.9.9.9".to_string()))
+            .await
+            .unwrap();
+        app_state
+            .set_pinned_ip_for("default", Some("2.2.2.2".to_string()))
+            .await
+            .unwrap();
+
+        // Active profile has matching bound_route_id and bound_ip = None -> stale anthropic pin
+        // must still be cleared while preserving "default".
+        reconcile_active_profile_binding_async(
+            &app_state,
+            auditor::profile_switcher::ActiveProfileBindingState {
+                profile_id: "p1".to_string(),
+                bound_ip: None,
+                bound_upstream_key: Some(raw_key.clone()),
+                bound_route_id: Some(route_id.clone()),
+            },
+        )
+        .await;
+        let st1 = app_state.get_data().await;
+        assert!(!st1.pinned_ips.contains_key(state::PROVIDER_ANTHROPIC));
+        assert_eq!(st1.pinned_ips.get("default").map(String::as_str), Some("2.2.2.2"));
+
+        // Active profile sets bound_ip while route still matches -> anthropic pin updated cleanly.
+        reconcile_active_profile_binding_async(
+            &app_state,
+            auditor::profile_switcher::ActiveProfileBindingState {
+                profile_id: "p1".to_string(),
+                bound_ip: Some("1.2.3.4".to_string()),
+                bound_upstream_key: Some(raw_key),
+                bound_route_id: Some(route_id),
+            },
+        )
+        .await;
+        let st2 = app_state.get_data().await;
+        assert_eq!(
+            st2.pinned_ips
+                .get(state::PROVIDER_ANTHROPIC)
+                .map(String::as_str),
+            Some("1.2.3.4")
+        );
+        assert_eq!(st2.pinned_ips.get("default").map(String::as_str), Some("2.2.2.2"));
+    }
 }

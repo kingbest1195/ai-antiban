@@ -1,0 +1,60 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
+import { providers as providerCopy, settings as copy } from "../../shared/copy/ru";
+
+vi.mock("../../ui/Modal", () => ({
+  Modal: ({ open, title, children, footer }: { open: boolean; title: string; children?: unknown; footer?: unknown }) =>
+    open ? createElement("div", { "data-modal": title }, children as never, footer as never) : null,
+}));
+
+import { SettingsModal } from "./SettingsModal";
+
+describe("SettingsModal: мониторинг сервисов и сохранённые исключения", () => {
+  it("рендерит переключатели мониторинга Claude, ChatGPT, Gemini и пояснение про домены Google", () => {
+    const html = renderToStaticMarkup(
+      createElement(SettingsModal, {
+        open: true,
+        onClose: vi.fn(),
+        autoUpdateEnabled: true,
+        onToggleAutoUpdate: vi.fn(async () => {}),
+        disabledProviders: ["gemini"],
+        trustedExceptions: {},
+      }),
+    );
+
+    expect(html).toContain(copy.monitoring.section);
+    expect(html).toContain(providerCopy.anthropic.name);
+    expect(providerCopy.openai.name).toBe("ChatGPT");
+    expect(html).toContain(providerCopy.openai.name);
+    expect(html).toContain(providerCopy.gemini.name);
+    expect(html).toContain("Google");
+    expect(html).toContain(`aria-label="${copy.monitoring.toggleLabel("Claude")}"`);
+    expect(html).toContain(`aria-label="${copy.monitoring.toggleLabel("Gemini")}"`);
+    expect(html).toContain('aria-checked="false"');
+    expect(html).toContain(copy.trustedExceptions.empty);
+  });
+
+  it("рендерит сохранённые исключения (Сервис + IP) с кнопками удаления и «Очистить все»", () => {
+    const html = renderToStaticMarkup(
+      createElement(SettingsModal, {
+        open: true,
+        onClose: vi.fn(),
+        autoUpdateEnabled: true,
+        onToggleAutoUpdate: vi.fn(async () => {}),
+        disabledProviders: [],
+        trustedExceptions: {
+          anthropic: ["185.220.101.5"],
+          openai: ["95.165.10.22"],
+        },
+      }),
+    );
+
+    expect(html).toContain(copy.trustedExceptions.section);
+    expect(html).toContain(copy.trustedExceptions.clearAll);
+    expect(html).toContain("185.220.101.5");
+    expect(html).toContain("95.165.10.22");
+    expect(html).toContain(`aria-label="${copy.trustedExceptions.remove("Claude", "185.220.101.5")}"`);
+    expect(html).toContain(`aria-label="${copy.trustedExceptions.remove("ChatGPT", "95.165.10.22")}"`);
+  });
+});

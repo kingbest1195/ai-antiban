@@ -4,8 +4,17 @@ import { describe, expect, it } from "vitest";
 import type { CheckResult, RiskReport } from "../../types";
 import { overview as copy } from "../../shared/copy/ru";
 import { parseAdminAuthError, parseTempDnsDeferredError } from "../../shared/hooks/useProtectionToggles";
-import { fetchAppState, setMockScenario, toggleSysproxyPrivileged, verifyAndUnblockProvider } from "../../utils/api";
-import { useOverviewModel } from "./useOverviewModel";
+import {
+  allowProviderSession,
+  clearTrustedExceptions,
+  fetchAppState,
+  removeTrustedException,
+  setMockScenario,
+  setProviderMonitoring,
+  toggleSysproxyPrivileged,
+  verifyAndUnblockProvider,
+} from "../../utils/api";
+import { tabBadges, useOverviewModel } from "./useOverviewModel";
 import type { OverviewModel } from "./useOverviewModel";
 
 const ok = (code: string): CheckResult => ({ status: "ok", code, message: "ok" });
@@ -176,5 +185,174 @@ describe("Обзор: неизвестный DNS-резолвер не крас�
       },
     });
     expect(m.pinState).toBe("pinned");
+  });
+});
+
+describe("Wave 2: disabled_providers, trusted_exceptions и API-моки", () => {
+  it("отключённый сервис получает status='disabled' и не вызывает ложный red/yellow вердикт или бейдж вкладки", () => {
+    const full14 = Array.from({ length: 14 }, (_, i) => ok(`C${i}`));
+    const green = report({ provider: "anthropic", overall_status: "green", checks: full14 });
+    const greenGpt = report({ provider: "openai", overall_status: "green", checks: full14 });
+    const redGemini = report({
+      provider: "gemini",
+      overall_status: "red",
+      geo_result: crit(),
+      checks: [crit(), ...full14.slice(1)],
+    });
+    const state = {
+      pinned_ip: null,
+      strict_pinning_enabled: false,
+      ip_history: {},
+      session_allowed_providers: [],
+      blocked_providers: ["gemini"],
+      disabled_providers: ["gemini"],
+    };
+
+    const m = model({
+      reports: { anthropic: green, openai: greenGpt, gemini: redGemini },
+      activeReport: green,
+      state,
+      sysproxyActive: true,
+    });
+
+    expect(m.tone).toBe("ok");
+    expect(m.verdict).toBe(copy.verdict.ok);
+    expect(m.banner).toBeNull();
+    expect(m.services.find((s) => s.id === "gemini")?.status).toBe("disabled");
+    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("ok");
+
+    const badges = tabBadges(m.banner, { anthropic: green, openai: greenGpt, gemini: redGemini }, state);
+    expect(badges.overview).toBeUndefined();
+    expect(badges.checks).toBeUndefined();
+  });
+
+  it("когда активный отчёт относится к отключённому сервису, метрики берутся из включённого сервиса", () => {
+    const redClaude = report({
+      provider: "anthropic",
+      overall_status: "red",
+      geo_result: crit(),
+      checks: [crit(), ...report().checks.slice(1)],
+    });
+    const greenGpt = report({ provider: "openai", overall_status: "green" });
+    const m = model({
+      reports: { anthropic: redClaude, openai: greenGpt },
+      activeReport: redClaude,
+      sysproxyActive: true,
+      state: {
+        pinned_ip: null,
+        strict_pinning_enabled: false,
+        ip_history: {},
+        session_allowed_providers: [],
+        blocked_providers: [],
+        disabled_providers: ["anthropic"],
+      },
+    });
+    expect(m.tone).toBe("ok");
+    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("disabled");
+    expect(m.services.find((s) => s.id === "openai")?.status).toBe("ok");
+  });
+
+  it("trusted_exceptions для текущего IP выхода разрешает сервис без красного баннера", () => {
+    const redGpt = report({
+      provider: "openai",
+      overall_status: "red",
+      telemetry: { ip: "185.220.101.5", country_code: "TR", resolved_at: 1 },
+      geo_result: crit(),
+      checks: [crit(), ...report().checks.slice(1)],
+    });
+    const m = model({
+      reports: { openai: redGpt },
+      activeReport: redGpt,
+      currentIp: "185.220.101.5",
+      sysproxyActive: true,
+      state: {
+        pinned_ip: null,
+        strict_pinning_enabled: false,
+        ip_history: {},
+        session_allowed_providers: [],
+        blocked_providers: [],
+        trusted_exceptions: { openai: ["185.220.101.5"] },
+      },
+    });
+    expect(m.banner).toBeNull();
+    expect(m.services.find((s) => s.id === "openai")?.status).toBe("allowed");
+  });
+
+  it("совпадающий pinned_ip/pinned_ips перекрывает IMPOSSIBLE_TRAVEL_CRITICAL без красной карточки «Доступ к ИИ остановлен»", () => {
+    const travelCrit: CheckResult = { code: "IMPOSSIBLE_TRAVEL_CRITICAL", status: "critical", message: "hop" };
+    const redClaude = report({
+      provider: "anthropic",
+      overall_status: "red",
+      telemetry: { ip: "198.51.100.245", country_code: "GB", resolved_at: 1 },
+      travel_result: travelCrit,
+      checks: [ok("GEO"), travelCrit],
+    });
+    const m = model({
+      reports: { anthropic: redClaude },
+      activeReport: redClaude,
+      currentIp: "198.51.100.245",
+      sysproxyActive: true,
+      state: {
+        pinned_ip: "198.51.100.245",
+        pinned_ips: { default: "198.51.100.245", anthropic: "198.51.100.245" },
+        strict_pinning_enabled: true,
+        ip_history: {},
+        session_allowed_providers: [],
+        blocked_providers: [],
+      },
+    });
+    expect(m.tone).toBe("ok");
+    expect(m.verdict).toBe(copy.verdict.ok);
+    expect(m.banner).toBeNull();
+    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("allowed");
+
+    // Если вместе с IMPOSSIBLE_TRAVEL_CRITICAL есть реальный критичный блок (например, DNSBL), pinned_ip не перекрывает его.
+    const dnsblCrit: CheckResult = { code: "DNSBL_LISTED_CRITICAL", status: "critical", message: "listed" };
+    const redBoth = report({
+      provider: "anthropic",
+      overall_status: "red",
+      telemetry: { ip: "198.51.100.245", country_code: "GB", resolved_at: 1 },
+      travel_result: travelCrit,
+      dnsbl_result: dnsblCrit,
+      checks: [travelCrit, dnsblCrit],
+    });
+    const mBlocked = model({
+      reports: { anthropic: redBoth },
+      activeReport: redBoth,
+      currentIp: "198.51.100.245",
+      sysproxyActive: true,
+      state: {
+        pinned_ip: "198.51.100.245",
+        pinned_ips: { default: "198.51.100.245", anthropic: "198.51.100.245" },
+        strict_pinning_enabled: true,
+        ip_history: {},
+        session_allowed_providers: [],
+        blocked_providers: [],
+      },
+    });
+    expect(mBlocked.tone).toBe("danger");
+    expect(mBlocked.verdict).toBe(copy.verdict.stopped);
+    expect(mBlocked.banner).toBe("stopped");
+  });
+
+  it("API моки setProviderMonitoring, removeTrustedException и clearTrustedExceptions обновляют состояние", async () => {
+    const off = await setProviderMonitoring("gemini", false);
+    expect(off.disabled_providers).toContain("gemini");
+
+    const on = await setProviderMonitoring("gemini", true);
+    expect(on.disabled_providers).not.toContain("gemini");
+
+    await allowProviderSession("openai");
+    const afterAllow = await fetchAppState();
+    expect(afterAllow.trusted_exceptions?.openai?.length).toBeGreaterThan(0);
+
+    const ip = afterAllow.trusted_exceptions!.openai[0];
+    const afterRemove = await removeTrustedException("openai", ip);
+    expect(afterRemove.trusted_exceptions?.openai).toBeUndefined();
+
+    await allowProviderSession("anthropic");
+    await allowProviderSession("gemini");
+    const afterClear = await clearTrustedExceptions();
+    expect(afterClear.trusted_exceptions).toEqual({});
   });
 });

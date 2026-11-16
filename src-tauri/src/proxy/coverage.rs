@@ -603,6 +603,11 @@ impl CoverageTracker {
                     bypass_suspected = true;
                     status = CoverageStatus::Off;
                     detail = ANTIGRAVITY_BYPASS_DETAIL.to_string();
+                } else if app_id == "opencode"
+                    && cli_mode == CliMode::AiOnly
+                    && status == CoverageStatus::Off
+                {
+                    bypass_suspected = true;
                 }
                 (status, f.manual_steps.clone(), detail)
             } else {
@@ -684,7 +689,7 @@ impl CoverageTracker {
     }
 }
 
-const KNOWN_IDS: [&str; 13] = [
+const KNOWN_IDS: [&str; 14] = [
     "browsers",
     "claude-desktop",
     "chatgpt-desktop",
@@ -695,6 +700,7 @@ const KNOWN_IDS: [&str; 13] = [
     "jetbrains",
     "claude-code",
     "gemini-cli",
+    "opencode",
     "node-cli",
     "python-cli",
     "curl",
@@ -908,7 +914,7 @@ fn compute_config_facts(
                         Verdict::Off if env.sysproxy_enabled && temp_dns_active => (
                             CoverageStatus::Off,
                             steps_of(&[steps::SET_PAC_URL]),
-                            "Системный PAC отложен: активный VPN держит временные DNS".to_string(),
+                            "Системный PAC отложен: активный VPN (utun) держит временные DNS — приложения без своих настроек прокси идут мимо Заставы".to_string(),
                         ),
                         Verdict::Off => (
                             CoverageStatus::Off,
@@ -1065,6 +1071,11 @@ fn cli_fact(
             steps_of(&[steps::SET_ENV_PROXY]),
             "Не удалось прочитать settings.json".to_string(),
         ),
+        None if id == "opencode" => (
+            CoverageStatus::Off,
+            steps_of(&[steps::SET_ENV_PROXY]),
+            "Терминальная утилита без глобального прокси: включите «Весь терминал» в Настройках или запустите с переменными прокси".to_string(),
+        ),
         None => (
             CoverageStatus::Off,
             steps_of(&[steps::SET_ENV_PROXY]),
@@ -1218,9 +1229,9 @@ fn antigravity_app_fact(
         };
     if pac_applies {
         (
-            CoverageStatus::Configured,
+            CoverageStatus::Off,
             steps_of(&[steps::LAUNCH_WITH_ENV]),
-            "Интерфейс следует системному PAC, а агент нет: запустите приложение с переменными прокси".to_string(),
+            "Интерфейс следует системному PAC, а агент — нет: перезапустите через Заставу с переменными прокси или включите «Весь терминал»".to_string(),
         )
     } else {
         (
@@ -1439,6 +1450,7 @@ pub fn get_known_app_info(id: &str) -> Option<KnownAppInfo> {
         "jetbrains" => ("jetbrains", "JetBrains IDE (PyCharm, IntelliJ...)", "ide"),
         "claude-code" => ("claude-code", "Claude Code", "cli"),
         "gemini-cli" => ("gemini-cli", "Gemini CLI", "cli"),
+        "opencode" => ("opencode", "OpenCode", "cli"),
         "node-cli" => ("node-cli", "Node.js / CLI", "cli"),
         "python-cli" => ("python-cli", "Python / CLI", "cli"),
         "curl" => ("curl", "curl", "cli"),
@@ -1528,6 +1540,9 @@ pub fn classify_process_name(name: &str) -> &'static str {
     }
     if lower == "gemini" || lower.contains("gemini-cli") {
         return "gemini-cli";
+    }
+    if has("opencode") {
+        return "opencode";
     }
     if lower == "node" || lower.starts_with("node ") {
         return "node-cli";
@@ -1646,6 +1661,12 @@ pub(crate) fn check_app_installed_in(id: &str, ctx: &FileCtx) -> bool {
         }
         "claude-code" => ex(&ctx.home.join(".claude")),
         "gemini-cli" => ex(&ctx.home.join(".gemini")),
+        "opencode" => {
+            ex(&ctx.home.join(".config").join("opencode"))
+                || ex(&ctx.home.join(".opencode").join("bin").join("opencode"))
+                || ex(Path::new("/opt/homebrew/bin/opencode"))
+                || ex(Path::new("/usr/local/bin/opencode"))
+        }
         "node-cli" => {
             ex(&ctx.home.join(".nvm"))
                 || ex(&ctx.home.join(".fnm"))

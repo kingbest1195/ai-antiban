@@ -5,7 +5,7 @@ import { classify, countChecks, failedChecks, isYellowOnlyUnknown, pickWorstRepo
 import { overview as copy } from "../../shared/copy/ru";
 import type { HeroTone, TabItem } from "../../ui";
 
-export type ServiceStatus = "ok" | "allowed" | "warn" | "critical" | "missing" | "checking";
+export type ServiceStatus = "ok" | "allowed" | "warn" | "critical" | "missing" | "checking" | "disabled";
 
 export interface ServiceModel {
   id: ProviderId;
@@ -86,9 +86,42 @@ export function useOverviewModel({
   startupPending = false,
 }: Input): OverviewModel {
   return useMemo(() => {
-    const anyRed = PROVIDER_IDS.some((id) => reports[id]?.overall_status === "red");
-    const anyYellow = PROVIDER_IDS.some(
-      (id) => reports[id]?.overall_status === "yellow" && !isYellowOnlyUnknown(reports[id], checksOf(reports[id] ?? null)),
+    const disabledSet = new Set((state?.disabled_providers ?? []).map((p) => p.toLowerCase()));
+    const enabledProviderIds = PROVIDER_IDS.filter((id) => !disabledSet.has(id));
+    const effectiveActiveReport =
+      (activeReport && !disabledSet.has(activeReport.provider) ? activeReport : null) ??
+      enabledProviderIds.map((id) => reports[id]).find(Boolean) ??
+      null;
+
+    const isAllowedFor = (id: ProviderId): boolean => {
+      if (disabledSet.has(id)) return false;
+      if (state?.session_allowed_providers?.includes(id)) return true;
+      const exitIp = reports[id]?.telemetry?.ip || (currentIp !== "--" ? currentIp : "");
+      if (!exitIp) return false;
+      const trimmedExit = exitIp.trim();
+      if (state?.trusted_exceptions?.[id]?.some((ip) => ip.trim() === trimmedExit)) {
+        return true;
+      }
+      const pinned = resolvePinnedIp(state, id);
+      if (pinned && pinned.trim() === trimmedExit && !state?.blocked_providers?.includes(id)) {
+        const list = checksOf(reports[id] ?? null);
+        const criticals = list.filter((c) => classify(c) === "crit");
+        // Закреплённый IP в разрешённой локации перекрывает только IMPOSSIBLE_TRAVEL_CRITICAL.
+        if (criticals.length > 0 && criticals.every((c) => c.code === "IMPOSSIBLE_TRAVEL_CRITICAL")) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const anyRed = enabledProviderIds.some(
+      (id) => (reports[id]?.overall_status === "red" && !isAllowedFor(id)) || Boolean(state?.blocked_providers?.includes(id)),
+    );
+    const anyYellow = enabledProviderIds.some(
+      (id) =>
+        reports[id]?.overall_status === "yellow" &&
+        !isYellowOnlyUnknown(reports[id], checksOf(reports[id] ?? null)) &&
+        !isAllowedFor(id),
     );
 
     const bad = (c?: CheckResult) => {
@@ -96,13 +129,14 @@ export function useOverviewModel({
       const k = classify(c);
       return k === "warn" || k === "crit";
     };
-    const ipv6Leak = bad(activeReport?.ipv6_result);
-    const tzMismatch = bad(activeReport?.timezone_result);
-    const dnsblBad = bad(activeReport?.dnsbl_result);
+    const ipv6Leak = bad(effectiveActiveReport?.ipv6_result);
+    const tzMismatch = bad(effectiveActiveReport?.timezone_result);
+    const dnsblBad = bad(effectiveActiveReport?.dnsbl_result);
 
-    const checks = checksOf(activeReport);
+    const checks = checksOf(effectiveActiveReport);
     const counts = countChecks(checks);
-    const incomplete = Boolean(activeReport?.incomplete) || nonDnsUnknownCount(activeReport, checks) > 0;
+    const incomplete =
+      Boolean(effectiveActiveReport?.incomplete) || nonDnsUnknownCount(effectiveActiveReport, checks) > 0;
 
     let verdict: string = copy.verdict.ok;
     let tone: HeroTone = "ok";
@@ -138,17 +172,20 @@ export function useOverviewModel({
     else if (updateInfo?.update_available) banner = "update";
 
     const checksPassed = counts.ok;
-    const checksTotal = Math.max(counts.applicable, activeReport?.applicable_count ?? 0);
+    const checksTotal = Math.max(counts.applicable, effectiveActiveReport?.applicable_count ?? 0);
 
-    const pinned = resolvePinnedIp(state, activeReport?.provider);
+    const pinned = resolvePinnedIp(state, effectiveActiveReport?.provider);
     const pinState: PinState = pinned ? (pinned === currentIp ? "pinned" : "changed") : "none";
 
-    const providerName = activeReport?.telemetry?.isp || activeReport?.telemetry?.org || null;
+    const providerName = effectiveActiveReport?.telemetry?.isp || effectiveActiveReport?.telemetry?.org || null;
 
     const services: ServiceModel[] = PROVIDER_IDS.map((id) => {
+      if (disabledSet.has(id)) {
+        return { id, status: "disabled" };
+      }
       const report = reports[id];
       const isBlocked = state?.blocked_providers?.includes(id);
-      const isAllowed = state?.session_allowed_providers?.includes(id);
+      const isAllowed = isAllowedFor(id);
       const list = checksOf(report ?? null);
       const hasCritical = list.some((c) => classify(c) === "crit");
       // Непроверенное не считаем чистым (кроме сбоя самого DNS-резолвера): сервис получает статус «Нужна проверка».
@@ -199,7 +236,7 @@ export function tabBadges(
   const out: { overview?: TabItem["badge"]; checks?: TabItem["badge"] } = {};
   if (banner === "stopped" || banner === "frozen") out.overview = "danger";
   else if (overviewNotice) out.overview = "warn";
-  const worst = pickWorstReport(reports);
+  const worst = pickWorstReport(reports, state?.disabled_providers);
   const n = worst ? failedChecks(worst.report, state).length : 0;
   if (n > 0) out.checks = n;
   return out;

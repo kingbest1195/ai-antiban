@@ -17,8 +17,6 @@ export const guides = {
 
   toast: {
     commandCopied: "Команда скопирована",
-    promoCopied: "Промокод скопирован",
-    promoCopiedText: (code: string, name: string) => `Промокод ${code} для ${name}`,
     openHosting: "Переход к хостингу",
     openHostingText: (name: string) => `Открываем ${name} в браузере`,
     openCard: "Переход к сервису карт",
@@ -35,7 +33,6 @@ export const guides = {
   /** Общие подписи действий. */
   actions: {
     pinIp: "Закрепить IP",
-    copyPromoAria: (code: string, name: string) => `Скопировать промокод ${code} для ${name}`,
     copyCommandAria: (label: string) => `Скопировать команду: ${label}`,
   },
 

@@ -11,8 +11,9 @@ export interface BackupScreenProps {
   currentCountry: string;
   activeUpstreamKey?: string | null;
   routesSnapshot?: RoutesSnapshot | null;
+  profileRefreshTrigger?: number;
   onRoutesUpdated?: () => Promise<unknown> | void;
-  onProfileSwitched: (profileName: string, pinnedIp?: string | null) => void;
+  onProfileSwitched: (profileName: string, pinnedIp?: string | null) => Promise<unknown> | void;
   onToast: ShowToast;
 }
 
@@ -23,6 +24,7 @@ export function BackupScreen({
   currentCountry,
   activeUpstreamKey,
   routesSnapshot,
+  profileRefreshTrigger,
   onRoutesUpdated,
   onProfileSwitched,
   onToast,
@@ -37,6 +39,7 @@ export function BackupScreen({
           currentCountry={currentCountry}
           activeUpstreamKey={activeUpstreamKey}
           routesSnapshot={routesSnapshot}
+          refreshTrigger={profileRefreshTrigger}
           onRoutesUpdated={onRoutesUpdated}
           onProfileSwitched={onProfileSwitched}
           onToast={onToast}

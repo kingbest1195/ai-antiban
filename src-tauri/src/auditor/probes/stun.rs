@@ -197,7 +197,7 @@ pub fn evaluate_udp_stun_for_route(
     if answered.is_empty() {
         return CheckResult::ok(
             "UDP_KEY_TCP_PROTECTED",
-            "Ключ Заставы передаёт AI-трафик по TCP, а QUIC в браузерах отключён политикой Заставы; исходящий UDP заблокирован или недоступен, утечки локального IP РФ нет.",
+            "ВПН Заставы передаёт AI-трафик по TCP, а QUIC в браузерах отключён политикой Заставы; исходящий UDP заблокирован или недоступен, утечки локального IP РФ нет.",
         );
     }
 
@@ -209,7 +209,7 @@ pub fn evaluate_udp_stun_for_route(
         return CheckResult::warning(
             "UDP_STUN_MISMATCH",
             format!(
-                "По UDP виден адрес {first_ip} ({cc}, ответ {labels}), хотя HTTP-трафик AI идёт через ключ Заставы ({http_exit_ip}). Включите зарубежный VPN для системного UDP-трафика."
+                "По UDP виден адрес {first_ip} ({cc}, ответ {labels}), хотя HTTP-трафик AI идёт через ВПН Заставы ({http_exit_ip}). Включите зарубежный VPN для системного UDP-трафика."
             ),
             None,
         )
@@ -222,7 +222,7 @@ pub fn evaluate_udp_stun_for_route(
     CheckResult::ok(
         "UDP_KEY_TCP_PROTECTED",
         format!(
-            "Ключ Заставы передаёт AI-трафик по TCP (выход {http_exit_ip}), QUIC в браузерах отключён политикой Заставы. Системный UDP идёт через VPN-туннель ({first_ip}{cc_note}, ответ {labels}) без утечки локального IP РФ."
+            "ВПН Заставы передаёт AI-трафик по TCP (выход {http_exit_ip}), QUIC в браузерах отключён политикой Заставы. Системный UDP идёт через VPN-туннель ({first_ip}{cc_note}, ответ {labels}) без утечки локального IP РФ."
         ),
     )
     .with_measured_via(via)

@@ -85,31 +85,34 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
     async (provider: ProviderId) => {
       try {
         await allowProviderSession(provider);
+        await refreshState();
         showToast(t.accessAllowed, t.accessAllowedText(providers[provider].name), "success");
         await runFullAudit(false);
       } catch (err: any) {
         showToast(t.genericError, err?.message || String(err), "error");
       }
     },
-    [runFullAudit, showToast],
+    [refreshState, runFullAudit, showToast],
   );
 
   const handleUnblockProvider = useCallback(
     async (provider: ProviderId) => {
       try {
         await unblockProvider(provider);
+        await refreshState();
         await runFullAudit(false);
       } catch (err: any) {
         showToast(t.genericError, err?.message || String(err), "error");
       }
     },
-    [runFullAudit, showToast],
+    [refreshState, runFullAudit, showToast],
   );
 
   const handleVerifyAndUnblockProvider = useCallback(
     async (provider: ProviderId): Promise<boolean> => {
       try {
         const unblocked = await verifyAndUnblockProvider(provider);
+        await refreshState();
         if (unblocked) {
           showToast(t.accessRestored, t.accessRestoredText(providers[provider].name), "success");
         }
@@ -120,7 +123,7 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
         return false;
       }
     },
-    [runFullAudit, showToast],
+    [refreshState, runFullAudit, showToast],
   );
 
   return {

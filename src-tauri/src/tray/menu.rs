@@ -1,8 +1,8 @@
 //! Builds the tray menu (status header, kill-switch, submenus) and the tray icon itself.
 
 use super::{
-    MAIN_TRAY_ID, TRAY_ICON_RED, TRAY_ICON_YELLOW, TrayKillswitchMenuItem, TrayStatsMenuItem,
-    TrayStatusMenuItem, events,
+    MAIN_TRAY_ID, TRAY_ICON_RED, TRAY_ICON_YELLOW, TrayKillswitchMenuItem, TrayProfilesSubmenu,
+    TrayStatsMenuItem, TrayStatusMenuItem, events, with_tray_on_main,
 };
 use crate::auditor;
 use tauri::{
@@ -46,55 +46,9 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let sep2 = PredefinedMenuItem::separator(app)?;
 
     // Submenu 1: Профили Claude (Мульти-аккаунт)
-    let profiles_res = auditor::profile_switcher::list_claude_profiles(None).ok();
-    let mut profile_menu_items = Vec::new();
-    if let Some(resp) = &profiles_res {
-        for p in resp.profiles.iter().take(10) {
-            let mark = if p.is_active {
-                "● Активен: "
-            } else {
-                "○ "
-            };
-            let email_or_label = p
-                .bound_ip
-                .as_deref()
-                .or(p.bound_country.as_deref())
-                .unwrap_or("Основной");
-            let proxy_badge = if p.bound_upstream_key.is_some() {
-                " [Прокси]"
-            } else {
-                ""
-            };
-            let label = format!("{mark}{} ({email_or_label}){proxy_badge}", p.name);
-            if let Ok(item) = MenuItem::with_id(
-                app,
-                format!("switch_profile:{}", p.id),
-                label,
-                true,
-                None::<&str>,
-            ) {
-                profile_menu_items.push(item);
-            }
-        }
-    }
-    let manage_profiles_i = MenuItem::with_id(
-        app,
-        "manage_profiles_tray",
-        "Управление профилями и бэкапом...",
-        true,
-        None::<&str>,
-    )?;
-    let sep_profiles = PredefinedMenuItem::separator(app)?;
-    let mut sub1_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
-    for item in &profile_menu_items {
-        sub1_items.push(item);
-    }
-    if !profile_menu_items.is_empty() {
-        sub1_items.push(&sep_profiles);
-    }
-    sub1_items.push(&manage_profiles_i);
-    let submenu_profiles =
-        Submenu::with_items(app, "Профили Claude (Мульти-аккаунт)", true, &sub1_items)?;
+    let submenu_profiles = Submenu::new(app, "Профили Claude (Мульти-аккаунт)", true)?;
+    populate_profiles_submenu(app.handle(), &submenu_profiles)?;
+    app.manage(TrayProfilesSubmenu(submenu_profiles.clone()));
 
     // Submenu 2: Контур защиты и сеть
     let toggle_sysproxy_i = MenuItem::with_id(
@@ -283,4 +237,75 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     super::stress::maybe_start(app.handle());
 
     Ok(())
+}
+
+/// Must run on the main thread (called from `build_tray` and `refresh_profiles_submenu`).
+fn populate_profiles_submenu(
+    app: &tauri::AppHandle,
+    submenu: &Submenu<tauri::Wry>,
+) -> tauri::Result<()> {
+    while let Ok(items) = submenu.items() {
+        if items.is_empty() {
+            break;
+        }
+        if submenu.remove_at(items.len() - 1).is_err() {
+            break;
+        }
+    }
+
+    let profiles_res = auditor::profile_switcher::list_claude_profiles(None).ok();
+    let mut added_profile_items = false;
+    if let Some(resp) = &profiles_res {
+        for p in resp.profiles.iter().take(10) {
+            let mark = if p.is_active {
+                "● Активен: "
+            } else {
+                "○ "
+            };
+            let email_or_label = p
+                .bound_ip
+                .as_deref()
+                .or(p.bound_country.as_deref())
+                .unwrap_or("Основной");
+            let proxy_badge = if p.bound_upstream_key.is_some() {
+                " [Прокси]"
+            } else {
+                ""
+            };
+            let label = format!("{mark}{} ({email_or_label}){proxy_badge}", p.name);
+            if let Ok(item) = MenuItem::with_id(
+                app,
+                format!("switch_profile:{}", p.id),
+                label,
+                true,
+                None::<&str>,
+            ) {
+                submenu.append(&item)?;
+                added_profile_items = true;
+            }
+        }
+    }
+    if added_profile_items {
+        let sep_profiles = PredefinedMenuItem::separator(app)?;
+        submenu.append(&sep_profiles)?;
+    }
+    let manage_profiles_i = MenuItem::with_id(
+        app,
+        "manage_profiles_tray",
+        "Управление профилями и бэкапом...",
+        true,
+        None::<&str>,
+    )?;
+    submenu.append(&manage_profiles_i)?;
+    Ok(())
+}
+
+/// Rebuilds the "Профили Claude (Мульти-аккаунт)" tray submenu on the main thread.
+/// Safe to call from any thread after create / delete / switch / bind / unbind.
+pub fn refresh_profiles_submenu(app: &tauri::AppHandle) {
+    with_tray_on_main(app, |app| {
+        if let Some(sub) = app.try_state::<TrayProfilesSubmenu>() {
+            let _ = populate_profiles_submenu(app, &sub.0);
+        }
+    });
 }

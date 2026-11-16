@@ -89,15 +89,15 @@ async fn test_connect_hold_and_block() {
     zastava_lib::sysproxy::force_os_dry_run();
     let auditor = Auditor::new().expect("Auditor initialization failed");
 
-    // Pre-populate telemetry with dangerous location: Turkey (TR)
+    // Pre-populate telemetry with Critical blocked location: Russia (RU)
     let dangerous_telemetry = NetworkTelemetry {
         ip: "185.220.101.5".to_string(),
-        country_code: "TR".to_string(),
+        country_code: "RU".to_string(),
         hostname: None,
         asn: Some(9009),
         org: Some("M247 Europe SRL".to_string()),
         isp: Some("M247 Europe SRL".to_string()),
-        timezone: Some("Europe/Istanbul".to_string()),
+        timezone: Some("Europe/Moscow".to_string()),
         resolved_at: current_timestamp(),
     };
     auditor.resolver.set_cached(dangerous_telemetry).await;
@@ -194,15 +194,15 @@ async fn test_connect_hold_and_allow_session() {
     });
 
     let auditor = Auditor::new().expect("Auditor initialization failed");
-    // Telemetry with warning/critical: Turkey (TR)
+    // Telemetry with Critical risk: Russia (RU)
     let dangerous_telemetry = NetworkTelemetry {
         ip: "185.220.101.5".to_string(),
-        country_code: "TR".to_string(),
+        country_code: "RU".to_string(),
         hostname: None,
         asn: Some(9009),
         org: Some("M247 Europe SRL".to_string()),
         isp: Some("M247 Europe SRL".to_string()),
-        timezone: Some("Europe/Istanbul".to_string()),
+        timezone: Some("Europe/Moscow".to_string()),
         resolved_at: current_timestamp(),
     };
     auditor.resolver.set_cached(dangerous_telemetry).await;
@@ -283,6 +283,105 @@ async fn test_connect_hold_and_allow_session() {
 
     srv_handle.abort();
     mock_handle.abort();
+}
+
+/// Integration Test 3b: Yellow (allowed geo, warning checks, zero critical) passes silently
+/// without holding in HoldQueue or blocking under both AskPopup and AutoLockSilent.
+#[tokio::test]
+async fn test_connect_yellow_passes_without_hold_or_block() {
+    use zastava_lib::state::InterceptionBehavior;
+
+    zastava_lib::sysproxy::force_os_dry_run();
+    for (behavior, cc, host) in [
+        (InterceptionBehavior::AskPopup, "TR", "gemini.google.com"),
+        (
+            InterceptionBehavior::AutoLockSilent,
+            "KZ",
+            "api.anthropic.com",
+        ),
+    ] {
+        let mock_target = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind mock target listener");
+        let mock_addr = mock_target.local_addr().unwrap();
+
+        let mock_handle = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = mock_target.accept().await {
+                let mut buf = [0u8; 128];
+                if let Ok(n) = stream.read(&mut buf).await
+                    && n > 0
+                {
+                    let _ = stream.write_all(&buf[..n]).await;
+                }
+            }
+        });
+
+        let auditor = Auditor::new().expect("Auditor initialization failed");
+        let yellow_telemetry = NetworkTelemetry {
+            ip: "185.220.101.5".to_string(),
+            country_code: cc.to_string(),
+            hostname: None,
+            asn: Some(9009),
+            org: Some("M247 Europe SRL".to_string()),
+            isp: Some("M247 Europe SRL".to_string()),
+            timezone: Some("Europe/Istanbul".to_string()),
+            resolved_at: current_timestamp(),
+        };
+        auditor.resolver.set_cached(yellow_telemetry).await;
+
+        let state = AppState::new_in_memory();
+        state.set_interception_behavior(behavior).await.unwrap();
+        let hold_queue = Arc::new(HoldQueue::new());
+
+        let server = Arc::new(
+            ProxyServer::bind_ephemeral(auditor, state.clone(), Arc::clone(&hold_queue), Some(mock_addr))
+                .await
+                .expect("Proxy server bind failed"),
+        );
+
+        let bound_addr = server.bound_addr;
+        let srv_clone = Arc::clone(&server);
+        let srv_handle = tokio::spawn(async move {
+            srv_clone.run().await;
+        });
+
+        let mut client = match TcpStream::connect(bound_addr).await {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("Skipping test due to sandbox network restrictions: {e}");
+                return;
+            }
+            Err(e) => panic!("Failed to connect to proxy: {e}"),
+        };
+
+        let connect_req = format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n");
+        client.write_all(connect_req.as_bytes()).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut resp_buf = [0u8; 256];
+        let n = tokio::time::timeout(Duration::from_secs(4), client.read(&mut resp_buf))
+            .await
+            .expect("Yellow connect timed out")
+            .unwrap();
+        let resp_str = String::from_utf8_lossy(&resp_buf[..n]);
+        assert!(
+            resp_str.contains("HTTP/1.1 200 Connection Established"),
+            "Yellow {cc} ({host}) under {behavior:?} must tunnel immediately: {resp_str}"
+        );
+
+        let ping_msg = b"YELLOW_PASS_OK\n";
+        client.write_all(ping_msg).await.unwrap();
+        client.flush().await.unwrap();
+        let mut echo_buf = [0u8; 128];
+        let echo_n = client.read(&mut echo_buf).await.unwrap();
+        assert_eq!(&echo_buf[..echo_n], ping_msg);
+
+        assert!(hold_queue.current_alert().is_none());
+        assert!(state.get_data().await.blocked_providers.is_empty());
+
+        srv_handle.abort();
+        mock_handle.abort();
+    }
 }
 
 /// Integration Test 4: Graceful Proxy Cleanup

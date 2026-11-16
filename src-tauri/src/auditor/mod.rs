@@ -35,7 +35,10 @@ pub use dnsbl::{
     check_all_dnsbl, check_all_dnsbl_with, check_all_dnsbl_with_doh, evaluate_dnsbl_report,
 };
 pub use geo_matrix::{CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo};
-pub use history::{evaluate_impossible_travel, evaluate_ip_pinning, evaluate_ip_pinning_for_route};
+pub use history::{
+    apply_pinned_travel_grace, evaluate_impossible_travel, evaluate_impossible_travel_with_pin,
+    evaluate_ip_pinning, evaluate_ip_pinning_for_route,
+};
 pub use ip_type::{ExitIdentity, IpType, TorLookup, evaluate_ip_reputation, lookup_tor};
 pub use leaks::{
     check_dns_leak, check_dns_leak_with, check_ipv6_leak, check_ipv6_leak_with,
@@ -323,6 +326,17 @@ impl Auditor {
             .await
     }
 
+    /// Telemetry of the direct egress path (uses `env.probe` when constructed with `Auditor::with_env`).
+    pub async fn resolve_direct(&self, force_refresh: bool) -> Result<NetworkTelemetry, String> {
+        if self.use_env_probe_for_direct {
+            self.resolver
+                .resolve_direct_via_probe(&*self.env.probe, force_refresh)
+                .await
+        } else {
+            self.resolver.resolve(force_refresh).await
+        }
+    }
+
     /// Same as [`Self::resolve_for_provider`] for an already taken route snapshot, so that an
     /// audit and the tunnel it admits work with the very same route.
     pub async fn resolve_for_selection(
@@ -333,7 +347,7 @@ impl Auditor {
         force_refresh: bool,
     ) -> Result<NetworkTelemetry, String> {
         match selection {
-            RouteSelection::Direct => self.resolver.resolve(force_refresh).await,
+            RouteSelection::Direct => self.resolve_direct(force_refresh).await,
             RouteSelection::Missing(id) => Err(format!(
                 "Маршрут {id} для {} не найден: ключ удалён, трафик заблокирован",
                 provider.display_name()
@@ -494,13 +508,26 @@ impl Auditor {
                 async move { pinning_verdict },
             ),
         );
+        let geo_allows_travel_grace = {
+            let geo = evaluate_provider_geo(&matrix, provider, &country);
+            !country.trim().is_empty() && !geo.status.is_critical() && !geo.status.is_unknown()
+        };
         let travel = tracked(
             &sink,
             2,
             run_check("Impossible Travel", CHECK_LIMIT_LOCAL, {
                 let history = state_data.ip_history_for_selection(provider.as_str(), selection);
                 let (country, resolved_at) = (country.clone(), telemetry.resolved_at);
-                async move { evaluate_impossible_travel(&history, &country, resolved_at, provider) }
+                let pinned_for_travel = is_pinned && geo_allows_travel_grace;
+                async move {
+                    evaluate_impossible_travel_with_pin(
+                        &history,
+                        &country,
+                        resolved_at,
+                        provider,
+                        pinned_for_travel,
+                    )
+                }
             }),
         );
         let dnsbl = tracked(
@@ -2173,5 +2200,100 @@ mod tests {
         assert_eq!(gemini.telemetry.country_code, "FR");
         assert_eq!(gemini.checks[2].code, "TRAVEL_NORMAL");
         assert_eq!(gemini.checks[2].status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn evaluate_all_applies_pinned_travel_grace_without_hiding_unpinned_or_sanctioned() {
+        let state = AppState::new_in_memory();
+        let now = crate::auditor::network::current_timestamp();
+        for p in ["anthropic", "openai"] {
+            state
+                .record_ip_history_for_selection(
+                    p,
+                    &RouteSelection::Direct,
+                    crate::state::IpHistoryEntry::new("198.51.100.1", "DE", Some(1234), now - 300),
+                )
+                .await
+                .unwrap();
+        }
+        state
+            .set_pinned_ip(Some("203.0.113.9".to_string()))
+            .await
+            .unwrap();
+
+        let probe = with_tor_list(FakeProbe::body(200, "loc=GB\n"))
+            .with_route(
+                "1.1.1.1/cdn-cgi/trace",
+                HttpProbeOutcome::Response {
+                    status: 200,
+                    body: "fl=1\nip=203.0.113.9\nloc=GB\ncolo=LHR\n".into(),
+                },
+            )
+            .with_route(
+                "ipwho.is",
+                HttpProbeOutcome::Response {
+                    status: 200,
+                    body: r#"{"success":true,"country_code":"GB"}"#.into(),
+                },
+            );
+        let system = FakeSystem {
+            timezone: Ok("Europe/London".into()),
+            local_offset: Some(0),
+            global_ipv6: Some(true),
+            ..FakeSystem::healthy()
+        };
+        let env = env_with_udp(
+            with_whoami(
+                zones_answering(FakeDns::new(LookupOutcome::Timeout)),
+                "203.0.113.9",
+            ),
+            probe,
+            system,
+            udp_exiting_as("203.0.113.9"),
+        );
+        let auditor = Auditor::with_env(env).unwrap();
+        auditor
+            .resolver
+            .set_cached_for_route(
+                None,
+                NetworkTelemetry {
+                    ip: "203.0.113.9".into(),
+                    country_code: "GB".into(),
+                    timezone: Some("Europe/London".into()),
+                    resolved_at: now,
+                    ..rich_telemetry()
+                },
+            )
+            .await;
+
+        let claude_pinned = auditor
+            .evaluate_all(ProviderId::Anthropic, &state, false)
+            .await
+            .unwrap();
+        let openai_pinned = auditor
+            .evaluate_all(ProviderId::Openai, &state, false)
+            .await
+            .unwrap();
+        assert_eq!(claude_pinned.travel_result.code, "TRAVEL_PINNED_RETURN");
+        assert_eq!(claude_pinned.checks[2].code, "TRAVEL_PINNED_RETURN");
+        assert_eq!(claude_pinned.overall_status, OverallStatus::Green);
+        assert_eq!(openai_pinned.travel_result.code, "TRAVEL_PINNED_RETURN");
+        assert_eq!(openai_pinned.checks[2].code, "TRAVEL_PINNED_RETURN");
+        assert_eq!(openai_pinned.overall_status, OverallStatus::Green);
+
+        // Unpinning restores IMPOSSIBLE_TRAVEL_CRITICAL / IMPOSSIBLE_TRAVEL_WARNING.
+        state.clear_all_pinned_ips().await.unwrap();
+        let claude_unpinned = auditor
+            .evaluate_all(ProviderId::Anthropic, &state, false)
+            .await
+            .unwrap();
+        let openai_unpinned = auditor
+            .evaluate_all(ProviderId::Openai, &state, false)
+            .await
+            .unwrap();
+        assert_eq!(claude_unpinned.travel_result.code, "IMPOSSIBLE_TRAVEL_CRITICAL");
+        assert_eq!(claude_unpinned.overall_status, OverallStatus::Red);
+        assert_eq!(openai_unpinned.travel_result.code, "IMPOSSIBLE_TRAVEL_WARNING");
+        assert_eq!(openai_unpinned.overall_status, OverallStatus::Yellow);
     }
 }

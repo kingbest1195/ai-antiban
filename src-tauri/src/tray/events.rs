@@ -1,6 +1,6 @@
 //! Tray menu click handlers and tray icon click handler.
 
-use super::{update_tray_killswitch, update_tray_status};
+use super::update_tray_status;
 use crate::{auditor, proxy, state, sysproxy};
 use tauri::{
     Emitter, Manager,
@@ -63,10 +63,13 @@ pub fn handle_menu_event(
                     app_handle.try_state::<std::sync::Arc<proxy::NetworkGuard>>(),
                     app_handle.try_state::<state::AppState>(),
                 ) {
-                    let target_freeze = !guard.is_gate_blocked();
-                    let now_frozen = guard.set_manual_killswitch(target_freeze, &st).await;
-                    update_tray_killswitch(&app_handle, now_frozen);
-                    let _ = app_handle.emit("tray://killswitch-toggled", now_frozen);
+                    crate::commands::interception::toggle_killswitch_shared(
+                        None,
+                        &guard,
+                        &st,
+                        &app_handle,
+                    )
+                    .await;
                 }
             });
         }
@@ -81,25 +84,73 @@ pub fn handle_menu_event(
             let profile_id = id.trim_start_matches("switch_profile:").to_string();
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
+                let _runtime_lock = crate::commands::claude::lock_profile_runtime().await;
                 match auditor::profile_switcher::switch_claude_profile(&profile_id) {
                     Ok(res) => {
-                        if let Some(st) = app_handle.try_state::<state::AppState>() {
-                            let _ = st.set_pinned_ip(res.pinned_ip_updated.clone()).await;
-                            let _ = crate::routing::apply_profile_key(
-                                &st,
-                                res.bound_upstream_key_updated.as_deref(),
-                            )
-                            .await;
+                        super::menu::refresh_profiles_submenu(&app_handle);
+                        let runtime_res = match (
+                            app_handle.try_state::<state::AppState>(),
+                            app_handle.try_state::<std::sync::Arc<proxy::NetworkGuard>>(),
+                        ) {
+                            (Some(st), Some(guard)) => {
+                                crate::commands::claude::sync_active_profile_binding_to_runtime(
+                                    &st,
+                                    &guard,
+                                    res.pinned_ip_updated.clone(),
+                                    res.bound_upstream_key_updated.as_deref(),
+                                    res.active_profile.bound_route_id.as_deref(),
+                                )
+                                .await
+                            }
+                            (Some(st), None) => {
+                                if let Err(e) = st
+                                    .set_pinned_ip_for(
+                                        state::PROVIDER_ANTHROPIC,
+                                        res.pinned_ip_updated.clone(),
+                                    )
+                                    .await
+                                {
+                                    Err(e.to_string())
+                                } else {
+                                    crate::routing::apply_profile_binding(
+                                        &st,
+                                        res.bound_upstream_key_updated.as_deref(),
+                                        res.active_profile.bound_route_id.as_deref(),
+                                    )
+                                    .await
+                                }
+                            }
+                            _ => Ok(()),
+                        };
+                        match runtime_res {
+                            Ok(()) => {
+                                let has_blocks = app_handle
+                                    .try_state::<std::sync::Arc<proxy::NetworkGuard>>()
+                                    .is_some_and(|g| g.any_provider_gate_blocked());
+                                let color = if has_blocks { "yellow" } else { "green" };
+                                update_tray_status(
+                                    &app_handle,
+                                    color,
+                                    Some(&format!("Профиль: {}", res.active_profile.name)),
+                                );
+                                let _ = app_handle.emit("tray://profile-switched", &res);
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "Failed to apply runtime state for profile {profile_id}: {err}"
+                                );
+                                crate::diagnostics::record("tray_profile", &err);
+                                update_tray_status(
+                                    &app_handle,
+                                    "red",
+                                    Some(&format!("Ошибка профиля: {}", res.active_profile.name)),
+                                );
+                            }
                         }
-                        update_tray_status(
-                            &app_handle,
-                            "green",
-                            Some(&format!("Профиль: {}", res.active_profile.name)),
-                        );
-                        let _ = app_handle.emit("tray://profile-switched", &res);
                     }
                     Err(e) => {
                         eprintln!("Failed to switch profile {profile_id}: {e}");
+                        crate::diagnostics::record("tray_profile", &e);
                     }
                 }
             });

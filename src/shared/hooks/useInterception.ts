@@ -40,14 +40,16 @@ export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }
     if (!interceptPayload) return;
     setAllowError(null);
     try {
-      await resolveInterception(
+      const applied = await resolveInterception(
         interceptPayload.id,
         "BlockUntilNetworkChange",
         interceptPayload.provider,
         interceptPayload.scope,
       );
-      await pauseUntilNetworkChange(interceptPayload.gate_reason ?? undefined);
-      showToast(t.intercept.pausedTitle, t.intercept.pausedText, "info");
+      if (applied) {
+        await pauseUntilNetworkChange(interceptPayload.gate_reason ?? undefined);
+        showToast(t.intercept.pausedTitle, t.intercept.pausedText, "info");
+      }
       setInterceptPayload(null);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

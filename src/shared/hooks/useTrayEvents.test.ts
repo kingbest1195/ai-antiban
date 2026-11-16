@@ -1,0 +1,54 @@
+import { describe, expect, it, vi } from "vitest";
+import { toast as t } from "../copy/ru";
+import { handleTrayProfileSwitched } from "./useTrayEvents";
+
+describe("handleTrayProfileSwitched", () => {
+  it("берёт имя из payload.active_profile.name и обновляет состояние, маршруты и профили", async () => {
+    const refreshState = vi.fn(async () => ({}));
+    const refreshRoutes = vi.fn(async () => null);
+    const refreshProfiles = vi.fn();
+    const showToast = vi.fn();
+    const runFullAudit = vi.fn(async () => {});
+
+    await handleTrayProfileSwitched(
+      { refreshState, refreshRoutes, refreshProfiles, showToast, runFullAudit },
+      {
+        previous_profile_id: "default",
+        active_profile: {
+          id: "work",
+          name: "Рабочий профиль",
+          isolated_device_id: "abc",
+          created_at: 1,
+          last_used_at: 2,
+          is_active: true,
+          has_saved_session: true,
+        },
+        cleaned_cache_items: 0,
+        restored_files: 0,
+        message: "ok",
+      },
+    );
+
+    expect(refreshState).toHaveBeenCalledTimes(1);
+    expect(refreshRoutes).toHaveBeenCalledTimes(1);
+    expect(refreshProfiles).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(t.profile.switched, "Рабочий профиль", "info");
+    expect(runFullAudit).toHaveBeenCalledWith(false);
+  });
+
+  it("падает обратно на общий текст, если active_profile отсутствует", async () => {
+    const showToast = vi.fn();
+    await handleTrayProfileSwitched(
+      {
+        refreshState: vi.fn(async () => ({})),
+        refreshRoutes: vi.fn(async () => null),
+        refreshProfiles: vi.fn(),
+        showToast,
+        runFullAudit: vi.fn(async () => {}),
+      },
+      null,
+    );
+
+    expect(showToast).toHaveBeenCalledWith(t.profile.switched, t.profile.switchedText, "info");
+  });
+});

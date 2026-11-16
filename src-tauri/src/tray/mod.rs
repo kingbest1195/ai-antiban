@@ -2,9 +2,9 @@
 //! `menu` builds the tray and its menu, `events` handles menu clicks and tray icon clicks.
 
 mod events;
-mod menu;
+pub mod menu;
 
-pub use menu::build_tray;
+pub use menu::{build_tray, refresh_profiles_submenu};
 
 #[cfg(all(feature = "tray-stress", debug_assertions))]
 mod stress;
@@ -17,7 +17,7 @@ use std::sync::{
 use tauri::{
     Manager,
     image::Image,
-    menu::{IconMenuItem, MenuItem},
+    menu::{IconMenuItem, MenuItem, Submenu},
     tray::TrayIcon,
 };
 
@@ -36,6 +36,9 @@ pub struct TrayKillswitchMenuItem(pub IconMenuItem<tauri::Wry>);
 
 #[derive(Clone)]
 pub struct TrayStatusMenuItem(pub IconMenuItem<tauri::Wry>);
+
+#[derive(Clone)]
+pub struct TrayProfilesSubmenu(pub Submenu<tauri::Wry>);
 
 pub(crate) const TRAY_ICON_GREEN: &[u8] = include_bytes!("../../icons/tray-green.png");
 pub(crate) const TRAY_ICON_YELLOW: &[u8] = include_bytes!("../../icons/tray-yellow.png");

@@ -81,8 +81,8 @@ export interface OverviewScreenProps {
   onPinIp: (ip: string, provider?: ProviderId) => void;
   onUnpinIp: (provider?: ProviderId) => void;
   onToggleStrict: () => void;
-  onAllowProvider: (provider: ProviderId) => void;
-  onUnblockProvider: (provider: ProviderId) => void;
+  onAllowProvider: (provider: ProviderId) => Promise<unknown> | void;
+  onUnblockProvider: (provider: ProviderId) => Promise<unknown> | void;
   onVerifyAndUnblockProvider?: (provider: ProviderId) => Promise<boolean>;
 
   onRetry: () => void;
@@ -97,6 +97,19 @@ export interface OverviewScreenProps {
 
 /** Цифры дня, пока данных нет: прочерк, а не «0» (ноль — это уже известный ответ). */
 const EMPTY_STAT = "—";
+
+/** Последовательно снимает ручной блок (если был) и разрешает провайдера, без параллельной гонки. */
+export async function executeAllowSequence(
+  provider: ProviderId,
+  blockedByUser: boolean,
+  onUnblockProvider: (provider: ProviderId) => Promise<unknown> | void,
+  onAllowProvider: (provider: ProviderId) => Promise<unknown> | void,
+): Promise<void> {
+  if (blockedByUser) {
+    await onUnblockProvider(provider);
+  }
+  await onAllowProvider(provider);
+}
 
 /** Экран «Обзор»: вердикт, сервисы ИИ, что под защитой, цифры за день, два действия. */
 export function OverviewScreen(props: OverviewScreenProps) {
@@ -137,9 +150,13 @@ export function OverviewScreen(props: OverviewScreenProps) {
   // Подтверждение «Разрешить принудительно»: только когда сеть действительно красная / RU / BY.
   const [pendingAllow, setPendingAllow] = useState<ProviderId | null>(null);
   const [verifyingAllow, setVerifyingAllow] = useState<ProviderId | null>(null);
-  const runAllow = (provider: ProviderId, blockedByUser: boolean) => {
-    if (blockedByUser) props.onUnblockProvider(provider);
-    props.onAllowProvider(provider);
+  const runAllow = async (provider: ProviderId, blockedByUser: boolean) => {
+    setVerifyingAllow(provider);
+    try {
+      await executeAllowSequence(provider, blockedByUser, props.onUnblockProvider, props.onAllowProvider);
+    } finally {
+      setVerifyingAllow(null);
+    }
   };
   const requestAllow = async (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => {
     if (blockedByUser && !needsForceConfirm(service.status, report) && props.onVerifyAndUnblockProvider) {
@@ -155,7 +172,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
       return;
     }
     if (needsForceConfirm(service.status, report)) setPendingAllow(service.id);
-    else runAllow(service.id, blockedByUser);
+    else await runAllow(service.id, blockedByUser);
   };
 
   const progress = progressOf(buildPendingChecks(partial ?? null, state));
@@ -280,20 +297,27 @@ export function OverviewScreen(props: OverviewScreenProps) {
           <Card>
             {killswitchFrozen ? (
               <Rows>
-                {model.services.map((service) => (
-                  <Row
-                    key={service.id}
-                    icon="alert"
-                    tone="danger"
-                    title={providerCopy[service.id].name}
-                    sub={providerCopy[service.id].domains}
-                    trail={
-                      <Badge tone="danger" icon="alert">
-                        {copy.service.stopped}
-                      </Badge>
-                    }
-                  />
-                ))}
+                {model.services.map((service) => {
+                  const isDisabled = service.status === "disabled";
+                  return (
+                    <Row
+                      key={service.id}
+                      icon={isDisabled ? "shield" : "alert"}
+                      tone={isDisabled ? "neutral" : "danger"}
+                      title={providerCopy[service.id].name}
+                      sub={providerCopy[service.id].domains}
+                      trail={
+                        isDisabled ? (
+                          <Badge tone="neutral">{copy.service.monitoringDisabled}</Badge>
+                        ) : (
+                          <Badge tone="danger" icon="alert">
+                            {copy.service.stopped}
+                          </Badge>
+                        )
+                      }
+                    />
+                  );
+                })}
               </Rows>
             ) : !startupPending && !sysproxyActive ? (
               <>
@@ -301,16 +325,23 @@ export function OverviewScreen(props: OverviewScreenProps) {
                   {copy.service.unprotectedNote}
                 </p>
                 <Rows>
-                  {model.services.map((service) => (
-                    <Row
-                      key={service.id}
-                      icon="shield"
-                      tone="neutral"
-                      title={providerCopy[service.id].name}
-                      sub={providerCopy[service.id].domains}
-                      trail={<Badge tone="neutral">{copy.service.unprotected}</Badge>}
-                    />
-                  ))}
+                  {model.services.map((service) => {
+                    const isDisabled = service.status === "disabled";
+                    return (
+                      <Row
+                        key={service.id}
+                        icon="shield"
+                        tone="neutral"
+                        title={providerCopy[service.id].name}
+                        sub={providerCopy[service.id].domains}
+                        trail={
+                          <Badge tone="neutral">
+                            {isDisabled ? copy.service.monitoringDisabled : copy.service.unprotected}
+                          </Badge>
+                        }
+                      />
+                    );
+                  })}
                 </Rows>
               </>
             ) : (
@@ -337,10 +368,16 @@ export function OverviewScreen(props: OverviewScreenProps) {
         open={pendingAllow !== null}
         title={pendingAllow ? copy.service.confirm.title(providerCopy[pendingAllow].name) : ""}
         confirmLabel={copy.service.confirm.action}
+        busy={verifyingAllow !== null}
         onCancel={() => setPendingAllow(null)}
-        onConfirm={() => {
-          if (pendingAllow) runAllow(pendingAllow, Boolean(state?.blocked_providers?.includes(pendingAllow)));
-          setPendingAllow(null);
+        onConfirm={async () => {
+          if (pendingAllow) {
+            const target = pendingAllow;
+            setPendingAllow(null);
+            await runAllow(target, Boolean(state?.blocked_providers?.includes(target)));
+          } else {
+            setPendingAllow(null);
+          }
         }}
       >
         {pendingAllow ? copy.service.confirm.text(providerCopy[pendingAllow].name) : ""}
@@ -684,9 +721,10 @@ function ServiceRow({
     case "warn":
       badge = (
         <Badge tone="warn" icon="alert">
-          {words.review}
+          {copy.service.warnBadge}
         </Badge>
       );
+      note = blockedByUser ? copy.service.blocked : copy.service.warnNote;
       tone = "warn";
       break;
     case "critical":
@@ -699,6 +737,11 @@ function ServiceRow({
       break;
     case "checking":
       badge = <Badge busy>{copy.service.checking}</Badge>;
+      tone = "neutral";
+      break;
+    case "disabled":
+      badge = <Badge tone="neutral">{copy.service.monitoringDisabled}</Badge>;
+      note = copy.service.monitoringDisabledNote;
       tone = "neutral";
       break;
     case "missing":
@@ -723,7 +766,7 @@ function ServiceRow({
   if (status !== "warn" && status !== "critical") {
     return (
       <Row
-        icon={status === "ok" || status === "allowed" || status === "checking" ? "shield" : "alert"}
+        icon={status === "ok" || status === "allowed" || status === "checking" || status === "disabled" ? "shield" : "alert"}
         tone={tone}
         title={meta.name}
         sub={sub}

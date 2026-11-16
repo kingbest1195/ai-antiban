@@ -6,5 +6,6 @@ export const common = {
   copyFailText: "Браузер не дал доступ к буферу обмена.",
   next: "Далее",
   cancel: "Отмена",
+  goTo: "Перейти",
   openSite: ". Открыть сайт",
 } as const;

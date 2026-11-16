@@ -54,6 +54,8 @@ let mockState: AppStateData = {
   ip_history: {},
   session_allowed_providers: [],
   blocked_providers: [],
+  trusted_exceptions: {},
+  disabled_providers: [],
   upstream_proxy: null,
   warmup_started_at: null,
   synced_ai_timezone: null,
@@ -188,11 +190,27 @@ export function setMockScenario(scenario: MockScenario) {
   }
 }
 
+function snapshotMockState(): AppStateData {
+  const clonedExceptions: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(mockState.trusted_exceptions ?? {})) {
+    clonedExceptions[k] = [...v];
+  }
+  return {
+    ...mockState,
+    pinned_ips: { ...(mockState.pinned_ips ?? {}) },
+    session_allowed_providers: [...mockState.session_allowed_providers],
+    blocked_providers: [...mockState.blocked_providers],
+    trusted_exceptions: clonedExceptions,
+    disabled_providers: [...(mockState.disabled_providers ?? [])],
+    custom_ai_domains: [...(mockState.custom_ai_domains ?? [])],
+  };
+}
+
 export async function fetchAppState(): Promise<AppStateData> {
   if (isTauri()) {
     return await invoke<AppStateData>("get_state");
   }
-  return { ...mockState };
+  return snapshotMockState();
 }
 
 export async function toggleAutoUpdate(enabled: boolean): Promise<void> {
@@ -787,6 +805,20 @@ export async function allowProviderSession(provider: ProviderId): Promise<void> 
   if (!mockState.session_allowed_providers.includes(provider)) {
     mockState.session_allowed_providers.push(provider);
   }
+  mockState.blocked_providers = mockState.blocked_providers.filter((p) => p !== provider);
+  const currentIp =
+    currentMockScenario === "turkey"
+      ? "185.220.101.5"
+      : currentMockScenario === "ru"
+      ? "95.165.10.22"
+      : mockState.pinned_ip || "185.212.102.40";
+  const nextExceptions = { ...(mockState.trusted_exceptions ?? {}) };
+  const list = [...(nextExceptions[provider] ?? [])];
+  if (!list.includes(currentIp)) {
+    list.push(currentIp);
+  }
+  nextExceptions[provider] = list;
+  mockState.trusted_exceptions = nextExceptions;
 }
 
 export async function unblockProvider(provider: ProviderId): Promise<void> {
@@ -796,6 +828,76 @@ export async function unblockProvider(provider: ProviderId): Promise<void> {
   mockState.blocked_providers = mockState.blocked_providers.filter(
     (p) => p !== provider
   );
+}
+
+/** Включает или отключает мониторинг, PAC-перехват, проверки и алерты для отдельного провайдера. */
+export async function setProviderMonitoring(
+  provider: string,
+  enabled: boolean,
+): Promise<AppStateData> {
+  if (isTauri()) {
+    return await invoke<AppStateData>("set_provider_monitoring", { provider, enabled });
+  }
+  const key = provider.trim().toLowerCase();
+  if (key) {
+    const disabled = new Set((mockState.disabled_providers ?? []).map((p) => p.toLowerCase()));
+    if (enabled) {
+      disabled.delete(key);
+    } else {
+      disabled.add(key);
+      mockState.blocked_providers = mockState.blocked_providers.filter((p) => p.toLowerCase() !== key);
+    }
+    mockState.disabled_providers = Array.from(disabled);
+  }
+  return snapshotMockState();
+}
+
+/** Удаляет одно сохранённое исключение (провайдер + IP выхода). */
+export async function removeTrustedException(
+  provider: string,
+  ip: string,
+): Promise<AppStateData> {
+  if (isTauri()) {
+    return await invoke<AppStateData>("remove_trusted_exception", { provider, ip });
+  }
+  const key = provider.trim().toLowerCase();
+  const normIp = ip.trim();
+  const next: Record<string, string[]> = {};
+  for (const [k, list] of Object.entries(mockState.trusted_exceptions ?? {})) {
+    if (k.toLowerCase() === key) {
+      const filtered = list.filter((item) => item.trim() !== normIp);
+      if (filtered.length > 0) next[k] = filtered;
+    } else {
+      next[k] = [...list];
+    }
+  }
+  mockState.trusted_exceptions = next;
+  mockState.session_allowed_providers = mockState.session_allowed_providers.filter(
+    (p) => p.toLowerCase() !== key,
+  );
+  return snapshotMockState();
+}
+
+/** Очищает сохранённые исключения (для одного провайдера или все сразу). */
+export async function clearTrustedExceptions(provider?: string): Promise<AppStateData> {
+  if (isTauri()) {
+    return await invoke<AppStateData>("clear_trusted_exceptions", { provider: provider ?? null });
+  }
+  const clean = provider?.trim().toLowerCase();
+  if (clean) {
+    const next: Record<string, string[]> = {};
+    for (const [k, list] of Object.entries(mockState.trusted_exceptions ?? {})) {
+      if (k.toLowerCase() !== clean) next[k] = [...list];
+    }
+    mockState.trusted_exceptions = next;
+    mockState.session_allowed_providers = mockState.session_allowed_providers.filter(
+      (p) => p.toLowerCase() !== clean,
+    );
+  } else {
+    mockState.trusted_exceptions = {};
+    mockState.session_allowed_providers = [];
+  }
+  return snapshotMockState();
 }
 
 /**
@@ -818,9 +920,9 @@ export async function resolveInterception(
   action: InterceptionAction,
   provider: ProviderId,
   scope?: string
-): Promise<void> {
+): Promise<boolean> {
   if (isTauri()) {
-    return await invoke("resolve_interception", {
+    return await invoke<boolean>("resolve_interception", {
       id,
       action,
       provider,
@@ -828,6 +930,7 @@ export async function resolveInterception(
     });
   }
   if (mockPendingAlert?.id === id) mockPendingAlert = null;
+  return true;
 }
 
 export async function pauseUntilNetworkChange(reason?: string | null): Promise<GuardPauseStatus> {
@@ -1507,9 +1610,15 @@ export async function switchClaudeProfile(
     last_used_at: p.id === targetId ? Math.floor(Date.now() / 1000) : p.last_used_at,
   }));
   const activeProf = mockProfiles.find((p) => p.id === targetId)!;
+  const nextPinned = { ...(mockState.pinned_ips ?? {}) };
   if (activeProf.bound_ip) {
-    mockState.pinned_ip = activeProf.bound_ip;
+    nextPinned.anthropic = activeProf.bound_ip;
+  } else {
+    delete nextPinned.anthropic;
   }
+  mockState.pinned_ips = nextPinned;
+  mockRoutesSnapshot.profile_route_id = activeProf.bound_route_id ?? null;
+  recomputeMockEffective();
   return {
     previous_profile_id: prevActive,
     active_profile: activeProf,
@@ -1800,7 +1909,7 @@ export async function upsertRoute(
     label && label.trim().length > 0
       ? label.trim()
       : trimmed.startsWith("zastava://")
-      ? "Ключ Заставы"
+      ? "ВПН Заставы"
       : trimmed.replace(/^[a-z0-9]+:\/\//i, "").split(/[/@]/)[0] || "Шлюз";
 
   const newRoute: RouteView = {
@@ -2270,7 +2379,7 @@ export async function exportDiagnosticBundle(): Promise<string> {
   }
   return JSON.stringify(
     {
-      app_version: "2.2.1",
+      app_version: "2.2.2",
       os: "macos",
       arch: "aarch64",
       sysproxy_enabled: mockSysproxyActive,

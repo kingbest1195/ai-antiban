@@ -79,7 +79,7 @@ export function DeepLinkModal({
     <Modal
       open={Boolean(deepLinkKey)}
       onClose={onClose}
-      title="Подключить ключ Заставы?"
+      title="Подключить ВПН Заставы?"
       footer={
         <>
           <Button variant="quiet" onClick={onClose} disabled={submitting}>

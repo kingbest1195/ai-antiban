@@ -714,6 +714,30 @@ pub async fn apply_profile_key(
     }
 }
 
+/// Applies the active Claude profile's route binding: if `key` is `Some(...)`, delegates to
+/// [`apply_profile_key`]; if `key` is `None` while `expected_route_id` is `Some(rid)` (a route
+/// that was removed while bound to this profile), retains `profile_route_id = Some(rid)` so
+/// `anthropic` stays fail-closed as `RouteSelection::Missing` / `DanglingBinding`.
+pub async fn apply_profile_binding(
+    state: &crate::state::AppState,
+    key: Option<&str>,
+    expected_route_id: Option<&str>,
+) -> Result<(), String> {
+    if key.map(str::trim).filter(|k| !k.is_empty()).is_some() {
+        return apply_profile_key(state, key).await;
+    }
+    if let Some(rid) = expected_route_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return state
+            .set_profile_route_dangling(rid.to_string())
+            .await
+            .map_err(|e| e.to_string());
+    }
+    state
+        .set_profile_route(None)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

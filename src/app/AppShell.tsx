@@ -94,6 +94,7 @@ export function AppShell() {
   const [routeUnavailableBanner, setRouteUnavailableBanner] = useState<RouteUnavailablePayload | null>(null);
   const [shutdownProgress, setShutdownProgress] = useState<ShutdownProgressPayload | null>(null);
   const [hideIpPref, setHideIpPref] = useState<boolean>(false);
+  const [profileRefreshKey, setProfileRefreshKey] = useState(0);
 
   // ---- Состояние и действия, вынесенные из старого Dashboard ----
   const stats = useGatewayStats(nav.tab === "overview" && !nav.subscriptionOpen);
@@ -146,6 +147,8 @@ export function AppShell() {
     openBackup: () => nav.goTab("backup"),
     runFullAudit,
     refreshState,
+    refreshRoutes: gw.refreshRoutes,
+    refreshProfiles: () => setProfileRefreshKey((n) => n + 1),
     checkUpdates: updater.handleCheckUpdates,
     syncTimezone: () => tz.handleSyncTz(),
     exportClaude: backup.handleExportClaude,
@@ -292,7 +295,7 @@ export function AppShell() {
       if (scope === "profile") {
         await bindUpstreamToClaudeProfile(profileId || "default", key);
         nav.goTab("backup");
-        showToast("Ключ привязан к профилю", "Ключ Заставы привязан только к выбранному профилю Claude.", "success");
+        showToast("ВПН привязан к профилю", "ВПН Заставы привязан только к выбранному профилю Claude.", "success");
       } else {
         const setAsDefault = scope === "all";
         await upsertRoute(key, null, setAsDefault);
@@ -639,10 +642,11 @@ export function AppShell() {
                 currentCountry={gw.currentCountry}
                 activeUpstreamKey={gw.state?.upstream_proxy?.raw_key}
                 routesSnapshot={gw.routesSnapshot}
+                profileRefreshTrigger={profileRefreshKey}
                 onRoutesUpdated={() => gw.refreshRoutes()}
-                onProfileSwitched={(_name, pin) => {
-                  if (pin) pinning.handlePinIp(pin);
-                  else runFullAudit(false);
+                onProfileSwitched={async () => {
+                  await Promise.all([refreshState(), gw.refreshRoutes()]);
+                  await runFullAudit(false);
                 }}
                 onToast={showToast}
               />
@@ -696,6 +700,8 @@ export function AppShell() {
         interceptionBehavior={gw.state?.interception_behavior}
         popupPosition={gw.state?.popup_position}
         customAiDomains={gw.state?.custom_ai_domains}
+        disabledProviders={gw.state?.disabled_providers}
+        trustedExceptions={gw.state?.trusted_exceptions}
         onStateUpdated={() => refreshState().catch(() => {})}
         onToast={showToast}
         appVersion={version}

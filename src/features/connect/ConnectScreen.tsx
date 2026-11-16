@@ -3,8 +3,10 @@ import type { AppStateData, ProviderId, RouteView, RoutesSnapshot } from "../../
 import {
   DIRECT_ROUTE_ID,
   bindProviderRoute,
+  bindRouteToClaudeProfile,
   clearUpstreamProxy,
   getRoutesSnapshot,
+  listClaudeProfiles,
   removeRoute,
   setDefaultRoute,
   setRouteEnabled,
@@ -27,7 +29,7 @@ import {
   Switch,
 } from "../../ui";
 import type { BadgeTone, RowTone, SegmentedOption } from "../../ui";
-import { connect as copy } from "../../shared/copy/ru";
+import { common, connect as copy } from "../../shared/copy/ru";
 import { formatCountryWithCode, formatRouteOptionLabel, isCountryBlockedForProvider } from "../../shared/lib/country";
 import { formatIp } from "../../shared/lib/format";
 import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
@@ -271,6 +273,20 @@ export function ConnectScreen({
     }
   };
 
+  const handleResetActiveProfileRoute = async () => {
+    try {
+      const list = await listClaudeProfiles();
+      if (list.active_profile_id) {
+        await bindRouteToClaudeProfile(list.active_profile_id, null);
+      }
+      await refresh(["anthropic"]);
+      onToast(copy.routes.toast.resetSuccess, copy.routes.toast.resetSuccessText, "info");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      onToast(copy.routes.toast.boundError, msg, "error");
+    }
+  };
+
   const handleResetAllDangling = async () => {
     try {
       const dangling = snapshot?.dangling || [];
@@ -280,6 +296,12 @@ export function ConnectScreen({
         if (item.kind === "default" && !clearedDefault) {
           await setDefaultRoute(null);
           clearedDefault = true;
+        } else if (item.kind === "profile") {
+          const list = await listClaudeProfiles();
+          if (list.active_profile_id) {
+            await bindRouteToClaudeProfile(list.active_profile_id, null);
+          }
+          affectedProviders.push("anthropic");
         } else if (item.provider) {
           await bindProviderRoute(item.provider as ProviderId, "direct");
           affectedProviders.push(item.provider as ProviderId);
@@ -342,7 +364,15 @@ export function ConnectScreen({
       )}
 
       {hasProfileError && (
-        <Banner tone="danger" title={copy.routes.profileErrorTitle}>
+        <Banner
+          tone="danger"
+          title={copy.routes.profileErrorTitle}
+          action={
+            <Button variant="secondary" size="sm" onClick={handleResetActiveProfileRoute}>
+              {copy.routes.resetToDirect}
+            </Button>
+          }
+        >
           {snapshot?.profile_route_error || copy.routes.profileErrorText}
         </Banner>
       )}
@@ -351,7 +381,17 @@ export function ConnectScreen({
         <p className="zs-t-body mb-3 text-ink-2">{copy.vpn.text}</p>
         <Rows>
           {HOSTINGS.map((h) => (
-            <Row key={h.id} icon="globe" title={h.name} sub={h.sub} onClick={() => openExternal(h.url)} />
+            <Row
+              key={h.id}
+              icon="globe"
+              title={h.name}
+              sub={h.sub}
+              trail={
+                <Button size="sm" variant="secondary" onClick={() => openExternal(h.url)}>
+                  {common.goTo}
+                </Button>
+              }
+            />
           ))}
         </Rows>
         <Button
@@ -512,11 +552,9 @@ export function ConnectScreen({
                   </Button>
                 }
               />
-              <div>
-                <Button variant="quiet" size="sm" className="-ml-3" onClick={() => openZastavaBot()}>
-                  {copy.key.get}
-                </Button>
-              </div>
+              <Button variant="primary" block onClick={() => openZastavaBot()}>
+                {copy.key.get}
+              </Button>
             </div>
           </>
         ) : isLegacyConfigured && upstream ? (
@@ -586,11 +624,9 @@ export function ConnectScreen({
                 </Button>
               }
             />
-            <div>
-              <Button variant="quiet" size="sm" className="-ml-3" onClick={() => openZastavaBot()}>
-                {copy.key.get}
-              </Button>
-            </div>
+            <Button variant="primary" block onClick={() => openZastavaBot()}>
+              {copy.key.get}
+            </Button>
           </div>
         )}
       </Card>

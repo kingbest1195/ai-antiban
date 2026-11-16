@@ -7,6 +7,7 @@ import type {
   InterceptionBehavior,
   PopupPosition,
   ProtectionChangePreviewItem,
+  ProviderId,
   RollbackReleaseInfo,
   UpdateProgressPayload,
   UpdateStatusPayload,
@@ -15,8 +16,10 @@ import type { ShowToast } from "../../shared/hooks";
 import { parseTempDnsDeferredError } from "../../shared/hooks/useProtectionToggles";
 import {
   addCustomAiDomain,
+  clearTrustedExceptions,
   copyTextToClipboard,
   exportDiagnosticBundle,
+  fetchAppState,
   forceCleanOsProxy,
   getAutostartStatus,
   getCliSettings,
@@ -29,10 +32,12 @@ import {
   onCoworkGuardStatus,
   previewProtectionChanges,
   removeCustomAiDomain,
+  removeTrustedException,
   setAutostartEnabled,
   setCliMode,
   setInterceptionBehavior,
   setPopupPosition,
+  setProviderMonitoring,
   setSplitTunnelMode,
   setSyncAiTzEnabled,
 } from "../../utils/api";
@@ -57,11 +62,12 @@ import {
   Switch,
 } from "../../ui";
 import type { SegmentedOption } from "../../ui";
-import { settings as copy } from "../../shared/copy/ru";
+import { providers as providerCopy, settings as copy } from "../../shared/copy/ru";
 
 import "./settings.css";
 
 const SOURCE_URL = "https://github.com/kingbest1195/ai-antiban";
+const MONITORED_PROVIDERS: ProviderId[] = ["anthropic", "openai", "gemini"];
 
 export interface SettingsModalProps {
   open: boolean;
@@ -71,7 +77,9 @@ export interface SettingsModalProps {
   interceptionBehavior?: InterceptionBehavior;
   popupPosition?: PopupPosition;
   customAiDomains?: string[];
-  onStateUpdated?: () => void;
+  disabledProviders?: string[];
+  trustedExceptions?: Record<string, string[]>;
+  onStateUpdated?: () => Promise<unknown> | void;
   onToast?: ShowToast;
   appVersion?: string;
   rollbackReleases?: RollbackReleaseInfo[];
@@ -111,6 +119,8 @@ export function SettingsModal({
   interceptionBehavior: propBehavior,
   popupPosition: propPosition,
   customAiDomains: propCustomDomains,
+  disabledProviders: propDisabledProviders,
+  trustedExceptions: propTrustedExceptions,
   onStateUpdated,
   onToast,
   appVersion = APP_VERSION,
@@ -129,6 +139,10 @@ export function SettingsModal({
   const [behavior, setBehavior] = useState<InterceptionBehavior>(propBehavior || "ask_popup");
   const [position, setPosition] = useState<PopupPosition>(propPosition || "top_right");
   const [customDomains, setCustomDomains] = useState<string[]>(propCustomDomains || []);
+  const [disabledProviders, setDisabledProviders] = useState<string[]>(propDisabledProviders || []);
+  const [trustedExceptions, setTrustedExceptions] = useState<Record<string, string[]>>(propTrustedExceptions || {});
+  const [monitoringBusy, setMonitoringBusy] = useState<ProviderId | null>(null);
+  const [exceptionsBusy, setExceptionsBusy] = useState(false);
   const [newDomainInput, setNewDomainInput] = useState("");
   const [domainBusy, setDomainBusy] = useState(false);
   const [confirmProxy, setConfirmProxy] = useState(false);
@@ -166,6 +180,14 @@ export function SettingsModal({
     if (propBehavior) setBehavior(propBehavior);
     if (propPosition) setPosition(propPosition);
     if (propCustomDomains) setCustomDomains(propCustomDomains);
+    if (propDisabledProviders) setDisabledProviders(propDisabledProviders);
+    if (propTrustedExceptions) setTrustedExceptions(propTrustedExceptions);
+    fetchAppState()
+      .then((st) => {
+        setDisabledProviders(st.disabled_providers ?? []);
+        setTrustedExceptions(st.trusted_exceptions ?? {});
+      })
+      .catch(() => {});
     getInterceptionBehavior()
       .then(setBehavior)
       .catch(() => {});
@@ -218,7 +240,7 @@ export function SettingsModal({
       active = false;
       unlisten?.();
     };
-  }, [open, propBehavior, propPosition, propCustomDomains]);
+  }, [open, propBehavior, propPosition, propCustomDomains, propDisabledProviders, propTrustedExceptions]);
 
   const handleExportDiagnostics = async () => {
     if (exportBusy) return;
@@ -418,6 +440,77 @@ export function SettingsModal({
     }
   };
 
+  const disabledSet = new Set(disabledProviders.map((p) => p.toLowerCase()));
+
+  const providerLabel = (provider: string): string => {
+    const key = provider.toLowerCase() as ProviderId;
+    return key in providerCopy ? providerCopy[key].name : provider;
+  };
+
+  const exceptionEntries = Object.entries(trustedExceptions)
+    .flatMap(([provider, ips]) => (ips ?? []).map((ip) => ({ provider, ip })))
+    .sort((a, b) => {
+      const ia = MONITORED_PROVIDERS.indexOf(a.provider.toLowerCase() as ProviderId);
+      const ib = MONITORED_PROVIDERS.indexOf(b.provider.toLowerCase() as ProviderId);
+      const ra = ia >= 0 ? ia : 99;
+      const rb = ib >= 0 ? ib : 99;
+      if (ra !== rb) return ra - rb;
+      if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
+      return a.ip.localeCompare(b.ip);
+    });
+
+  const handleToggleProviderMonitoring = async (providerId: ProviderId, enabled: boolean) => {
+    if (monitoringBusy) return;
+    setMonitoringBusy(providerId);
+    const name = providerCopy[providerId].name;
+    try {
+      const updated = await setProviderMonitoring(providerId, enabled);
+      setDisabledProviders(updated.disabled_providers ?? []);
+      if (updated.trusted_exceptions) setTrustedExceptions(updated.trusted_exceptions);
+      await onStateUpdated?.();
+      if (enabled) {
+        onToast?.(copy.monitoring.toastOnTitle(name), copy.monitoring.toastOnText, "success");
+      } else {
+        onToast?.(copy.monitoring.toastOffTitle(name), copy.monitoring.toastOffText, "info");
+      }
+    } catch (err) {
+      onToast?.(copy.monitoring.error, errText(err), "warning");
+    } finally {
+      setMonitoringBusy(null);
+    }
+  };
+
+  const handleRemoveTrustedException = async (provider: string, ip: string) => {
+    if (exceptionsBusy) return;
+    setExceptionsBusy(true);
+    const label = providerLabel(provider);
+    try {
+      const updated = await removeTrustedException(provider, ip);
+      setTrustedExceptions(updated.trusted_exceptions ?? {});
+      await onStateUpdated?.();
+      onToast?.(copy.trustedExceptions.removedTitle, copy.trustedExceptions.removedText(label, ip), "info");
+    } catch (err) {
+      onToast?.(copy.trustedExceptions.error, errText(err), "warning");
+    } finally {
+      setExceptionsBusy(false);
+    }
+  };
+
+  const handleClearTrustedExceptions = async () => {
+    if (exceptionsBusy) return;
+    setExceptionsBusy(true);
+    try {
+      const updated = await clearTrustedExceptions();
+      setTrustedExceptions(updated.trusted_exceptions ?? {});
+      await onStateUpdated?.();
+      onToast?.(copy.trustedExceptions.clearedTitle, copy.trustedExceptions.clearedText, "info");
+    } catch (err) {
+      onToast?.(copy.trustedExceptions.error, errText(err), "warning");
+    } finally {
+      setExceptionsBusy(false);
+    }
+  };
+
   const handleCleanOsProxy = async () => {
     setCleaningProxy(true);
     setProxyResult(null);
@@ -559,6 +652,83 @@ export function SettingsModal({
               <p className="zs-settings__hint" role="alert">
                 {osTzError}
               </p>
+            )}
+          </Section>
+
+          {/* Мониторинг сервисов ИИ */}
+          <Section title={copy.monitoring.section}>
+            <p className="zs-t-body zs-settings__lead">{copy.monitoring.text}</p>
+            <Rows className="zs-settings__rows">
+              {MONITORED_PROVIDERS.map((id) => {
+                const enabled = !disabledSet.has(id);
+                const statusText = enabled ? copy.monitoring.enabledSub : copy.monitoring.disabledSub;
+                const sub =
+                  id === "gemini"
+                    ? `${statusText}. ${copy.monitoring.geminiNote}`
+                    : `${statusText} (${providerCopy[id].domains})`;
+                return (
+                  <Row
+                    key={id}
+                    icon="shield"
+                    tone={enabled ? "ok" : "neutral"}
+                    title={providerCopy[id].name}
+                    sub={sub}
+                    trail={
+                      <Switch
+                        checked={enabled}
+                        disabled={monitoringBusy !== null}
+                        onChange={(next) => void handleToggleProviderMonitoring(id, next)}
+                        aria-label={copy.monitoring.toggleLabel(providerCopy[id].name)}
+                      />
+                    }
+                  />
+                );
+              })}
+            </Rows>
+          </Section>
+
+          {/* Сохранённые исключения (trusted_exceptions) */}
+          <Section title={copy.trustedExceptions.section}>
+            <p className="zs-t-body zs-settings__lead">{copy.trustedExceptions.text}</p>
+            {exceptionEntries.length > 0 ? (
+              <>
+                <div className="zs-settings__exc-actions">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={exceptionsBusy}
+                    onClick={() => void handleClearTrustedExceptions()}
+                  >
+                    {copy.trustedExceptions.clearAll}
+                  </Button>
+                </div>
+                <Rows className="zs-settings__rows">
+                  {exceptionEntries.map(({ provider, ip }) => {
+                    const label = providerLabel(provider);
+                    return (
+                      <Row
+                        key={`${provider}:${ip}`}
+                        icon="lock"
+                        title={label}
+                        sub={<Mono>{ip}</Mono>}
+                        trail={
+                          <Button
+                            variant="quiet"
+                            size="sm"
+                            iconOnly
+                            icon="x"
+                            aria-label={copy.trustedExceptions.remove(label, ip)}
+                            disabled={exceptionsBusy}
+                            onClick={() => void handleRemoveTrustedException(provider, ip)}
+                          />
+                        }
+                      />
+                    );
+                  })}
+                </Rows>
+              </>
+            ) : (
+              <p className="zs-settings__empty">{copy.trustedExceptions.empty}</p>
             )}
           </Section>
 

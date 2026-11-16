@@ -12,7 +12,8 @@ export const toast = {
   strictOff: "Строгий режим выключен",
   strictOffText: "Вместо остановки вы будете получать уведомления.",
   accessAllowed: "Блок снят",
-  accessAllowedText: (name: string) => `${name} разрешён до конца сессии.`,
+  accessAllowedText: (name: string) =>
+    `${name} разрешён для текущего IP выхода. Постоянное исключение можно удалить в Настройках.`,
   accessRestored: "Доступ восстановлен",
   accessRestoredText: (name: string) => `Адрес проверен, блокировка ${name} снята.`,
   guard: {
@@ -39,7 +40,7 @@ export const toast = {
   },
   intercept: {
     allowedTitle: "Пауза снята",
-    allowedText: "Трафик к ИИ разрешён на эту сессию.",
+    allowedText: "Трафик к ИИ разрешён для текущего IP выхода (исключение сохранено в Настройках).",
     pausedTitle: "Пауза до смены сети",
     pausedText: "Запросы к ИИ приостановлены до смены сети или IP.",
     pauseError: "Не удалось включить паузу до смены сети",

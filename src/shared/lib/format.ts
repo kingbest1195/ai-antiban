@@ -61,14 +61,34 @@ export function maskIpsInText(text: string, hideIpMode = false): string {
   return text.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.(\d{1,3})\b/g, "•••.•••.•••.$1");
 }
 
-/** Возвращает закреплённый IP для конкретного провайдера с откатом к глобальному («default» / `pinned_ip`). */
+/** Возвращает закреплённый IP для конкретного провайдера.
+ *  Когда провайдер привязан к своему маршруту (ключа Заставы или профиля Claude),
+ *  нельзя подмешивать глобальный `default` / `pinned_ip` локального VPN — иначе UI покажет чужой IP. */
 export function resolvePinnedIp(
-  state: Pick<AppStateData, "pinned_ip" | "pinned_ips"> | null | undefined,
+  state:
+    | (Pick<AppStateData, "pinned_ip" | "pinned_ips"> &
+        Partial<
+          Pick<
+            AppStateData,
+            "profile_route_id" | "provider_routes" | "default_route_id" | "profile_route_invalid"
+          >
+        >)
+    | null
+    | undefined,
   provider?: ProviderId | null,
 ): string | null {
   if (!state) return null;
-  if (provider && state.pinned_ips?.[provider]) {
-    return state.pinned_ips[provider];
+  if (provider) {
+    const explicit = state.provider_routes?.[provider];
+    const isRouted =
+      (provider === "anthropic" && Boolean(state.profile_route_id || state.profile_route_invalid)) ||
+      (explicit !== undefined ? explicit !== "__direct__" : Boolean(state.default_route_id && state.default_route_id !== "__direct__"));
+    if (isRouted) {
+      return state.pinned_ips?.[provider] ?? null;
+    }
+    if (state.pinned_ips?.[provider]) {
+      return state.pinned_ips[provider];
+    }
   }
   return state.pinned_ips?.default ?? state.pinned_ip ?? null;
 }

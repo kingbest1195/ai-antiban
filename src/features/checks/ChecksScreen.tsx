@@ -138,8 +138,14 @@ export function ChecksScreen({
 
   const resolvedReports = reports ?? (report ? { [report.provider]: report } : undefined);
   const defaultProvider =
-    provider ?? (resolvedReports ? pickWorstProvider(resolvedReports) : undefined) ?? report?.provider ?? "anthropic";
+    provider ??
+    (resolvedReports ? pickWorstProvider(resolvedReports, state?.disabled_providers) : undefined) ??
+    report?.provider ??
+    "anthropic";
   const activeProvider: ProviderId = manualProvider ?? defaultProvider;
+  const isProviderDisabled = Boolean(
+    state?.disabled_providers?.some((p) => p.toLowerCase() === activeProvider),
+  );
   const activeReport: RiskReport | null = resolvedReports
     ? (resolvedReports[activeProvider] ?? (report?.provider === activeProvider ? report : null))
     : (report ?? null);
@@ -153,6 +159,19 @@ export function ChecksScreen({
       options={PROVIDER_ORDER.map((id) => ({ value: id, label: providerCopy[id].name }))}
     />
   );
+
+  if (isProviderDisabled) {
+    return (
+      <div className="zs-stack">
+        {switcher}
+        <Card>
+          <EmptyState icon="shield" title="Мониторинг отключён">
+            Перехват, проверки и уведомления для {providerName} отключены в Настройках. Включите сервис в Настройках, чтобы снова проверять его.
+          </EmptyState>
+        </Card>
+      </div>
+    );
+  }
 
   // Ни отчёта, ни идущей проверки, а аудит упал (или не вернул отчёт для выбранного провайдера): понятная ошибка с повтором.
   const missingAfterFinish = !activeReport && !rechecking && !startupPending && (Boolean(auditError) || Boolean(resolvedReports && Object.keys(resolvedReports).length > 0));

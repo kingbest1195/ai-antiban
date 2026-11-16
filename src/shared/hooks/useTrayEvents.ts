@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
 import type {
   EnrichedPayload,
+  ProfileSwitchResult,
   RiskInterceptPayload,
   UpdateCheckResult,
   UpdateProgressPayload,
@@ -24,6 +25,10 @@ export interface TrayEventHandlers {
   runFullAudit: (force?: boolean, silentError?: boolean) => Promise<void>;
   /** Перечитать AppStateData (tray://state-changed, tray://profile-switched). */
   refreshState: () => Promise<unknown>;
+  /** Перечитать снимок маршрутов. */
+  refreshRoutes?: () => Promise<unknown>;
+  /** Обновить список профилей Claude в интерфейсе. */
+  refreshProfiles?: () => void;
   checkUpdates: (silent?: boolean) => Promise<void>;
   syncTimezone: () => Promise<void>;
   exportClaude: () => Promise<void>;
@@ -33,6 +38,19 @@ export interface TrayEventHandlers {
   applyUpdateProgress: (payload: UpdateProgressPayload) => void;
   applyUpdateAvailable: (payload: UpdateCheckResult) => void;
   applyUpdateStatus: (payload: UpdateStatusPayload) => void;
+}
+
+/** Обработчик события `tray://profile-switched`: читает имя из `active_profile.name` и обновляет состояние, маршруты и профили. */
+export async function handleTrayProfileSwitched(
+  handlers: Pick<TrayEventHandlers, "refreshState" | "refreshRoutes" | "refreshProfiles" | "showToast" | "runFullAudit">,
+  payload?: Partial<ProfileSwitchResult> | null,
+): Promise<void> {
+  try {
+    await Promise.all([handlers.refreshState(), handlers.refreshRoutes?.()]);
+  } catch {}
+  handlers.refreshProfiles?.();
+  handlers.showToast(t.profile.switched, payload?.active_profile?.name || t.profile.switchedText, "info");
+  handlers.runFullAudit(false);
 }
 
 /**
@@ -96,17 +114,13 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
 
     on("tray://state-changed", async () => {
       try {
-        await ref.current.refreshState();
+        await Promise.all([ref.current.refreshState(), ref.current.refreshRoutes?.()]);
       } catch {}
     });
 
-    on<any>("tray://profile-switched", async (payload) => {
-      try {
-        await ref.current.refreshState();
-      } catch {}
-      ref.current.showToast(t.profile.switched, payload?.name || t.profile.switchedText, "info");
-      ref.current.runFullAudit(false);
-    });
+    on<ProfileSwitchResult>("tray://profile-switched", (payload) =>
+      handleTrayProfileSwitched(ref.current, payload),
+    );
 
     on("tray://open-profiles", () => {
       ref.current.openBackup();

@@ -194,6 +194,8 @@ fn classify_known_names() {
     assert_eq!(classify_process_name("Vivaldi Helper"), "browsers");
     assert_eq!(classify_process_name("claude-code"), "claude-code");
     assert_eq!(classify_process_name("gemini"), "gemini-cli");
+    assert_eq!(classify_process_name("opencode"), "opencode");
+    assert_eq!(classify_process_name("opencode.exe"), "opencode");
     assert_eq!(classify_process_name("node"), "node-cli");
     assert_eq!(classify_process_name("python3"), "python-cli");
     assert_eq!(classify_process_name("Python"), "python-cli");
@@ -1300,17 +1302,18 @@ fn desktop_antigravity_is_not_judged_by_a_settings_file() {
 }
 
 #[test]
-fn desktop_antigravity_with_an_effective_pac_is_configured_but_asks_for_the_env() {
+fn desktop_antigravity_with_an_effective_pac_is_off_and_asks_for_the_env() {
     let rig = Rig::new();
     desktop_app(&rig);
     rig.seed_wifi_pac(OUR_PAC, true);
     rig.platform.set_effective_pac(Some(OUR_PAC), true);
     let snap = antigravity_snapshot(&rig, FakeProbe::answering(PS_OTHER));
     let a = app(&snap, "antigravity");
-    assert_eq!(a.status, CoverageStatus::Configured);
+    assert_eq!(a.status, CoverageStatus::Off);
     assert_eq!(a.manual_steps, vec![steps::LAUNCH_WITH_ENV.to_string()]);
+    assert!(a.detail.contains("агент"), "{}", a.detail);
 
-    // A VPN that overrides the PAC: it is not effective, the app is off again.
+    // A VPN that overrides the PAC: it is still off and asks for system proxy + env.
     rig.platform.set_effective_pac(None, false);
     let snap = antigravity_snapshot(&rig, FakeProbe::answering(PS_OTHER));
     assert_eq!(app(&snap, "antigravity").status, CoverageStatus::Off);
@@ -1713,4 +1716,53 @@ fn utun_vpn_with_temp_dns_and_deferred_os_pac_surfaces_tunnel_notice_and_configu
             .manual_steps
             .contains(&steps::ENABLE_PROTECTION.to_string())
     );
+}
+
+#[test]
+fn opencode_in_ai_only_is_off_with_bypass_suspected_even_with_service_json() {
+    let rig = Rig::new();
+    let cfg_dir = home().join(".config").join("opencode");
+    rig.fs.create_private_dir_all(&cfg_dir).unwrap();
+    rig.fs.put(
+        &cfg_dir.join("service.json"),
+        br#"{"env":{"HTTPS_PROXY":"http://127.0.0.1:8899","HTTP_PROXY":"http://127.0.0.1:8899"}}"#,
+        0o600,
+    );
+
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    t.set_cli_mode(CliMode::AiOnly);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+
+    let oc = app(&snap, "opencode");
+    assert!(oc.installed);
+    assert_eq!(oc.status, CoverageStatus::Off);
+    assert!(oc.bypass_suspected);
+    assert_eq!(oc.manual_steps, vec![steps::SET_ENV_PROXY.to_string()]);
+    assert!(oc.detail.contains("Весь терминал"), "{}", oc.detail);
+}
+
+#[test]
+fn opencode_in_global_terminal_is_configured_and_traffic_confirms() {
+    let rig = Rig::new();
+    let bin = home().join(".opencode").join("bin").join("opencode");
+    rig.fs.create_private_dir_all(bin.parent().unwrap()).unwrap();
+    rig.fs.put(&bin, b"#!/bin/sh\n", 0o755);
+
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    t.set_cli_mode(CliMode::GlobalTerminal);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+
+    let oc = app(&snap, "opencode");
+    assert!(oc.installed);
+    assert_eq!(oc.status, CoverageStatus::Configured);
+    assert!(!oc.bypass_suspected);
+
+    t.set_cli_mode(CliMode::AiOnly);
+    t.record_hit("opencode", None);
+    let snap2 = t.snapshot(&rig.env(PacSource::Services, true), true);
+    let oc2 = app(&snap2, "opencode");
+    assert_eq!(oc2.status, CoverageStatus::Confirmed);
+    assert!(!oc2.bypass_suspected);
 }

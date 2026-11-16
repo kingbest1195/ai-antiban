@@ -149,6 +149,117 @@ pub fn evaluate_impossible_travel(
     CheckResult::ok("TRAVEL_NORMAL", text)
 }
 
+fn is_blocked_country_for_travel_grace(country_raw: &str) -> bool {
+    let cc = country_raw.trim();
+    crate::is_sanctioned_or_blocked_country(cc)
+        || cc.eq_ignore_ascii_case("HK")
+        || cc.eq_ignore_ascii_case("CN")
+        || cc.eq_ignore_ascii_case("MO")
+}
+
+fn is_travel_anomaly_code(code: &str) -> bool {
+    matches!(
+        code,
+        "IMPOSSIBLE_TRAVEL_CRITICAL" | "IMPOSSIBLE_TRAVEL_WARNING"
+    )
+}
+
+/// Pin-aware variant of [`evaluate_impossible_travel`]: returning to an explicitly pinned IP on
+/// a non-sanctioned/non-blocked country within `<4h` does not trigger `IMPOSSIBLE_TRAVEL_CRITICAL`
+/// or `IMPOSSIBLE_TRAVEL_WARNING`.
+pub fn evaluate_impossible_travel_with_pin(
+    history: &[IpHistoryEntry],
+    current_country_raw: &str,
+    current_timestamp: u64,
+    provider: ProviderId,
+    is_pinned: bool,
+) -> CheckResult {
+    let res = evaluate_impossible_travel(history, current_country_raw, current_timestamp, provider);
+    if is_pinned
+        && !is_blocked_country_for_travel_grace(current_country_raw)
+        && is_travel_anomaly_code(&res.code)
+    {
+        let cc = current_country_raw.trim().to_uppercase();
+        return CheckResult::ok(
+            "TRAVEL_PINNED_RETURN",
+            format!(
+                "Возврат на ваш закреплённый IP в {cc}: смена страны относительно предыдущего VPN допустима."
+            ),
+        );
+    }
+    res
+}
+
+/// Downgrades `IMPOSSIBLE_TRAVEL_CRITICAL` / `IMPOSSIBLE_TRAVEL_WARNING` in `report` when
+/// `is_pinned` is `true`, exit geo is non-sanctioned/non-blocked (neither `Critical` nor `Unknown`),
+/// and no other check is `Critical`. Recomputes `overall_status`, `trust_score`, and counts.
+pub fn apply_pinned_travel_grace(
+    report: &mut crate::auditor::RiskReport,
+    is_pinned: bool,
+) -> bool {
+    if !is_pinned {
+        return false;
+    }
+    let cc = report.telemetry.country_code.trim();
+    if cc.is_empty()
+        || is_blocked_country_for_travel_grace(cc)
+        || report.geo_result.status.is_critical()
+        || report.geo_result.status.is_unknown()
+    {
+        return false;
+    }
+
+    let has_other_critical = report
+        .checks
+        .iter()
+        .any(|c| c.status.is_critical() && !is_travel_anomaly_code(&c.code))
+        || (report.pinning_result.status.is_critical()
+            && !is_travel_anomaly_code(&report.pinning_result.code))
+        || report.dnsbl_result.status.is_critical()
+        || report.asn_result.status.is_critical()
+        || report.ipv6_result.status.is_critical();
+    if has_other_critical {
+        return false;
+    }
+
+    let has_travel_anomaly = is_travel_anomaly_code(&report.travel_result.code)
+        || report
+            .checks
+            .iter()
+            .any(|c| is_travel_anomaly_code(&c.code));
+    if !has_travel_anomaly {
+        return false;
+    }
+
+    let grace = CheckResult::ok(
+        "TRAVEL_PINNED_RETURN",
+        format!(
+            "Возврат на ваш закреплённый IP в {}: смена страны относительно предыдущего VPN допустима.",
+            cc.to_uppercase()
+        ),
+    );
+    if is_travel_anomaly_code(&report.travel_result.code) {
+        report.travel_result = grace.clone();
+    }
+    for check in &mut report.checks {
+        if is_travel_anomaly_code(&check.code) {
+            *check = grace.clone();
+        }
+    }
+    if report.checks.is_empty() {
+        report.overall_status = crate::auditor::OverallStatus::Green;
+        report.trust_score = 100;
+    } else {
+        let verdict = crate::auditor::score_checks(&report.checks, true);
+        report.overall_status = verdict.overall_status;
+        report.trust_score = verdict.trust_score;
+        report.unknown_count = verdict.unknown_count;
+        report.applicable_count = verdict.applicable_count;
+        report.incomplete = verdict.incomplete;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +418,101 @@ mod tests {
             (CheckStatus::Critical, "PINNED_IP_MISMATCH")
         );
         assert!(!pinned_bad);
+    }
+
+    #[test]
+    fn impossible_travel_with_pin_allows_pinned_return_and_blocks_unpinned_or_sanctioned() {
+        let now = 100_000;
+        let history = vec![
+            IpHistoryEntry::new("145.241.193.245", "GB", Some(31898), now - 1800),
+            IpHistoryEntry::new("185.10.10.10", "NL", Some(1234), now - 900),
+            IpHistoryEntry::new("195.20.20.20", "DE", Some(5678), now - 300),
+        ];
+
+        // Unpinned return to GB within <4h still triggers IMPOSSIBLE_TRAVEL_CRITICAL / WARNING.
+        let unpinned_claude =
+            evaluate_impossible_travel_with_pin(&history, "GB", now, ProviderId::Anthropic, false);
+        assert_eq!(unpinned_claude.status, CheckStatus::Critical);
+        assert_eq!(unpinned_claude.code, "IMPOSSIBLE_TRAVEL_CRITICAL");
+
+        let unpinned_openai =
+            evaluate_impossible_travel_with_pin(&history, "GB", now, ProviderId::Openai, false);
+        assert_eq!(unpinned_openai.status, CheckStatus::Warning);
+        assert_eq!(unpinned_openai.code, "IMPOSSIBLE_TRAVEL_WARNING");
+
+        // Pinned return to non-sanctioned GB within <4h is allowed cleanly.
+        for pid in [ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+            let pinned_ok = evaluate_impossible_travel_with_pin(&history, "GB", now, pid, true);
+            assert_eq!(pinned_ok.status, CheckStatus::Ok);
+            assert_eq!(pinned_ok.code, "TRAVEL_PINNED_RETURN");
+        }
+
+        // Sanctioned country (RU) must NEVER be downgraded even if is_pinned == true.
+        let pinned_ru =
+            evaluate_impossible_travel_with_pin(&history, "RU", now, ProviderId::Anthropic, true);
+        assert_eq!(pinned_ru.status, CheckStatus::Critical);
+        assert_eq!(pinned_ru.code, "IMPOSSIBLE_TRAVEL_CRITICAL");
+    }
+
+    #[test]
+    fn apply_pinned_travel_grace_turns_pinned_travel_red_green_without_hiding_real_risks() {
+        use crate::auditor::{NetworkTelemetry, OverallStatus, RiskReport};
+
+        let ok = CheckResult::ok("OK", "ok");
+        let travel_crit = CheckResult::critical("IMPOSSIBLE_TRAVEL_CRITICAL", "DE -> GB in 5m", None);
+        let base = RiskReport {
+            provider: ProviderId::Anthropic,
+            overall_status: OverallStatus::Red,
+            trust_score: 35,
+            telemetry: NetworkTelemetry {
+                ip: "145.241.193.245".to_string(),
+                country_code: "GB".to_string(),
+                hostname: None,
+                asn: Some(31898),
+                org: None,
+                isp: None,
+                timezone: None,
+                resolved_at: 100_000,
+            },
+            geo_result: ok.clone(),
+            pinning_result: ok.clone(),
+            travel_result: travel_crit.clone(),
+            dnsbl_result: ok.clone(),
+            dnsbl_clean_count: "0/0".to_string(),
+            asn_result: ok.clone(),
+            ipv6_result: ok.clone(),
+            timezone_result: ok.clone(),
+            ipv6_exit: false,
+            checks: vec![ok.clone(), ok.clone(), travel_crit.clone(), ok.clone()],
+            unknown_count: 0,
+            applicable_count: 4,
+            incomplete: false,
+        };
+
+        // Unpinned stays Red.
+        let mut unpinned = base.clone();
+        assert!(!apply_pinned_travel_grace(&mut unpinned, false));
+        assert_eq!(unpinned.overall_status, OverallStatus::Red);
+
+        // Pinned on allowed GB with only travel anomaly becomes Green.
+        let mut pinned = base.clone();
+        assert!(apply_pinned_travel_grace(&mut pinned, true));
+        assert_eq!(pinned.overall_status, OverallStatus::Green);
+        assert_eq!(pinned.travel_result.code, "TRAVEL_PINNED_RETURN");
+        assert_eq!(pinned.checks[2].code, "TRAVEL_PINNED_RETURN");
+
+        // Pinned with another Warning (e.g. timezone) becomes Yellow, not Red.
+        let mut with_warn = base.clone();
+        with_warn
+            .checks
+            .push(CheckResult::warning("TIMEZONE_MISMATCH", "tz", None));
+        assert!(apply_pinned_travel_grace(&mut with_warn, true));
+        assert_eq!(with_warn.overall_status, OverallStatus::Yellow);
+
+        // Pinned with DNSBL critical stays Red.
+        let mut with_dnsbl = base;
+        with_dnsbl.dnsbl_result = CheckResult::critical("DNSBL_LISTED_CRITICAL", "listed", None);
+        assert!(!apply_pinned_travel_grace(&mut with_dnsbl, true));
+        assert_eq!(with_dnsbl.overall_status, OverallStatus::Red);
     }
 }

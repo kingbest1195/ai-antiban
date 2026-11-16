@@ -677,7 +677,7 @@ pub fn evaluate_dns_country_for_route(
             return CheckResult::ok(
                 "DNS_KEY_COUNTRY_ISOLATED",
                 format!(
-                    "DNS-резолвер {ip} ({country}) работает через системный VPN, а трафик AI изолирован через ключ Заставы ({exit}) по TCP CONNECT."
+                    "DNS-резолвер {ip} ({country}) работает через системный VPN, а трафик AI изолирован через ВПН Заставы ({exit}) по TCP CONNECT."
                 ),
             )
             .with_measured_via(MEASURED_VIA)
