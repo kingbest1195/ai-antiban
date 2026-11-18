@@ -1,403 +1,50 @@
-import { useEffect, useMemo, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { AppHeader, Banner, Button, Icon, Mono, TabPanel, Tabs, Tip, Toast, ToastViewport } from "../ui";
-import type { MenuEntry, TabItem } from "../ui";
-import { overview as overviewCopy, shell as copy, tabs as tabCopy, toast as toastCopy } from "../shared/copy/ru";
+import { overview as overviewCopy, shell as copy, tabs as tabCopy } from "../shared/copy/ru";
 import { formatCountryWithCode } from "../shared/lib/country";
 import { formatIp } from "../shared/lib/format";
-import { APP_VERSION } from "../shared/version";
-import { tabBadges, useOverviewModel } from "../features/overview/useOverviewModel";
-import { coverageNeedsAttention } from "../features/coverage/coverageModel";
-import {
-  useClaudeBackup,
-  useGatewayState,
-  useGatewayStats,
-  useInterception,
-  useMockScenario,
-  useNavigation,
-  usePinning,
-  useProtectionToggles,
-  useTimezoneSync,
-  useToasts,
-  useTrayEvents,
-  useUpdater,
-} from "../shared/hooks";
-import type { TabId } from "../shared/hooks";
-import type { RouteUnavailablePayload, ShutdownProgressPayload } from "../types";
-import { openTelegramSupport } from "../utils/opener";
-import {
-  bindUpstreamToClaudeProfile,
-  getHideIpMode,
-  onRouteUnavailable,
-  onShutdownProgress,
-  setHideIpMode,
-  takePendingDeepLink,
-  upsertRoute,
-} from "../utils/api";
+import { isTauri } from "../utils/api/client";
 import { OverviewScreen } from "../features/overview/OverviewScreen";
 import { ConnectScreen } from "../features/connect/ConnectScreen";
 import { CopyErrorLogButton } from "../shared/components/CopyErrorLogButton";
-import { AlertOverlay } from "../features/alert";
-import { OnboardingFlow, useOnboarding } from "../features/onboarding";
 import { BackupScreen } from "../features/backup";
 import { ChecksScreen } from "../features/checks";
-import { CrashTestModal } from "../features/crash-test";
 import { GuidesScreen } from "../features/guides";
-import { SettingsModal } from "../features/settings";
-import { hasBrowserTraffic } from "../features/coverage/coverageModel";
 import { SubscriptionScreen } from "../features/subscription";
-import { AboutModal } from "./AboutModal";
-import { DeepLinkModal } from "./DeepLinkModal";
-import type { DeepLinkConfirmOptions } from "./DeepLinkModal";
-import { EventsModal } from "./EventsModal";
-import { ShutdownOverlay } from "./ShutdownOverlay";
-import { TimezoneModal } from "./TimezoneModal";
-import { UpdateModal } from "./UpdateModal";
+import { AppShellDialogs } from "./AppShellDialogs";
+import { useAppShellController } from "./useAppShellController";
 import "./shell.css";
-
-const TAB_ITEMS: TabItem<TabId>[] = [
-  { id: "overview", label: tabCopy.overview },
-  { id: "connect", label: tabCopy.connect },
-  { id: "checks", label: tabCopy.checks },
-  { id: "backup", label: tabCopy.backup },
-  { id: "guides", label: tabCopy.guides },
-];
-
-/** Вкладки с бейджами: подмешивает их к неизменной основе. */
-function withBadges(badges: ReturnType<typeof tabBadges>): TabItem<TabId>[] {
-  return TAB_ITEMS.map((item) =>
-    item.id === "overview" && badges.overview !== undefined
-      ? { ...item, badge: badges.overview }
-      : item.id === "checks" && badges.checks !== undefined
-        ? { ...item, badge: badges.checks }
-        : item,
-  );
-}
 
 const TAB_PREFIX = "app";
 
 /** Оболочка главного окна: шапка с меню «Ещё», вкладки, активный экран, футер и все общие диалоги. */
 export function AppShell() {
-  const nav = useNavigation();
-  const onboarding = useOnboarding();
-  const { toasts, showToast, dismissToast } = useToasts();
+  const ctrl = useAppShellController();
+  const {
+    nav,
+    toasts,
+    showToast,
+    dismissToast,
+    setCrashTestOpen,
+    setTimezoneOpen,
+    routeUnavailableBanner,
+    setRouteUnavailableBanner,
+    profileRefreshKey,
+    stats,
+    gw,
+    toggles,
+    pinning,
+    tz,
+    updater,
+    hideIpMode,
+    intercept,
+    backup,
+    tabItems,
+    version,
+    menuItems,
+    handleToggleHideIp,
+  } = ctrl;
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [crashTestOpen, setCrashTestOpen] = useState(false);
-  const [timezoneOpen, setTimezoneOpen] = useState(false);
-  const [aboutOpen, setAboutOpen] = useState(false);
-  const [eventsOpen, setEventsOpen] = useState(false);
-  const [browserSimulation, setBrowserSimulation] = useState(false);
-  const [pendingDeepLinkKey, setPendingDeepLinkKey] = useState<string | null>(null);
-  const [submittingDeepLink, setSubmittingDeepLink] = useState(false);
-  const [routeUnavailableBanner, setRouteUnavailableBanner] = useState<RouteUnavailablePayload | null>(null);
-  const [shutdownProgress, setShutdownProgress] = useState<ShutdownProgressPayload | null>(null);
-  const [hideIpPref, setHideIpPref] = useState<boolean>(false);
-  const [profileRefreshKey, setProfileRefreshKey] = useState(0);
-
-  // ---- Состояние и действия, вынесенные из старого Dashboard ----
-  const stats = useGatewayStats(nav.tab === "overview" && !nav.subscriptionOpen);
-  const gw = useGatewayState({ showToast, refreshGatewayStats: stats.refreshGatewayStats });
   const { runFullAudit, refreshState } = gw;
-  const toggles = useProtectionToggles({
-    sysproxyActive: gw.sysproxyActive,
-    setSysproxyActive: gw.setSysproxyActive,
-    showToast,
-    startupPending: gw.startupPending,
-  });
-  const pinning = usePinning({
-    state: gw.state,
-    refreshState,
-    runFullAudit,
-    showToast,
-    currentIp: gw.currentIp,
-  });
-  const tz = useTimezoneSync({ activeReport: gw.activeReport, runFullAudit, showToast });
-  const updater = useUpdater({ showToast, setAutoUpdateEnabled: gw.setAutoUpdateEnabled });
-  const hideIpMode = gw.state?.hide_ip_mode ?? hideIpPref;
-  const intercept = useInterception({
-    runFullAudit,
-    showToast,
-    onSimulateInBrowser: () => setBrowserSimulation(true),
-  });
-  const backup = useClaudeBackup(showToast);
-  const overviewModel = useOverviewModel({
-    reports: gw.reports,
-    activeReport: gw.activeReport,
-    state: gw.state,
-    currentIp: gw.currentIp,
-    sysproxyActive: gw.sysproxyActive,
-    killswitchFrozen: toggles.killswitchFrozen,
-    updateInfo: updater.updateInfo,
-    refreshing: gw.refreshing,
-    startupPending: gw.startupPending,
-  });
-  // Жёлтая точка: защита включена и запуск закончен, но часть ИИ-приложений не покрыта (красное её перекрывает).
-  const coverageNotice = !gw.startupPending && gw.sysproxyActive && coverageNeedsAttention(gw.coverageSnapshot);
-  const tabItems = useMemo(
-    () => withBadges(tabBadges(overviewModel.banner, gw.reports, gw.state, coverageNotice)),
-    [overviewModel.banner, gw.reports, gw.state, coverageNotice],
-  );
-  const mock = useMockScenario(runFullAudit);
-
-  useTrayEvents({
-    showToast,
-    openGuide: nav.openGuide,
-    openBackup: () => nav.goTab("backup"),
-    runFullAudit,
-    refreshState,
-    refreshRoutes: gw.refreshRoutes,
-    refreshProfiles: () => setProfileRefreshKey((n) => n + 1),
-    checkUpdates: updater.handleCheckUpdates,
-    syncTimezone: () => tz.handleSyncTz(),
-    exportClaude: backup.handleExportClaude,
-    openCrashTest: () => setCrashTestOpen(true),
-    setKillswitchFrozen: toggles.setKillswitchFrozen,
-    setInterceptPayload: intercept.setInterceptPayload,
-    applyUpdateProgress: updater.applyUpdateProgress,
-    applyUpdateAvailable: updater.applyUpdateAvailable,
-    applyUpdateStatus: updater.applyUpdateStatus,
-  });
-
-  // Ленивая загрузка вкладок: «Бэкап» сканирует ~/.claude, «Проверки» ждут первый отчёт.
-  useEffect(() => {
-    if (nav.tab === "backup" && !backup.claudeSummary) {
-      backup.loadClaudeSummary();
-    }
-    if (nav.tab === "checks" && !gw.reports.anthropic && !gw.refreshing) {
-      runFullAudit(true, true);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nav.tab, backup.claudeSummary, gw.reports.anthropic, gw.refreshing]);
-
-  // В Tauri версию отдаёт бэкенд; в браузере его ответ — мок, поэтому берём package.json.
-  const version = (isTauri() && updater.updateInfo?.current_version) || APP_VERSION;
-
-  useEffect(() => {
-    takePendingDeepLink()
-      .then((key) => {
-        if (key) setPendingDeepLinkKey(key);
-      })
-      .catch((err) => {
-        console.warn("Could not check pending deep link:", err);
-      });
-
-    let unlisten: (() => void) | undefined;
-    if (isTauri()) {
-      listen<string>("zastava://deep-link", (event) => {
-        if (event.payload) {
-          setPendingDeepLinkKey(event.payload);
-        }
-      })
-        .then((fn) => {
-          unlisten = fn;
-        })
-        .catch((err) => {
-          console.warn("Failed to listen for deep link events:", err);
-        });
-    }
-
-    const onHashChange = () => {
-      takePendingDeepLink()
-        .then((key) => {
-          if (key) setPendingDeepLinkKey(key);
-        })
-        .catch(() => {});
-    };
-    if (typeof window !== "undefined") {
-      window.addEventListener("hashchange", onHashChange);
-    }
-
-    return () => {
-      unlisten?.();
-      if (typeof window !== "undefined") {
-        window.removeEventListener("hashchange", onHashChange);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    onRouteUnavailable((info) => {
-      if (!active) return;
-      setRouteUnavailableBanner(info);
-      showToast(
-        `Маршрут недоступен (${info.provider.toUpperCase()})`,
-        info.message || "Подключение через выбранный ключ остановлено для защиты IP.",
-        "error",
-      );
-      gw.refreshRoutes().catch(() => {});
-    })
-      .then((fn) => {
-        if (active) unlisten = fn;
-        else fn();
-      })
-      .catch(() => {});
-
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    let unlisten: (() => void) | undefined;
-    getHideIpMode()
-      .then((enabled) => {
-        if (active) setHideIpPref(enabled);
-      })
-      .catch(() => {});
-
-    onShutdownProgress((payload) => {
-      if (active) setShutdownProgress(payload);
-    })
-      .then((fn) => {
-        if (active) unlisten = fn;
-        else fn();
-      })
-      .catch(() => {});
-
-    return () => {
-      active = false;
-      unlisten?.();
-    };
-  }, []);
-
-  // Если установка обновления завершилась ошибкой, убираем прелоадер завершения, чтобы пользователь увидел ошибку в окне обновления.
-  useEffect(() => {
-    if (updater.updaterStatus?.stage === "failed") {
-      setShutdownProgress(null);
-    }
-  }, [updater.updaterStatus?.stage]);
-
-  const handleToggleHideIp = async () => {
-    const next = !hideIpMode;
-    setHideIpPref(next);
-    try {
-      await setHideIpMode(next);
-      await refreshState();
-      showToast(next ? copy.hideIp.onToast : copy.hideIp.offToast, undefined, "info");
-    } catch (err: unknown) {
-      setHideIpPref(!next);
-      showToast(toastCopy.genericError, err instanceof Error ? err.message : String(err), "error");
-    }
-  };
-
-  const handleConfirmDeepLink = async ({ scope, profileId }: DeepLinkConfirmOptions) => {
-    if (!pendingDeepLinkKey) return;
-    const key = pendingDeepLinkKey;
-    setSubmittingDeepLink(true);
-    try {
-      if (scope === "profile") {
-        await bindUpstreamToClaudeProfile(profileId || "default", key);
-        nav.goTab("backup");
-        showToast("ВПН привязан к профилю", "ВПН Заставы привязан только к выбранному профилю Claude.", "success");
-      } else {
-        const setAsDefault = scope === "all";
-        await upsertRoute(key, null, setAsDefault);
-        nav.goTab("connect");
-        showToast(
-          "Ключ подключён",
-          setAsDefault
-            ? "Маршрут Заставы добавлен и назначен основным для всех ИИ-сервисов."
-            : "Маршрут Заставы сохранён в списке без изменения текущего подключения.",
-          "success",
-        );
-      }
-      await gw.refreshRoutes();
-      await refreshState();
-      setPendingDeepLinkKey(null);
-    } catch (err: any) {
-      console.error("Failed to add deep-link route:", err);
-      showToast("Ошибка подключения ключа", err?.message || String(err), "error");
-    } finally {
-      setSubmittingDeepLink(false);
-    }
-  };
-
-  const handleCancelDeepLink = () => {
-    setPendingDeepLinkKey(null);
-  };
-
-  const handleOpenSupport = async () => {
-    showToast(copy.toast.supportTitle, copy.toast.supportText, "info");
-    await openTelegramSupport();
-  };
-
-  const handleOpenOsClock = async () => {
-    await tz.openOsClock();
-    setTimezoneOpen(false);
-    nav.openGuide("03-os-privacy-setup");
-  };
-
-  // ---- Меню «Ещё» ----
-  const menuItems = useMemo<MenuEntry[]>(() => {
-    const items: MenuEntry[] = [
-      { id: "subscription", label: copy.menu.subscription, onSelect: nav.openSubscription },
-      { id: "settings", label: copy.menu.settings, onSelect: () => setSettingsOpen(true) },
-      { id: "sep-1", type: "separator" },
-      { id: "events", label: copy.menu.events, onSelect: () => setEventsOpen(true) },
-      {
-        id: "rescan",
-        label: copy.menu.rescan,
-        disabled: gw.refreshing,
-        onSelect: () => runFullAudit(true),
-      },
-      { id: "timezone", label: copy.menu.syncTimezone, onSelect: () => setTimezoneOpen(true) },
-      {
-        id: "updates",
-        label: updater.checkingUpdate
-          ? copy.menu.checkingUpdates
-          : updater.updateInfo?.update_available
-            ? copy.menu.updateTo(updater.updateInfo.latest_version)
-            : copy.menu.checkUpdates,
-        badge: updater.updateInfo?.update_available ? "Доступно" : undefined,
-        disabled: updater.checkingUpdate,
-        onSelect: () => {
-          if (updater.updateInfo?.update_available) updater.setShowUpdateModal(true);
-          else updater.handleCheckUpdates(false);
-        },
-      },
-      { id: "sep-2", type: "separator" },
-      {
-        id: "onboarding",
-        label: copy.menu.onboarding,
-        onSelect: onboarding.start,
-      },
-      { id: "support", label: copy.menu.support, onSelect: handleOpenSupport },
-      { id: "about", label: copy.menu.about, onSelect: () => setAboutOpen(true) },
-    ];
-    if (!isTauri()) {
-      items.push(
-        { id: "sep-3", type: "separator" },
-        {
-          id: "sc-clean",
-          label: copy.menu.scenarioNl,
-          disabled: mock.scenario === "clean",
-          onSelect: () => mock.handleSwitchScenario("clean"),
-        },
-        {
-          id: "sc-turkey",
-          label: copy.menu.scenarioTr,
-          disabled: mock.scenario === "turkey",
-          onSelect: () => mock.handleSwitchScenario("turkey"),
-        },
-        {
-          id: "sc-ru",
-          label: copy.menu.scenarioRu,
-          disabled: mock.scenario === "ru",
-          onSelect: () => mock.handleSwitchScenario("ru"),
-        },
-      );
-    }
-    return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gw.refreshing, updater.checkingUpdate, updater.updateInfo, mock.scenario, runFullAudit, nav.openSubscription, onboarding.start]);
-
   const payload = intercept.interceptPayload;
 
   return (
@@ -466,7 +113,6 @@ export function AppShell() {
               aria-label={tabCopy.label}
             />
 
-            {/* Отчёт неполный: на «Обзоре» то же говорит его собственный баннер, поэтому там не дублируем */}
             {gw.activeReport?.incomplete && nav.tab !== "overview" && (
               <Banner
                 tone="neutral"
@@ -481,7 +127,6 @@ export function AppShell() {
               </Banner>
             )}
 
-            {/* Перехват запроса в главном окне (Tauri): неблокирующий баннер */}
             {isTauri() && payload && (
               <Banner
                 tone="danger"
@@ -674,7 +319,6 @@ export function AppShell() {
           <Mono>v{version}</Mono>
         </footer>
 
-        {/* Уведомления */}
         <ToastViewport>
           {toasts.map((t) => (
             <Toast
@@ -691,98 +335,7 @@ export function AppShell() {
         </ToastViewport>
       </div>
 
-      {/* Диалоги */}
-      <SettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        autoUpdateEnabled={gw.autoUpdateEnabled}
-        onToggleAutoUpdate={updater.handleToggleAutoUpdate}
-        interceptionBehavior={gw.state?.interception_behavior}
-        popupPosition={gw.state?.popup_position}
-        customAiDomains={gw.state?.custom_ai_domains}
-        disabledProviders={gw.state?.disabled_providers}
-        trustedExceptions={gw.state?.trusted_exceptions}
-        onStateUpdated={() => refreshState().catch(() => {})}
-        onToast={showToast}
-        appVersion={version}
-        rollbackReleases={updater.rollbackReleases}
-        rollbackLoading={updater.rollbackLoading}
-        rollbackLoaded={updater.rollbackLoaded}
-        rollbackError={updater.rollbackError}
-        rollingBackVersion={updater.rollingBackVersion}
-        installingUpdate={updater.installingUpdate}
-        updateProgress={updater.updateProgress}
-        updaterStatus={updater.updaterStatus}
-        onLoadRollbackVersions={updater.handleLoadRollbackVersions}
-        onInstallRollback={updater.handleInstallRollback}
-      />
-      <CrashTestModal open={crashTestOpen} onClose={() => setCrashTestOpen(false)} onToast={showToast} />
-      <TimezoneModal
-        open={timezoneOpen}
-        onClose={() => setTimezoneOpen(false)}
-        syncing={tz.syncingTz}
-        synced={tz.tzSyncedNotice}
-        onSync={() => tz.handleSyncTz()}
-        onOpenOsClock={handleOpenOsClock}
-        hasBrowserTraffic={hasBrowserTraffic(gw.coverageSnapshot?.apps)}
-      />
-      <UpdateModal
-        open={updater.showUpdateModal}
-        onClose={() => updater.setShowUpdateModal(false)}
-        info={updater.updateInfo}
-        installing={updater.installingUpdate}
-        progress={updater.updateProgress}
-        status={updater.updaterStatus}
-        onInstall={updater.handleInstallUpdate}
-      />
-      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} version={version} onSupport={handleOpenSupport} />
-      <EventsModal open={eventsOpen} onClose={() => setEventsOpen(false)} stats={stats.gatewayStats} />
-      <DeepLinkModal
-        deepLinkKey={pendingDeepLinkKey}
-        onClose={handleCancelDeepLink}
-        onConfirm={handleConfirmDeepLink}
-        submitting={submittingDeepLink}
-      />
-
-      {/* Знакомство с Заставой: первый запуск новой версии или «Ещё» → «Пройти знакомство заново» */}
-      {onboarding.open && (
-        <OnboardingFlow
-          key={onboarding.run}
-          initialStep={onboarding.initialStep}
-          reports={gw.reports}
-          activeReport={gw.activeReport}
-          refreshing={gw.refreshing}
-          auditError={gw.auditError}
-          currentIp={gw.currentIp}
-          trustScore={gw.trustScore}
-          sysproxyActive={gw.sysproxyActive}
-          cliProtected={toggles.cliProtected}
-          onToggleSysproxy={toggles.handleToggleSysproxy}
-          onToggleCli={() => toggles.handleToggleCliProtection({ quiet: true })}
-          onRecheck={() => runFullAudit(true, true)}
-          onClose={(to) => {
-            onboarding.finish();
-            if (to) nav.goTab(to);
-          }}
-        />
-      )}
-
-      {/* Превью диалога обрыва в браузере (без Tauri) */}
-      {!isTauri() && (browserSimulation || payload) && (
-        <AlertOverlay
-          initialPayload={payload ?? undefined}
-          onResolved={() => {
-            const hadPayload = Boolean(payload);
-            setBrowserSimulation(false);
-            if (hadPayload) {
-              intercept.setInterceptPayload(null);
-              runFullAudit(false);
-            }
-          }}
-        />
-      )}
-
-      <ShutdownOverlay progress={shutdownProgress} />
+      <AppShellDialogs ctrl={ctrl} />
     </div>
   );
 }

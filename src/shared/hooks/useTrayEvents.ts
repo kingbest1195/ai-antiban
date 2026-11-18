@@ -13,6 +13,7 @@ import type {
 import { applyEnriched } from "../../features/alert/alertState";
 import { auditConnection, pinCurrentIp } from "../../utils/api";
 import { toast as t } from "../copy/ru";
+import { parseAdminAuthError } from "./useProtectionToggles";
 import type { ShowToast } from "./useToasts";
 
 /** Обработчики событий Tauri. Хук держит их в ref, поэтому подписки ставятся один раз и вызывают свежие версии. */
@@ -51,6 +52,16 @@ export async function handleTrayProfileSwitched(
   handlers.refreshProfiles?.();
   handlers.showToast(t.profile.switched, payload?.active_profile?.name || t.profile.switchedText, "info");
   handlers.runFullAudit(false);
+}
+
+/** Обработчик события `sysproxy://admin-auth-required`: предупреждает о неполной защите PAC при старте и подсказывает «Разрешить с паролем». */
+export function handleSysproxyAdminAuthRequired(
+  handlers: Pick<TrayEventHandlers, "showToast">,
+  payload?: string | null,
+): void {
+  const parsed = payload ? parseAdminAuthError(payload) : null;
+  const detail = parsed ? `${parsed} Откройте «Обзор» → «Разрешить с паролем».` : t.sysproxy.adminAuthText;
+  handlers.showToast(t.sysproxy.adminAuthTitle, detail, "warning");
 }
 
 /**
@@ -152,6 +163,10 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
 
     on("network://changed", () => {
       ref.current.runFullAudit(true);
+    });
+
+    on<string>("sysproxy://admin-auth-required", (payload) => {
+      handleSysproxyAdminAuthRequired(ref.current, payload);
     });
 
     // Эпоха последнего enriched по текущему алерту: чужие и устаревшие события игнорируются.

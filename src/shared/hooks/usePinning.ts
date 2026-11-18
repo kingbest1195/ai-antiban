@@ -8,7 +8,8 @@ import {
   unpinIp,
   verifyAndUnblockProvider,
 } from "../../utils/api";
-import { providers, toast as t } from "../copy/ru";
+import { writeClipboard } from "../lib/clipboard";
+import { common, providers, toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
 interface Options {
@@ -26,14 +27,17 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
 
   useEffect(() => () => window.clearTimeout(copiedTimer.current), []);
 
-  const handleCopyIp = useCallback(() => {
-    if (currentIp && currentIp !== "--") {
-      navigator.clipboard.writeText(currentIp);
-      setCopiedIp(true);
-      showToast(t.ipCopied, currentIp, "success");
-      window.clearTimeout(copiedTimer.current);
-      copiedTimer.current = window.setTimeout(() => setCopiedIp(false), 2000);
+  const handleCopyIp = useCallback(async () => {
+    if (!currentIp || currentIp === "--") return;
+    const ok = await writeClipboard(currentIp);
+    if (!ok) {
+      showToast(t.ipCopyError, common.copyFailText, "error");
+      return;
     }
+    setCopiedIp(true);
+    showToast(t.ipCopied, currentIp, "success");
+    window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => setCopiedIp(false), 2000);
   }, [currentIp, showToast]);
 
   const handlePinIp = useCallback(

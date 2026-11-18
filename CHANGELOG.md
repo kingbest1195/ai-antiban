@@ -7,6 +7,40 @@
 
 ---
 
+## [2.3.0] — 2026-11-18
+
+Релиз, выросший из разбора реального кейса бана со «100% защитой» и превративший слепую зону в рабочую броню: перехват скачка ASN внутри одной страны, «Безопасный выход» с сохранением `deviceId` и 4-часовым таймером, реальная PTR-проверка и честные гайды без посредников, плюс фикс 20-минутных таймаутов маршрутов поверх VPN на Windows, нативный буфер обмена и строгий откат `apply_pac` на macOS и 4-слойная архитектура ядра с [`CONSTITUTION.md`](CONSTITUTION.md).
+
+### Добавлено
+* **Безопасный выход из Claude и 4-часовой таймер смены IP/VPN (`auditor/profile_switcher/safe_logout.rs`, `commands/claude.rs`, `state/schema.rs`, `state/settings.rs`, `ProfilesSection.tsx`, `ProfileModals.tsx`, `CooldownBanner.tsx`):**
+  * Кнопка **«Безопасный выход (смена IP / VPN)»** (`safe_logout_claude_cmd`) мягко завершает процессы Claude Desktop и помощников (только при `os_effects_enabled()`), удаляет только cookies и хранилище сессий (`Cookies`, `Local Storage`, `Session Storage`, `IndexedDB`, `WebStorage`, `SharedStorage`, `DIPS`) и OAuth-токены CLI, **строго сохраняя `ant-device-registry.json` (`deviceId`), `ccd-ids.json`, `claude_desktop_config.json` и `.claude/settings.json`**, а также напоминает выйти из `claude.ai` в браузерах.
+  * В `AppStateData` добавлены поля `ip_change_cooldown_until` и `last_safe_logout_at` (обратная совместимость через `#[serde(default)]`); после безопасного выхода запускается 4-часовой таймер (`14400` с) с живым баннером обратного отсчёта `HH:MM:SS` на экране «Обзор» и кнопкой ручного сброса (`clear_ip_change_cooldown_cmd`).
+* **Перехват смены ASN/дата-центра внутри одной страны (`auditor/history.rs`, `proxy/guard/{policy,audit_summary,audit_outcome,alerts,baseline_restore}.rs`):**
+  * `evaluate_impossible_travel_with_exit` теперь отслеживает смену провайдера/ASN даже при совпадении страны (`prev_country == current_country`, например `DE -> DE`), если оба ASN ненулевые и различаются (`AS_A -> AS_B`), сменился IP, не прошло 4 часов и возврат не является `TRAVEL_PINNED_RETURN` — возвращается предупреждение `TRAVEL_ASN_JUMP_SAME_COUNTRY` (при этом смена IP у одного провайдера `AS_A -> AS_A` остаётся `TRAVEL_NORMAL`).
+  * `NetworkGuard` больше не выполняет тихий `accept_locked` при `TRAVEL_ASN_JUMP_SAME_COUNTRY` или при активном 4-часовом кулдауне во время внезапной смены IP — требуется явное подтверждение пользователя в `alert-popup` (с сохранением работы `TRAVEL_PINNED_RETURN` и `trusted_exceptions`).
+* **Реальный Reverse DNS (PTR) lookup (`auditor/seams/dns/`, `auditor/network/mod.rs`):** в `DnsLookup` / `SystemDns` добавлен `reverse_ptr` на базе `hickory_resolver::TokioResolver::reverse_lookup`; `evaluate_reverse_dns_ptr_with_dns` проверяет реальную PTR-запись выходного IP на маркеры публичных анонимайзеров (с пометкой `rdns:ptr`).
+* **4-слойная модульная архитектура и Конституция (`CONSTITUTION.md`, `ARCHITECTURE.md`, `scripts/check-architecture.mjs`):** ядро `src-tauri/src/` и фронтенд `src/` декомпозированы на строгую 4-слойную архитектуру (`core/` → `state/`, `routing/` → доменные сервисы → `app/`, `commands/`, `tray/`) с жёсткими бюджетами размеров файлов (`<= 500L` prod / `<= 700L` test), вынесенными тестовыми двойниками `fakes.rs`, тонкой границей `invoke()` в `src/utils/api/` и автоматическими проверками CI без функциональных регрессий.
+
+### Изменено
+* **Честный статус Datacenter / VPS IP (`auditor/ip_type.rs`):** для `IpType::Hosting` отображается честная формулировка «Datacenter / VPS IP (не резидентский)» с напоминанием избегать резких смен IP/ASN (при сохранении `Status::Ok` для личных VPS).
+* **Обновлены гайды по VPS и оплате (`rules/guides/*.md`, `src/features/guides/providers.ts`, `src/features/connect/hostings.ts`, `src/shared/copy/ru/guides.ts`, `src/shared/copy/ru/connect.ts`):**
+  * `is*hosting` заменён на **Vultr** (`https://www.vultr.com/?ref=9936768`);
+  * убраны завышенные формулировки про «100% защиту на VPS», «идеальный ASN» и «нулевой риск»;
+  * добавлено жёсткое предупреждение против посредников (`Playerok`, `FunPay`, Telegram-ботов, чужого Apple Pay) и уточнение, что способ через Apple App Store подразумевает **собственный личный Apple ID** с пополнением Gift Card;
+  * добавлено предупреждение никогда не переключать VPN/VPS на лету через `Cmd+Q` без безопасного выхода и 4-часовой паузы.
+
+### Исправлено
+* **Стабильность маршрутов Заставы поверх другого VPN на Windows (`proxy/upstream/{entry_connect,handshakes,chained,mod}.rs`, `routing/net/{mod,dns}.rs`, `proxy/server/{mod,tunnel,route_guard}.rs`, `src-tauri/Cargo.toml`):**
+  * добавлен автоматический fallback через системный `chained_proxy` для публичных входных узлов при сбое или таймауте прямого TCP-соединения (с защитой от петель на loopback, приватные подсети и сам `chained_proxy`, при полном сохранении fail-closed для целевого ИИ-трафика);
+  * в `tcp_connect_addrs` внедрён алгоритм Happy Eyeballs (`race_connect`, шаг `250 мс`, чередование IPv6/IPv4) и включён `SO_KEEPALIVE` (`time = 30s`, `interval = 10s` через `socket2`) для предотвращения подвисаний на мёртвом первом адресе или полуоткрытых VPN/NAT-сокетах;
+  * исправлен бюджет таймаутов DNS vs `ROUTE_ENTRY_TIMEOUT_SECS` (увеличен до `12s`, `system_lookup` сокращён до `1200 мс`, fallback через `hickory` и DoH распараллелен в `2500 мс`, добавлен аварийный stale-кэш DNS на `7200` с / 2 часа с фоновым обновлением);
+  * добавлена запись фазы ошибки (`dns`, `tcp_direct`, `tcp_chained`, `tls`, `connect`) в `[proxy:route]` журнала диагностики (`diagnostics::record`).
+* **Надёжное копирование текста в буфер на macOS WKWebView (`src/shared/lib/clipboard.ts`, `CopyErrorLogButton.tsx`, `useClaudeBackup.ts`, `useProtectionToggles.ts`, `usePinning.ts`, `useCopy.ts`, `useSettingsController.ts`):** все вызовы `navigator.clipboard.writeText` заменены на единый helper `writeClipboard`, который сначала вызывает нативную Tauri-команду `copy_text_to_clipboard` (`pbcopy` / Win32 `CF_UNICODETEXT`), устраняя `NotAllowedError` после асинхронных операций (включая «Скопировать промпт переноса» и копирование CLI-команды / IP / диагностического отчёта).
+* **Строгий откат частичных ошибок прав администратора в `apply_pac` на macOS (`sysproxy/macos/apply.rs`, `app/mod.rs`, `src/utils/api/events.ts`, `useTrayEvents.ts`):** при `AdminAuthRequired` (код 14 `networksetup`) на любой физической сетевой службе (включая chain/bypass) `apply_pac` откатывает частичные изменения и возвращает `Err(MSG_ADMIN_AUTH_REQUIRED)` вместо ложного `sysproxy_active = true`; ошибки прав на старте теперь отправляются в интерфейс через `sysproxy://admin-auth-required` с предложением «Разрешить с паролем».
+* **Перенос длинных причин блокировки в окне перехвата (`src/features/alert/alert.css`):** в `.zs-alert-reason` добавлен корректный перенос длинных строк (`overflow-wrap: anywhere`), чтобы причины `TRAVEL_ASN_JUMP_SAME_COUNTRY` и таймера кулдауна не обрезались.
+
+---
+
 ## [2.2.2] — 2026-11-16
 
 Патч-релиз с надёжным ядром при обрыве и восстановлении VPN, расширенным покрытием клиентов и доменов Gemini (`oauth2.googleapis.com`, `iamcredentials.googleapis.com`, `OpenCode`, честный статус `Antigravity`), обновлённым интерфейсом для ключей и хостингов, исправлением `CoworkVMServiceManualGuard` на Windows, постоянными исключениями `(Сервис + Exit IP)`, пер-сервисными тумблерами мониторинга и повышенной надёжностью мультиаккаунтинга.

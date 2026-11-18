@@ -41,6 +41,10 @@ jobs:
       - name: Lint hex colors
         run: pnpm lint:hex
 
+      # Enforces CONSTITUTION.md: file size budgets, 4-layer acyclicity, and frontend invoke() isolation.
+      - name: Architecture constitution guard
+        run: node scripts/check-architecture.mjs --self-test
+
       - name: Unit tests
         run: pnpm test
 

@@ -1,0 +1,176 @@
+import type { IpHistoryEntry, ProviderId, RiskReport } from "./audit";
+import type { CliMode } from "./coverage";
+
+export type InterceptionBehavior = "ask_popup" | "auto_lock_silent" | "auto_allow_trusted";
+export type PopupPosition = "top_right" | "top_center";
+
+export interface UpstreamProxyConfig {
+  enabled: boolean;
+  raw_key: string;
+  protocol: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  label?: string | null;
+}
+
+export interface AppStateData {
+  schema_version?: number;
+  pinned_ip: string | null;
+  strict_pinning_enabled: boolean;
+  ip_history: Record<string, IpHistoryEntry[]>;
+  session_allowed_providers: string[];
+  blocked_providers: string[];
+  /** Постоянные исключения вида { provider: [ip, ...] }, сохраняются между перезапусками. */
+  trusted_exceptions?: Record<string, string[]>;
+  /** Провайдеры с отключённым мониторингом, PAC-перехватом и алертами. */
+  disabled_providers?: string[];
+  upstream_proxy?: UpstreamProxyConfig | null;
+  warmup_started_at?: number | null;
+  synced_ai_timezone?: string | null;
+  auto_update_enabled?: boolean;
+  interception_behavior?: InterceptionBehavior;
+  popup_position?: PopupPosition;
+  custom_ai_domains?: string[];
+  /** Независимый тумблер «Подменять часовой пояс и локаль для ИИ в терминале/IDE». */
+  sync_ai_tz_enabled?: boolean;
+  /** Режим покрытия CLI. */
+  cli_mode?: CliMode;
+  /** Автозапуск Заставы при входе в систему (в трей). */
+  autostart_enabled?: boolean;
+  /** Защита от фонового автозапуска ИИ-служб (Windows CoworkVMService / macOS). */
+  cowork_guard_enabled?: boolean;
+  /** Режим выборочной маршрутизации VPN (split tunneling / TUN). */
+  split_tunnel_mode?: boolean;
+  /** Попровйдерное закрепление IP-адреса (ключ "default" или ProviderId). */
+  pinned_ips?: Record<string, string>;
+  /** Скрытие реального IP на экране для безопасных скриншотов. */
+  hide_ip_mode?: boolean;
+  /** Пройден ли мастер настройки v2.2. */
+  onboarding_v2_2_done?: boolean;
+  /** Маршруты и привязки в state.json. */
+  provider_routes?: Record<string, string>;
+  default_route_id?: string | null;
+  profile_route_id?: string | null;
+  legacy_route_id?: string | null;
+  profile_route_invalid?: string | null;
+  /** Ручной Kill-Switch («СТОП СЕТИ»). */
+  manual_killswitch?: boolean;
+  /** Unix-время (сек), до которого действует 4-часовой таймер после безопасного выхода из Claude. */
+  ip_change_cooldown_until?: number | null;
+  /** Unix-время (сек) последнего безопасного выхода из Claude Desktop/CLI. */
+  last_safe_logout_at?: number | null;
+}
+
+/** Состояние синхронизации системного часового пояса ОС (`os_tz::OsTzSyncStatus`). */
+export interface OsTzSyncStatus {
+  synced: boolean;
+  current_os_tz: string | null;
+  original_os_tz: string | null;
+  synced_target_tz: string | null;
+  auto_restore_pending: boolean;
+}
+
+export type AppStateSnapshot = AppStateData;
+
+export type InterceptionAction =
+  | "AllowSession"
+  | "BlockUntilNetworkChange"
+  | "OpenGuideAndBlock"
+  | "allowSession"
+  | "blockUntilNetworkChange"
+  | "openGuideAndBlock";
+
+export interface NetworkChange {
+  old_ip?: string | null;
+  old_country?: string | null;
+  /** null, пока новый адрес ещё не определён. */
+  new_ip?: string | null;
+  /** null, пока страна нового адреса ещё не определена. */
+  new_country?: string | null;
+}
+
+/** detecting — окно показано до конца проверки; ready — данные полные; failed — проверка не удалась, запросы остановлены. */
+export type AlertPhase = "detecting" | "ready" | "failed";
+
+export interface RiskInterceptPayload {
+  id: string;
+  provider: ProviderId;
+  host: string;
+  /** null, пока phase === "detecting". */
+  report?: RiskReport | null;
+  ttl_seconds: number;
+  scope?: "provider" | "network" | string;
+  network_change?: NetworkChange | null;
+  /** Понятная причина срабатывания перехвата из шлюза. */
+  gate_reason?: string | null;
+  is_simulation?: boolean;
+  /** Unix-время (мс), когда изменение сети обнаружено. */
+  detected_at_ms: number;
+  phase: AlertPhase;
+}
+
+/** interceptor://enriched: данные, пришедшие после показа окна. */
+export interface EnrichedPayload {
+  id: string;
+  /** Эпоха шлюза: устаревшие эпохи игнорируются. */
+  epoch: number;
+  phase: "ready" | "failed";
+  report?: RiskReport | null;
+  network_change: NetworkChange;
+  gate_reason?: string | null;
+}
+
+export type GuardPauseMode = "none" | "until_network_change" | "manual";
+
+export interface GuardPauseStatus {
+  paused: boolean;
+  mode: GuardPauseMode;
+  gate?: string | null;
+  gate_reason?: string | null;
+  manual_killswitch: boolean;
+}
+
+export interface ProtectionChangePreviewItem {
+  category: string;
+  target: string;
+  action: string;
+  description: string;
+  reversible: boolean;
+}
+
+export interface ShutdownProgressPayload {
+  mode: "quit" | "update";
+  step: number;
+  total: number;
+  label: string;
+  done: boolean;
+}
+
+export interface AutostartStatus {
+  platform: string;
+  supported: boolean;
+  enabled: boolean;
+  active_in_os: boolean;
+  target: string;
+}
+
+export interface DetectedAiProcess {
+  name: string;
+  kind: "process" | "login_item";
+  detail: string;
+}
+
+export interface CoworkGuardStatus {
+  platform: string;
+  supported: boolean;
+  service_present: boolean;
+  start_type: number | null;
+  service_running: boolean;
+  task_installed: boolean;
+  task_healthy: boolean;
+  needs_repair: boolean;
+  summary: string;
+  detected_ai_apps: DetectedAiProcess[];
+}

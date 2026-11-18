@@ -210,10 +210,6 @@ pub fn handle_menu_event(
             let app_handle = app.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = sysproxy::force_clean_all_os_proxy_traces();
-                if let Some(st) = app_handle.try_state::<state::AppState>() {
-                    let _ = st.set_sysproxy_enabled(false).await;
-                    let _ = st.set_cli_protection_enabled(false).await;
-                }
                 update_tray_status(&app_handle, "green", Some("Прокси и хвосты в ОС очищены"));
                 let _ = app_handle.emit("tray://state-changed", ());
             });

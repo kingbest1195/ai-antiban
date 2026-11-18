@@ -1,10 +1,6 @@
-/// Checks whether a country code is sanctioned/high-risk and must NEVER be auto-pinned as AI timezone.
-pub fn is_sanctioned_or_blocked_country(country_code: &str) -> bool {
-    const BLOCKED: &[&str] = &["RU", "BY", "IR", "KP", "SY", "CU"];
-    BLOCKED
-        .iter()
-        .any(|c| c.eq_ignore_ascii_case(country_code.trim()))
-}
+pub use crate::core::sanctions::{
+    is_blocked_geo_code, is_sanctioned_locale, is_sanctioned_or_blocked_country,
+};
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ShowToast } from "../../shared/hooks";
+import { writeClipboard } from "../../shared/lib/clipboard";
 import { common } from "../../shared/copy/ru";
 
 interface CopyNotice {
@@ -16,13 +17,13 @@ export function useCopy(onToast?: ShowToast, resetMs = 2500) {
 
   const copy = useCallback(
     async (id: string, value: string, notice?: CopyNotice) => {
-      try {
-        await navigator.clipboard.writeText(value);
+      const ok = await writeClipboard(value);
+      if (ok) {
         setCopiedId(id);
         window.clearTimeout(timer.current);
         timer.current = window.setTimeout(() => setCopiedId(null), resetMs);
         if (notice) onToast?.(notice.title, notice.text, "success");
-      } catch {
+      } else {
         onToast?.(common.copyFailTitle, common.copyFailText, "error");
       }
     },

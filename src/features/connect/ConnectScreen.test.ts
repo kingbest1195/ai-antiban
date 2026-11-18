@@ -5,6 +5,7 @@ import { connect as copy } from "../../shared/copy/ru";
 import { formatCountryWithCode } from "../../shared/lib/country";
 import type { RouteView, RoutesSnapshot } from "../../types";
 import { ConnectScreen, getAffectedProvidersForRoute, resolveProviderExitCountry } from "./ConnectScreen";
+import { HOSTINGS } from "./hostings";
 
 const makeRoute = (id: string, country: string, exitIp: string, label: string): RouteView => ({
   id,
@@ -119,5 +120,26 @@ describe("resolveProviderExitCountry и ConnectScreen", () => {
 
     expect(html).toContain(copy.routes.profileErrorTitle);
     expect(html).toContain(copy.routes.resetToDirect);
+  });
+
+  it("использует Vultr с реферальной ссылкой и не содержит is*hosting", () => {
+    const vultr = HOSTINGS.find((h) => h.id === "vultr");
+    expect(vultr?.name).toBe("Vultr");
+    expect(vultr?.url).toBe("https://www.vultr.com/?ref=9936768");
+    expect(HOSTINGS.some((h) => (h.id as string) === "ishosting")).toBe(false);
+
+    const html = renderToStaticMarkup(
+      createElement(ConnectScreen, {
+        state: null,
+        routesSnapshot: snapshot,
+        currentIp: "95.165.10.22",
+        currentCountry: "DE",
+        onRefreshState: vi.fn(async () => {}),
+        onOpenGuide: vi.fn(),
+        onToast: vi.fn(),
+      }),
+    );
+    expect(html).toContain("Vultr");
+    expect(html).not.toContain("is*hosting");
   });
 });

@@ -1,5 +1,4 @@
 import { useState } from "react";
-import type { ReactNode } from "react";
 import type {
   AppStateData,
   CoverageSnapshot,
@@ -17,9 +16,7 @@ import {
   Card,
   ConfirmModal,
   EmptyState,
-  ExpandRow,
   InfoTip,
-  Menu,
   Row,
   Rows,
   Section,
@@ -28,20 +25,22 @@ import {
   Stats,
   StatusHero,
   Switch,
-  cx,
 } from "../../ui";
 import { CopyErrorLogButton } from "../../shared/components/CopyErrorLogButton";
-import type { MenuEntry } from "../../ui";
-import { checks as checksCopy, coverage as coverageCopy, overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
+import { overview as copy, providers as providerCopy } from "../../shared/copy/ru";
 import { formatCountryWithCode } from "../../shared/lib/country";
-import { formatIp, formatNumber, resolvePinnedIp } from "../../shared/lib/format";
+import { formatIp, formatNumber } from "../../shared/lib/format";
 import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
 import { openZastavaBot } from "../../utils/opener";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
 import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
-import type { OsTzSyncStatus } from "../../types";
 import { CoverageSection } from "../coverage/CoverageSection";
-import { buildPendingChecks, failedChecks, progressOf } from "../checks/checksModel";
+import { buildPendingChecks, progressOf } from "../checks/checksModel";
+import { CooldownBanner } from "./CooldownBanner";
+import { HeroFacts } from "./HeroFacts";
+import { ProblemBanner } from "./ProblemBanner";
+import { ProtectedSection } from "./ProtectedSection";
+import { ServiceRow } from "./ServiceRow";
 import { needsForceConfirm, useOverviewModel } from "./useOverviewModel";
 import type { ServiceModel } from "./useOverviewModel";
 
@@ -131,7 +130,6 @@ export function OverviewScreen(props: OverviewScreenProps) {
     killswitchFrozen,
   } = props;
 
-  // Ожидание данных: отчёта ещё нет (и это не окончательная ошибка) либо шлюз ещё запускается.
   const loading = (!activeReport && (!auditError || startupPending)) || (startupPending && !killswitchFrozen);
   const failed = !loading && !activeReport && Boolean(auditError);
 
@@ -147,7 +145,6 @@ export function OverviewScreen(props: OverviewScreenProps) {
     startupPending,
   });
 
-  // Подтверждение «Разрешить принудительно»: только когда сеть действительно красная / RU / BY.
   const [pendingAllow, setPendingAllow] = useState<ProviderId | null>(null);
   const [verifyingAllow, setVerifyingAllow] = useState<ProviderId | null>(null);
   const runAllow = async (provider: ProviderId, blockedByUser: boolean) => {
@@ -221,6 +218,12 @@ export function OverviewScreen(props: OverviewScreenProps) {
           {copy.banner.timezone.syncedBannerText(osTzStatus.original_os_tz, osTzStatus.synced_target_tz)}
         </Banner>
       )}
+
+      <CooldownBanner
+        cooldownUntil={state?.ip_change_cooldown_until}
+        onCleared={props.onRetry}
+        onToast={props.onToast}
+      />
 
       {expiringRoute && expiringRoute.expires_at && (
         <Banner
@@ -383,71 +386,14 @@ export function OverviewScreen(props: OverviewScreenProps) {
         {pendingAllow ? copy.service.confirm.text(providerCopy[pendingAllow].name) : ""}
       </ConfirmModal>
 
-      <Section title={copy.sectionProtected}>
-        {props.protection?.adminAuthMessage && (
-          <Banner
-            tone="warn"
-            title={coverageCopy.protection.adminAuthTitle}
-            action={
-              <div className="zs-banner__actions">
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={props.protection.retryingAdminAuth}
-                  onClick={() => void props.protection?.enableSysproxyPrivileged()}
-                >
-                  {props.protection.retryingAdminAuth
-                    ? coverageCopy.protection.adminAuthBusy
-                    : coverageCopy.protection.adminAuthRetry}
-                </Button>
-                <CopyErrorLogButton
-                  title={coverageCopy.protection.adminAuthTitle}
-                  message={props.protection.adminAuthMessage}
-                  variant="secondary"
-                />
-              </div>
-            }
-          >
-            {props.protection.adminAuthMessage}
-          </Banner>
-        )}
-        <Card>
-          <Rows>
-            <li className={cx("zs-linked-group", sysproxyActive && !startupPending && "zs-linked-group--on")}>
-              <div className="zs-linked-group__head">
-                <span>{copy.linkedProxy.label}</span>
-                <InfoTip
-                  title={copy.linkedProxy.tooltipTitle}
-                  text={copy.linkedProxy.tooltipText}
-                />
-              </div>
-              <ul className="zs-rows zs-linked-group__rows">
-                <Row
-                  icon="globe"
-                  tone={startupPending ? "neutral" : sysproxyActive ? "ok" : "neutral"}
-                  title={copy.browsers.title}
-                  sub={copy.browsers.sub}
-                  trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.browsers.title} />}
-                />
-                <Row
-                  icon="shield"
-                  tone={startupPending ? "neutral" : sysproxyActive ? "ok" : "neutral"}
-                  title={copy.desktopApps.title}
-                  sub={copy.desktopApps.sub}
-                  trail={startupPending ? <PendingBadge /> : <Switch checked={sysproxyActive} onChange={props.onToggleSysproxy} aria-label={copy.desktopApps.title} />}
-                />
-              </ul>
-            </li>
-            <Row
-              icon="term"
-              tone={startupPending ? "neutral" : cliProtected ? "ok" : "neutral"}
-              title={copy.editors.title}
-              sub={copy.editors.sub}
-              trail={startupPending ? <PendingBadge /> : <Switch checked={cliProtected} onChange={props.onToggleCli} aria-label={copy.editors.title} />}
-            />
-          </Rows>
-        </Card>
-      </Section>
+      <ProtectedSection
+        startupPending={startupPending}
+        sysproxyActive={sysproxyActive}
+        cliProtected={cliProtected}
+        protection={props.protection}
+        onToggleSysproxy={props.onToggleSysproxy}
+        onToggleCli={props.onToggleCli}
+      />
 
       <CoverageSection
         variant="overview"
@@ -494,321 +440,6 @@ export function OverviewScreen(props: OverviewScreenProps) {
   );
 }
 
-/* ---------- Баннер: один на экран, одно действие ---------- */
-
-function ProblemBanner({
-  kind,
-  targetTz,
-  tzCode,
-  osTzStatus,
-  osTzLoading,
-  onSyncOsTimezone,
-  onRestoreOsTimezone,
-  ...props
-}: {
-  kind: ReturnType<typeof useOverviewModel>["banner"];
-  targetTz?: string;
-  tzCode?: string;
-  osTzStatus: OsTzSyncStatus | null;
-  osTzLoading: boolean;
-  onSyncOsTimezone: () => void;
-  onRestoreOsTimezone: () => void;
-} & OverviewScreenProps) {
-  if (!kind) return null;
-  const openChecks = (
-    <Button size="sm" onClick={props.onOpenChecks}>
-      {copy.banner.openChecks}
-    </Button>
-  );
-  switch (kind) {
-    case "frozen":
-      return (
-        <Banner tone="warn" title={copy.banner.frozen.title}>
-          {copy.banner.frozen.text}
-        </Banner>
-      );
-    case "stopped":
-      return (
-        <Banner tone="danger" role="alert" title={copy.banner.stopped.title} action={openChecks}>
-          {copy.banner.stopped.text}
-        </Banner>
-      );
-    case "leak":
-      return (
-        <Banner tone="danger" title={copy.banner.leak.title} action={openChecks}>
-          {copy.banner.leak.text}
-        </Banner>
-      );
-    case "timezone": {
-      const cliOnly = tzCode === "TIMEZONE_SYNCED_CLI_ONLY";
-      const title = cliOnly ? copy.banner.timezone.cliOnlyTitle : copy.banner.timezone.title;
-      const baseText = cliOnly ? copy.banner.timezone.cliOnlyText : copy.banner.timezone.text;
-      const text = osTzStatus?.synced ? `${baseText} ${copy.banner.timezone.restartHint}` : baseText;
-      return (
-        <Banner
-          tone="warn"
-          title={title}
-          action={
-            <div className="zs-banner__actions">
-              {osTzStatus?.synced ? (
-                <Button size="sm" variant="secondary" disabled={osTzLoading} onClick={onRestoreOsTimezone}>
-                  {copy.banner.timezone.restoreOs}
-                </Button>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={osTzLoading || !targetTz}
-                  onClick={onSyncOsTimezone}
-                >
-                  {osTzLoading ? copy.banner.timezone.syncingOs : copy.banner.timezone.syncOs}
-                </Button>
-              )}
-              <Button size="sm" variant="secondary" onClick={props.onOpenTimezone}>
-                {copy.banner.timezone.action}
-              </Button>
-            </div>
-          }
-        >
-          {text}
-        </Banner>
-      );
-    }
-    case "review":
-      return (
-        <Banner tone="warn" title={copy.banner.review.title} action={openChecks}>
-          {copy.banner.review.text}
-        </Banner>
-      );
-    case "incomplete":
-      return (
-        <Banner
-          tone="neutral"
-          title={copy.banner.incomplete.title}
-          action={
-            <Button size="sm" onClick={props.onRetry}>
-              {copy.banner.incomplete.action}
-            </Button>
-          }
-        >
-          {copy.banner.incomplete.text}
-        </Banner>
-      );
-    case "update":
-      return (
-        <Banner
-          tone="info"
-          icon="zap"
-          title={copy.banner.update.title(props.updateInfo?.latest_version ?? "")}
-          action={
-            <Button size="sm" onClick={props.onOpenUpdate}>
-              {copy.banner.update.action}
-            </Button>
-          }
-        >
-          {copy.banner.update.text}
-        </Banner>
-      );
-  }
-}
-
-/* ---------- Бейджи под вердиктом ---------- */
-
-function HeroFacts({ model, ...props }: { model: ReturnType<typeof useOverviewModel> } & OverviewScreenProps) {
-  const allPassed = model.checksTotal > 0 && model.checksPassed === model.checksTotal;
-  const activeProvider = props.activeReport?.provider;
-  const pinned = resolvePinnedIp(props.state, activeProvider) != null;
-  const strict = Boolean(props.state?.strict_pinning_enabled);
-  const explicitProviderPin = Boolean(activeProvider && props.state?.pinned_ips?.[activeProvider]);
-
-  const menu: MenuEntry[] = [
-    { id: "copy", label: copy.ipMenu.copy, icon: "copy", onSelect: props.onCopyIp },
-    ...(pinned
-      ? ([
-          {
-            id: "strict",
-            label: strict ? copy.ipMenu.strictOff : copy.ipMenu.strictOn,
-            icon: "lock",
-            onSelect: props.onToggleStrict,
-          },
-          {
-            id: "unpin",
-            label: copy.ipMenu.unpin,
-            icon: "x",
-            onSelect: () => props.onUnpinIp(explicitProviderPin ? activeProvider : undefined),
-          },
-        ] as MenuEntry[])
-      : ([
-          {
-            id: "pin",
-            label: copy.ipMenu.pin,
-            icon: "lock",
-            disabled: props.currentIp === "--",
-            onSelect: () => props.onPinIp(props.currentIp, activeProvider),
-          },
-        ] as MenuEntry[])),
-  ];
-
-  const hasActiveRoute = Boolean(
-    props.routesSnapshot &&
-      (Object.values(props.routesSnapshot.effective || {}).some(Boolean) ||
-        props.routesSnapshot.routes.some((r) => r.enabled && r.status === "active")),
-  );
-
-  const extra: ReactNode =
-    model.pinState === "pinned" ? (
-      <Badge icon="lock">{copy.facts.pinned}</Badge>
-    ) : model.pinState === "changed" ? (
-      <Badge tone="warn" icon="alert">
-        {copy.facts.pinChanged}
-      </Badge>
-    ) : props.state?.upstream_proxy?.enabled || hasActiveRoute ? (
-      <Badge icon="key">{copy.facts.key}</Badge>
-    ) : null;
-
-  return (
-    <>
-      <Badge tone={allPassed ? "ok" : "warn"} icon={allPassed ? "check" : "alert"}>
-        {model.checksLabel}
-      </Badge>
-      {props.dataAgeMinutes != null && (
-        <Badge tone={props.auditError ? "warn" : "neutral"} icon={props.auditError ? "alert" : undefined}>
-          {checksCopy.dataAge(props.dataAgeMinutes, Boolean(props.auditError))}
-        </Badge>
-      )}
-      {model.providerName && <Badge>{model.providerName}</Badge>}
-      {extra}
-      <Menu items={menu} label={copy.ipMenu.label} align="end" className="-my-1" />
-    </>
-  );
-}
-
-/* ---------- Строка сервиса ---------- */
-
-function ServiceRow({
-  service,
-  report,
-  state,
-  blockedByUser,
-  verifying,
-  onFix,
-  onAllow,
-}: {
-  service: ServiceModel;
-  report: RiskReport | undefined;
-  state: AppStateData | null;
-  blockedByUser: boolean;
-  verifying?: boolean;
-  onFix: (provider: ProviderId) => void;
-  onAllow: (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const meta = providerCopy[service.id];
-  const { status } = service;
-
-  let badge: ReactNode;
-  let note: string | null = null;
-  let tone: "neutral" | "ok" | "warn" | "danger" = "ok";
-
-  switch (status) {
-    case "ok":
-      badge = <Badge tone="ok">{words.available}</Badge>;
-      break;
-    case "allowed":
-      badge = <Badge tone="ok">{words.available}</Badge>;
-      note = copy.service.session;
-      break;
-    case "warn":
-      badge = (
-        <Badge tone="warn" icon="alert">
-          {copy.service.warnBadge}
-        </Badge>
-      );
-      note = blockedByUser ? copy.service.blocked : copy.service.warnNote;
-      tone = "warn";
-      break;
-    case "critical":
-      badge = (
-        <Badge tone="danger" icon="alert">
-          {words.blocked}
-        </Badge>
-      );
-      tone = "danger";
-      break;
-    case "checking":
-      badge = <Badge busy>{copy.service.checking}</Badge>;
-      tone = "neutral";
-      break;
-    case "disabled":
-      badge = <Badge tone="neutral">{copy.service.monitoringDisabled}</Badge>;
-      note = copy.service.monitoringDisabledNote;
-      tone = "neutral";
-      break;
-    case "missing":
-      badge = (
-        <Badge tone="warn" icon="alert">
-          {words.review}
-        </Badge>
-      );
-      note = copy.service.missing;
-      tone = "warn";
-      break;
-  }
-
-  const sub = (
-    <>
-      <span className="block">{meta.domains}</span>
-      {note && <span className="block">{note}</span>}
-    </>
-  );
-
-  // Решение по сервису принимается здесь: раскрываем только строки, где есть проблема.
-  if (status !== "warn" && status !== "critical") {
-    return (
-      <Row
-        icon={status === "ok" || status === "allowed" || status === "checking" || status === "disabled" ? "shield" : "alert"}
-        tone={tone}
-        title={meta.name}
-        sub={sub}
-        trail={badge}
-      />
-    );
-  }
-
-  const first = report ? failedChecks(report, state)[0] : undefined;
-  const reason = first ? `${first.title}. ${first.result.message}` : status === "critical" ? copy.service.blocked : copy.service.noReason;
-
-  return (
-    <ExpandRow
-      icon="alert"
-      tone={tone}
-      title={meta.name}
-      sub={sub}
-      trail={badge}
-      open={open}
-      onToggle={() => setOpen((v) => !v)}
-      detailLabel={copy.service.detailLabel}
-    >
-      <p className="zs-t-body">{reason}</p>
-      <div className="flex flex-wrap gap-2">
-        {report && (
-          <Button size="sm" onClick={() => onFix(service.id)}>
-            {copy.service.fix}
-          </Button>
-        )}
-        <Button variant="quiet" size="sm" disabled={verifying} onClick={() => onAllow(service, report, blockedByUser)}>
-          {blockedByUser ? copy.service.unblock : copy.service.forceAllow}
-        </Button>
-      </div>
-      <p className="zs-t-caption">
-        {blockedByUser && !needsForceConfirm(service.status, report) ? copy.service.unblockHint : copy.service.forceHint}
-      </p>
-    </ExpandRow>
-  );
-}
-
-/* ---------- Загрузка ---------- */
-
 /** Герой, пока данных нет: не «Опасно» и не «Защищены», а ожидание с прогрессом проверок. */
 function HeroChecking({ startup, done, total }: { startup: boolean; done: number; total: number }) {
   return (
@@ -823,9 +454,4 @@ function HeroChecking({ startup, done, total }: { startup: boolean; done: number
       </div>
     </Card>
   );
-}
-
-/** Вместо тумблера, пока защита запускается: состояние ещё не известно. */
-function PendingBadge() {
-  return <Badge busy>{copy.service.checking}</Badge>;
 }

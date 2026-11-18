@@ -4,6 +4,7 @@ pub mod guard;
 pub mod hold_queue;
 pub mod http_forward;
 pub mod pac;
+pub mod popup_port;
 pub mod route_watch;
 pub mod server;
 pub mod transit;

@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use zastava_lib::auditor::Auditor;
 use zastava_lib::proxy::hold_queue::HoldQueue;
-use zastava_lib::proxy::{Gate, ProxyServer};
+use zastava_lib::proxy::{Gate, ProxyServer, Transit};
 use zastava_lib::routing::{Entry, EntryProto, Route};
 use zastava_lib::state::AppState;
 
@@ -296,6 +296,200 @@ async fn test_default_route_carries_unbound_providers() {
     let mut echo = [0u8; 11];
     c.read_exact(&mut echo).await.unwrap();
     assert_eq!(&echo, b"via-default");
+    assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(server.direct_connect_count(), 0);
+}
+
+fn public_socks_route(id: &str, host: &str, port: u16) -> Route {
+    Route {
+        id: id.to_string(),
+        label: format!("public {id}"),
+        country: Some("NL".to_string()),
+        exit_ip: None,
+        expires_at: None,
+        entries: vec![Entry {
+            proto: EntryProto::Socks5,
+            host: host.to_string(),
+            port,
+            username: None,
+            password: None,
+            sni: None,
+        }],
+        raw_key: format!("socks5://{host}:{port}"),
+        enabled: true,
+        added_at: 0,
+    }
+}
+
+/// Local HTTP CONNECT proxy stub that redirects `CONNECT <expected_target>` to `bridge_port`.
+async fn spawn_chained_http_bridge(expected_target: String, bridge_port: u16) -> (u16, Arc<AtomicU64>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let hits = Arc::new(AtomicU64::new(0));
+    let h = Arc::clone(&hits);
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = l.accept().await {
+            let expected = expected_target.clone();
+            let h = Arc::clone(&h);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut b = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if client.read(&mut b).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    head.push(b[0]);
+                }
+                let req = String::from_utf8_lossy(&head);
+                let first = req.lines().next().unwrap_or("");
+                assert!(
+                    first.starts_with(&format!("CONNECT {expected} ")),
+                    "unexpected chained CONNECT target: {first}"
+                );
+                h.fetch_add(1, Ordering::SeqCst);
+                let Ok(mut upstream) = TcpStream::connect(("127.0.0.1", bridge_port)).await else {
+                    let _ = client
+                        .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                        .await;
+                    return;
+                };
+                let _ = client
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .await;
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+    (port, hits)
+}
+
+async fn start_with_chained(
+    state: AppState,
+    redirect: Option<std::net::SocketAddr>,
+    chained: Option<String>,
+) -> Arc<ProxyServer> {
+    let auditor = Auditor::new().unwrap();
+    let transit = Transit::system().with_chained(Arc::new(move || chained.clone()));
+    let server = Arc::new(
+        ProxyServer::bind_ephemeral(auditor, state, Arc::new(HoldQueue::new()), redirect)
+            .await
+            .unwrap()
+            .with_transit(transit),
+    );
+    let s = Arc::clone(&server);
+    tokio::spawn(async move { s.run().await });
+    server
+}
+
+#[tokio::test]
+async fn test_public_route_falls_back_via_chained_proxy_when_direct_fails() {
+    let state = AppState::new_in_memory();
+    let socks_echo_port = spawn_socks_echo().await;
+    // Public entry IP (unreachable directly) on an unused high port; chained proxy bridges to echo.
+    let entry_host = "93.184.216.34";
+    let entry_port = 19999;
+    state
+        .upsert_route(public_socks_route("pub", entry_host, entry_port))
+        .await
+        .unwrap();
+    state
+        .bind_provider_route("anthropic", Some("pub"))
+        .await
+        .unwrap();
+    state.allow_provider_for_session("anthropic").await.unwrap();
+
+    let (cp_port, cp_hits) =
+        spawn_chained_http_bridge(format!("{entry_host}:{entry_port}"), socks_echo_port).await;
+    let (sink, sink_hits) = direct_sink().await;
+    let server = start_with_chained(
+        state.clone(),
+        Some(sink),
+        Some(format!("127.0.0.1:{cp_port}")),
+    )
+    .await;
+
+    let Some((mut c, resp)) = connect(&server, "api.anthropic.com").await else {
+        return;
+    };
+    assert!(resp.contains("200 Connection Established"), "{resp}");
+    c.write_all(b"via-chained").await.unwrap();
+    let mut echo = [0u8; 11];
+    c.read_exact(&mut echo).await.unwrap();
+    assert_eq!(&echo, b"via-chained");
+    assert_eq!(cp_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(server.direct_connect_count(), 0);
+}
+
+#[tokio::test]
+async fn test_both_direct_and_chained_unreachable_is_fail_closed_with_diagnostics() {
+    let state = AppState::new_in_memory();
+    let dead_cp_port = closed_port().await;
+    state
+        .upsert_route(public_socks_route("pub-dead", "93.184.216.34", 19998))
+        .await
+        .unwrap();
+    state
+        .bind_provider_route("anthropic", Some("pub-dead"))
+        .await
+        .unwrap();
+    state.allow_provider_for_session("anthropic").await.unwrap();
+
+    let (sink, sink_hits) = direct_sink().await;
+    let server = start_with_chained(
+        state.clone(),
+        Some(sink),
+        Some(format!("127.0.0.1:{dead_cp_port}")),
+    )
+    .await;
+
+    let Some((_c, resp)) = connect(&server, "api.anthropic.com").await else {
+        return;
+    };
+    assert!(resp.starts_with("HTTP/1.1 502"), "{resp}");
+    assert!(resp.contains("fail-closed"), "{resp}");
+    assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(server.direct_connect_count(), 0);
+    assert_eq!(route_down_events(&state), 1);
+
+    let diag = zastava_lib::diagnostics::dump();
+    assert!(
+        diag.iter()
+            .any(|line| line.contains("[proxy:route]") && line.contains("pub-dead")),
+        "expected [proxy:route] diagnostic entry, got: {diag:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_happy_eyeballs_connects_when_first_ip_is_dead() {
+    let state = AppState::new_in_memory();
+    let socks_port = spawn_socks_echo().await;
+    // `localhost` resolves to both ::1 and 127.0.0.1 on dual-stack hosts; our echo listener
+    // binds 127.0.0.1 only, so ::1 (ordered first per RFC 8305) fails and Happy Eyeballs
+    // connects to 127.0.0.1 without stalling.
+    let mut route = socks_route("he", socks_port);
+    route.entries[0].host = "localhost".to_string();
+    route.raw_key = format!("socks5://localhost:{socks_port}");
+    state.upsert_route(route).await.unwrap();
+    state
+        .bind_provider_route("anthropic", Some("he"))
+        .await
+        .unwrap();
+    state.allow_provider_for_session("anthropic").await.unwrap();
+
+    let (sink, sink_hits) = direct_sink().await;
+    let server = start(state.clone(), Some(sink)).await;
+
+    let started = std::time::Instant::now();
+    let Some((mut c, resp)) = connect(&server, "api.anthropic.com").await else {
+        return;
+    };
+    assert!(resp.contains("200 Connection Established"), "{resp}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    c.write_all(b"he-ok").await.unwrap();
+    let mut echo = [0u8; 5];
+    c.read_exact(&mut echo).await.unwrap();
+    assert_eq!(&echo, b"he-ok");
     assert_eq!(sink_hits.load(Ordering::SeqCst), 0);
     assert_eq!(server.direct_connect_count(), 0);
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { toast as t } from "../copy/ru";
-import { handleTrayProfileSwitched } from "./useTrayEvents";
+import { handleSysproxyAdminAuthRequired, handleTrayProfileSwitched } from "./useTrayEvents";
 
 describe("handleTrayProfileSwitched", () => {
   it("берёт имя из payload.active_profile.name и обновляет состояние, маршруты и профили", async () => {
@@ -50,5 +50,26 @@ describe("handleTrayProfileSwitched", () => {
     );
 
     expect(showToast).toHaveBeenCalledWith(t.profile.switched, t.profile.switchedText, "info");
+  });
+});
+
+describe("handleSysproxyAdminAuthRequired", () => {
+  it("показывает warning-тост с подсказкой «Разрешить с паролем» и снимает префикс ADMIN_AUTH_REQUIRED:", () => {
+    const showToast = vi.fn();
+    handleSysproxyAdminAuthRequired({ showToast }, "ADMIN_AUTH_REQUIRED:Требуется пароль администратора");
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const [title, text, tone] = showToast.mock.calls[0];
+    expect(title).toBe(t.sysproxy.adminAuthTitle);
+    expect(text).toContain("Требуется пароль администратора");
+    expect(text).toContain("Разрешить с паролем");
+    expect(tone).toBe("warning");
+  });
+
+  it("использует запасной текст, если payload пустой", () => {
+    const showToast = vi.fn();
+    handleSysproxyAdminAuthRequired({ showToast }, null);
+
+    expect(showToast).toHaveBeenCalledWith(t.sysproxy.adminAuthTitle, t.sysproxy.adminAuthText, "warning");
   });
 });

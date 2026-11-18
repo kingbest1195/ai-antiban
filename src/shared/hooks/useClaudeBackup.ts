@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClaudeExportResult, ClaudeLocalDataSummary, ProviderId } from "../../types";
 import { cleanAppCache, exportClaudeLocalData, scanClaudeLocalData } from "../../utils/api";
-import { toast as t } from "../copy/ru";
+import { writeClipboard } from "../lib/clipboard";
+import { common, toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
 /** Бэкап и очистка данных Claude для вкладки «Бэкап». Выгрузка запускается и из трея, поэтому хук живёт в оболочке. */
@@ -53,7 +54,11 @@ export function useClaudeBackup(showToast: ShowToast) {
         setClaudeExporting(false);
       }
       if (promptText) {
-        await navigator.clipboard.writeText(promptText);
+        const ok = await writeClipboard(promptText);
+        if (!ok) {
+          showToast(t.backup.promptError, common.copyFailText, "error");
+          return;
+        }
         setCopiedPrompt(true);
         showToast(t.backup.promptCopied, t.backup.promptCopiedText, "success");
         window.clearTimeout(copiedTimer.current);

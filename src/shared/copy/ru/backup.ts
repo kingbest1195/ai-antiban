@@ -68,6 +68,12 @@ export const backup = {
     confirmTitle: (name: string) => `Удалить профиль «${name}»?`,
     confirmText: "Сессии и идентификатор устройства этого профиля будут удалены. Остальные профили не изменятся.",
     confirmAction: "Удалить профиль",
+    safeLogout: "Безопасный выход (смена IP / VPN)",
+    safeLogoutBusy: "Выполняем безопасный выход…",
+    safeLogoutModalTitle: "Безопасный выход из Claude",
+    safeLogoutModalText:
+      "Закроет Claude Desktop и фоновые процессы, очистит только cookies и хранилище сессий (сохранив deviceId и настройки MCP) и запустит 4-часовой таймер смены IP/VPN. Также выйдите из claude.ai во всех браузерах перед сменой сети.",
+    safeLogoutModalConfirm: "Выйти и запустить таймер",
   },
   create: {
     title: "Новый профиль",
@@ -119,6 +125,10 @@ export const backup = {
     unbound: "Ключ отвязан",
     unboundText: "Профиль теперь использует общее подключение.",
     unbindError: "Не удалось отвязать ключ",
+    safeLogoutDone: "Безопасный выход выполнен",
+    safeLogoutDoneText: (closedProcesses: number, formattedDuration: string) =>
+      `Закрыто процессов: ${closedProcesses}, таймер смены IP ${formattedDuration} запущен. Не забудьте выйти из claude.ai в браузерах.`,
+    safeLogoutError: "Не удалось выполнить безопасный выход",
   },
 } as const;
 

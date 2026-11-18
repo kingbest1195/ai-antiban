@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Button } from "../../ui";
 import type { ButtonSize, ButtonVariant } from "../../ui";
-import { copyTextToClipboard, getErrorDiagnostics } from "../../utils/api";
+import { getErrorDiagnostics } from "../../utils/api";
+import { writeClipboard } from "../lib/clipboard";
 
 interface CopyErrorLogButtonProps {
   title?: string;
@@ -19,35 +20,6 @@ function fallbackFormat(title?: string, message?: string): string {
   ]
     .filter(Boolean)
     .join("\n");
-}
-
-async function writeClipboard(text: string): Promise<boolean> {
-  if (await copyTextToClipboard(text)) {
-    return true;
-  }
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // fallback below
-    }
-  }
-  if (typeof document === "undefined") return false;
-  try {
-    const el = document.createElement("textarea");
-    el.value = text;
-    el.setAttribute("readonly", "");
-    el.style.position = "fixed";
-    el.style.opacity = "0";
-    document.body.appendChild(el);
-    el.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(el);
-    return ok;
-  } catch {
-    return false;
-  }
 }
 
 /** Кнопка копирования диагностического лога для быстрого разбора ошибок с macOS/Windows. */

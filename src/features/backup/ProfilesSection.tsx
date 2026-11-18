@@ -9,14 +9,34 @@ import {
   deleteClaudeProfile,
   getRoutesSnapshot,
   listClaudeProfiles,
+  safeLogoutClaude,
   switchClaudeProfile,
 } from "../../utils/api";
-import { Badge, Banner, Button, Card, ConfirmModal, EmptyState, Field, Menu, Modal, Mono, Row, Rows, Section, Select, Skeleton, Switch } from "../../ui";
-import type { MenuEntry, SelectOption } from "../../ui";
+import { Badge, Button, Card, EmptyState, Menu, Mono, Row, Rows, Section, Skeleton } from "../../ui";
+import type { MenuEntry } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
-import { backup as copy, common as commonCopy } from "../../shared/copy/ru";
-import { countryName, formatRouteBadgeLabel, formatRouteOptionLabel, hasCountryMention } from "../../shared/lib/country";
-import { decodeZastavaKeyPreview } from "../../shared/lib/zastavaKey";
+import { backup as copy } from "../../shared/copy/ru";
+import { countryName } from "../../shared/lib/country";
+import {
+  KEY_OPTION_NEW,
+  KEY_OPTION_NONE,
+  formatCooldownDuration,
+  hasProfileKeyBinding,
+  isProfileRouteMissing,
+  resolveBoundBadge,
+  resolveCreateProfileIpBinding,
+  resolveInitialBindChoice,
+} from "./profileModel";
+import { ProfileModals } from "./ProfileModals";
+
+export {
+  KEY_OPTION_NEW,
+  KEY_OPTION_NONE,
+  hasProfileKeyBinding,
+  isProfileRouteMissing,
+  resolveCreateProfileIpBinding,
+  resolveInitialBindChoice,
+};
 
 export interface ProfilesSectionProps {
   currentIp: string;
@@ -27,53 +47,6 @@ export interface ProfilesSectionProps {
   onRoutesUpdated?: () => Promise<unknown> | void;
   onProfileSwitched: (profileName: string, pinnedIp?: string | null) => Promise<unknown> | void;
   onToast: ShowToast;
-}
-
-const CREATE_FORM_ID = "claude-profile-create-form";
-const BIND_FORM_ID = "claude-profile-bind-key-form";
-export const KEY_OPTION_NONE = "__none__";
-export const KEY_OPTION_NEW = "__new__";
-
-export function hasProfileKeyBinding(p: Pick<ClaudeProfile, "bound_upstream_key" | "bound_route_id">): boolean {
-  return Boolean(p.bound_upstream_key || p.bound_route_id);
-}
-
-export function isProfileRouteMissing(
-  p: Pick<ClaudeProfile, "bound_upstream_key" | "bound_route_id">,
-  availableRoutes: Pick<RouteView, "id">[],
-  routesLoaded: boolean,
-): boolean {
-  if (!routesLoaded || p.bound_upstream_key || !p.bound_route_id) return false;
-  return !availableRoutes.some((r) => r.id === p.bound_route_id);
-}
-
-export function resolveCreateProfileIpBinding(
-  bindCurrentOnCreate: boolean,
-  ipKnown: boolean,
-  currentIp: string,
-  currentCountry: string,
-  createKeyChoice: string,
-): { ip: string | null; country: string | null } {
-  if (createKeyChoice !== KEY_OPTION_NONE) {
-    return { ip: null, country: null };
-  }
-  return {
-    ip: bindCurrentOnCreate && ipKnown ? currentIp : null,
-    country: bindCurrentOnCreate && ipKnown && currentCountry !== "--" ? currentCountry : null,
-  };
-}
-
-export function resolveInitialBindChoice(
-  p: Pick<ClaudeProfile, "bound_upstream_key" | "bound_route_id">,
-  availableRoutes: Pick<RouteView, "id">[],
-): { choice: string; keyInput: string } {
-  if (p.bound_route_id && availableRoutes.some((r) => r.id === p.bound_route_id)) {
-    return { choice: p.bound_route_id, keyInput: "" };
-  }
-  if (p.bound_upstream_key) {
-    return { choice: KEY_OPTION_NEW, keyInput: p.bound_upstream_key };
-  }
-  return { choice: KEY_OPTION_NONE, keyInput: "" };
 }
 
 /** Профили Claude: строка на профиль, переключение, привязка IP и ключа, удаление с подтверждением, создание. */
@@ -97,6 +70,8 @@ export function ProfilesSection({
   const [bindingProxyId, setBindingProxyId] = useState<string | null>(null);
   const [removing, setRemoving] = useState<ClaudeProfile | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
+  const [safeLogoutOpen, setSafeLogoutOpen] = useState(false);
+  const [safeLogoutBusy, setSafeLogoutBusy] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [bindCurrentOnCreate, setBindCurrentOnCreate] = useState(true);
@@ -151,6 +126,25 @@ export function ProfilesSection({
 
   const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
+  const handleSafeLogout = async () => {
+    if (safeLogoutBusy) return;
+    setSafeLogoutBusy(true);
+    try {
+      const res = await safeLogoutClaude();
+      setSafeLogoutOpen(false);
+      await onProfileSwitched("", null);
+      onToast(
+        t_toast.safeLogoutDone,
+        t_toast.safeLogoutDoneText(res.closed_processes, formatCooldownDuration(res.cooldown_secs)),
+        "success",
+      );
+    } catch (err) {
+      onToast(t_toast.safeLogoutError, errText(err), "error");
+    } finally {
+      setSafeLogoutBusy(false);
+    }
+  };
+
   const handleSwitch = async (profileId: string) => {
     if (profileId === activeProfileId || switchingId) return;
     setSwitchingId(profileId);
@@ -184,29 +178,6 @@ export function ProfilesSection({
     } finally {
       setBindingId(null);
     }
-  };
-
-  const resolveBoundBadge = (p: ClaudeProfile): { text: string; tone: "info" | "danger" } | null => {
-    if (!p.bound_upstream_key && !p.bound_route_id) return null;
-    if (isProfileRouteMissing(p, routes, routesLoaded)) {
-      return { text: "Маршрут удалён", tone: "danger" };
-    }
-    if (p.bound_route_id) {
-      const match = routes.find((r) => r.id === p.bound_route_id);
-      if (match) {
-        return { text: t.keyBoundLabel(formatRouteBadgeLabel(match.label, match.country)), tone: "info" };
-      }
-    }
-    if (p.bound_upstream_key) {
-      const preview = decodeZastavaKeyPreview(p.bound_upstream_key);
-      if (preview?.label) {
-        return { text: t.keyBoundLabel(formatRouteBadgeLabel(preview.label, preview.country)), tone: "info" };
-      }
-      if (preview?.entrySummary) {
-        return { text: t.keyBoundLabel(preview.entrySummary), tone: "info" };
-      }
-    }
-    return { text: t.keyBound, tone: "info" };
   };
 
   const openBindModal = async (p: ClaudeProfile) => {
@@ -346,9 +317,7 @@ export function ProfilesSection({
       label: hasBoundKey ? t.changeKey : t.bindKey,
       icon: "key",
       disabled: bindingProxyId === p.id,
-      onSelect: () => {
-        void openBindModal(p);
-      },
+      onSelect: () => void openBindModal(p),
     });
     if (hasBoundKey) {
       items.push({
@@ -399,7 +368,7 @@ export function ProfilesSection({
                 {profiles.map((p) => {
                   const isActive = p.id === activeProfileId;
                   const country = countryName(p.bound_country);
-                  const boundBadge = resolveBoundBadge(p);
+                  const boundBadge = resolveBoundBadge(p, routes, routesLoaded);
                   return (
                     <Row
                       key={p.id}
@@ -453,175 +422,52 @@ export function ProfilesSection({
               </Button>
             </>
           )}
+          <Button
+            block
+            variant="secondary"
+            icon="shield"
+            className="zs-backup__block"
+            disabled={safeLogoutBusy}
+            onClick={() => setSafeLogoutOpen(true)}
+          >
+            {safeLogoutBusy ? t.safeLogoutBusy : t.safeLogout}
+          </Button>
         </Card>
       </Section>
 
-      <Modal
-        open={createOpen}
-        onClose={() => (creating ? undefined : setCreateOpen(false))}
-        title={copy.create.title}
-        footer={
-          <>
-            <Button onClick={() => setCreateOpen(false)} disabled={creating}>
-              {commonCopy.cancel}
-            </Button>
-            <Button
-              variant="primary"
-              type="submit"
-              form={CREATE_FORM_ID}
-              disabled={
-                creating ||
-                !newName.trim() ||
-                (createKeyChoice === KEY_OPTION_NEW && !createKeyInput.trim())
-              }
-            >
-              {creating ? copy.create.submitting : copy.create.submit}
-            </Button>
-          </>
-        }
-      >
-        <form id={CREATE_FORM_ID} className="zs-backup__create" onSubmit={handleCreate}>
-          <Field
-            label={copy.create.nameLabel}
-            placeholder={copy.create.namePlaceholder}
-            help={copy.create.nameHelp}
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            autoComplete="off"
-            required
-          />
-          <Rows>
-            <Row
-              icon="lock"
-              title={copy.create.bindIp}
-              sub={
-                createKeyChoice !== KEY_OPTION_NONE
-                  ? "Отключено: профиль работает через выделенный ключ Заставы"
-                  : ipKnown
-                    ? copy.create.bindIpOn(currentIp)
-                    : copy.create.bindIpNone
-              }
-              trail={
-                <Switch
-                  checked={createKeyChoice === KEY_OPTION_NONE && bindCurrentOnCreate && ipKnown}
-                  disabled={!ipKnown || createKeyChoice !== KEY_OPTION_NONE}
-                  onChange={setBindCurrentOnCreate}
-                  aria-label={copy.create.bindIp}
-                />
-              }
-            />
-            <Row
-              icon="key"
-              title={copy.create.keyTitle}
-              sub={copy.create.keySub}
-            />
-          </Rows>
-          <Select
-            label={copy.create.keyTitle}
-            value={createKeyChoice}
-            onChange={(e) => setCreateKeyChoice(e.target.value)}
-            options={
-              [
-                { value: KEY_OPTION_NONE, label: copy.create.keyNone },
-                ...routes.map((r) => ({
-                  value: r.id,
-                  label: formatRouteBadgeLabel(r.label, r.country),
-                })),
-                { value: KEY_OPTION_NEW, label: copy.create.keyNewOption },
-              ] satisfies SelectOption[]
-            }
-          />
-          {createKeyChoice === KEY_OPTION_NEW && (
-            <Field
-              label={copy.create.keyPasteLabel}
-              placeholder={copy.create.keyPastePlaceholder}
-              value={createKeyInput}
-              onChange={(e) => setCreateKeyInput(e.target.value)}
-              autoComplete="off"
-              spellCheck={false}
-            />
-          )}
-        </form>
-      </Modal>
-
-      <Modal
-        open={bindingTarget !== null}
-        onClose={() => (savingBind ? undefined : setBindingTarget(null))}
-        title={copy.bindKeyModal.title(bindingTarget?.name ?? "")}
-        footer={
-          <>
-            <Button onClick={() => setBindingTarget(null)} disabled={savingBind}>
-              {commonCopy.cancel}
-            </Button>
-            <Button
-              variant="primary"
-              type="submit"
-              form={BIND_FORM_ID}
-              disabled={savingBind || (bindChoice === KEY_OPTION_NEW && !bindKeyInput.trim())}
-            >
-              {savingBind ? copy.bindKeyModal.saving : copy.bindKeyModal.save}
-            </Button>
-          </>
-        }
-      >
-        <form id={BIND_FORM_ID} className="zs-backup__create" onSubmit={handleSaveBindKey}>
-          <p className="zs-t-body">{copy.bindKeyModal.lead}</p>
-          <Select
-            label={copy.bindKeyModal.sourceLabel}
-            value={bindChoice}
-            onChange={(e) => setBindChoice(e.target.value)}
-            options={
-              [
-                { value: KEY_OPTION_NONE, label: copy.bindKeyModal.noneOption },
-                ...routes.map((r) => ({
-                  value: r.id,
-                  label: formatRouteOptionLabel({
-                    label: r.label,
-                    country: r.country,
-                    ipOrHost: r.exit_ip,
-                  }),
-                })),
-                { value: KEY_OPTION_NEW, label: copy.bindKeyModal.newOption },
-              ] satisfies SelectOption[]
-            }
-          />
-          {bindChoice === KEY_OPTION_NEW && (
-            <>
-              <Field
-                label={copy.bindKeyModal.inputLabel}
-                placeholder={copy.bindKeyModal.inputPlaceholder}
-                value={bindKeyInput}
-                onChange={(e) => setBindKeyInput(e.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-              />
-              {(() => {
-                const preview = decodeZastavaKeyPreview(bindKeyInput);
-                if (!preview) return null;
-                const countryPart =
-                  preview.country && !hasCountryMention(preview.label, preview.country) ? preview.country : null;
-                const parts = [preview.label, countryPart, preview.exit_ip, preview.entrySummary].filter(Boolean);
-                return parts.length > 0 ? (
-                  <Banner tone="info" title={copy.bindKeyModal.previewLabel}>
-                    {parts.join(" · ")}
-                  </Banner>
-                ) : null;
-              })()}
-            </>
-          )}
-        </form>
-      </Modal>
-
-      <ConfirmModal
-        open={removing !== null}
-        title={t.confirmTitle(removing?.name ?? "")}
-        confirmLabel={t.confirmAction}
-        busy={removeBusy}
-        onConfirm={handleRemove}
-        onCancel={() => setRemoving(null)}
-      >
-        {t.confirmText}
-      </ConfirmModal>
+      <ProfileModals
+        routes={routes}
+        ipKnown={ipKnown}
+        currentIp={currentIp}
+        createOpen={createOpen}
+        creating={creating}
+        newName={newName}
+        bindCurrentOnCreate={bindCurrentOnCreate}
+        createKeyChoice={createKeyChoice}
+        createKeyInput={createKeyInput}
+        onCloseCreate={() => setCreateOpen(false)}
+        onNewNameChange={setNewName}
+        onBindCurrentOnCreateChange={setBindCurrentOnCreate}
+        onCreateKeyChoiceChange={setCreateKeyChoice}
+        onCreateKeyInputChange={setCreateKeyInput}
+        onCreate={handleCreate}
+        bindingTarget={bindingTarget}
+        savingBind={savingBind}
+        bindChoice={bindChoice}
+        bindKeyInput={bindKeyInput}
+        onCloseBind={() => setBindingTarget(null)}
+        onBindChoiceChange={setBindChoice}
+        onBindKeyInputChange={setBindKeyInput}
+        onSaveBindKey={handleSaveBindKey}
+        removing={removing}
+        removeBusy={removeBusy}
+        onConfirmRemove={handleRemove}
+        onCancelRemove={() => setRemoving(null)}
+        safeLogoutOpen={safeLogoutOpen}
+        safeLogoutBusy={safeLogoutBusy}
+        onConfirmSafeLogout={handleSafeLogout}
+        onCancelSafeLogout={() => (safeLogoutBusy ? undefined : setSafeLogoutOpen(false))}
+      />
     </>
   );
 }

@@ -14,27 +14,14 @@ import {
   toggleUpstreamProxy,
   upsertRoute,
 } from "../../utils/api";
-import { openExternal, openZastavaBot } from "../../utils/opener";
-import {
-  Badge,
-  Banner,
-  Button,
-  Card,
-  Field,
-  Mono,
-  Row,
-  Rows,
-  Segmented,
-  Select,
-  Switch,
-} from "../../ui";
-import type { BadgeTone, RowTone, SegmentedOption } from "../../ui";
+import { openExternal } from "../../utils/opener";
+import { Badge, Banner, Button, Card, Row, Rows } from "../../ui";
 import { common, connect as copy } from "../../shared/copy/ru";
-import { formatCountryWithCode, formatRouteOptionLabel, isCountryBlockedForProvider } from "../../shared/lib/country";
 import { formatIp } from "../../shared/lib/format";
-import { formatRemainingTimeRu, getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
 import type { ShowToast } from "../../shared/hooks";
 import { HOSTINGS } from "./hostings";
+import { ProviderRoutesSection } from "./ProviderRoutesSection";
+import { type AddKeyScope, RouteListSection } from "./RouteListSection";
 
 export interface ConnectScreenProps {
   state: AppStateData | null;
@@ -82,19 +69,6 @@ export function resolveProviderExitCountry(
 }
 
 const VPN_GUIDE = "01-personal-vpn-15min";
-
-const PROVIDERS: { id: ProviderId; name: string }[] = [
-  { id: "anthropic", name: copy.routes.services.anthropic },
-  { id: "openai", name: copy.routes.services.openai },
-  { id: "gemini", name: copy.routes.services.gemini },
-];
-
-type AddKeyScope = "all" | "save_only";
-
-const ADD_SCOPE_OPTIONS: SegmentedOption<AddKeyScope>[] = [
-  { value: "all", label: copy.key.scopeOptions.all },
-  { value: "save_only", label: copy.key.scopeOptions.save_only },
-];
 
 /** Экран «Подключение»: личный VPN, ключ Заставы, список маршрутов и привязки по сервисам. */
 export function ConnectScreen({
@@ -146,9 +120,7 @@ export function ConnectScreen({
 
   useEffect(() => {
     if (!propSnapshot) {
-      getRoutesSnapshot()
-        .then(setLocalSnapshot)
-        .catch(() => null);
+      getRoutesSnapshot().then(setLocalSnapshot).catch(() => null);
     }
   }, [propSnapshot]);
 
@@ -156,7 +128,6 @@ export function ConnectScreen({
   const routes = snapshot?.routes ?? [];
   const hasRoutes = routes.length > 0;
   const isLegacyConfigured = Boolean(upstream);
-  const isLegacyActive = upstream?.enabled ?? false;
 
   const handleAddKey = async () => {
     const key = inputKey.trim();
@@ -197,8 +168,7 @@ export function ConnectScreen({
         "info",
       );
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.key.toast.toggleError, msg, "error");
+      onToast(copy.key.toast.toggleError, err instanceof Error ? err.message : String(err), "error");
     } finally {
       setTogglingId(null);
     }
@@ -219,8 +189,7 @@ export function ConnectScreen({
       }
       await refresh("none");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.key.toast.testError, msg, "error");
+      onToast(copy.key.toast.testError, err instanceof Error ? err.message : String(err), "error");
     } finally {
       setTestingId(null);
     }
@@ -241,8 +210,7 @@ export function ConnectScreen({
       await refresh(affected);
       onToast(copy.key.toast.disconnected, copy.key.toast.disconnectedText, "info");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.key.toast.disconnectError, msg, "error");
+      onToast(copy.key.toast.disconnectError, err instanceof Error ? err.message : String(err), "error");
     } finally {
       setDeletingId(null);
     }
@@ -253,8 +221,7 @@ export function ConnectScreen({
       await setDefaultRoute(routeId);
       await refresh();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.routes.toast.boundError, msg, "error");
+      onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -268,8 +235,7 @@ export function ConnectScreen({
         "success",
       );
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.routes.toast.boundError, msg, "error");
+      onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -282,8 +248,7 @@ export function ConnectScreen({
       await refresh(["anthropic"]);
       onToast(copy.routes.toast.resetSuccess, copy.routes.toast.resetSuccessText, "info");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.routes.toast.boundError, msg, "error");
+      onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -310,8 +275,7 @@ export function ConnectScreen({
       await refresh(clearedDefault ? "all" : affectedProviders.length > 0 ? affectedProviders : "none");
       onToast(copy.routes.toast.resetSuccess, copy.routes.toast.resetSuccessText, "info");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.routes.toast.boundError, msg, "error");
+      onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -327,8 +291,7 @@ export function ConnectScreen({
         "info",
       );
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.key.toast.toggleError, msg, "error");
+      onToast(copy.key.toast.toggleError, err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -338,12 +301,10 @@ export function ConnectScreen({
       await refresh();
       onToast(copy.key.toast.disconnected, copy.key.toast.disconnectedText, "info");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onToast(copy.key.toast.disconnectError, msg, "error");
+      onToast(copy.key.toast.disconnectError, err instanceof Error ? err.message : String(err), "error");
     }
   };
 
-  const exitKnown = currentIp !== "--";
   const hasDangling = Boolean(snapshot?.dangling && snapshot.dangling.length > 0);
   const hasProfileError = Boolean(snapshot?.profile_route_error);
 
@@ -404,300 +365,41 @@ export function ConnectScreen({
         </Button>
       </Card>
 
-      <Card title={copy.key.title}>
-        <p className="zs-t-body mb-3 text-ink-2">{copy.key.text}</p>
-
-        {hasRoutes ? (
-          <>
-            <Rows>
-              {routes.map((r) => {
-                const isTesting = testingId === r.id;
-                const isToggling = togglingId === r.id;
-                const isDeleting = deletingId === r.id;
-                const expiryUrgency = getRouteExpiryUrgency(r.expires_at);
-                const isExpired = r.status === "expired" || expiryUrgency === "expired";
-                const showRenew = expiryUrgency !== "none" || isExpired;
-
-                const statusTone: BadgeTone =
-                  r.status === "active"
-                    ? "ok"
-                    : r.status === "unreachable" || isExpired
-                    ? "danger"
-                    : r.status === "exit_ip_mismatch"
-                    ? "warn"
-                    : "neutral";
-
-                const rowTone: RowTone = statusTone;
-
-                const statusText =
-                  r.status === "active"
-                    ? copy.key.switchOn
-                    : isExpired
-                    ? copy.key.expired
-                    : r.status === "unreachable"
-                    ? copy.key.unreachable
-                    : r.status === "exit_ip_mismatch"
-                    ? copy.key.ipMismatch
-                    : copy.key.switchOff;
-
-                const locationText = r.country ? formatCountryWithCode(r.country) || r.country : "";
-                const latencyText = r.health?.latency_ms ? copy.key.latency(r.health.latency_ms) : "";
-                const dateText = r.expires_at ? copy.key.expires(new Date(r.expires_at * 1000).toLocaleDateString()) : "";
-
-                return (
-                  <div key={r.id} className="zs-stack gap-2 py-2 border-b border-line last:border-b-0">
-                    <Row
-                      icon="key"
-                      tone={rowTone}
-                      title={
-                        <span className="inline-flex items-center gap-2 flex-wrap">
-                          <span>{r.label || copy.key.defaultLabel}</span>
-                          {r.is_default && <Badge tone="info">{copy.key.defaultBadge}</Badge>}
-                          {r.is_profile_route && <Badge tone="neutral">{copy.key.profileBadge}</Badge>}
-                          <Badge tone={statusTone}>{statusText}</Badge>
-                          {(expiryUrgency === "soon" || expiryUrgency === "critical") && r.expires_at && (
-                            <Badge tone={expiryUrgency === "critical" ? "danger" : "warn"}>
-                              {copy.key.expiringSoon(formatRemainingTimeRu(r.expires_at))}
-                            </Badge>
-                          )}
-                        </span>
-                      }
-                      sub={
-                        <span className="inline-flex items-center gap-2 flex-wrap">
-                          {r.exit_ip && <Mono>{formatIp(r.exit_ip, hideIpMode)}</Mono>}
-                          {locationText && <span>· {locationText}</span>}
-                          {latencyText && <span>· {latencyText}</span>}
-                          {dateText && <span>· {dateText}</span>}
-                        </span>
-                      }
-                      trail={
-                        <Switch
-                          checked={r.enabled}
-                          disabled={isToggling}
-                          onChange={() => handleToggleRoute(r.id, !r.enabled)}
-                          aria-label={copy.key.switchLabel}
-                        />
-                      }
-                    />
-
-                    <div className="flex items-center gap-2 pl-9 flex-wrap">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={isTesting}
-                        onClick={() => handleTestRoute(r.id)}
-                      >
-                        {isTesting ? copy.key.testing : copy.key.test}
-                      </Button>
-                      {showRenew && (
-                        <Button
-                          size="sm"
-                          variant={expiryUrgency === "critical" || isExpired ? "primary" : "secondary"}
-                          onClick={() => openZastavaBot(r.id)}
-                        >
-                          {copy.key.renew}
-                        </Button>
-                      )}
-                      {!r.is_default && (
-                        <Button
-                          size="sm"
-                          variant="quiet"
-                          onClick={() => handleSetDefaultRoute(r.id)}
-                        >
-                          {copy.key.makeDefault}
-                        </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="quiet"
-                        disabled={isDeleting}
-                        onClick={() => handleRemoveRoute(r.id)}
-                      >
-                        {copy.key.remove}
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })}
-            </Rows>
-
-            <div className="mt-4 pt-3 border-t border-line zs-stack gap-3">
-              <div className="zs-stack gap-1">
-                <span className="zs-t-label text-ink-2">{copy.key.scopeLabel}</span>
-                <Segmented
-                  aria-label={copy.key.scopeLabel}
-                  options={ADD_SCOPE_OPTIONS}
-                  value={addScope}
-                  onChange={setAddScope}
-                />
-              </div>
-              <Field
-                label={copy.key.fieldLabel}
-                placeholder={copy.key.placeholder}
-                value={inputKey}
-                onChange={(e) => {
-                  setInputKey(e.target.value);
-                  if (error) setError(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleAddKey();
-                }}
-                autoComplete="off"
-                spellCheck={false}
-                help={copy.key.caption}
-                error={error ?? undefined}
-                action={
-                  <Button onClick={handleAddKey} disabled={connecting}>
-                    {connecting ? copy.key.connecting : copy.key.connect}
-                  </Button>
-                }
-              />
-              <Button variant="primary" block onClick={() => openZastavaBot()}>
-                {copy.key.get}
-              </Button>
-            </div>
-          </>
-        ) : isLegacyConfigured && upstream ? (
-          <>
-            <Rows>
-              <Row
-                icon="key"
-                tone={isLegacyActive ? "ok" : "neutral"}
-                title={upstream.label || copy.key.defaultLabel}
-                sub={isLegacyActive ? copy.key.switchOn : copy.key.switchOff}
-                trail={
-                  <Switch
-                    checked={isLegacyActive}
-                    onChange={handleLegacyToggle}
-                    aria-label={copy.key.switchLabel}
-                  />
-                }
-              />
-              <Row
-                icon="globe"
-                title={copy.key.exit}
-                sub={
-                  exitKnown ? (
-                    <>
-                      <Mono>{formatIp(currentIp, hideIpMode)}</Mono>
-                      {formatCountryWithCode(currentCountry) ? ` · ${formatCountryWithCode(currentCountry)}` : ""}
-                    </>
-                  ) : (
-                    copy.key.exitUnknown
-                  )
-                }
-              />
-            </Rows>
-            <Button variant="danger" block className="mt-3" onClick={handleLegacyDisconnect}>
-              {copy.key.disconnect}
-            </Button>
-          </>
-        ) : (
-          <div className="zs-stack gap-3">
-            <div className="zs-stack gap-1">
-              <span className="zs-t-label text-ink-2">{copy.key.scopeLabel}</span>
-              <Segmented
-                aria-label={copy.key.scopeLabel}
-                options={ADD_SCOPE_OPTIONS}
-                value={addScope}
-                onChange={setAddScope}
-              />
-            </div>
-            <Field
-              label={copy.key.fieldLabel}
-              placeholder={copy.key.placeholder}
-              value={inputKey}
-              onChange={(e) => {
-                setInputKey(e.target.value);
-                if (error) setError(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleAddKey();
-              }}
-              autoComplete="off"
-              spellCheck={false}
-              help={copy.key.caption}
-              error={error ?? undefined}
-              action={
-                <Button onClick={handleAddKey} disabled={connecting}>
-                  {connecting ? copy.key.connecting : copy.key.connect}
-                </Button>
-              }
-            />
-            <Button variant="primary" block onClick={() => openZastavaBot()}>
-              {copy.key.get}
-            </Button>
-          </div>
-        )}
-      </Card>
+      <RouteListSection
+        routes={routes}
+        upstream={upstream}
+        currentIp={currentIp}
+        currentCountry={currentCountry}
+        hideIpMode={hideIpMode}
+        addScope={addScope}
+        setAddScope={setAddScope}
+        inputKey={inputKey}
+        onInputKeyChange={(val) => {
+          setInputKey(val);
+          if (error) setError(null);
+        }}
+        error={error}
+        connecting={connecting}
+        testingId={testingId}
+        togglingId={togglingId}
+        deletingId={deletingId}
+        onAddKey={handleAddKey}
+        onToggleRoute={handleToggleRoute}
+        onTestRoute={handleTestRoute}
+        onSetDefaultRoute={handleSetDefaultRoute}
+        onRemoveRoute={handleRemoveRoute}
+        onLegacyToggle={handleLegacyToggle}
+        onLegacyDisconnect={handleLegacyDisconnect}
+      />
 
       {hasRoutes && (
-        <Card title={copy.routes.title}>
-          <p className="zs-t-body mb-3 text-ink-2">{copy.routes.text}</p>
-          <div className="zs-stack gap-3">
-            {PROVIDERS.map((p) => {
-              const explicitBinding = snapshot?.provider_routes[p.id];
-              const isDirectSentinel = explicitBinding === DIRECT_ROUTE_ID;
-              const isDefaultEffective = !explicitBinding && Boolean(snapshot?.default_route_id);
-              const currentValue = isDirectSentinel
-                ? "direct"
-                : explicitBinding || (isDefaultEffective ? "default" : "direct");
-
-              const selectOptions = [
-                { value: "direct", label: copy.routes.direct },
-                ...(snapshot?.default_route_id
-                  ? [{ value: "default", label: copy.routes.default }]
-                  : []),
-                ...routes.map((r) => {
-                  const rawIpOrHost = r.exit_ip || r.entries[0]?.host || "";
-                  const ipOrHost = rawIpOrHost ? formatIp(rawIpOrHost, hideIpMode) : "";
-                  return {
-                    value: r.id,
-                    label: formatRouteOptionLabel({
-                      label: r.label,
-                      country: r.country,
-                      ipOrHost,
-                      fallbackLabel: copy.key.defaultLabel,
-                    }),
-                  };
-                }),
-              ];
-
-              const exitCountry = resolveProviderExitCountry(p.id, snapshot, routes, currentCountry);
-              const blockedCountry =
-                exitCountry && exitCountry !== "--" && isCountryBlockedForProvider(p.id, exitCountry)
-                  ? exitCountry
-                  : null;
-
-              return (
-                <div key={p.id} className="zs-stack gap-2 p-2 rounded-lg bg-bg-2">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <span className="font-medium text-ink">{p.name}</span>
-                    <div className="w-full sm:w-64">
-                      <Select
-                        options={selectOptions}
-                        value={currentValue}
-                        onChange={(e) => handleBindProvider(p.id, e.target.value)}
-                        aria-label={p.name}
-                      />
-                    </div>
-                  </div>
-                  {blockedCountry && (
-                    <Banner
-                      tone="warn"
-                      title={copy.routes.blockedCountryTitle(
-                        p.name,
-                        formatCountryWithCode(blockedCountry) || blockedCountry,
-                      )}
-                    >
-                      {copy.routes.blockedCountryText}
-                    </Banner>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </Card>
+        <ProviderRoutesSection
+          snapshot={snapshot}
+          routes={routes}
+          currentCountry={currentCountry}
+          hideIpMode={hideIpMode}
+          onBindProvider={handleBindProvider}
+        />
       )}
     </>
   );

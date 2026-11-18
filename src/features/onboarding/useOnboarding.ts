@@ -1,18 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getOnboardingV22Done, setOnboardingV22Done } from "../../utils/api";
+import { isTauri } from "../../utils/api/client";
 
 /** Флаг «знакомство пройдено или пропущено» для версии 2.2 (хранится в state.json и кэшируется в localStorage). */
 export const ONBOARDING_DONE_KEY = "zastava_onboarding_v2_2_done";
 
 export const ONBOARDING_STEPS = 4;
-
-function safeIsTauri(): boolean {
-  try {
-    return typeof window !== "undefined" && isTauri();
-  } catch {
-    return false;
-  }
-}
 
 export function readDoneFromStorage(): boolean {
   try {
@@ -34,9 +27,9 @@ export function writeDoneToStorage(done = true): void {
 }
 
 export async function readOnboardingDone(): Promise<boolean> {
-  if (safeIsTauri()) {
+  if (isTauri()) {
     try {
-      const done = await invoke<boolean>("get_onboarding_v2_2_done");
+      const done = await getOnboardingV22Done();
       writeDoneToStorage(done);
       return done;
     } catch {
@@ -48,9 +41,9 @@ export async function readOnboardingDone(): Promise<boolean> {
 
 export async function persistOnboardingDone(done = true): Promise<void> {
   writeDoneToStorage(done);
-  if (safeIsTauri()) {
+  if (isTauri()) {
     try {
-      await invoke("set_onboarding_v2_2_done", { done });
+      await setOnboardingV22Done(done);
     } catch {
       // Ошибка записи в state.json не должна блокировать закрытие онбординга; localStorage уже обновлён.
     }
@@ -102,7 +95,7 @@ export function useOnboarding() {
 
   // В Tauri гидратируем состояние из state.json и держим localStorage-кэш в синхронизации.
   useEffect(() => {
-    if (initial.forced || initial.isAlertWindow || !safeIsTauri()) return;
+    if (initial.forced || initial.isAlertWindow || !isTauri()) return;
     let cancelled = false;
     readOnboardingDone().then((done) => {
       if (cancelled || userInteractedRef.current) return;

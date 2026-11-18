@@ -1,24 +1,20 @@
 import { useEffect, useState } from "react";
-import type { AppStateData, CoverageSnapshot, PartialAudit, ProviderId, RiskReport, SourceView } from "../../types";
-import { Badge, Banner, Button, Card, EmptyState, ExpandRow, Link, Mono, Row, Rows, Section, Segmented, cx } from "../../ui";
-import type { IconName, Tone } from "../../ui";
-import { providers as providerCopy, status as words } from "../../shared/copy/ru";
-import { checks as copy } from "../../shared/copy/ru";
-import type { CheckId } from "../../shared/copy/ru";
+import type { AppStateData, CoverageSnapshot, PartialAudit, ProviderId, RiskReport } from "../../types";
+import { Badge, Banner, Button, Card, EmptyState, ExpandRow, Row, Rows, Section, Segmented, cx } from "../../ui";
+import type { Tone } from "../../ui";
+import { checks as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
-import { formatIp, maskIpsInText, resolvePinnedIp } from "../../shared/lib/format";
 import { CoverageSection } from "../coverage/CoverageSection";
-import { openOsNetworkSettings } from "../../utils/api";
+import { CheckRow, LEAK_CHECKS, UNKNOWN_ICON, needsLook, statusOf } from "./CheckRow";
 import {
   PROVIDER_ORDER,
   buildChecks,
   buildPendingChecks,
-  isCriticalStatus,
   partitionChecksForProvider,
   pickWorstProvider,
   progressOf,
 } from "./checksModel";
-import type { CheckItem, PrioritizedCheckItem } from "./checksModel";
+import type { CheckItem } from "./checksModel";
 import "./checks.css";
 
 export interface ChecksScreenProps {
@@ -27,7 +23,7 @@ export interface ChecksScreenProps {
   reports?: Partial<Record<ProviderId, RiskReport>>;
   /** Что уже известно о идущем аудите (пока отчёта нет): готовые проверки и адрес выхода. */
   partial?: PartialAudit | null;
-  /** Текст ошибки аудита: без отчёта и без идущего повтора показывается «Повторить». */
+  /** Текст ошибки аудита: без отчёта и без идущей проверки показывается «Повторить». */
   auditError?: string | null;
   /** Шлюз ещё запускается в фоне: данных нет не потому, что проверка сломалась. */
   startupPending?: boolean;
@@ -53,58 +49,6 @@ export interface ChecksScreenProps {
   dataAgeMinutes?: number | null;
 }
 
-/** Значок строки: только украшение, статус говорит бейдж. */
-const ICONS: Record<CheckId, IconName> = {
-  geo_matrix: "globe",
-  claude_exit: "shield",
-  asn: "pulse",
-  dnsbl: "shield",
-  reverse_dns: "term",
-  pinning: "lock",
-  travel: "arrow",
-  ipv6: "zap",
-  dns: "pulse",
-  dns_country: "globe",
-  wifi_geo: "shield",
-  timezone: "refresh",
-  locale_hygiene: "term",
-  udp_stun: "zap",
-};
-
-/** Значок «не удалось проверить». */
-const UNKNOWN_ICON: IconName = "help";
-
-const LEAK_CHECKS: string[] = ["ipv6", "dns", "dns_country", "wifi_geo", "udp_stun"];
-
-interface StatusView {
-  tone: Tone | "neutral";
-  word: string;
-  icon?: IconName;
-  /** Результата ещё нет: на бейдже вращается индикатор. */
-  busy?: boolean;
-}
-
-/** Ссылка на настройки сети есть только на macOS и Windows; на остальных системах кнопку не показываем. */
-const CAN_OPEN_NETWORK_SETTINGS =
-  typeof navigator !== "undefined" && /Mac|Win/i.test(navigator.platform || navigator.userAgent || "");
-
-/** Единый словарь: Чисто / Нужна проверка / Утечка / Выключено. */
-function statusOf(item: CheckItem, state: AppStateData | null, provider: ProviderId): StatusView {
-  if (item.pending) return { tone: "neutral", word: copy.pending.badge, busy: true };
-  if (item.ok) return { tone: "ok", word: words.clean, icon: "check" };
-  if (item.missing) return { tone: "neutral", word: words.noData, icon: UNKNOWN_ICON };
-  if (item.cls === "unknown") return { tone: "neutral", word: words.unknown, icon: UNKNOWN_ICON };
-  if (item.cls === "na") return { tone: "neutral", word: words.notApplicable };
-  if (isCriticalStatus(item.result)) {
-    return { tone: "danger", word: LEAK_CHECKS.includes(item.id) ? words.leak : words.review, icon: "alert" };
-  }
-  if (item.id === "pinning" && !resolvePinnedIp(state, provider)) return { tone: "neutral", word: words.off };
-  return { tone: "warn", word: words.review, icon: "alert" };
-}
-
-/** Строку раскрываем сразу, если по ней есть что делать. */
-const needsLook = (item: CheckItem) => item.cls !== "ok" && item.cls !== "na" && item.cls !== "pending";
-
 /** Экран «Проверки»: переключатель провайдеров, вердикт, приоритетные проверки, тесты защиты. */
 export function ChecksScreen({
   report,
@@ -127,7 +71,6 @@ export function ChecksScreen({
   rechecking,
   dataAgeMinutes,
 }: ChecksScreenProps) {
-  // Явный выбор пользователя; без него раскрыты только непройденные проверки.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [passedOpen, setPassedOpen] = useState(false);
   const [manualProvider, setManualProvider] = useState<ProviderId | null>(null);
@@ -173,8 +116,11 @@ export function ChecksScreen({
     );
   }
 
-  // Ни отчёта, ни идущей проверки, а аудит упал (или не вернул отчёт для выбранного провайдера): понятная ошибка с повтором.
-  const missingAfterFinish = !activeReport && !rechecking && !startupPending && (Boolean(auditError) || Boolean(resolvedReports && Object.keys(resolvedReports).length > 0));
+  const missingAfterFinish =
+    !activeReport &&
+    !rechecking &&
+    !startupPending &&
+    (Boolean(auditError) || Boolean(resolvedReports && Object.keys(resolvedReports).length > 0));
   if (missingAfterFinish) {
     return (
       <div className="zs-stack">
@@ -198,7 +144,6 @@ export function ChecksScreen({
     );
   }
 
-  // Пока отчёта нет, строки рисуются сразу: готовые — с результатом, остальные — «Проверяем…».
   const activePartial = partial?.provider === activeProvider ? partial : null;
   const built = activeReport ? buildChecks(activeReport, state) : buildPendingChecks(activePartial, state);
   const { items, counts, total } = built;
@@ -219,7 +164,6 @@ export function ChecksScreen({
     counts.crit > 0 ? "danger" : failed > 0 ? "warn" : unknown > 0 && !dnsOnlyUnknown ? "neutral" : "ok";
   const leak = items.some((i) => LEAK_CHECKS.includes(i.id) && i.cls === "crit");
   const ip = activeReport?.telemetry.ip ?? activePartial?.telemetry?.ip ?? "";
-  // Пока отчёта нет, судим по адресу выхода из частичного аудита.
   const ipv6Exit = activeReport ? Boolean(activeReport.ipv6_exit) : ip.includes(":");
   const ratioPassed = waiting ? progress.done : passed;
   const ratioTotal = waiting ? progress.total : total;
@@ -373,177 +317,4 @@ export function ChecksScreen({
       </Section>
     </div>
   );
-}
-
-/* ---------- Строка проверки: ExpandRow с подробностями ---------- */
-
-function priorityLabel(item: PrioritizedCheckItem, providerName: string): string {
-  if (item.tier === 1) return copy.priority.tier1(providerName);
-  if (item.tier === 2) return copy.priority.tier2(providerName);
-  return item.advisory ? copy.priority.tier3Advisory(providerName) : copy.priority.tier3Required(providerName);
-}
-
-interface CheckRowProps {
-  item: PrioritizedCheckItem;
-  providerName: string;
-  showPriority: boolean;
-  hideIpMode: boolean;
-  view: StatusView;
-  open: boolean;
-  onToggle: () => void;
-  onAction: () => void;
-  onGuide: () => void;
-  /** Повторный прогон через общий аудит; без обработчика кнопка не показывается. */
-  onRetry?: () => void;
-  retrying?: boolean;
-}
-
-function CheckRow({ item, providerName, showPriority, hideIpMode, view, open, onToggle, onAction, onGuide, onRetry, retrying }: CheckRowProps) {
-  const actionLabel =
-    item.action === "pin" ? copy.actions.pin : item.action === "sync-timezone" ? copy.actions.syncTimezone : copy.actions.openGuide;
-  // Инструкция отдельной ссылкой — только если главное действие другое.
-  const showGuideLink = item.result.guide_ref && item.action !== "guide";
-  const sources = item.pending ? [] : (item.result.detail?.sources ?? []);
-  const showNetworkSettings = Boolean(item.help?.canOpenNetworkSettings) && CAN_OPEN_NETWORK_SETTINGS;
-  const priorityTone = item.tier === 1 ? "tier1" : item.tier === 2 ? "tier2" : item.advisory ? "advisory" : "tier3";
-
-  return (
-    <ExpandRow
-      icon={ICONS[item.id as CheckId] ?? "pulse"}
-      tone={view.tone === "ok" || view.tone === "warn" || view.tone === "danger" ? view.tone : "neutral"}
-      title={item.title}
-      sub={
-        showPriority ? (
-          <>
-            <span className={cx("zs-check__priority", `zs-check__priority--${priorityTone}`)}>{priorityLabel(item, providerName)}</span>
-            {" · "}
-            {item.what}
-          </>
-        ) : (
-          item.what
-        )
-      }
-      trail={
-        <Badge tone={view.tone} icon={view.icon} busy={view.busy}>
-          {view.word}
-        </Badge>
-      }
-      open={open}
-      onToggle={onToggle}
-      detailLabel={item.title}
-    >
-      {item.pending ? (
-        <p className="zs-check__message" role="status" aria-busy="true">
-          {copy.pending.row}
-        </p>
-      ) : (
-        <div>
-          <p className="zs-check__label">{copy.detail.result}</p>
-          {item.cls === "unknown" && !item.help && (
-            <p className="zs-check__message">{copy.reasons[item.missing ? "no_data" : (item.result.reason ?? "unknown")]}</p>
-          )}
-          <p className="zs-check__message">{maskIpsInText(item.result.message, hideIpMode)}</p>
-          {(item.id === "dns" || item.id === "dns_country") &&
-            item.cls === "unknown" &&
-            item.result.code !== "DNS_WHOAMI_FAKE_IP" && <p className="zs-check__label">{copy.dnsHelp.mutedNote}</p>}
-          {item.result.measured_via && (
-            <p className="zs-check__label">
-              {copy.measuredViaLabel} <Mono>{item.result.measured_via}</Mono>
-            </p>
-          )}
-        </div>
-      )}
-      {sources.length > 0 && (
-        <div>
-          <p className="zs-check__label">{copy.detail.sources}</p>
-          <ul className="zs-check__sources">
-            {sources.map((src) => (
-              <li key={src.source} className="zs-check__message">
-                {copy.sources.line(src.source, describeSource(src, hideIpMode))}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {item.help && (
-        <>
-          <div>
-            <p className="zs-check__label">{copy.detail.why}</p>
-            {item.help.intro && <p className="zs-check__message">{item.help.intro}</p>}
-            <p className="zs-check__message">{item.help.why}</p>
-          </div>
-          <div>
-            <p className="zs-check__label">{copy.detail.steps}</p>
-            <ol className="zs-check__steps">
-              {item.help.steps.map((step) => (
-                <li key={step} className="zs-check__message">
-                  {step}
-                </li>
-              ))}
-            </ol>
-          </div>
-        </>
-      )}
-      {item.advice && (
-        <div>
-          <p className="zs-check__label">{copy.detail.todo}</p>
-          <p className="zs-check__message">{item.advice}</p>
-        </div>
-      )}
-      {item.data.length > 0 && (
-        <dl className="zs-check__data">
-          {item.data.map((d) => {
-            const val =
-              d.label === copy.data.ip || d.label === copy.data.pinnedIp ? formatIp(d.value, hideIpMode) : d.value;
-            return (
-              <div key={d.label} className="zs-check__pair">
-                <dt>{d.label}</dt>
-                <dd>{d.mono ? <Mono>{val}</Mono> : val}</dd>
-              </div>
-            );
-          })}
-        </dl>
-      )}
-      {(item.action || showGuideLink || (item.cls === "unknown" && onRetry) || showNetworkSettings) && (
-        <div className="zs-check__actions">
-          {item.cls === "unknown" && onRetry && (
-            <Button size="sm" icon="refresh" onClick={onRetry} disabled={retrying}>
-              {copy.retry}
-            </Button>
-          )}
-          {showNetworkSettings && (
-            <Button size="sm" onClick={() => void openOsNetworkSettings().catch(() => {})}>
-              {copy.dnsHelp.openSettings}
-            </Button>
-          )}
-          {item.action && (
-            <Button size="sm" icon={item.action === "guide" ? undefined : item.action === "pin" ? "lock" : "refresh"} onClick={onAction}>
-              {actionLabel}
-            </Button>
-          )}
-          {showGuideLink && (
-            <Link
-              href="#"
-              chevron
-              onClick={(e) => {
-                e.preventDefault();
-                onGuide();
-              }}
-            >
-              {copy.actions.openGuide}
-            </Link>
-          )}
-        </div>
-      )}
-    </ExpandRow>
-  );
-}
-
-/** «172.70.161.26 · Cloudflare (публичный DNS)», «вернул служебный адрес 198.18.0.7», «не ответил вовремя». */
-function describeSource(src: SourceView, hideIpMode: boolean): string {
-  const state = copy.sources.state[src.state] ?? copy.sources.state.empty;
-  if (!src.addr) return state;
-  const addr = formatIp(src.addr, hideIpMode);
-  const operator = src.operator ? ` · ${copy.sources.operator(src.operator)}` : "";
-  return src.state === "answered" ? `${addr}${operator}` : `${state} ${addr}${operator}`;
 }

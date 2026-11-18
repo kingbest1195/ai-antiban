@@ -1,6 +1,7 @@
 export const toast = {
   auditError: "Не удалось проверить соединение",
   ipCopied: "IP скопирован",
+  ipCopyError: "Не удалось скопировать IP",
   pinned: "IP закреплён",
   pinnedText: (ip: string) => `Адрес ${ip} сохранён как эталонный.`,
   pinError: "Не удалось закрепить IP",
@@ -70,6 +71,11 @@ export const toast = {
   profile: {
     switched: "Профиль переключён",
     switchedText: "Активный профиль Claude обновлён.",
+  },
+  sysproxy: {
+    adminAuthTitle: "Нужны права администратора macOS",
+    adminAuthText:
+      "Системный прокси включён не полностью. Откройте «Обзор» → «Разрешить с паролем», чтобы защитить все сетевые службы.",
   },
   backup: {
     exported: "Архив Claude готов",

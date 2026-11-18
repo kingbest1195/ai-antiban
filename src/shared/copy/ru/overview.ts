@@ -164,6 +164,16 @@ export const overview = {
       renew: "Продлить",
       openConnect: "Маршруты",
     },
+    cooldown: {
+      title: "Пауза смены сети активна",
+      text: (countdown: string) =>
+        `Осталось ${countdown}. Не открывайте Claude Desktop и claude.ai до окончания таймера, чтобы избежать антифрод-проверки при смене IP/VPN.`,
+      clear: "Сбросить таймер",
+      clearing: "Сбрасываем…",
+      clearedTitle: "Таймер смены IP сброшен",
+      clearedText: "Ограничение после безопасного выхода снято вручную.",
+      clearError: "Не удалось сбросить таймер",
+    },
   },
   error: {
     title: "Нет связи с сетью",

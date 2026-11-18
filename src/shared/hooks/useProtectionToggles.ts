@@ -9,6 +9,7 @@ import {
   toggleSysproxyPrivileged,
 } from "../../utils/api";
 import type { CliProtectionReport } from "../../types";
+import { writeClipboard } from "../lib/clipboard";
 import { toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
@@ -166,11 +167,7 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
       } else {
         const report = await enableCliProtection();
         if (!quiet) {
-          try {
-            await navigator.clipboard.writeText(report.shell_command);
-          } catch {
-            // буфер обмена необязателен
-          }
+          await writeClipboard(report.shell_command);
         }
         setCliProtected(true);
         if (!quiet) {

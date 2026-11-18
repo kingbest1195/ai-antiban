@@ -2,6 +2,7 @@
 
 use crate::{auditor, proxy, routing, state, tray};
 use std::sync::OnceLock;
+use tauri::Emitter;
 
 static PROFILE_RUNTIME_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -277,4 +278,28 @@ pub async fn bind_route_to_claude_profile(
         sync_active_profile_route_to_runtime(&state, &guard, upstream_key.as_deref()).await?;
     }
     Ok(resp)
+}
+
+#[tauri::command]
+pub async fn safe_logout_claude_cmd(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<auditor::profile_switcher::SafeLogoutResult, String> {
+    let _runtime_lock = lock_profile_runtime().await;
+    let res = auditor::profile_switcher::safe_logout_claude(&state).await?;
+    let _ = app.emit("network://changed", &());
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn clear_ip_change_cooldown_cmd(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<(), String> {
+    state
+        .clear_ip_change_cooldown()
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("network://changed", &());
+    Ok(())
 }

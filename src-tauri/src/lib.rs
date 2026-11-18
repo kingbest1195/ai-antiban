@@ -3,6 +3,7 @@ pub mod auditor;
 pub mod autostart;
 pub mod bin_checker;
 pub mod commands;
+pub mod core;
 pub mod cowork_guard;
 pub mod diagnostics;
 pub mod os_tz;

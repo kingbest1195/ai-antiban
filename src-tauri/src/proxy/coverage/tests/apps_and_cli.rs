@@ -1,0 +1,575 @@
+use super::super::*;
+use super::*;
+use crate::state::CliMode;
+use crate::sysproxy::fs::{Fs, RealFs};
+use crate::sysproxy::platform::{PlatOp, RegValue};
+use std::sync::atomic::Ordering;
+
+#[test]
+fn not_installed_app_is_reported_as_such() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    let cursor = app(&snap, "cursor");
+    assert_eq!(cursor.status, CoverageStatus::NotInstalled);
+    assert!(!cursor.installed);
+    assert!(cursor.manual_steps.is_empty());
+    assert_eq!(
+        app(&snap, "claude-code").status,
+        CoverageStatus::NotInstalled
+    );
+}
+
+// ----- browsers / desktop: PAC read from the OS ------------------------------------------------
+
+#[test]
+fn browser_is_configured_only_when_the_os_pac_is_ours() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    rig.seed_wifi_pac("http://127.0.0.1:8899/proxy.pac", true);
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    let b = app(&snap, "browsers");
+    assert_eq!(b.status, CoverageStatus::Configured);
+    assert!(b.manual_steps.is_empty());
+    assert_eq!(b.ai_requests, 0);
+}
+
+#[test]
+fn browser_with_a_foreign_or_disabled_pac_is_off() {
+    for (url, enabled) in [
+        ("http://corp.example/wpad.pac", true),
+        ("http://127.0.0.1:18899/proxy.pac", true),
+        ("http://127.0.0.1:8899/proxy.pac", false),
+    ] {
+        let (_, t) = tracker(FakeProbe::failing());
+        t.set_gateway_addr(gw(8899));
+        let rig = Rig::new();
+        rig.seed_wifi_pac(url, enabled);
+        let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+        let b = app(&snap, "browsers");
+        assert_eq!(b.status, CoverageStatus::Off, "{url} {enabled}");
+        assert_eq!(b.manual_steps, vec!["enable_protection".to_string()]);
+    }
+}
+
+#[test]
+fn unreadable_pac_is_unknown_not_configured() {
+    // The service list cannot be read.
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    rig.seed_wifi_pac("http://127.0.0.1:8899/proxy.pac", true);
+    rig.platform.fail_next(PlatOp::ListServices);
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    let b = app(&snap, "browsers");
+    assert_eq!(b.status, CoverageStatus::Unknown);
+    assert!(b.manual_steps.contains(&"set_pac_url".to_string()));
+
+    // One service cannot be read and the others do not match.
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    rig.seed_wifi_pac("http://other/proxy.pac", true);
+    rig.platform.fail_next(PlatOp::GetPac);
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Unknown);
+
+    // No network service at all.
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Unknown);
+}
+
+#[test]
+fn gateway_not_known_yet_is_unknown() {
+    let (_, t) = tracker(FakeProbe::failing());
+    let rig = Rig::new();
+    rig.seed_wifi_pac("http://127.0.0.1:8899/proxy.pac", true);
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Unknown);
+    assert_eq!(snap.gateway_addr, None);
+    assert_eq!(snap.pac_url, None);
+}
+
+#[test]
+fn windows_style_pac_is_read_from_inet() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8900));
+    let rig = Rig::new();
+    rig.platform.seed_inet(
+        "AutoConfigURL",
+        RegValue::sz("http://127.0.0.1:8900/proxy.pac"),
+    );
+    let snap = t.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Configured);
+
+    let rig = Rig::new();
+    rig.platform.seed_inet(
+        "AutoConfigURL",
+        RegValue::sz("http://127.0.0.1:8899/proxy.pac"),
+    );
+    let snap = t.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Off);
+
+    let rig = Rig::new();
+    rig.platform.fail_next(PlatOp::GetInet);
+    let snap = t.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Unknown);
+
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Inet, false), true);
+    assert_eq!(app(&snap, "browsers").status, CoverageStatus::Off);
+}
+
+// ----- IDE: http.proxy and nothing else --------------------------------------------------------
+
+#[test]
+fn ide_without_http_proxy_is_not_configured_even_with_the_cli_layer_on() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    make_editor(&rig.fs, "Cursor", Some("{ \"editor.fontSize\": 14 }"));
+    rig.seed_wifi_pac("http://127.0.0.1:8899/proxy.pac", true);
+    // CLI layer on AND the system PAC is ours: still not a fact about the IDE.
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    let cursor = app(&snap, "cursor");
+    assert_eq!(cursor.status, CoverageStatus::Off);
+    assert!(cursor.installed);
+    assert!(cursor.manual_steps.contains(&"set_http_proxy".to_string()));
+}
+
+#[test]
+fn ide_settings_file_missing_is_off() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    make_editor(&rig.fs, "Cursor", None);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "cursor").status, CoverageStatus::Off);
+}
+
+#[test]
+fn ide_is_configured_when_http_proxy_points_at_the_gateway_port() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    make_editor(
+        &rig.fs,
+        "Code",
+        Some(
+            "// comment\n{\n  \"http.proxy\": \"http://127.0.0.1:8899\", /* x */\n  \"a\": 1,\n}\n",
+        ),
+    );
+    make_editor(
+        &rig.fs,
+        "Windsurf",
+        Some("{\"http.proxy\": \"http://127.0.0.1:7890\"}"),
+    );
+    make_editor(
+        &rig.fs,
+        "Antigravity",
+        Some("{\"http.proxy\": \"http://127.0.0.1:18899\"}"),
+    );
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&snap, "vscode").status, CoverageStatus::Configured);
+    assert!(app(&snap, "vscode").manual_steps.is_empty());
+    // Somebody else's proxy and a lookalike port are not ours.
+    assert_eq!(app(&snap, "windsurf").status, CoverageStatus::Off);
+    assert_eq!(app(&snap, "antigravity").status, CoverageStatus::Off);
+}
+
+#[test]
+fn ide_port_follows_the_real_gateway_port() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8900));
+    let rig = Rig::new();
+    make_editor(
+        &rig.fs,
+        "Cursor",
+        Some("{\"http.proxy\": \"http://127.0.0.1:8899\"}"),
+    );
+    make_editor(
+        &rig.fs,
+        "Code",
+        Some("{\"http.proxy\": \"http://localhost:8900\"}"),
+    );
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&snap, "cursor").status, CoverageStatus::Off);
+    assert_eq!(app(&snap, "vscode").status, CoverageStatus::Configured);
+}
+
+#[test]
+fn ide_with_a_broken_settings_file_is_unknown() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    make_editor(&rig.fs, "Cursor", Some("{ this is not json"));
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "cursor").status, CoverageStatus::Unknown);
+}
+
+#[test]
+fn http_proxy_value_matching() {
+    assert!(proxy_value_targets_gateway("http://127.0.0.1:8899", 8899));
+    assert!(proxy_value_targets_gateway("http://127.0.0.1:8899/", 8899));
+    assert!(proxy_value_targets_gateway("127.0.0.1:8899", 8899));
+    assert!(proxy_value_targets_gateway("http://localhost:8899", 8899));
+    assert!(!proxy_value_targets_gateway("http://127.0.0.1:18899", 8899));
+    assert!(!proxy_value_targets_gateway("http://127.0.0.1:7890", 8899));
+    assert!(!proxy_value_targets_gateway(
+        "http://proxy.example:8899",
+        8899
+    ));
+    assert!(!proxy_value_targets_gateway("", 8899));
+    assert!(!proxy_value_targets_gateway("garbage", 8899));
+}
+
+// ----- JetBrains -------------------------------------------------------------------------------
+
+const JB_XML: &str = "<application>\n  <component name=\"HttpConfigurable\">\n    \
+    <option name=\"USE_HTTP_PROXY\" value=\"true\" />\n    \
+    <option name=\"PROXY_HOST\" value=\"127.0.0.1\" />\n    \
+    <option name=\"PROXY_PORT\" value=\"8899\" />\n  </component>\n</application>\n";
+
+#[test]
+fn jetbrains_is_unknown_by_default_with_manual_steps() {
+    const { assert!(!JETBRAINS_XML_CONFIRMED) };
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    rig.fs
+        .create_private_dir_all(&editor_root().join("JetBrains"))
+        .unwrap();
+    // Even a settings file that "looks right" is not trusted until the format is confirmed.
+    rig.fs.put(
+        &editor_root()
+            .join("JetBrains")
+            .join("PyCharm2025.1")
+            .join("options")
+            .join("proxy.settings.xml"),
+        JB_XML.as_bytes(),
+        0o600,
+    );
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    let jb = app(&snap, "jetbrains");
+    assert!(jb.installed);
+    assert_eq!(jb.status, CoverageStatus::Unknown);
+    assert_eq!(
+        jb.manual_steps,
+        vec![
+            "jetbrains_proxy_settings".to_string(),
+            "set_pac_url".to_string(),
+            "set_http_proxy".to_string()
+        ]
+    );
+}
+
+#[test]
+fn jetbrains_xml_is_read_only_when_the_format_is_confirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("support");
+    let options = root.join("JetBrains").join("PyCharm2025.1").join("options");
+    std::fs::create_dir_all(&options).unwrap();
+    let ctx = FileCtx::new(Arc::new(RealFs), dir.path().join("home"), vec![root]);
+
+    // No file: nothing to read -> unknown.
+    let (st, _, _) = jetbrains_fact(Some(&ctx), Some(gw(8899)), true);
+    assert_eq!(st, CoverageStatus::Unknown);
+
+    std::fs::write(options.join("proxy.settings.xml"), JB_XML).unwrap();
+    let (st, steps, _) = jetbrains_fact(Some(&ctx), Some(gw(8899)), true);
+    assert_eq!(st, CoverageStatus::Configured);
+    assert!(steps.is_empty());
+    // Wrong port: off, with steps.
+    let (st, steps, _) = jetbrains_fact(Some(&ctx), Some(gw(8900)), true);
+    assert_eq!(st, CoverageStatus::Off);
+    assert!(!steps.is_empty());
+    // Flag off: the same file changes nothing.
+    let (st, _, _) = jetbrains_fact(Some(&ctx), Some(gw(8899)), false);
+    assert_eq!(st, CoverageStatus::Unknown);
+
+    // PAC variant.
+    let pac_xml = "<application><component name=\"HttpConfigurable\">\
+        <option name=\"USE_PROXY_PAC\" value=\"true\" />\
+        <option name=\"PAC_URL\" value=\"http://127.0.0.1:8899/proxy.pac\" />\
+        </component></application>";
+    std::fs::write(options.join("proxy.settings.xml"), pac_xml).unwrap();
+    let (st, _, _) = jetbrains_fact(Some(&ctx), Some(gw(8899)), true);
+    assert_eq!(st, CoverageStatus::Configured);
+    let (st, _, _) = jetbrains_fact(Some(&ctx), Some(gw(8900)), true);
+    assert_eq!(st, CoverageStatus::Off);
+}
+
+// ----- CLI -------------------------------------------------------------------------------------
+
+#[test]
+fn cli_follows_the_protection_layer_and_asks_for_a_new_terminal() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    t.set_cli_mode(CliMode::GlobalTerminal);
+    let rig = Rig::new();
+    let on = t.snapshot(&rig.env(PacSource::Services, true), true);
+    let curl = app(&on, "curl");
+    assert_eq!(curl.status, CoverageStatus::Configured);
+    assert!(curl.manual_steps.contains(&"reopen_terminal".to_string()));
+    let off = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&off, "curl").status, CoverageStatus::Off);
+}
+
+// ----- CLI modes -------------------------------------------------------------------------------
+
+fn claude_settings(rig: &Rig, text: Option<&str>) {
+    let dir = home().join(".claude");
+    rig.fs.create_private_dir_all(&dir).unwrap();
+    if let Some(t) = text {
+        rig.fs.put(&dir.join("settings.json"), t.as_bytes(), 0o600);
+    }
+}
+
+const CLAUDE_OURS: &str = "{ // mine\n \"env\": { \"HTTPS_PROXY\": \"http://127.0.0.1:8899\" } }";
+
+#[test]
+fn ai_only_is_the_default_and_the_snapshot_says_so() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(snap.cli_mode, CliMode::AiOnly);
+    let json = serde_json::to_value(&snap).unwrap();
+    assert_eq!(json["cli_mode"], "ai_only");
+    t.set_cli_mode(CliMode::GlobalTerminal);
+    let json =
+        serde_json::to_value(t.snapshot(&rig.env(PacSource::Services, true), false)).unwrap();
+    assert_eq!(
+        json["cli_mode"], "global_terminal",
+        "a mode change is not hidden by the cache"
+    );
+}
+
+#[test]
+fn ai_only_does_not_cover_the_general_tools_even_with_the_protection_on() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    for id in ["node-cli", "python-cli", "curl"] {
+        let a = app(&snap, id);
+        if !a.installed {
+            continue;
+        }
+        assert_eq!(a.status, CoverageStatus::Off, "{id}");
+        assert!(
+            a.detail
+                .contains("Не покрывается в режиме «Только ИИ-клиенты и IDE»"),
+            "{}",
+            a.detail
+        );
+        assert!(
+            !a.manual_steps.contains(&"enable_protection".to_string()),
+            "{id}"
+        );
+        assert!(
+            !a.manual_steps.contains(&"reopen_terminal".to_string()),
+            "{id}"
+        );
+    }
+    assert!(app(&snap, "curl").installed);
+}
+
+#[test]
+fn ai_only_claude_code_is_configured_only_when_its_settings_carry_our_proxy() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    // The flag says "on", the file says nothing: not configured.
+    let rig = Rig::new();
+    claude_settings(&rig, None);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Off);
+    assert!(
+        app(&snap, "claude-code")
+            .manual_steps
+            .contains(&"enable_protection".to_string())
+    );
+    // Our proxy on the gateway port (JSONC with a comment): configured, no terminal to reopen.
+    claude_settings(&rig, Some(CLAUDE_OURS));
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    let a = app(&snap, "claude-code");
+    assert_eq!(a.status, CoverageStatus::Configured);
+    assert!(!a.manual_steps.contains(&"reopen_terminal".to_string()));
+    // Another port is not the gateway.
+    claude_settings(
+        &rig,
+        Some("{\"env\": {\"HTTPS_PROXY\": \"http://127.0.0.1:10808\"}}"),
+    );
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Off);
+    // A broken file is unknown, never configured.
+    claude_settings(&rig, Some("{ not json"));
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Unknown);
+}
+
+#[test]
+fn ai_only_gemini_cli_reads_its_own_settings_file() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    let dir = home().join(".gemini");
+    rig.fs.create_private_dir_all(&dir).unwrap();
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "gemini-cli").status, CoverageStatus::Off);
+    rig.fs
+        .put(&dir.join("settings.json"), CLAUDE_OURS.as_bytes(), 0o600);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "gemini-cli").status, CoverageStatus::Configured);
+    // Claude's file is not consulted for Gemini.
+    claude_settings(&rig, None);
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Off);
+}
+
+#[test]
+fn ai_only_without_a_gateway_address_is_unknown_for_the_ai_clients() {
+    let (_, t) = tracker(FakeProbe::failing());
+    let rig = Rig::new();
+    claude_settings(&rig, Some(CLAUDE_OURS));
+    let snap = t.snapshot(&rig.env(PacSource::Services, true), true);
+    assert_eq!(app(&snap, "claude-code").status, CoverageStatus::Unknown);
+}
+
+#[test]
+fn global_terminal_keeps_the_flag_logic_and_asks_to_reopen_the_terminal() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    t.set_cli_mode(CliMode::GlobalTerminal);
+    let rig = Rig::new();
+    claude_settings(&rig, None);
+    let on = t.snapshot(&rig.env(PacSource::Services, true), true);
+    for id in ["claude-code", "curl"] {
+        let a = app(&on, id);
+        assert_eq!(a.status, CoverageStatus::Configured, "{id}");
+        assert!(
+            a.manual_steps.contains(&"reopen_terminal".to_string()),
+            "{id}"
+        );
+    }
+    let off = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&off, "claude-code").status, CoverageStatus::Off);
+    assert!(
+        app(&off, "claude-code")
+            .manual_steps
+            .contains(&"enable_protection".to_string())
+    );
+}
+
+// ----- snapshot shape --------------------------------------------------------------------------
+
+#[test]
+fn snapshot_carries_the_real_gateway_address() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8900));
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(snap.gateway_addr.as_deref(), Some("127.0.0.1:8900"));
+    assert_eq!(
+        snap.pac_url.as_deref(),
+        Some("http://127.0.0.1:8900/proxy.pac")
+    );
+    assert_eq!(snap.generated_at_ms, 10_000_000);
+    assert!(snap.sysproxy_enabled);
+}
+
+#[test]
+fn status_serializes_in_snake_case() {
+    let all = [
+        (CoverageStatus::Confirmed, "\"confirmed\""),
+        (CoverageStatus::Configured, "\"configured\""),
+        (CoverageStatus::Unknown, "\"unknown\""),
+        (CoverageStatus::Off, "\"off\""),
+        (CoverageStatus::NotInstalled, "\"not_installed\""),
+    ];
+    for (s, text) in all {
+        assert_eq!(serde_json::to_string(&s).unwrap(), text);
+    }
+}
+
+#[test]
+fn item_json_has_the_contract_fields() {
+    let (_, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    t.record_incoming_blocking(1, Some("curl/8"), TrafficKind::AiRequest);
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    let v = serde_json::to_value(&snap).unwrap();
+    for key in ["apps", "gateway_addr", "pac_url", "generated_at_ms"] {
+        assert!(v.get(key).is_some(), "{key}");
+    }
+    let curl = v["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "curl")
+        .unwrap();
+    for key in [
+        "id",
+        "name",
+        "status",
+        "last_seen_ms",
+        "ai_requests",
+        "pac_fetches",
+        "manual_steps",
+    ] {
+        assert!(curl.get(key).is_some(), "{key}");
+    }
+    assert_eq!(curl["status"], "confirmed");
+}
+
+#[test]
+fn facts_are_cached_briefly_and_a_recheck_bypasses_the_cache() {
+    let (clock, t) = tracker(FakeProbe::failing());
+    t.set_gateway_addr(gw(8899));
+    let rig = Rig::new();
+    rig.seed_wifi_pac("http://127.0.0.1:8899/proxy.pac", true);
+    let env = rig.env(PacSource::Services, false);
+
+    t.snapshot(&env, false);
+    let after_first = rig.platform.calls().len();
+    assert!(after_first > 0);
+    t.snapshot(&env, false);
+    assert_eq!(
+        rig.platform.calls().len(),
+        after_first,
+        "served from the cache"
+    );
+    t.snapshot(&env, true);
+    assert!(
+        rig.platform.calls().len() > after_first,
+        "forced re-check reads the OS"
+    );
+    let after_forced = rig.platform.calls().len();
+    clock.fetch_add(FACTS_TTL_MS + 1, Ordering::SeqCst);
+    t.snapshot(&env, false);
+    assert!(rig.platform.calls().len() > after_forced, "cache expired");
+}
+
+#[test]
+fn installed_check_uses_only_the_given_file_system() {
+    let rig = Rig::new();
+    assert!(!check_app_installed_in("claude-code", &rig.ctx));
+    rig.fs
+        .create_private_dir_all(&home().join(".claude"))
+        .unwrap();
+    assert!(check_app_installed_in("claude-code", &rig.ctx));
+    assert!(!check_app_installed_in("cursor", &rig.ctx));
+    make_editor(&rig.fs, "Cursor", None);
+    assert!(check_app_installed_in("cursor", &rig.ctx));
+    assert!(check_app_installed_in("browsers", &rig.ctx));
+    assert!(!check_app_installed_in("no-such-app", &rig.ctx));
+}
+
+// ----- WP-28: VPN services and the effective system proxy --------------------------------------
+
