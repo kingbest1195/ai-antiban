@@ -606,4 +606,54 @@ fn enable_with_applies_browser_pac_policies_and_restore_cleans_them() {
     assert!(!rep.has_failures());
     assert_eq!(store.get("com.google.Chrome", KEY_PROXY_MODE), None);
     assert_eq!(store.get("com.google.Chrome", KEY_PROXY_PAC_URL), None);
+    assert_eq!(
+        store.get(r"Software\Policies\Google\Chrome", KEY_PROXY_PAC_URL),
+        None
+    );
+}
+
+#[test]
+fn enable_with_error_leaves_sys_proxy_inactive_and_journal_empty() {
+    use super::platform::PlatOp;
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
+        return;
+    }
+    let (st, fs, p) = fixture();
+    let mut j = journal(&fs);
+
+    #[cfg(target_os = "macos")]
+    {
+        let usb_svc = ServiceId::new("en5", "USB 10/100 LAN", "USB LAN");
+        p.add_service(usb_svc.clone());
+        p.seed_pac(
+            &usb_svc,
+            PacState {
+                url: Some(PAC.to_string()),
+                enabled: Some(true),
+            },
+        );
+        p.seed_pac(&wifi(), restored_pac());
+        p.fail_next_auth(PlatOp::SetPac);
+        let err = enable_with(&st, &mut j, &p, PAC).unwrap_err();
+        assert!(
+            err.starts_with("ADMIN_AUTH_REQUIRED:"),
+            "expected ADMIN_AUTH_REQUIRED: prefix, got {err}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        p.fail_next(PlatOp::SetInet);
+        assert!(enable_with(&st, &mut j, &p, PAC).is_err());
+    }
+
+    assert!(
+        !st.sys_proxy_active(),
+        "sys_proxy_active must remain false when enable_with fails"
+    );
+    assert!(
+        j.is_empty(),
+        "journal entries must be rolled back on enable_with failure: {:?}",
+        j.entries()
+    );
 }

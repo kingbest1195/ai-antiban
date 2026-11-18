@@ -495,15 +495,10 @@ fn partial_admin_auth_required_rolls_back_and_returns_prefix() {
     p.fail_next_auth(PlatOp::SetPac);
     let mut j = open(&fs);
 
-    let st = crate::sysproxy::SysState::new();
-    let err = crate::sysproxy::enable_with(&st, &mut j, &p, PAC).unwrap_err();
+    let err = enable_pac(&mut j, &p, PAC).unwrap_err();
     assert!(
         err.starts_with("ADMIN_AUTH_REQUIRED:"),
         "expected ADMIN_AUTH_REQUIRED: prefix, got {err}"
-    );
-    assert!(
-        !st.sys_proxy_active(),
-        "sys_proxy_active must remain false on partial AdminAuthRequired"
     );
     assert!(
         j.is_empty(),
