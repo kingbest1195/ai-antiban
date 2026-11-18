@@ -256,10 +256,10 @@ async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
 
 async fn system_ptr_lookup(ip: IpAddr, limit: Duration) -> Option<String> {
     let started = std::time::Instant::now();
-    let per_try = Duration::from_millis((limit.as_millis() as u64 / 2).clamp(600, 1200));
 
     #[cfg(target_os = "macos")]
     {
+        let per_try = Duration::from_millis((limit.as_millis() as u64 / 2).clamp(600, 1200));
         let scutil_ips = macos_scutil_nameservers().await;
         if !scutil_ips.is_empty() {
             if let Some(ptr) = hickory_ptr_query(ip, per_try, Some(&scutil_ips)).await {

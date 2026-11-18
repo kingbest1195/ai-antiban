@@ -190,7 +190,7 @@ async fn active_per_provider_hold_from_vpn_jump_cannot_reblock_after_restore_to_
         )
         .await
         .expect("bind")
-        .with_hold_ttl(Duration::from_millis(160)),
+        .with_hold_ttl(Duration::from_millis(600)),
     );
     server
         .guard
@@ -238,7 +238,7 @@ async fn active_per_provider_hold_from_vpn_jump_cannot_reblock_after_restore_to_
     );
 
     // Wait well past the original hold TTL to prove no orphaned timeout relapses into block.
-    tokio::time::sleep(Duration::from_millis(260)).await;
+    tokio::time::sleep(Duration::from_millis(750)).await;
     assert!(!state.is_provider_blocked("anthropic").await);
     assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
     assert!(

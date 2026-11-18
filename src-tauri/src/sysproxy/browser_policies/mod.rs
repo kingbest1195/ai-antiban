@@ -26,8 +26,11 @@ use std::fmt;
 #[allow(unused_imports)]
 pub use chromium::{
     CHROMIUM_BROWSERS, ChromiumBrowserDef, MACOS_CHROMIUM_DOMAIN_NAMES,
-    WINDOWS_CHROMIUM_POLICY_BROWSERS, policy_specs_for_macos, policy_specs_with_pac,
+    WINDOWS_CHROMIUM_POLICY_BROWSERS, policy_specs_with_pac,
 };
+#[allow(unused_imports)]
+#[cfg(any(target_os = "macos", test))]
+pub use chromium::policy_specs_for_macos;
 #[allow(unused_imports)]
 #[cfg(any(target_os = "windows", test))]
 pub use chromium::{WINDOWS_CHROMIUM_DOMAIN_NAMES, policy_specs_for_windows};

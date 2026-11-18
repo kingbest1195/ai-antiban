@@ -1,7 +1,9 @@
 //! macOS `scutil --dns` nameserver parser and runner.
 
+#[cfg(any(target_os = "macos", test))]
 use std::net::IpAddr;
 
+#[cfg(any(target_os = "macos", test))]
 use super::is_usable_nameserver;
 
 /// Parses active reachable DNS nameservers from macOS `scutil --dns` output.

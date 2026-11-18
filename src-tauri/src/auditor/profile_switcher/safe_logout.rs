@@ -2,6 +2,7 @@
 //! clears ONLY auth/session files (preserving device IDs and MCP/user configs), and starts the
 //! 4-hour post-logout IP-change cooldown.
 
+#[cfg(target_os = "macos")]
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
