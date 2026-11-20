@@ -115,7 +115,7 @@ jobs:
       # 1) Загружаем Windows-инсталляторы как workflow artifact (без него SignPath падает).
       - name: Upload Windows installers for SignPath
         id: upload-windows-installers
-        if: matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' && secrets.SIGNPATH_API_TOKEN != ''
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-installers
@@ -127,7 +127,7 @@ jobs:
 
       # 2) Отправляем артефакт в SignPath.io и скачиваем подписанные бинарники в signed-windows-installers/.
       - name: Sign Windows installers via SignPath.io OSS
-        if: matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' && secrets.SIGNPATH_API_TOKEN != ''
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -140,7 +140,7 @@ jobs:
 
       # 3) Подменяем локальные бандлы подписанными, переподписываем minisign (.sig) и обновляем draft-релиз + latest.json.
       - name: Re-sign minisign & refresh draft release after SignPath
-        if: matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' && secrets.SIGNPATH_API_TOKEN != ''
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

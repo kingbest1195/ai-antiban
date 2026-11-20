@@ -338,6 +338,8 @@ pub(crate) fn route_telemetry(ip: &str, cc: &str) -> NetworkTelemetry {
         org: Some("Zastava Remote ISP".into()),
         isp: Some("Zastava Remote ISP".into()),
         timezone: Some("Europe/Amsterdam".into()),
-        resolved_at: current_timestamp(),
+        // Keep test-seeded route telemetry fresh past CACHE_TTL_SECONDS (15s) on slow CI runners
+        // so it never falls back to live external geo resolvers through the local echo SOCKS5 stub.
+        resolved_at: current_timestamp() + 300,
     }
 }
