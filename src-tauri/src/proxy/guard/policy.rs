@@ -56,7 +56,6 @@ pub(super) fn network_change(
     }
 }
 
-
 /// Returns `true` when `report` has an allowed, resolved exit country and zero critical
 /// failures (non-critical Yellow warnings such as KZ, RS, Timezone, AI Studio warning remain acceptable).
 pub(crate) fn report_no_critical_and_geo_ok(report: &RiskReport) -> bool {
@@ -151,7 +150,10 @@ pub(crate) fn effective_tray_report<'a>(
     st: &crate::state::AppStateData,
 ) -> std::borrow::Cow<'a, RiskReport> {
     if !has_blocked
-        && matches!(report.overall_status, OverallStatus::Red | OverallStatus::Yellow)
+        && matches!(
+            report.overall_status,
+            OverallStatus::Red | OverallStatus::Yellow
+        )
         && is_report_pinned_travel_only(report, st)
     {
         let mut adjusted = report.clone();
@@ -172,7 +174,11 @@ pub(crate) fn effective_tray_report<'a>(
     }
 }
 
-pub(super) fn all_excepted(st: &crate::state::AppStateData, unrouted: &[&'static str], ip: &str) -> bool {
+pub(super) fn all_excepted(
+    st: &crate::state::AppStateData,
+    unrouted: &[&'static str],
+    ip: &str,
+) -> bool {
     !unrouted.is_empty()
         && unrouted
             .iter()
@@ -202,7 +208,6 @@ pub(super) fn all_unrouted_session_or_excepted(
             st.session_allowed_providers.contains(*p) || st.is_ip_trusted_for_provider(p, ip)
         })
 }
-
 
 /// True when `report` triggered a same-country ASN/datacenter jump without 4h pause.
 pub(crate) fn has_same_country_asn_jump(report: &RiskReport) -> bool {
@@ -238,9 +243,7 @@ pub(super) fn resolve_gate_reason_with_cooldown(
         .any(|c| c.status.is_critical() || c.code == "TRAVEL_ASN_JUMP_SAME_COUNTRY")
         || report.geo_result.status.is_critical()
         || report.pinning_result.status.is_critical();
-    if !has_high_priority_issue
-        && let Some(reason) = cooldown_reason
-    {
+    if !has_high_priority_issue && let Some(reason) = cooldown_reason {
         return reason.to_string();
     }
     crate::proxy::hold_queue::build_gate_reason(Some(report), Some(net_change), false)

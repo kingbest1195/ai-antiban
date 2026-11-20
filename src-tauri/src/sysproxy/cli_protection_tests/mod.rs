@@ -6,7 +6,6 @@ use crate::sysproxy::shell_rc::build_shell_rc_guard_block_with_tz;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-
 pub(super) const URL: &str = "http://127.0.0.1:8899";
 pub(super) const HOME: &str = "/home/u";
 pub(super) const ROOT: &str = "/home/u/AppSup";
@@ -90,7 +89,6 @@ pub(super) fn raw(text: &str, path: &[&str]) -> Option<String> {
 
 pub(super) const COMMENTED: &str = "\u{feff}{\r\n\t// my theme\r\n\t\"workbench.colorTheme\": \"Default Dark+\",\r\n\t\"editor.fontSize\": 14 /* px */\r\n}\r\n";
 
-
 pub(super) const ZONE: &str = "Europe/Berlin";
 pub(super) const USER_ZSHRC: &str = "export PATH=\"$HOME/bin:$PATH\"\nalias g=git\n";
 
@@ -118,8 +116,7 @@ pub(super) fn shell_block() -> String {
     build_shell_rc_guard_block_with_tz(URL, 8899, None)
 }
 
-
 mod ide_tests;
-mod shell_tests;
 mod mode_tests;
+mod shell_tests;
 mod signature_tests;

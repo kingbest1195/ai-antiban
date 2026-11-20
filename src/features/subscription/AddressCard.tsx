@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Card, Mono, Row, Rows, TabPanel, Tabs } from "../../ui";
+import { Button, Card, InfoTip, Mono, Row, Rows, TabPanel, Tabs } from "../../ui";
 import { subscription } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 import { useCopy } from "../guides/useCopy";
@@ -8,8 +8,12 @@ import { TAX_FREE_ADDRESSES } from "./addresses";
 const copy = subscription.address;
 const PREFIX = "subs-state";
 
+export interface AddressCardProps {
+  onToast?: ShowToast;
+}
+
 /** Адрес без налога штата для Stripe AVS: выбор штата, копирование улицы, города и полного адреса. */
-export function AddressCard({ onToast }: { onToast?: ShowToast }) {
+export function AddressCard({ onToast }: AddressCardProps) {
   const [index, setIndex] = useState<number>(0);
   const { copiedId, copy: copyText } = useCopy(onToast, 2000);
   const address = TAX_FREE_ADDRESSES[index];
@@ -21,7 +25,18 @@ export function AddressCard({ onToast }: { onToast?: ShowToast }) {
   const full = `${address.street}, ${address.city}, ${address.code} ${address.zip}, United States`;
 
   return (
-    <Card title={copy.title} aside={copy.aside}>
+    <Card
+      title={copy.title}
+      aside={
+        <span className="zs-field-row">
+          <span>{copy.aside}</span>
+          <InfoTip
+            title="Stripe AVS и 0% US Tax"
+            text="Пять штатов США (DE, OR, NH, MT, AK) не взимают налог с продаж на цифровые подписки. Для карт с US BIN это снижает риск отказа при проверке индекса (AVS) и экономит +8–10%."
+          />
+        </span>
+      }
+    >
       <p className="zs-t-body subs-lead">{copy.text}</p>
 
       <Tabs

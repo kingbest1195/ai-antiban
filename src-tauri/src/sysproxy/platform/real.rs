@@ -69,7 +69,11 @@ fn run(program: &'static str, args: &[&str], op: &'static str) -> PResult<(bool,
 
 /// Runs `program` and returns stdout on success, or logs non-empty stderr/stdout to diagnostics
 /// and maps macOS authorization failures to [`PlatformError::AdminAuthRequired`].
-pub(super) fn run_stdout(program: &'static str, args: &[&str], op: &'static str) -> PResult<String> {
+pub(super) fn run_stdout(
+    program: &'static str,
+    args: &[&str],
+    op: &'static str,
+) -> PResult<String> {
     match run_detailed(program, args, op)? {
         (true, _, stdout, _) => {
             clear_last_os_error();

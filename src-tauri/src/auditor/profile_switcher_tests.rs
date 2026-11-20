@@ -8,8 +8,7 @@ fn test_profile_creation_and_default_initialization() {
     fs::create_dir_all(&claude_dir).unwrap();
 
     // 1. Initial list auto-creates default profile
-    let resp =
-        list_claude_profiles_in(&storage_dir, &claude_dir, Some("145.241.10.5")).unwrap();
+    let resp = list_claude_profiles_in(&storage_dir, &claude_dir, Some("145.241.10.5")).unwrap();
     assert_eq!(resp.profiles.len(), 1);
     assert_eq!(resp.profiles[0].id, "default");
     assert_eq!(resp.profiles[0].name, "Основной аккаунт");
@@ -97,8 +96,7 @@ fn test_profile_switching_and_snapshot_restoration() {
 
     // Claude dir now has profile 2's fresh isolated device registry
     assert!(claude_dir.join("ant-device-registry.json").exists());
-    let registry_content =
-        fs::read_to_string(claude_dir.join("ant-device-registry.json")).unwrap();
+    let registry_content = fs::read_to_string(claude_dir.join("ant-device-registry.json")).unwrap();
     assert!(registry_content.contains(&resp.profiles[1].isolated_device_id));
 
     // Switch back to default profile
@@ -125,8 +123,7 @@ fn test_delete_profile_and_prevent_last_deletion() {
 
     // Add second profile and delete it
     let resp =
-        create_claude_profile_in(&storage_dir, &claude_dir, "Temporary", None, None, None)
-            .unwrap();
+        create_claude_profile_in(&storage_dir, &claude_dir, "Temporary", None, None, None).unwrap();
     let p2_id = resp.profiles[1].id.clone();
     let after_del = delete_claude_profile_in(&storage_dir, &claude_dir, &p2_id).unwrap();
     assert_eq!(after_del.profiles.len(), 1);
@@ -184,13 +181,9 @@ fn test_sync_profiles_for_route_update_in() {
 
     // Update raw key for the same route ID
     let updated_key = "socks5://127.0.0.1:1080#NL-Updated";
-    let res = sync_profiles_for_route_update_in(
-        &storage_dir,
-        &claude_dir,
-        &route_id,
-        Some(updated_key),
-    )
-    .unwrap();
+    let res =
+        sync_profiles_for_route_update_in(&storage_dir, &claude_dir, &route_id, Some(updated_key))
+            .unwrap();
     assert_eq!(res, Some(Some(updated_key.to_string())));
 
     // Remove route -> clears profile binding and reports active profile cleared
@@ -347,7 +340,11 @@ async fn test_safe_logout_clears_auth_preserves_device_id_and_starts_cooldown() 
     fs::write(claude_dir.join("SharedStorage/ss.db"), "shared").unwrap();
     fs::write(claude_dir.join("DIPS"), "dips").unwrap();
     fs::write(claude_dir.join("DIPS-wal"), "dips-wal").unwrap();
-    fs::write(home_dir.join(".claude/.credentials.json"), r#"{"token":"secret"}"#).unwrap();
+    fs::write(
+        home_dir.join(".claude/.credentials.json"),
+        r#"{"token":"secret"}"#,
+    )
+    .unwrap();
     fs::write(
         home_dir.join(".claude.json"),
         r#"{"oauthAccount":{"email":"a@b.c"},"userID":"u1","mcpServers":{"s1":{}}}"#,

@@ -56,3 +56,5 @@ export { Select } from "./Select";
 export type { SelectProps, SelectOption } from "./Select";
 export { Tip, InfoTip, clampTooltipPosition } from "./Tooltip";
 export type { TipProps, InfoTipProps, TooltipBounds } from "./Tooltip";
+export { HintCard, isHintDismissed } from "./HintCard";
+export type { HintCardProps, HintCardAction } from "./HintCard";

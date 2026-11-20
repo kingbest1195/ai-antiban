@@ -1,18 +1,19 @@
 import { Badge, Banner, Card, Row, Rows, Switch } from "../../ui";
 import { onboarding as copy } from "../../shared/copy/ru";
+import { CleanRoomRadarAnim } from "../mascot";
 import { StepFooter, StepFrame } from "./parts";
 
 export interface StepProtectProps {
   sysproxyActive: boolean;
   cliProtected: boolean;
-  /** Те же обработчики, что у тумблеров «Обзора» (useProtectionToggles). */
+  /** Те же обработчики, что у тумблеров защиты. */
   onToggleSysproxy: () => void;
   onToggleCli: () => void;
   onNext: () => void;
   onBack: () => void;
 }
 
-/** Шаг 3: три слоя защиты v2.2 — браузеры (PAC + QUIC/DoH), приложения/CLI/IDE (ai_only) и часовой пояс для ИИ. */
+/** Шаг 3: слои защиты (браузеры, редакторы/CLI, часовой пояс) и бесплатный локальный Бункер данных. */
 export function StepProtect({ sysproxyActive, cliProtected, onToggleSysproxy, onToggleCli, onNext, onBack }: StepProtectProps) {
   const state =
     sysproxyActive && cliProtected
@@ -29,6 +30,15 @@ export function StepProtect({ sysproxyActive, cliProtected, onToggleSysproxy, on
       lead={copy.protect.lead}
       footer={<StepFooter back={onBack} primary={{ onClick: onNext, children: copy.protect.next }} />}
     >
+      <CleanRoomRadarAnim
+        scanning={sysproxyActive || cliProtected}
+        layers={[
+          { id: "browsers", label: "Браузеры", status: sysproxyActive ? "ok" : "pending" },
+          { id: "editors", label: "CLI и IDE", status: cliProtected ? "ok" : "pending" },
+          { id: "bunker", label: "Бункер", status: "ok" },
+          { id: "os_tz", label: "Часовой пояс", status: "pending" },
+        ]}
+      />
       <Card>
         <Rows>
           <Row
@@ -49,6 +59,7 @@ export function StepProtect({ sysproxyActive, cliProtected, onToggleSysproxy, on
             sub={copy.protect.timezone.sub}
             trail={<Badge tone="neutral">{copy.protect.timezone.badge}</Badge>}
           />
+          <Row icon="lock" title={copy.protect.bunker.title} sub={copy.protect.bunker.sub} />
         </Rows>
       </Card>
       <p className="zs-onb__note" aria-live="polite">

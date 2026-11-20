@@ -188,7 +188,12 @@ impl<'a> Doc<'a> {
         }
     }
 
-    pub(super) fn insert_member(&self, parent: &Obj, key: &str, raw: &str) -> Vec<(usize, usize, String)> {
+    pub(super) fn insert_member(
+        &self,
+        parent: &Obj,
+        key: &str,
+        raw: &str,
+    ) -> Vec<(usize, usize, String)> {
         let member = format!("{}: {}", quote(key), raw);
         let eol = self.eol();
         let base = self.line_indent(parent.open);
@@ -298,4 +303,3 @@ impl<'a> Doc<'a> {
         edits
     }
 }
-

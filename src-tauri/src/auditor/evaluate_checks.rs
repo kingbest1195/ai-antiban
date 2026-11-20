@@ -8,12 +8,12 @@ use super::cache::{
 };
 use super::probes::stun;
 use super::probes::whoami::{self, ResolverView};
-use super::run_check::{blocking_check, run_check};
 use super::rules::DangerousAsns;
+use super::run_check::{blocking_check, run_check};
 use super::{
-    AuditEnv, AuditProgress, CheckResult, NetworkResolver, ProgressSink, check_dns_leak_with,
-    evaluate_dns_resolver_for_route, evaluate_locale_env_hygiene_with,
-    evaluate_system_timezone_with_sync,
+    AuditEnv, AuditProgress, AuditProtectionContext, CheckResult, NetworkResolver, ProgressSink,
+    check_dns_leak_with, evaluate_dns_resolver_for_route_with_protection,
+    evaluate_locale_env_hygiene_with, evaluate_system_timezone_with_sync,
 };
 
 /// Time limit of a check that only computes (no I/O of its own).
@@ -84,6 +84,7 @@ pub(super) async fn run_dns_resolver_check(
     country: String,
     env: AuditEnv,
     via_zastava_key: bool,
+    protection: AuditProtectionContext,
 ) -> CheckResult {
     run_check("DNS Resolver", CHECK_LIMIT_IO, async move {
         // The OS configuration is reference; the verdict is by the resolver that really
@@ -96,7 +97,13 @@ pub(super) async fn run_dns_resolver_check(
             blocking_check(move || check_dns_leak_with(&*system, &cc, &keywords)).await
         });
         let (config, view) = tokio::join!(os_config, resolver_view(&env, &cache));
-        evaluate_dns_resolver_for_route(config, &view, &country, via_zastava_key)
+        evaluate_dns_resolver_for_route_with_protection(
+            config,
+            &view,
+            &country,
+            via_zastava_key,
+            protection,
+        )
     })
     .await
 }
@@ -158,10 +165,8 @@ pub(super) async fn run_locale_check(
         let key = format!("locale:{synced_key}|en={sync_ai_tz_enabled}|act={sync_active}");
         cached_check(&cache.os, &key, OS_TTL, async {
             let system = env.system.clone();
-            blocking_check(move || {
-                evaluate_locale_env_hygiene_with(&*system, synced_tz.as_deref())
-            })
-            .await
+            blocking_check(move || evaluate_locale_env_hygiene_with(&*system, synced_tz.as_deref()))
+                .await
         })
         .await
     })

@@ -104,8 +104,6 @@ pub(crate) fn vpn_untouched_line(names: &[String]) -> String {
     format!("VPN-службы не изменялись: {}", names.join(", "))
 }
 
-
-
 /// Puts the PAC on every enabled physical network service and switches a third-party explicit
 /// proxy off (it is chained through the PAC instead). Used for the first enable and for
 /// self-healing: a repeated call changes nothing that already is as it should be.

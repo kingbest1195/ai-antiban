@@ -72,7 +72,6 @@ pub(super) fn antigravity_app_fact(
     }
 }
 
-
 /// Does a process listing (`ps -axo comm=` paths or `tasklist` names) show Antigravity? Names
 /// only: the arguments of processes are never requested.
 pub(super) fn listing_has_antigravity(text: &str) -> bool {

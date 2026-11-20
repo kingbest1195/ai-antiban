@@ -42,8 +42,6 @@ pub use types::{
 };
 
 #[cfg(test)]
-use audit_summary::{audit_all, summarize};
-#[cfg(test)]
 use crate::auditor::geo_matrix::ProviderId;
 #[cfg(test)]
 use crate::auditor::{Auditor, NetworkTelemetry, OverallStatus, RiskReport};
@@ -56,6 +54,8 @@ use crate::proxy::hold_queue::{
 };
 #[cfg(test)]
 use crate::state::{AppState, IpHistoryEntry, KNOWN_PROVIDERS};
+#[cfg(test)]
+use audit_summary::{audit_all, summarize};
 #[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]

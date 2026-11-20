@@ -254,9 +254,7 @@ fn policy_specs_with_pac_covers_all_chromium_browsers_macos_and_windows() {
         );
         assert!(
             win_with_pac.iter().any(|s| {
-                s.domain == subkey
-                    && s.key == KEY_QUIC_ALLOWED
-                    && s.value == PolicyValue::Dword(0)
+                s.domain == subkey && s.key == KEY_QUIC_ALLOWED && s.value == PolicyValue::Dword(0)
             }),
             "missing QuicAllowed for {subkey}"
         );

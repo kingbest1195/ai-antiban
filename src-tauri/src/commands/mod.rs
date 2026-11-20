@@ -2,7 +2,9 @@
 
 pub mod audit;
 pub mod autostart;
+pub mod bunker;
 pub mod claude;
+pub mod clean_room;
 pub mod coverage;
 pub mod crash_test;
 pub mod deeplink;
@@ -11,6 +13,8 @@ pub mod interception;
 pub mod payment;
 pub mod restart_app;
 pub mod routes;
+pub mod sos;
+pub mod state_v3;
 pub mod sysproxy;
 pub mod updates;
 pub mod upstream;

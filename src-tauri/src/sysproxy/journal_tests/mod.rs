@@ -2,7 +2,6 @@ use super::*;
 use crate::sysproxy::fs::FakeFs;
 use crate::sysproxy::platform::FakePlatform;
 
-
 pub(super) const DIR: &str = "/data";
 
 pub(super) fn setup() -> (FakeFs, FakePlatform) {
@@ -32,7 +31,6 @@ pub(super) fn pac_value(url: &str, on: bool) -> Value {
         enabled: Some(on),
     })
 }
-
 
 mod baseline_tests;
 mod crash_tests;

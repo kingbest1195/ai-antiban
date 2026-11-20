@@ -78,8 +78,7 @@ fn service_order_parses_device_port_and_disabled_flag() {
 
 #[test]
 fn reg_query_keeps_exact_type_and_absence() {
-    let sz =
-        "\r\nHKEY\\x\r\n    AutoConfigURL    REG_SZ    http://127.0.0.1:8899/proxy.pac\r\n";
+    let sz = "\r\nHKEY\\x\r\n    AutoConfigURL    REG_SZ    http://127.0.0.1:8899/proxy.pac\r\n";
     assert_eq!(
         parse_reg_query_value(sz, "AutoConfigURL"),
         Some(RegValue::sz("http://127.0.0.1:8899/proxy.pac"))
@@ -144,9 +143,7 @@ fn scutil_dns_order_independent_and_unknown_fields_flagged() {
     let unknown = "<dictionary> {\n  UnexpectedCustomDnsFlag : 1\n}\n";
     assert!(parse_scutil_dns(unknown).unknown_fields);
     assert!(parse_getdnsservers("There aren't any DNS Servers set on Wi-Fi.\n").is_empty());
-    assert!(
-        parse_getsearchdomains("There aren't any Search Domains set on Wi-Fi.\n").is_empty()
-    );
+    assert!(parse_getsearchdomains("There aren't any Search Domains set on Wi-Fi.\n").is_empty());
 }
 
 #[test]
@@ -180,12 +177,11 @@ fn scutil_dns_amneziavpn_metadata_and_synthetic_services_do_not_trigger_temp_dns
             ),
         },
     ];
-    let triggered =
-        has_physical_temp_dns_override(std::slice::from_ref(&wifi), &entries, |name| {
-            assert_eq!(name, "Wi-Fi");
-            Ok((vec!["192.168.1.1".into()], Vec::new()))
-        })
-        .unwrap();
+    let triggered = has_physical_temp_dns_override(std::slice::from_ref(&wifi), &entries, |name| {
+        assert_eq!(name, "Wi-Fi");
+        Ok((vec!["192.168.1.1".into()], Vec::new()))
+    })
+    .unwrap();
     assert!(
         !triggered,
         "AmneziaVPN / synthetic DNS entries must be ignored"
@@ -195,9 +191,10 @@ fn scutil_dns_amneziavpn_metadata_and_synthetic_services_do_not_trigger_temp_dns
     let mut override_entries = entries.clone();
     override_entries[2].dns.servers = vec!["9.9.9.9".into()];
     assert!(
-        has_physical_temp_dns_override(std::slice::from_ref(&wifi), &override_entries, |_| Ok(
-            (vec!["192.168.1.1".into()], Vec::new())
-        ))
+        has_physical_temp_dns_override(std::slice::from_ref(&wifi), &override_entries, |_| Ok((
+            vec!["192.168.1.1".into()],
+            Vec::new()
+        )))
         .unwrap()
     );
 
@@ -237,12 +234,9 @@ fn inactive_secondary_physical_service_with_stale_setup_dns_is_ignored() {
         ),
     }];
     assert!(
-        !has_physical_temp_dns_override_active(
-            &physical,
-            &stale_p30t_only,
-            &active_ids,
-            |_| { Ok((Vec::new(), Vec::new())) }
-        )
+        !has_physical_temp_dns_override_active(&physical, &stale_p30t_only, &active_ids, |_| {
+            Ok((Vec::new(), Vec::new()))
+        })
         .unwrap()
     );
 
@@ -257,12 +251,9 @@ fn inactive_secondary_physical_service_with_stale_setup_dns_is_ignored() {
         ),
     });
     assert!(
-        has_physical_temp_dns_override_active(
-            &physical,
-            &with_active_wifi,
-            &active_ids,
-            |_| { Ok((Vec::new(), Vec::new())) }
-        )
+        has_physical_temp_dns_override_active(&physical, &with_active_wifi, &active_ids, |_| {
+            Ok((Vec::new(), Vec::new()))
+        })
         .unwrap()
     );
 }

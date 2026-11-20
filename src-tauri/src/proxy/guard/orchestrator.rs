@@ -75,7 +75,10 @@ impl NetworkGuard {
         // Never abort/restart an in-flight audit or already-handled check for the exact same IP
         // unless `needs_reaudit` was explicitly armed (e.g. route unbind / exception removed).
         if !inner.needs_reaudit
-            && (inner.pending.as_ref().is_some_and(|p| p.target_ip == new_ip)
+            && (inner
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.target_ip == new_ip)
                 || (old.as_ref().map(|b| b.ip.as_str()) == Some(new_ip.as_str())
                     && inner.handled_ip.as_deref() == Some(new_ip.as_str())))
         {
@@ -103,7 +106,10 @@ impl NetworkGuard {
         if all_pinned {
             self.clear_until_network_change_locked(inner);
             let cached_cc = env.auditor.resolver.cached_direct_country(&new_ip).await;
-            if cached_cc.as_deref().is_some_and(|c| !is_blocked_geo_code(c)) {
+            if cached_cc
+                .as_deref()
+                .is_some_and(|c| !is_blocked_geo_code(c))
+            {
                 inner.baseline = Some(Baseline {
                     ip: new_ip.clone(),
                     country: cached_cc,
@@ -359,5 +365,4 @@ impl NetworkGuard {
                 .await;
         });
     }
-
 }

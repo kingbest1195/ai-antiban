@@ -351,7 +351,6 @@ impl HoldQueue {
     }
 }
 
-
 #[cfg(test)]
 #[path = "hold_queue_tests.rs"]
 mod tests;

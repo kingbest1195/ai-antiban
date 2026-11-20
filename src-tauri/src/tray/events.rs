@@ -156,18 +156,39 @@ pub fn handle_menu_event(
             });
         }
         "toggle_sysproxy_tray" => {
-            let active = sysproxy::is_sysproxy_active();
-            if active {
-                crate::startup::note_user_off(app);
-                let report = sysproxy::cleanup_all_persistent_settings();
-                if report.has_failures() {
-                    eprintln!("Застава: часть настроек будет восстановлена позже");
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let target_enable = !sysproxy::is_sysproxy_active();
+                if let (Some(st), Some(aud), Some(proxy_mgr)) = (
+                    app_handle.try_state::<state::AppState>(),
+                    app_handle.try_state::<auditor::Auditor>(),
+                    app_handle.try_state::<proxy::ProxyManager>(),
+                ) && let Err(err) = crate::commands::sysproxy::toggle_sysproxy_shared(
+                    target_enable,
+                    &st,
+                    &aud,
+                    &proxy_mgr,
+                    &app_handle,
+                )
+                .await
+                {
+                    crate::diagnostics::record("tray:toggle_sysproxy", &err);
+                    if err.starts_with("ADMIN_AUTH_REQUIRED:") {
+                        let _ = app_handle.emit("sysproxy://admin-auth-required", &err);
+                    }
                 }
-            } else if let Some(proxy_mgr) = app.try_state::<proxy::ProxyManager>() {
-                let pac_url = format!("http://{}/proxy.pac", proxy_mgr.server.bound_addr);
-                let _ = sysproxy::enable_sysproxy(&pac_url);
-            }
-            let _ = app.emit("tray://sysproxy-toggled", !active);
+                // Emit ONLY the actual post-operation state, never optimistic `!active`.
+                let actual_sysproxy = sysproxy::is_sysproxy_active();
+                let actual_cli = tokio::task::spawn_blocking(sysproxy::is_cli_protection_enabled)
+                    .await
+                    .unwrap_or(false);
+                if !actual_sysproxy {
+                    super::update_tray_protection_off(&app_handle);
+                }
+                let _ = app_handle.emit("tray://sysproxy-toggled", actual_sysproxy);
+                let _ = app_handle.emit("tray://cli-toggled", actual_cli);
+                let _ = app_handle.emit("tray://state-changed", ());
+            });
         }
         "toggle_cli_tray" => {
             let active = sysproxy::is_cli_protection_enabled();

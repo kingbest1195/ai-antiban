@@ -240,7 +240,13 @@ fn disabling_gemini_excludes_gemini_and_google_domains_from_pac() {
             "PAC script still contains disabled gemini domain: {excluded}"
         );
     }
-    for kept in ["claude.ai", "anthropic.com", "chatgpt.com", "openai.com", "custom-ai.org"] {
+    for kept in [
+        "claude.ai",
+        "anthropic.com",
+        "chatgpt.com",
+        "openai.com",
+        "custom-ai.org",
+    ] {
         assert!(
             domains.iter().any(|d| d == kept),
             "enabled domain missing from PAC: {kept}"

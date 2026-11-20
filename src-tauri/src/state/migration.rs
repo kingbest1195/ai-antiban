@@ -22,6 +22,9 @@ impl AppStateData {
                 self.default_route_id = Some(id);
             }
         }
+        if self.schema_version < 3 && self.onboarding_v2_2_done {
+            self.onboarding_v3_done = true;
+        }
         self.schema_version = self.schema_version.max(CURRENT_SCHEMA_VERSION);
         if let Some(ref ip) = self.pinned_ip {
             let trimmed = ip.trim();

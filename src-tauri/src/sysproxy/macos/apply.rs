@@ -3,7 +3,38 @@ use super::super::journal::{ApplyOutcome, EntryState, Journal, JournalError, Res
 use super::super::platform::{PacState, Platform, PlatformError};
 use super::planner::plan_physical_pac;
 use super::{HealGuard, MSG_ADMIN_AUTH_REQUIRED};
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const DIAG_DEDUP_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone)]
+pub(super) struct MacosDiagState {
+    key: String,
+    recorded_at: Instant,
+}
+
+static LAST_MACOS_DIAG_STATE: Mutex<Option<MacosDiagState>> = Mutex::new(None);
+
+fn should_record_diag(state: &Mutex<Option<MacosDiagState>>, key: &str, now: Instant) -> bool {
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(prev) = guard.as_ref()
+        && prev.key == key
+        && now.saturating_duration_since(prev.recorded_at) < DIAG_DEDUP_TTL
+    {
+        return false;
+    }
+    *guard = Some(MacosDiagState {
+        key: key.to_string(),
+        recorded_at: now,
+    });
+    true
+}
+
+fn clear_diag_state(state: &Mutex<Option<MacosDiagState>>) {
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
 
 pub(super) fn note_changed(outcome: ApplyOutcome, changed: &mut bool) {
     if outcome != ApplyOutcome::Unchanged {
@@ -17,9 +48,28 @@ pub(super) fn apply_pac(
     pac_url: &str,
     heal: Option<(&HealGuard, Instant)>,
 ) -> Result<EnableReport, String> {
+    apply_pac_with(
+        j,
+        p,
+        pac_url,
+        heal,
+        &LAST_MACOS_DIAG_STATE,
+        &mut crate::diagnostics::record,
+    )
+}
+
+pub(super) fn apply_pac_with(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    heal: Option<(&HealGuard, Instant)>,
+    diag_state: &Mutex<Option<MacosDiagState>>,
+    record: &mut dyn FnMut(&str, &str),
+) -> Result<EnableReport, String> {
     if super::super::os_effects_enabled() {
         super::super::platform::clear_last_os_error();
     }
+    let now = heal.map(|(_, t)| t).unwrap_or_else(Instant::now);
     let planned = plan_physical_pac(p, pac_url, heal)?;
 
     // Phase 2: write, service by service; one failure does not stop the others.
@@ -35,6 +85,8 @@ pub(super) fn apply_pac(
     let mut failed = 0usize;
     let mut admin_auth_required = planned.chain_admin_auth;
     let mut applied_in_pass: Vec<Resource> = Vec::new();
+    let mut admin_auth_msgs: Vec<String> = Vec::new();
+    let mut fail_msgs: Vec<String> = Vec::new();
     for plan in &planned.plans {
         let pac_res = Resource::Pac {
             service: plan.svc.clone(),
@@ -51,10 +103,10 @@ pub(super) fn apply_pac(
                 if o != ApplyOutcome::Unchanged || !pac_existed {
                     applied_in_pass.push(pac_res.clone());
                 }
-                if let Some((guard, now)) = heal
+                if let Some((guard, t)) = heal
                     && was_in_place
                     && o != ApplyOutcome::Unchanged
-                    && guard.note_rewrite(&plan.svc.key(), now)
+                    && guard.note_rewrite(&plan.svc.key(), t)
                 {
                     // Names only, no values.
                     eprintln!(
@@ -66,22 +118,16 @@ pub(super) fn apply_pac(
             Err(JournalError::Platform(PlatformError::AdminAuthRequired(op))) => {
                 failed += 1;
                 admin_auth_required = true;
-                crate::diagnostics::record(
-                    "sysproxy:macos",
-                    &format!(
-                        "{} ({}) requires admin auth on {op}",
-                        plan.svc.name,
-                        pac_res.id()
-                    ),
-                );
+                admin_auth_msgs.push(format!(
+                    "{} ({}) requires admin auth on {op}",
+                    plan.svc.name,
+                    pac_res.id()
+                ));
                 continue;
             }
             Err(e) => {
                 failed += 1;
-                crate::diagnostics::record(
-                    "sysproxy:macos",
-                    &format!("{} ({}) failed: {e}", plan.svc.name, pac_res.id()),
-                );
+                fail_msgs.push(format!("{} ({}) failed: {e}", plan.svc.name, pac_res.id()));
                 continue; // keep the user's explicit proxy while the PAC is not in place
             }
         }
@@ -102,14 +148,11 @@ pub(super) fn apply_pac(
                     Err(JournalError::Platform(PlatformError::AdminAuthRequired(op))) => {
                         failed += 1;
                         admin_auth_required = true;
-                        crate::diagnostics::record(
-                            "sysproxy:macos",
-                            &format!(
-                                "{} ({}) requires admin auth on {op}",
-                                plan.svc.name,
-                                bypass_res.id()
-                            ),
-                        );
+                        admin_auth_msgs.push(format!(
+                            "{} ({}) requires admin auth on {op}",
+                            plan.svc.name,
+                            bypass_res.id()
+                        ));
                     }
                     Err(e) => eprintln!("Застава: {} не записан: {e}", bypass_res.id()),
                 },
@@ -129,58 +172,64 @@ pub(super) fn apply_pac(
                 Err(JournalError::Platform(PlatformError::AdminAuthRequired(op))) => {
                     failed += 1;
                     admin_auth_required = true;
-                    crate::diagnostics::record(
-                        "sysproxy:macos",
-                        &format!(
-                            "{} ({}) requires admin auth on {op}",
-                            plan.svc.name,
-                            chain_res.id()
-                        ),
-                    );
+                    admin_auth_msgs.push(format!(
+                        "{} ({}) requires admin auth on {op}",
+                        plan.svc.name,
+                        chain_res.id()
+                    ));
                 }
                 Err(e) => eprintln!("Застава: {} не изменён: {e}", chain_res.id()),
             }
         }
-    }
-    if !report.skipped_vpn.is_empty()
-        && let Ok(eff) = p.effective_proxy()
-        && (eff.pac_enabled != Some(true) || eff.pac_url.as_deref() != Some(pac_url))
-    {
-        crate::diagnostics::record(
-            "sysproxy:macos",
-            &format!(
-                "effective proxy differs while vpn active ({}): pac_enabled={:?}, url_matches={}",
-                report.skipped_vpn.join(","),
-                eff.pac_enabled,
-                eff.pac_url.as_deref() == Some(pac_url)
-            ),
-        );
     }
     if admin_auth_required {
         let rolled_back = applied_in_pass.len();
         for res in applied_in_pass.into_iter().rev() {
             let _ = j.restore_one(p, &res);
         }
-        crate::diagnostics::record(
-            "sysproxy:macos",
-            &format!(
-                "apply_pac aborted on admin_auth_required (plans={}, configured={}, failed={failed}, unreadable={}, rolled_back={rolled_back})",
-                planned.plans.len(),
-                report.configured.len(),
-                planned.unreadable
-            ),
+        let key = format!(
+            "admin_auth:{}:plans={}:configured={}:failed={failed}:unreadable={}",
+            admin_auth_msgs.join(";"),
+            planned.plans.len(),
+            report.configured.len(),
+            planned.unreadable
         );
+        if should_record_diag(diag_state, &key, now) {
+            for msg in &admin_auth_msgs {
+                record("sysproxy:macos", msg);
+            }
+            record(
+                "sysproxy:macos",
+                &format!(
+                    "apply_pac aborted on admin_auth_required (plans={}, configured={}, failed={failed}, unreadable={}, rolled_back={rolled_back})",
+                    planned.plans.len(),
+                    report.configured.len(),
+                    planned.unreadable
+                ),
+            );
+        }
         return Err(MSG_ADMIN_AUTH_REQUIRED.to_string());
     }
     if report.configured.is_empty() && (failed > 0 || planned.unreadable > 0) {
-        crate::diagnostics::record(
-            "sysproxy:macos",
-            &format!(
-                "apply_pac failed on all services: plans={}, failed={failed}, unreadable={}, admin_auth_required={admin_auth_required}",
-                planned.plans.len(),
-                planned.unreadable
-            ),
+        let key = format!(
+            "all_failed:{}:plans={}:failed={failed}:unreadable={}",
+            fail_msgs.join(";"),
+            planned.plans.len(),
+            planned.unreadable
         );
+        if should_record_diag(diag_state, &key, now) {
+            for msg in &fail_msgs {
+                record("sysproxy:macos", msg);
+            }
+            record(
+                "sysproxy:macos",
+                &format!(
+                    "apply_pac failed on all services: plans={}, failed={failed}, unreadable={}, admin_auth_required={admin_auth_required}",
+                    planned.plans.len(),
+                    planned.unreadable
+                ),
+            );
+        }
         if super::super::os_effects_enabled()
             && let Some(detail) = super::super::platform::last_os_error()
         {
@@ -189,6 +238,40 @@ pub(super) fn apply_pac(
             ));
         }
         return Err("Не удалось включить защиту ни на одной сетевой службе.".to_string());
+    }
+    if !report.skipped_vpn.is_empty()
+        && let Ok(eff) = p.effective_proxy()
+        && (eff.pac_enabled != Some(true) || eff.pac_url.as_deref() != Some(pac_url))
+    {
+        let url_matches = eff.pac_url.as_deref() == Some(pac_url);
+        let key = format!(
+            "vpn_eff_diff:{}:pac={:?}:url={url_matches}:fails={}",
+            report.skipped_vpn.join(","),
+            eff.pac_enabled,
+            fail_msgs.join(";")
+        );
+        if should_record_diag(diag_state, &key, now) {
+            for msg in &fail_msgs {
+                record("sysproxy:macos", msg);
+            }
+            record(
+                "sysproxy:macos",
+                &format!(
+                    "effective proxy differs while vpn active ({}): pac_enabled={:?}, url_matches={url_matches}",
+                    report.skipped_vpn.join(","),
+                    eff.pac_enabled,
+                ),
+            );
+        }
+    } else if !fail_msgs.is_empty() {
+        let key = format!("partial_fail:{}", fail_msgs.join(";"));
+        if should_record_diag(diag_state, &key, now) {
+            for msg in &fail_msgs {
+                record("sysproxy:macos", msg);
+            }
+        }
+    } else {
+        clear_diag_state(diag_state);
     }
     Ok(report)
 }

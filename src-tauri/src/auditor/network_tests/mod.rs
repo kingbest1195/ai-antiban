@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(super) async fn spawn_http_mock(
     status: &'static str,
     content_type: &'static str,
@@ -27,7 +26,6 @@ pub(super) async fn spawn_http_mock(
     });
     format!("http://127.0.0.1:{}/cdn-cgi/trace", addr.port())
 }
-
 
 mod client_tests;
 mod probe_tests;

@@ -14,18 +14,18 @@ use std::sync::Arc;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+#[cfg(test)]
+use dns::is_name_not_found;
 pub(crate) use dns::is_usable_nameserver;
 #[cfg(any(target_os = "macos", test))]
 #[allow(unused_imports)]
 pub(crate) use dns::parse_scutil_dns_nameservers;
 pub use dns::{DnsLookup, LookupOutcome, SystemDns, TxtOutcome};
-#[cfg(test)]
-use dns::is_name_not_found;
 pub use probe::{HttpProbeOutcome, IpProbe, ReqwestProbe};
-#[cfg(any(test, target_os = "windows"))]
-pub use system::parse_reg_string_values;
 #[cfg(test)]
 use system::is_plain_zone_name;
+#[cfg(any(test, target_os = "windows"))]
+pub use system::parse_reg_string_values;
 pub use system::{
     RealSystem, SystemInfo, SystemReadError, is_global_unicast_v6, parse_defaults_values,
     parse_utc_offset,

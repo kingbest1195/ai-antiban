@@ -49,7 +49,10 @@ impl ProxyServer {
         )
     }
 
-    pub(super) async fn handle_pac_request(&self, client: &mut TcpStream) -> Result<(), std::io::Error> {
+    pub(super) async fn handle_pac_request(
+        &self,
+        client: &mut TcpStream,
+    ) -> Result<(), std::io::Error> {
         let pac_script = self.build_pac_script().await;
 
         let response = format!(
@@ -180,6 +183,12 @@ impl ProxyServer {
                 "AI services are reachable over HTTPS only: Zastava does not forward plain HTTP requests to them.",
             )
             .await;
+        }
+
+        if self.is_alias {
+            return self
+                .handle_alias_plain_http(client, &req, &buf[head_end..])
+                .await;
         }
 
         self.state.stats().record_direct_bypassed_host(&host);

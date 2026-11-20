@@ -5,7 +5,6 @@ use crate::sysproxy::platform::FakePlatform;
 use std::path::Path;
 use std::sync::Arc;
 
-
 pub(super) const DIR: &str = "/data";
 pub(super) const PAC: &str = "http://127.0.0.1:8899/proxy.pac";
 
@@ -44,7 +43,6 @@ pub(super) fn touched(p: &FakePlatform, svc: &ServiceId) -> bool {
     let key = svc.key();
     p.calls().iter().any(|c| c.contains(&key))
 }
-
 
 mod proxy_tests;
 mod vpn_tests;

@@ -221,7 +221,14 @@ pub fn parse_tasklist_has_claude(output: &str) -> bool {
 
 /// Builds the argument list for `schtasks.exe /Create` using a Task Scheduler XML file.
 pub fn build_schtasks_create_args(xml_path: &str) -> [&str; 6] {
-    ["/Create", "/TN", COWORK_TASK_FULL_NAME, "/XML", xml_path, "/F"]
+    [
+        "/Create",
+        "/TN",
+        COWORK_TASK_FULL_NAME,
+        "/XML",
+        xml_path,
+        "/F",
+    ]
 }
 
 /// Encodes XML text as little-endian UTF-16 with BOM (`0xFF, 0xFE`) for Windows `schtasks.exe /XML`.

@@ -1,10 +1,10 @@
 //! Background watchers: tray status polling, GitHub update check, and CoworkVMService guard.
 
 use crate::tray::update_tray_from_report;
-use crate::{auditor, commands, cowork_guard, proxy, state, updater};
+use crate::{auditor, bunker, commands, cowork_guard, proxy, state, sysproxy, updater};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// Failed audits in a row at start before the tray says "Нет данных" (about 3.6 s plus the audit time).
 const STARTUP_FAILURES_BEFORE_NO_DATA: u32 = 3;
@@ -25,6 +25,7 @@ struct SiblingRefreshCtx<'a> {
     st: &'a state::AppStateData,
     enabled_pids: &'a [auditor::ProviderId],
     has_blocked: bool,
+    protection: auditor::AuditProtectionFlags,
 }
 
 async fn refresh_sibling_unrouted_providers(
@@ -41,7 +42,11 @@ async fn refresh_sibling_unrouted_providers(
         if crate::routing::select_route_id(ctx.st, other_pid.as_str()).is_some() {
             continue;
         }
-        if let Ok(mut other_report) = ctx.auditor.evaluate_all(other_pid, ctx.state, false).await {
+        if let Ok(mut other_report) = ctx
+            .auditor
+            .evaluate_all_with_protection(other_pid, ctx.state, false, ctx.protection)
+            .await
+        {
             let other_pinned = commands::audit::is_ip_pinned_for_state(
                 ctx.st,
                 other_pid,
@@ -51,7 +56,8 @@ async fn refresh_sibling_unrouted_providers(
             let _ = ctx.handle.emit("audit://refreshed", &other_report);
             if update_tray_on_worse
                 && !proxy::guard::report_allowed_for_state(&other_report, ctx.st, false)
-                && status_rank(other_report.overall_status) > status_rank(tray_report.overall_status)
+                && status_rank(other_report.overall_status)
+                    > status_rank(tray_report.overall_status)
             {
                 *tray_report =
                     proxy::guard::effective_tray_report(&other_report, ctx.has_blocked, ctx.st)
@@ -103,8 +109,9 @@ pub(super) fn spawn_tray_status_watcher(
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 continue;
             };
+            let protection = commands::audit::read_runtime_protection_flags().await;
             match watcher_auditor
-                .evaluate_all(pid, &watcher_state, false)
+                .evaluate_all_with_protection(pid, &watcher_state, false, protection)
                 .await
             {
                 Ok(mut report) => {
@@ -122,8 +129,7 @@ pub(super) fn spawn_tray_status_watcher(
                         || watcher_guard.any_provider_gate_closed();
 
                     let mut tray_report =
-                        proxy::guard::effective_tray_report(&report, has_blocked, &st)
-                            .into_owned();
+                        proxy::guard::effective_tray_report(&report, has_blocked, &st).into_owned();
                     let mut tray_is_pinned = is_pinned;
                     let _ = watcher_handle.emit("audit://refreshed", &report);
 
@@ -142,6 +148,7 @@ pub(super) fn spawn_tray_status_watcher(
                         st: &st,
                         enabled_pids: &enabled_pids,
                         has_blocked,
+                        protection,
                     };
                     let sibling_status_changed =
                         if !initial_synced || ip_changed || observed_changed || has_blocked {
@@ -156,16 +163,22 @@ pub(super) fn spawn_tray_status_watcher(
                             false
                         };
 
-                    update_tray_from_report(
-                        &watcher_handle,
-                        &tray_report,
-                        tray_is_pinned,
-                        has_blocked,
-                    );
+                    let startup_ready = watcher_handle
+                        .try_state::<Arc<crate::startup::StartupState>>()
+                        .is_none_or(|s| s.is_ready());
+                    if !has_blocked && startup_ready && !sysproxy::is_sysproxy_active() {
+                        crate::tray::update_tray_protection_off(&watcher_handle);
+                    } else {
+                        update_tray_from_report(
+                            &watcher_handle,
+                            &tray_report,
+                            tray_is_pinned,
+                            has_blocked,
+                        );
+                    }
 
                     let cur_status = (tray_report.overall_status, has_blocked);
-                    let status_changed = last_synced_status
-                        .is_some_and(|prev| prev != cur_status)
+                    let status_changed = last_synced_status.is_some_and(|prev| prev != cur_status)
                         || sibling_status_changed;
 
                     // If status changed on the same IP, still refresh sibling unrouted providers
@@ -212,7 +225,12 @@ pub(super) fn spawn_tray_status_watcher(
                         || watcher_guard.any_provider_gate_closed();
                     failures += 1;
                     if !has_blocked {
-                        if !initial_synced && failures < STARTUP_FAILURES_BEFORE_NO_DATA {
+                        let startup_ready = watcher_handle
+                            .try_state::<Arc<crate::startup::StartupState>>()
+                            .is_none_or(|s| s.is_ready());
+                        if startup_ready && !sysproxy::is_sysproxy_active() {
+                            crate::tray::update_tray_protection_off(&watcher_handle);
+                        } else if !initial_synced && failures < STARTUP_FAILURES_BEFORE_NO_DATA {
                             // Cold start (network or PAC not up yet): still "checking", not an error.
                             crate::tray::update_tray_checking(&watcher_handle);
                         } else {
@@ -256,9 +274,50 @@ pub(super) fn spawn_update_checker(app: &tauri::App, app_state: &state::AppState
     });
 }
 
+/// Pure trigger predicate for the Windows `CoworkVMService` guard watcher.
+///
+/// Triggers `\Zastava\CoworkVMServiceManualGuard` only when OS effects are enabled, the
+/// platform supports the guard, the Task Scheduler task is installed, and either:
+/// - `start_type == Some(2)` (Store update reset service startup back to Automatic), OR
+/// - `service_running && !claude_process_running` (service is running while Claude is closed).
+pub(crate) fn should_trigger_cowork_guard(
+    status: &cowork_guard::CoworkGuardStatus,
+    claude_process_running: bool,
+    os_effects_enabled: bool,
+) -> bool {
+    if !os_effects_enabled || !status.supported || !status.task_installed {
+        return false;
+    }
+    status.start_type == Some(2) || (status.service_running && !claude_process_running)
+}
+
+fn is_claude_process_running() -> bool {
+    if !crate::sysproxy::os_effects_enabled() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let Ok(out) = crate::sysproxy::silent_command("tasklist.exe")
+            .args(["/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"])
+            .output()
+        else {
+            return false;
+        };
+        out.status.success()
+            && cowork_guard::parse_tasklist_has_claude(&cowork_guard::decode_windows_cmd_text(
+                &out.stdout,
+            ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 /// Periodically verifies Windows `CoworkVMService` Start type / macOS AI helpers every 60s.
-/// If a Windows Store update resets `CoworkVMService\Start` back to `2` (Automatic) while the
-/// Task Scheduler guard is installed, triggers the guard task automatically and notifies the UI.
+/// If a Windows Store update resets `CoworkVMService\Start` back to `2` (Automatic) or the
+/// service is left running with Claude closed while the Task Scheduler guard is installed,
+/// triggers the guard task automatically and notifies the UI.
 pub(super) fn spawn_cowork_guard_watcher(app: &tauri::App) {
     let handle = app.handle().clone();
     tauri::async_runtime::spawn(async move {
@@ -267,7 +326,20 @@ pub(super) fn spawn_cowork_guard_watcher(app: &tauri::App) {
             if let Ok(mut status) =
                 tokio::task::spawn_blocking(cowork_guard::get_cowork_guard_status).await
             {
-                if status.supported && status.task_installed && status.start_type == Some(2) {
+                let os_effects = crate::sysproxy::os_effects_enabled();
+                let claude_running = if os_effects
+                    && status.supported
+                    && status.task_installed
+                    && status.start_type != Some(2)
+                    && status.service_running
+                {
+                    tokio::task::spawn_blocking(is_claude_process_running)
+                        .await
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if should_trigger_cowork_guard(&status, claude_running, os_effects) {
                     let triggered =
                         tokio::task::spawn_blocking(cowork_guard::trigger_cowork_guard_task)
                             .await
@@ -287,3 +359,44 @@ pub(super) fn spawn_cowork_guard_watcher(app: &tauri::App) {
         }
     });
 }
+
+/// Periodically triggers Data Bunker automatic snapshot creation (default every 24h)
+/// off the main thread when `bunker.auto_backup_enabled == true`.
+pub(super) fn spawn_bunker_scheduler(app: &tauri::App, app_state: &state::AppState) {
+    let handle = app.handle().clone();
+    let bunker_state = app_state.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            if sysproxy::os_effects_enabled()
+                && let (Ok(data_dir), Some(home_dir)) = (
+                    handle.path().app_data_dir(),
+                    auditor::claude_exporter::get_home_dir(),
+                )
+            {
+                let settings = bunker_state.get_data().await.bunker;
+                let now = auditor::network::current_timestamp();
+                if let Ok(Ok(Some(res))) = tokio::task::spawn_blocking(move || {
+                    bunker::scheduler::run_scheduled_backup_if_due(
+                        &data_dir, &home_dir, &settings, now,
+                    )
+                })
+                .await
+                {
+                    {
+                        let mut w = bunker_state.write().await;
+                        w.bunker.last_backup_at = Some(res.snapshot.created_at);
+                        w.bunker.last_backup_size_bytes = Some(res.snapshot.total_bytes);
+                    }
+                    let _ = bunker_state.save_async().await;
+                    let _ = handle.emit("bunker://backup-finished", &res);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(900)).await;
+        }
+    });
+}
+
+#[cfg(test)]
+#[path = "watchers_tests.rs"]
+mod tests;

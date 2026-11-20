@@ -304,5 +304,4 @@ impl CoverageTracker {
         }
         answer
     }
-
 }

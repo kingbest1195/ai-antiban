@@ -1,8 +1,8 @@
 //! Production [`PolicyStore`] backed by `crate::win_reg` on Windows and `defaults` on macOS.
 
-use super::{PolicyStore, PolicyValue};
 #[cfg(target_os = "macos")]
 use super::chromium::CHROMIUM_BROWSERS;
+use super::{PolicyStore, PolicyValue};
 use crate::sysproxy::platform::{PResult, PlatformError};
 use crate::sysproxy::{note_dry_run_blocked, os_effects_enabled};
 

@@ -1,23 +1,27 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
 use crate::auditor::geo_matrix::ProviderId;
 #[cfg(test)]
 use crate::auditor::{Auditor, RiskReport};
-use crate::proxy::hold_queue::HoldResolution;
 #[cfg(test)]
 use crate::proxy::hold_queue::HoldQueue;
+use crate::proxy::hold_queue::HoldResolution;
 use crate::state::AppState;
 
-use super::types::{Env, Gate, Inner, NetworkGuard};
 #[cfg(test)]
 use super::types::{AuditFn, GuardIo};
+use super::types::{Env, Gate, Inner, NetworkGuard};
 
 impl NetworkGuard {
-    pub(super) async fn drain_pending_route_sync_locked(&self, env: Option<&Env>, inner: &mut Inner) {
+    pub(super) async fn drain_pending_route_sync_locked(
+        &self,
+        env: Option<&Env>,
+        inner: &mut Inner,
+    ) {
         let pending_sync: HashMap<String, bool> = {
             let mut map = self
                 .pending_route_sync
@@ -71,7 +75,9 @@ impl NetworkGuard {
     /// When `routed == false`, resets gate/handled state and kicks an immediate re-audit so
     /// `provider` does not skip verification after unbinding.
     pub fn sync_provider_route_change(&self, provider: &str, routed: bool) {
-        let canonical = ProviderId::from_id(provider).map(|p| p.as_str()).unwrap_or(provider);
+        let canonical = ProviderId::from_id(provider)
+            .map(|p| p.as_str())
+            .unwrap_or(provider);
         {
             let mut map = self
                 .pending_route_sync
@@ -143,7 +149,9 @@ impl NetworkGuard {
     /// Opens `provider`'s gate and removes it from any active pending alert when monitoring is
     /// disabled for that provider.
     pub async fn sync_provider_disabled(self: &Arc<Self>, provider: &str, state: &AppState) {
-        let canonical = ProviderId::from_id(provider).map(|p| p.as_str()).unwrap_or(provider);
+        let canonical = ProviderId::from_id(provider)
+            .map(|p| p.as_str())
+            .unwrap_or(provider);
         self.open_routed_providers(&[canonical]);
         let mut inner = self.inner.lock().await;
         if let Some(p) = inner.pending.as_mut() {
@@ -255,5 +263,4 @@ impl NetworkGuard {
     pub(crate) fn bump_restore_epoch_for_test(&self) {
         self.restore_epoch.fetch_add(1, Ordering::SeqCst);
     }
-
 }

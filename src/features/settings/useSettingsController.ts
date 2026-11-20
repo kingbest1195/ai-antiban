@@ -25,6 +25,7 @@ import {
   installOrRepairCoworkGuard,
   onCoworkGuardStatus,
   previewProtectionChanges,
+  resetDismissedHints,
   setAutostartEnabled,
   setCliMode,
   setInterceptionBehavior,
@@ -96,6 +97,7 @@ export function useSettingsController({
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [confirmRollbackVersion, setConfirmRollbackVersion] = useState<string | null>(null);
+  const [hintsResetBusy, setHintsResetBusy] = useState(false);
 
   const exceptions = useSettingsExceptions({
     customDomains,
@@ -338,6 +340,19 @@ export function useSettingsController({
     }
   };
 
+  const handleResetDismissedHints = async () => {
+    setHintsResetBusy(true);
+    try {
+      await resetDismissedHints();
+      await onStateUpdated?.();
+      onToast?.("Подсказки сброшены", "Все контекстные подсказки снова будут показаны в разделах.", "success");
+    } catch (err) {
+      onToast?.("Не удалось сбросить подсказки", errText(err), "warning");
+    } finally {
+      setHintsResetBusy(false);
+    }
+  };
+
   return {
     ...exceptions,
     updatingToggle,
@@ -367,6 +382,8 @@ export function useSettingsController({
     setPreviewOpen,
     confirmRollbackVersion,
     setConfirmRollbackVersion,
+    hintsResetBusy,
+    handleResetDismissedHints,
     handleExportDiagnostics,
     handleToggleAutostart,
     handleInstallCoworkGuard,

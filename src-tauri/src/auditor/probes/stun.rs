@@ -5,7 +5,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_PRIVACY, UnknownReason};
+use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_NETWORK, UnknownReason};
 use crate::auditor::seams::{UdpOutcome, UdpProbe};
 
 /// A STUN server: short name for `measured_via`, label for texts, `host:port`.
@@ -211,7 +211,7 @@ pub fn evaluate_udp_stun_for_route(
             format!(
                 "По UDP виден адрес {first_ip} ({cc}, ответ {labels}), хотя HTTP-трафик AI идёт через ВПН Заставы ({http_exit_ip}). Включите зарубежный VPN для системного UDP-трафика."
             ),
-            None,
+            Some(GUIDE_OS_NETWORK.to_string()),
         )
         .with_measured_via(via);
     }
@@ -290,7 +290,7 @@ pub fn evaluate_udp_stun(
                 "Внешний адрес по UDP ({udp_ip}, ответ {}) отличается от адреса HTTP-выхода ({exit_v4}): UDP-трафик выходит другим путём, возможно, мимо туннеля.",
                 server.label
             ),
-            Some(GUIDE_OS_PRIVACY.to_string()),
+            Some(GUIDE_OS_NETWORK.to_string()),
         )
         .with_measured_via(via);
     }

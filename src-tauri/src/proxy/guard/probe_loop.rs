@@ -11,12 +11,12 @@ use crate::proxy::hold_queue::HoldQueue;
 use crate::state::AppState;
 use crate::state::KNOWN_PROVIDERS;
 
-use super::types::{
-    Env, Gate, GuardCtx, Inner, NetworkGuard, PROBE_MIN_GAP_MS, ROUTE_CHECK_INTERVAL_MS,
-    TickPlan, compute_local_route_fingerprint,
-};
 #[cfg(any(test, feature = "test-support"))]
 use super::types::{AUDIT_TIMEOUT_SECS, AuditFn, GuardIo, ProbeFn, ResolveFn};
+use super::types::{
+    Env, Gate, GuardCtx, Inner, NetworkGuard, PROBE_MIN_GAP_MS, ROUTE_CHECK_INTERVAL_MS, TickPlan,
+    compute_local_route_fingerprint,
+};
 
 impl NetworkGuard {
     /// Starts the background monitor (call once from the Tauri setup hook).
@@ -319,7 +319,11 @@ impl NetworkGuard {
         }
     }
 
-    pub(super) async fn unblock_disabled_and_routed(&self, env: &Env, st: &crate::state::AppStateData) {
+    pub(super) async fn unblock_disabled_and_routed(
+        &self,
+        env: &Env,
+        st: &crate::state::AppStateData,
+    ) {
         if self.is_manual_killswitch() {
             return;
         }
@@ -337,5 +341,4 @@ impl NetworkGuard {
             None => self.check_route_and_tick(&Env::from_ctx(ctx.clone())).await,
         }
     }
-
 }

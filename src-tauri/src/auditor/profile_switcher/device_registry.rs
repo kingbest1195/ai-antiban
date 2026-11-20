@@ -1,5 +1,6 @@
 //! Filesystem safety primitives, OS directory resolution, and device registry initialization.
 
+use crate::auditor::geo_matrix::ProviderId;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -150,29 +151,38 @@ pub fn default_profiles_storage_dir() -> PathBuf {
     }
 }
 
-/// Resolves the Claude Desktop data directory for a given OS (`"macos"`, `"windows"`, `"linux"`),
-/// checking MSIX Store package paths on Windows when the classic `%APPDATA%\Claude` folder does
-/// not exist yet.
-pub fn resolve_claude_desktop_dir_for_platform(
+/// Resolves all desktop client data directories for `provider` on a given OS (`"macos"`,
+/// `"windows"`, `"linux"`), including both Classic (`%APPDATA%\...`) and Windows Microsoft Store
+/// MSIX (`%LOCALAPPDATA%\Packages\...\LocalCache\Roaming\...`) directories that exist on disk.
+pub fn resolve_ai_app_data_dirs_for_platform(
+    provider: ProviderId,
     os: &str,
     home: Option<&Path>,
     appdata: Option<&Path>,
     local_appdata: Option<&Path>,
-) -> Option<PathBuf> {
+) -> Vec<PathBuf> {
+    let (app_name, msix_prefix) = match provider {
+        ProviderId::Anthropic => ("Claude", "Claude_"),
+        ProviderId::Openai => ("ChatGPT", "OpenAI.ChatGPT-Desktop_"),
+        ProviderId::Gemini => return Vec::new(),
+    };
+
     match os {
-        "macos" => {
-            let h = home?;
-            Some(h.join("Library").join("Application Support").join("Claude"))
-        }
+        "macos" => home
+            .map(|h| h.join("Library").join("Application Support").join(app_name))
+            .into_iter()
+            .collect(),
         "windows" => {
+            let mut dirs = Vec::new();
             let classic = appdata
-                .map(|p| p.join("Claude"))
-                .or_else(|| home.map(|h| h.join("AppData").join("Roaming").join("Claude")));
-            if let Some(ref p) = classic
-                && is_real_dir(p)
+                .map(|p| p.join(app_name))
+                .or_else(|| home.map(|h| h.join("AppData").join("Roaming").join(app_name)));
+            if let Some(p) = classic
+                && is_real_dir(&p)
             {
-                return classic;
+                dirs.push(p);
             }
+
             let local_base = local_appdata
                 .map(PathBuf::from)
                 .or_else(|| home.map(|h| h.join("AppData").join("Local")));
@@ -186,12 +196,9 @@ pub fn resolve_claude_desktop_dir_for_platform(
                         .filter_map(|e| {
                             let name = e.file_name();
                             let name_str = name.to_string_lossy();
-                            if name_str.starts_with("Claude_") {
-                                let candidate = e
-                                    .path()
-                                    .join("LocalCache")
-                                    .join("Roaming")
-                                    .join("Claude");
+                            if name_str.starts_with(msix_prefix) {
+                                let candidate =
+                                    e.path().join("LocalCache").join("Roaming").join(app_name);
                                 is_real_dir(&candidate).then_some(candidate)
                             } else {
                                 None
@@ -199,12 +206,68 @@ pub fn resolve_claude_desktop_dir_for_platform(
                         })
                         .collect();
                     candidates.sort();
-                    if let Some(found) = candidates.into_iter().next() {
-                        return Some(found);
+                    for c in candidates {
+                        if !dirs.contains(&c) {
+                            dirs.push(c);
+                        }
                     }
                 }
             }
-            classic
+            dirs
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Resolves all desktop client data directories for `provider` on the current OS.
+pub fn resolve_ai_app_data_dirs(provider: ProviderId) -> Vec<PathBuf> {
+    let home = get_user_home_dir();
+    #[cfg(target_os = "macos")]
+    let os = "macos";
+    #[cfg(target_os = "windows")]
+    let os = "windows";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let os = "linux";
+
+    let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+    let local_appdata = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    resolve_ai_app_data_dirs_for_platform(
+        provider,
+        os,
+        home.as_deref(),
+        appdata.as_deref(),
+        local_appdata.as_deref(),
+    )
+}
+
+/// Resolves the Claude Desktop data directory for a given OS (`"macos"`, `"windows"`, `"linux"`),
+/// checking MSIX Store package paths on Windows when the classic `%APPDATA%\Claude` folder does
+/// not exist yet.
+pub fn resolve_claude_desktop_dir_for_platform(
+    os: &str,
+    home: Option<&Path>,
+    appdata: Option<&Path>,
+    local_appdata: Option<&Path>,
+) -> Option<PathBuf> {
+    match os {
+        "macos" | "windows" => {
+            let dirs = resolve_ai_app_data_dirs_for_platform(
+                ProviderId::Anthropic,
+                os,
+                home,
+                appdata,
+                local_appdata,
+            );
+            if let Some(found) = dirs.into_iter().next() {
+                return Some(found);
+            }
+            if os == "windows" {
+                appdata
+                    .map(|p| p.join("Claude"))
+                    .or_else(|| home.map(|h| h.join("AppData").join("Roaming").join("Claude")))
+            } else {
+                None
+            }
         }
         _ => {
             let h = home?;

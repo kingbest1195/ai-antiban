@@ -20,6 +20,9 @@ interface SystemGuardSectionProps {
   cleaningProxy: boolean;
   proxyResult: { ok: boolean; text: string } | null;
   onRequestCleanProxy: () => void;
+  hintsResetBusy?: boolean;
+  onResetDismissedHints?: () => Promise<void>;
+  onReplayOnboarding?: () => void;
 }
 
 export function SystemGuardSection({
@@ -37,6 +40,9 @@ export function SystemGuardSection({
   cleaningProxy,
   proxyResult,
   onRequestCleanProxy,
+  hintsResetBusy = false,
+  onResetDismissedHints,
+  onReplayOnboarding,
 }: SystemGuardSectionProps) {
   return (
     <>
@@ -206,6 +212,26 @@ export function SystemGuardSection({
           </Link>
         </p>
       </Section>
+
+      {(onResetDismissedHints || onReplayOnboarding) && (
+        <Section title="Подсказки и обучение">
+          <p className="zs-t-body zs-settings__lead">
+            Вернуть закрытые баннеры-подсказки в разделах или пройти сценарий первого знакомства заново.
+          </p>
+          <div className="zs-settings__form" style={{ flexWrap: "wrap" }}>
+            {onResetDismissedHints && (
+              <Button variant="secondary" disabled={hintsResetBusy} onClick={() => void onResetDismissedHints()}>
+                {hintsResetBusy ? "Сбрасываем…" : "Показать все подсказки снова"}
+              </Button>
+            )}
+            {onReplayOnboarding && (
+              <Button variant="secondary" onClick={onReplayOnboarding}>
+                Пройти знакомство заново
+              </Button>
+            )}
+          </div>
+        </Section>
+      )}
 
       <Section title={copy.proxy.section}>
         <p className="zs-t-body zs-settings__lead">{copy.proxy.text}</p>

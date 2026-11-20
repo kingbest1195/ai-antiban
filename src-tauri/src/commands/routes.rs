@@ -105,6 +105,7 @@ pub async fn remove_route(
     state: tauri::State<'_, AppContext>,
     auditor: tauri::State<'_, auditor::Auditor>,
     guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
 ) -> Result<RoutesSnapshot, String> {
     let _runtime_lock = super::claude::lock_profile_runtime().await;
     let was_active_profile_route =
@@ -112,6 +113,7 @@ pub async fn remove_route(
     if !state.remove_route(&id).await.map_err(|e| e.to_string())? {
         return Err(format!("Маршрут не найден: {id}"));
     }
+    proxy_manager.stop_aliases_for_route(&id).await;
     auditor.resolver.invalidate_route(&id).await;
 
     let profile_sync = auditor::profile_switcher::mark_profiles_route_removed(&id);
@@ -136,7 +138,9 @@ pub async fn remove_route(
     }
 
     let anthropic_routed = matches!(
-        state.route_selection(crate::state::PROVIDER_ANTHROPIC).await,
+        state
+            .route_selection(crate::state::PROVIDER_ANTHROPIC)
+            .await,
         routing::RouteSelection::Route(_)
     );
     guard.sync_provider_route_change(crate::state::PROVIDER_ANTHROPIC, anthropic_routed);

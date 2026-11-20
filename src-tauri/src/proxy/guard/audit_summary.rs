@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use crate::auditor::geo_matrix::ProviderId;
 #[cfg(test)]
 use crate::auditor::OverallStatus;
+use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::{NetworkTelemetry, RiskReport};
 
 #[cfg(test)]
@@ -80,7 +80,6 @@ fn is_provider_critical_or_blocked(res: &Result<RiskReport, String>) -> bool {
         Err(_) => true,
     }
 }
-
 
 /// True when an enabled unrouted provider's audit permits traffic without blocking or alerting.
 fn provider_allowed_by_audit(
@@ -267,4 +266,3 @@ pub(super) fn summarize_for_state(
         reports,
     })
 }
-

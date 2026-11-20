@@ -13,6 +13,32 @@ pub(crate) use helpers::{
     is_ip_pinned_for_state, remove_trusted_exception_inner, set_provider_monitoring_inner,
     should_verify_unblock,
 };
+
+fn read_os_pac_deferred() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if !crate::sysproxy::os_effects_enabled() || !crate::sysproxy::is_sysproxy_active() {
+            return false;
+        }
+        use crate::sysproxy::platform::{Platform, RealPlatform};
+        !matches!(RealPlatform.temp_dns_overrides(), Ok(false))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+pub(crate) async fn read_runtime_protection_flags() -> auditor::AuditProtectionFlags {
+    tokio::task::spawn_blocking(|| auditor::AuditProtectionFlags {
+        sysproxy_active: crate::sysproxy::is_sysproxy_active(),
+        cli_or_sandbox_protection_active: crate::sysproxy::is_cli_protection_enabled(),
+        os_pac_deferred: read_os_pac_deferred(),
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 pub(crate) use helpers::{allow_provider_session_inner, pin_ip_inner, unpin_ip_inner};
 
@@ -63,16 +89,22 @@ pub async fn audit_connection(
             );
         }) as auditor::ProgressSink
     });
+    let protection = read_runtime_protection_flags().await;
     let mut report = match auditor
-        .evaluate_all_progress(provider_id, &state, force_refresh.unwrap_or(false), sink)
+        .evaluate_all_progress_with_protection(
+            provider_id,
+            &state,
+            force_refresh.unwrap_or(false),
+            sink,
+            protection,
+        )
         .await
     {
         Ok(report) => report,
         Err(e) => {
             // A failed primary audit must not leave the previous (possibly green) tray state;
             // a stop/block state stays as it is.
-            if provider_id == auditor::ProviderId::Anthropic && !guard.any_provider_gate_pending()
-            {
+            if provider_id == auditor::ProviderId::Anthropic && !guard.any_provider_gate_pending() {
                 let st = state.get_data().await;
                 let has_blocked =
                     !st.blocked_providers.is_empty() || guard.any_provider_gate_closed();
@@ -218,8 +250,7 @@ pub async fn clear_trusted_exceptions(
     guard: tauri::State<'_, Arc<proxy::NetworkGuard>>,
     provider: Option<String>,
 ) -> Result<state::AppStateData, String> {
-    let updated =
-        clear_trusted_exceptions_inner(&state, &guard, provider.as_deref()).await?;
+    let updated = clear_trusted_exceptions_inner(&state, &guard, provider.as_deref()).await?;
     let _ = app.emit("network://changed", &());
     Ok(updated)
 }
@@ -236,7 +267,10 @@ pub async fn verify_and_unblock_provider(
 ) -> Result<bool, String> {
     let provider_id = auditor::ProviderId::from_id(&provider)
         .ok_or_else(|| format!("Неизвестный провайдер: {provider}"))?;
-    let mut report = auditor.evaluate_all(provider_id, &state, true).await?;
+    let protection = read_runtime_protection_flags().await;
+    let mut report = auditor
+        .evaluate_all_with_protection(provider_id, &state, true, protection)
+        .await?;
 
     let st_before = state.get_data().await;
     let manual_ks = guard.is_manual_killswitch();

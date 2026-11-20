@@ -44,8 +44,7 @@ fn simulation_gate_reason_and_pause_mode_serde_work() {
 }
 
 #[tokio::test]
-async fn resolve_interception_single_provider_allow_persists_exception_and_keeps_unrelated_block()
-{
+async fn resolve_interception_single_provider_allow_persists_exception_and_keeps_unrelated_block() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.json");
     let state = state::AppState::load_or_default(path.clone());
@@ -71,14 +70,12 @@ async fn resolve_interception_single_provider_allow_persists_exception_and_keeps
             .await
             .unwrap(),
     );
-    let pm = proxy::ProxyManager {
-        hold_queue: Arc::clone(&server.hold_queue),
-        guard: Arc::clone(&server.guard),
-        coverage: Arc::clone(&server.coverage),
-        server,
-    };
+    let pm = proxy::ProxyManager::from_server(server);
     pm.guard.sync_gates_with_state(&state).await;
-    let rx = pm.hold_queue.register("hold-1".to_string(), "anthropic").await;
+    let rx = pm
+        .hold_queue
+        .register("hold-1".to_string(), "anthropic")
+        .await;
 
     resolve_interception_core(
         "hold-1",
@@ -94,26 +91,42 @@ async fn resolve_interception_single_provider_allow_persists_exception_and_keeps
 
     assert_eq!(rx.await.unwrap(), proxy::HoldResolution::Allow);
     assert!(!state.is_provider_blocked("anthropic").await);
-    assert!(state.is_ip_trusted_for_provider("anthropic", "5.5.5.5").await);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Anthropic), proxy::Gate::Open);
+    assert!(
+        state
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Anthropic),
+        proxy::Gate::Open
+    );
     // Unrelated openai remains blocked and un-excepted.
     assert!(state.is_provider_blocked("openai").await);
     assert!(!state.is_ip_trusted_for_provider("openai", "5.5.5.5").await);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Openai), proxy::Gate::Blocked);
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Openai),
+        proxy::Gate::Blocked
+    );
 
     // Reloading clears session_allowed but keeps trusted_exceptions.
     drop(state);
     let reloaded = state::AppState::load_or_default(path);
     assert!(!reloaded.is_provider_session_allowed("anthropic").await);
-    assert!(reloaded.is_ip_trusted_for_provider("anthropic", "5.5.5.5").await);
+    assert!(
+        reloaded
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
 }
 
 #[tokio::test]
 async fn resolve_interception_network_block_skips_disabled_and_routed_providers() {
     let state = state::AppState::new_in_memory();
-    state.set_provider_monitoring("gemini", false).await.unwrap();
-    let route =
-        crate::routing::parse_route_key("socks5://1.2.3.4:1080#nl", 1).unwrap();
+    state
+        .set_provider_monitoring("gemini", false)
+        .await
+        .unwrap();
+    let route = crate::routing::parse_route_key("socks5://1.2.3.4:1080#nl", 1).unwrap();
     let route_id = state.upsert_route(route).await.unwrap();
     state
         .bind_provider_route("openai", Some(&route_id))
@@ -127,13 +140,11 @@ async fn resolve_interception_network_block_skips_disabled_and_routed_providers(
             .await
             .unwrap(),
     );
-    let pm = proxy::ProxyManager {
-        hold_queue: std::sync::Arc::clone(&server.hold_queue),
-        guard: std::sync::Arc::clone(&server.guard),
-        coverage: std::sync::Arc::clone(&server.coverage),
-        server,
-    };
-    let _rx = pm.hold_queue.register("net-1".to_string(), proxy::ALL_PROVIDERS).await;
+    let pm = proxy::ProxyManager::from_server(server);
+    let _rx = pm
+        .hold_queue
+        .register("net-1".to_string(), proxy::ALL_PROVIDERS)
+        .await;
 
     resolve_interception_core(
         "net-1",
@@ -151,9 +162,18 @@ async fn resolve_interception_network_block_skips_disabled_and_routed_providers(
     assert!(state.is_provider_blocked("anthropic").await);
     assert!(!state.is_provider_blocked("openai").await);
     assert!(!state.is_provider_blocked("gemini").await);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Anthropic), proxy::Gate::Blocked);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Openai), proxy::Gate::Open);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Gemini), proxy::Gate::Open);
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Anthropic),
+        proxy::Gate::Blocked
+    );
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Openai),
+        proxy::Gate::Open
+    );
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Gemini),
+        proxy::Gate::Open
+    );
 }
 
 #[tokio::test]
@@ -197,12 +217,7 @@ async fn resolve_interception_superseded_block_and_open_guide_are_noops_and_neve
             .await
             .unwrap(),
     );
-    let pm = proxy::ProxyManager {
-        hold_queue: Arc::clone(&server.hold_queue),
-        guard: Arc::clone(&server.guard),
-        coverage: Arc::clone(&server.coverage),
-        server,
-    };
+    let pm = proxy::ProxyManager::from_server(server);
 
     // Provider hold superseded by network recovery must NOT re-block on BlockUntilNetworkChange or OpenGuideAndBlock.
     let _rx_prov = pm
@@ -225,7 +240,10 @@ async fn resolve_interception_superseded_block_and_open_guide_are_noops_and_neve
     assert!(!out_block.applied);
     assert!(out_block.pause_status.is_none());
     assert!(!state.is_provider_blocked("anthropic").await);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Anthropic), proxy::Gate::Open);
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Anthropic),
+        proxy::Gate::Open
+    );
 
     let out_guide = resolve_interception_core(
         "hold-prov-1",
@@ -241,7 +259,10 @@ async fn resolve_interception_superseded_block_and_open_guide_are_noops_and_neve
     assert!(!out_guide.applied);
     assert!(!out_guide.open_guide);
     assert!(!state.is_provider_blocked("anthropic").await);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Anthropic), proxy::Gate::Open);
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Anthropic),
+        proxy::Gate::Open
+    );
 
     // Network-scoped alert superseded before UI click must NOT block or enter PauseMode.
     let _rx_net = pm

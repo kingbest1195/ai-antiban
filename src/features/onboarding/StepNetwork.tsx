@@ -3,6 +3,7 @@ import type { ProviderId, RiskReport } from "../../types";
 import { Badge, Banner, Card, EmptyState, Progress, Row, Rows, Skeleton, StatusHero } from "../../ui";
 import { onboarding as copy } from "../../shared/copy/ru";
 import { checksWord } from "../../shared/lib/format";
+import { SmartScreenGuide, SplitRoutingAnim } from "../mascot";
 import { evaluateNetwork } from "./networkVerdict";
 import { StepFooter, StepFrame } from "./parts";
 
@@ -87,6 +88,7 @@ export function StepNetwork({
 
   return (
     <StepFrame title={copy.network.title} lead={copy.network.lead} footer={footer}>
+      <SplitRoutingAnim compact active={loading || failed || verdict.good} />
       <div className="zs-onb__result" aria-live="polite" aria-atomic="true">
         {loading ? (
           <Loading />
@@ -123,6 +125,7 @@ export function StepNetwork({
           </>
         )}
       </div>
+      <SmartScreenGuide collapsible defaultExpanded={false} />
     </StepFrame>
   );
 }

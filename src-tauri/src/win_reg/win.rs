@@ -89,8 +89,7 @@ fn open_key(root: RootKey, subkey: &str, sam_desired: u32) -> Result<KeyHandle, 
     let sub = encode_utf16_nul(subkey);
     let mut handle: *mut c_void = core::ptr::null_mut();
     // SAFETY: `sub` is NUL-terminated; `handle` receives the opened key handle.
-    let st =
-        unsafe { RegOpenKeyExW(root_handle(root), sub.as_ptr(), 0, sam_desired, &mut handle) };
+    let st = unsafe { RegOpenKeyExW(root_handle(root), sub.as_ptr(), 0, sam_desired, &mut handle) };
     if st == 0 {
         Ok(KeyHandle(handle))
     } else {

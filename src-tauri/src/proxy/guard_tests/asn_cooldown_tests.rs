@@ -28,11 +28,10 @@ async fn guard_holds_and_requires_confirmation_on_same_country_asn_jump() {
     let h = harness(asn_jump_audit("95.217.1.1", "NL"), "95.217.1.1").await;
     h.change("95.217.1.1").await;
 
-    let ev = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("enriched alert on TRAVEL_ASN_JUMP_SAME_COUNTRY");
+    let ev =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("enriched alert on TRAVEL_ASN_JUMP_SAME_COUNTRY");
     assert_eq!(ev.0["phase"], "ready");
     let gate_reason = ev.0["gate_reason"].as_str().unwrap_or("");
     assert!(
@@ -65,8 +64,7 @@ async fn guard_blocks_under_auto_lock_silent_on_same_country_asn_jump() {
         .unwrap();
     h.change("95.217.1.1").await;
 
-    h.io
-        .wait_for("network://changed", 2000)
+    h.io.wait_for("network://changed", 2000)
         .await
         .expect("network://changed");
     assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
@@ -91,8 +89,7 @@ async fn guard_still_allows_pinned_ip_return_without_popup() {
         .unwrap();
     h.change("95.217.1.1").await;
 
-    h.io
-        .wait_for("network://changed", 2000)
+    h.io.wait_for("network://changed", 2000)
         .await
         .expect("pinned IP accepted");
     assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
@@ -110,11 +107,10 @@ async fn guard_enforces_ip_change_cooldown_under_ask_popup_and_auto_lock_silent(
     h.state.start_ip_change_cooldown(14_400).await.unwrap();
     h.change("9.9.9.9").await;
 
-    let ev = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("enriched cooldown alert");
+    let ev =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("enriched cooldown alert");
     assert_eq!(ev.0["phase"], "ready");
     let reason = ev.0["gate_reason"].as_str().unwrap_or("");
     assert!(
@@ -182,8 +178,7 @@ async fn guard_allows_pinned_ip_even_during_active_cooldown() {
     h.state.start_ip_change_cooldown(14_400).await.unwrap();
     h.change("9.9.9.9").await;
 
-    h.io
-        .wait_for("network://changed", 2000)
+    h.io.wait_for("network://changed", 2000)
         .await
         .expect("pinned IP allowed during cooldown");
     assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);

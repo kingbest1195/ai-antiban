@@ -119,6 +119,8 @@ export interface CleanResult {
   bytes_freed: number;
   success: boolean;
   message: string;
+  found_dir?: boolean;
+  locked_targets?: string[];
 }
 
 export interface BinAuditResult {

@@ -106,8 +106,10 @@ impl NetworkResolver {
     ) -> Result<NetworkTelemetry, String> {
         self.resolve_cached_or_fetch(None, None, force_refresh, || async {
             let limit = Duration::from_millis(REQUEST_TIMEOUT_MS);
-            if let HttpProbeOutcome::Response { status: 200..=299, body } =
-                probe.get("https://ipwho.is/", limit).await
+            if let HttpProbeOutcome::Response {
+                status: 200..=299,
+                body,
+            } = probe.get("https://ipwho.is/", limit).await
                 && let Ok(parsed) = serde_json::from_str::<IpWhoIsResponse>(&body)
                 && let (Some(ip), Some(cc)) = (parsed.ip, parsed.country_code)
             {
@@ -127,8 +129,10 @@ impl NetworkResolver {
                 });
             }
 
-            if let HttpProbeOutcome::Response { status: 200..=299, body } =
-                probe.get("https://1.1.1.1/cdn-cgi/trace", limit).await
+            if let HttpProbeOutcome::Response {
+                status: 200..=299,
+                body,
+            } = probe.get("https://1.1.1.1/cdn-cgi/trace", limit).await
                 && let Some(trace) = parse_cloudflare_trace(&body)
                 && let Some(cc) = trace.loc
             {

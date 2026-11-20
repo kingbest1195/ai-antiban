@@ -24,7 +24,11 @@ use super::{
 impl ProxyServer {
     /// Direct connection for transit traffic: cached DNS, SSRF check of every answer and Happy
     /// Eyeballs across address families (see [`Transit::connect_direct`]).
-    pub(super) async fn connect_direct(&self, host: &str, port: u16) -> Result<TcpStream, std::io::Error> {
+    pub(super) async fn connect_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<TcpStream, std::io::Error> {
         self.direct_connects.fetch_add(1, Ordering::SeqCst);
         self.transit.connect_direct(host, port).await
     }
@@ -263,7 +267,7 @@ impl ProxyServer {
 /// is closed no byte is forwarded, and the session aborts when the route changes, the gate closes or
 /// the manual kill-switch is engaged. Routed tunnels (`KillSwitchOnly`) are only stopped by the
 /// manual kill-switch. Both end as soon as the routing of their provider changes (`watch`).
-async fn pump(
+pub(super) async fn pump(
     client: &mut TcpStream,
     target: &mut UpstreamStream,
     guard: &Arc<NetworkGuard>,

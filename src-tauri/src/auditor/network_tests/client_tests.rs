@@ -435,4 +435,3 @@ async fn test_reverse_ptr_via_fake_dns() {
     assert_eq!(unk_res.status, CheckStatus::Unknown);
     assert_eq!(unk_res.code, "REVERSE_DNS_NO_DATA");
 }
-

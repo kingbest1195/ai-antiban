@@ -107,19 +107,19 @@ impl NetworkResolver {
         };
 
         let gateway_port = self.gateway_port();
-        let chained_client = if route.is_none() && client_override.is_none() && direct_probe.is_none()
-        {
-            crate::sysproxy::get_chained_proxy()
-                .filter(|cp| {
-                    !crate::sysproxy::is_gateway_host_port(
-                        cp,
-                        (gateway_port > 0).then_some(gateway_port),
-                    )
-                })
-                .and_then(|cp| build_chained_probe_client(&cp, timeout))
-        } else {
-            None
-        };
+        let chained_client =
+            if route.is_none() && client_override.is_none() && direct_probe.is_none() {
+                crate::sysproxy::get_chained_proxy()
+                    .filter(|cp| {
+                        !crate::sysproxy::is_gateway_host_port(
+                            cp,
+                            (gateway_port > 0).then_some(gateway_port),
+                        )
+                    })
+                    .and_then(|cp| build_chained_probe_client(&cp, timeout))
+            } else {
+                None
+            };
 
         let via_host = if route.is_some() {
             match provider {

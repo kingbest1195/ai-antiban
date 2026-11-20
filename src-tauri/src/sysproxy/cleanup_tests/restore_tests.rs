@@ -2,7 +2,9 @@ use super::*;
 use crate::sysproxy::fs::FakeFs;
 use crate::sysproxy::journal::{Value, recover_with};
 use crate::sysproxy::platform::{FakePlatform, PacState, PlatOp, ServiceId};
-use crate::sysproxy::{NO_PROXY_VALUE, SysProxy, dry_run_blocked_calls, is_sysproxy_active, os_effects_enabled};
+use crate::sysproxy::{
+    NO_PROXY_VALUE, SysProxy, dry_run_blocked_calls, is_sysproxy_active, os_effects_enabled,
+};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -416,4 +418,3 @@ fn migration_also_finds_locale_variables_the_registry_lists() {
     migrate_legacy(&mut j, &p, None);
     assert_eq!(p.env_of("LC_IDENTIFICATION"), None);
 }
-

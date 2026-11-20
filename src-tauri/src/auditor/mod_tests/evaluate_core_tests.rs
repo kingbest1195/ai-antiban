@@ -526,8 +526,8 @@ async fn evaluate_all_tor_exit_is_a_warning() {
 /// only the core checks (0 and 2) stop the gateway.
 #[tokio::test]
 async fn evaluate_all_tor_list_unreachable_is_unknown_and_not_a_core_check() {
-    let probe = FakeProbe::body(200, "loc=NL\n")
-        .with_route("torbulkexitlist", HttpProbeOutcome::Timeout);
+    let probe =
+        FakeProbe::body(200, "loc=NL\n").with_route("torbulkexitlist", HttpProbeOutcome::Timeout);
     let env = env_of(
         with_whoami(
             zones_answering(FakeDns::new(LookupOutcome::Timeout)),
@@ -558,4 +558,3 @@ async fn evaluate_all_ipv4_exit_is_not_marked_ipv6() {
     assert_eq!(json["ipv6_exit"], false);
     assert_eq!(json["asn_result"]["detail"]["ip_type"], "unknown");
 }
-

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub use device_registry::{
     default_claude_desktop_dir, default_profiles_storage_dir, get_user_home_dir,
+    resolve_ai_app_data_dirs, resolve_ai_app_data_dirs_for_platform,
     resolve_claude_desktop_dir_for_platform,
 };
 pub use profiles_store::{

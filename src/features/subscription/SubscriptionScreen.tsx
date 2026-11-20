@@ -12,28 +12,34 @@ export interface SubscriptionScreenProps {
   vpnCountry?: string;
   activeReport?: RiskReport | null;
   state?: AppStateData | null;
+  initialTab?: SubTab;
+  warmupStartedAt?: number | null;
+  onStartWarmup?: () => Promise<unknown> | void;
   onStateChange?: () => void;
   onNavigateToPaymentGuide?: () => void;
   onToast?: ShowToast;
 }
 
-type SubTab = "card" | "warmup";
+export type SubTab = "card" | "warmup";
 
 /** Экран «Подписка» (меню «Ещё»): проверка карты и адрес для оплаты, прогрев аккаунта и чеклист. */
 export function SubscriptionScreen({
   vpnCountry = "NL",
   activeReport,
   state,
+  initialTab = "card",
+  warmupStartedAt,
+  onStartWarmup,
   onStateChange,
   onNavigateToPaymentGuide,
   onToast,
 }: SubscriptionScreenProps) {
-  const [tab, setTab] = useState<SubTab>("card");
+  const [tab, setTab] = useState<SubTab>(initialTab);
 
   const country =
     vpnCountry && vpnCountry !== "--" ? vpnCountry : activeReport?.telemetry.country_code || "NL";
 
-  const warm = warmupProgress(state?.warmup_started_at);
+  const warm = warmupProgress(warmupStartedAt !== undefined ? warmupStartedAt : state?.warmup_started_at);
   const warmupLabel = warm.started
     ? warm.done
       ? copy.tabs.warmupDone
@@ -54,12 +60,14 @@ export function SubscriptionScreen({
 
       {tab === "card" ? (
         <>
-          <CardCheck country={country} onToast={onToast} onNavigateToPaymentGuide={onNavigateToPaymentGuide} />
+          <CardCheck exitCountry={country} onToast={onToast} onNavigateToPaymentGuide={onNavigateToPaymentGuide} />
           <AddressCard onToast={onToast} />
         </>
       ) : (
         <Warmup
           state={state}
+          warmupStartedAt={warmupStartedAt}
+          onStartWarmup={onStartWarmup}
           onStateChange={onStateChange}
           onNavigateToPaymentGuide={onNavigateToPaymentGuide}
           onToast={onToast}

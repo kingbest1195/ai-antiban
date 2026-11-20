@@ -28,6 +28,19 @@ impl ProxyServer {
         let provider_opt = ProviderId::from_host_with_custom(&host, &st_snapshot.custom_ai_domains)
             .filter(|p| !st_snapshot.is_provider_disabled(p.as_str()));
 
+        if self.is_alias {
+            if !is_canary && provider_opt.is_some() {
+                self.coverage.record_incoming(
+                    peer_port,
+                    user_agent,
+                    crate::proxy::coverage::TrafficKind::AiRequest,
+                );
+            }
+            return self
+                .handle_alias_connect(client, &host, port, provider_opt, is_canary)
+                .await;
+        }
+
         let provider = match provider_opt {
             Some(p) => {
                 // Only a tunnel to an enabled AI host is an AI request (the canary is Zastava's

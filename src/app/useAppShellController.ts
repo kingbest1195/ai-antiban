@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
-import type { MenuEntry, TabItem } from "../ui";
-import { shell as copy, tabs as tabCopy, toast as toastCopy } from "../shared/copy/ru";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { MenuEntry } from "../ui";
+import { shell as copy, toast as toastCopy } from "../shared/copy/ru";
 import { APP_VERSION } from "../shared/version";
-import { tabBadges, useOverviewModel } from "../features/overview/useOverviewModel";
-import { coverageNeedsAttention } from "../features/coverage/coverageModel";
+import { useCoworkGuardWatcher } from "../shared/hooks/useCoworkGuardWatcher";
 import {
   useClaudeBackup,
   useGatewayState,
@@ -18,12 +17,14 @@ import {
   useTrayEvents,
   useUpdater,
 } from "../shared/hooks";
-import type { TabId } from "../shared/hooks";
-import type { RouteUnavailablePayload, ShutdownProgressPayload } from "../types";
+import type { PersonaRiskReport, RouteUnavailablePayload, ShutdownProgressPayload } from "../types";
 import { openTelegramSupport } from "../utils/opener";
 import {
   bindUpstreamToClaudeProfile,
+  dismissHint,
   getHideIpMode,
+  getPersonaRiskReport,
+  markWhatsNewV3Seen,
   onDeepLink,
   onRouteUnavailable,
   onShutdownProgress,
@@ -33,25 +34,8 @@ import {
 } from "../utils/api";
 import { isTauri } from "../utils/api/client";
 import { useOnboarding } from "../features/onboarding";
+import type { OnboardingGoal } from "../features/onboarding";
 import type { DeepLinkConfirmOptions } from "./DeepLinkModal";
-
-const TAB_ITEMS: TabItem<TabId>[] = [
-  { id: "overview", label: tabCopy.overview },
-  { id: "connect", label: tabCopy.connect },
-  { id: "checks", label: tabCopy.checks },
-  { id: "backup", label: tabCopy.backup },
-  { id: "guides", label: tabCopy.guides },
-];
-
-function withBadges(badges: ReturnType<typeof tabBadges>): TabItem<TabId>[] {
-  return TAB_ITEMS.map((item) =>
-    item.id === "overview" && badges.overview !== undefined
-      ? { ...item, badge: badges.overview }
-      : item.id === "checks" && badges.checks !== undefined
-        ? { ...item, badge: badges.checks }
-        : item,
-  );
-}
 
 export function useAppShellController() {
   const nav = useNavigation();
@@ -70,8 +54,12 @@ export function useAppShellController() {
   const [shutdownProgress, setShutdownProgress] = useState<ShutdownProgressPayload | null>(null);
   const [hideIpPref, setHideIpPref] = useState<boolean>(false);
   const [profileRefreshKey, setProfileRefreshKey] = useState(0);
+  const [personaRisk, setPersonaRisk] = useState<PersonaRiskReport | null>(null);
+  const [whatsNewBusy, setWhatsNewBusy] = useState(false);
+  const checksAuditAttemptedRef = useRef(false);
 
-  const stats = useGatewayStats(nav.tab === "overview" && !nav.subscriptionOpen);
+  const coworkGuard = useCoworkGuardWatcher();
+  const stats = useGatewayStats(nav.currentRoute.page === "home" || nav.currentRoute.page === "stats");
   const gw = useGatewayState({ showToast, refreshGatewayStats: stats.refreshGatewayStats });
   const { runFullAudit, refreshState } = gw;
   const toggles = useProtectionToggles({
@@ -96,32 +84,16 @@ export function useAppShellController() {
     onSimulateInBrowser: () => setBrowserSimulation(true),
   });
   const backup = useClaudeBackup(showToast);
-  const overviewModel = useOverviewModel({
-    reports: gw.reports,
-    activeReport: gw.activeReport,
-    state: gw.state,
-    currentIp: gw.currentIp,
-    sysproxyActive: gw.sysproxyActive,
-    killswitchFrozen: toggles.killswitchFrozen,
-    updateInfo: updater.updateInfo,
-    refreshing: gw.refreshing,
-    startupPending: gw.startupPending,
-  });
-
-  const coverageNotice = !gw.startupPending && gw.sysproxyActive && coverageNeedsAttention(gw.coverageSnapshot);
-  const tabItems = useMemo(
-    () => withBadges(tabBadges(overviewModel.banner, gw.reports, gw.state, coverageNotice)),
-    [overviewModel.banner, gw.reports, gw.state, coverageNotice],
-  );
   const mock = useMockScenario(runFullAudit);
 
   useTrayEvents({
     showToast,
     openGuide: nav.openGuide,
-    openBackup: () => nav.goTab("backup"),
+    openBackup: () => nav.push({ page: "backup" }),
     runFullAudit,
     refreshState,
     refreshRoutes: gw.refreshRoutes,
+    syncProtectionStatus: toggles.syncProtectionStatus,
     refreshProfiles: () => setProfileRefreshKey((n) => n + 1),
     checkUpdates: updater.handleCheckUpdates,
     syncTimezone: () => tz.handleSyncTz(),
@@ -135,14 +107,31 @@ export function useAppShellController() {
   });
 
   useEffect(() => {
-    if (nav.tab === "backup" && !backup.claudeSummary) {
+    if (nav.currentRoute.page === "backup" && !backup.claudeSummary) {
       backup.loadClaudeSummary();
     }
-    if (nav.tab === "checks" && !gw.reports.anthropic && !gw.refreshing) {
+    if (nav.currentRoute.page !== "checks") {
+      checksAuditAttemptedRef.current = false;
+    } else if (!gw.reports.anthropic && !gw.refreshing && !gw.auditError && !checksAuditAttemptedRef.current) {
+      checksAuditAttemptedRef.current = true;
       runFullAudit(true, true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nav.tab, backup.claudeSummary, gw.reports.anthropic, gw.refreshing]);
+  }, [nav.currentRoute.page, backup.claudeSummary, gw.reports.anthropic, gw.refreshing, gw.auditError]);
+
+  useEffect(() => {
+    if (gw.startupPending) return;
+    getPersonaRiskReport()
+      .then(setPersonaRisk)
+      .catch(() => {});
+  }, [
+    gw.startupPending,
+    gw.state?.ip_change_cooldown_until,
+    gw.state?.pinned_ip,
+    gw.state?.sync_ai_tz_enabled,
+    gw.activeReport?.telemetry?.ip,
+    nav.currentRoute.page,
+  ]);
 
   const version = (isTauri() && updater.updateInfo?.current_version) || APP_VERSION;
 
@@ -299,6 +288,42 @@ export function useAppShellController() {
     nav.openGuide("03-os-privacy-setup");
   };
 
+  const handleAcknowledgeWhatsNew = async () => {
+    setWhatsNewBusy(true);
+    try {
+      await markWhatsNewV3Seen();
+      await refreshState();
+    } catch {
+      // ignore
+    } finally {
+      setWhatsNewBusy(false);
+    }
+  };
+
+  const handleRestartOnboardingFromWhatsNew = async () => {
+    await handleAcknowledgeWhatsNew();
+    onboarding.start();
+  };
+
+  const handleDismissHint = async (hintId: string) => {
+    try {
+      await dismissHint(hintId);
+      await refreshState();
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleOnboardingGoal = (goal?: OnboardingGoal) => {
+    if (goal === "clean_room") {
+      nav.reset({ page: "clean-room", cleanRoomTab: "launchpad" });
+    } else if (goal === "sos") {
+      nav.reset({ page: "backup" });
+    } else {
+      nav.goHome();
+    }
+  };
+
   const menuItems = useMemo<MenuEntry[]>(() => {
     const items: MenuEntry[] = [
       { id: "subscription", label: copy.menu.subscription, onSelect: nav.openSubscription },
@@ -370,13 +395,15 @@ export function useAppShellController() {
     stats,
     gw,
     toggles,
+    coworkGuard,
+    personaRisk,
+    whatsNewBusy,
     pinning,
     tz,
     updater,
     hideIpMode,
     intercept,
     backup,
-    tabItems,
     version,
     menuItems,
     handleToggleHideIp,
@@ -384,5 +411,9 @@ export function useAppShellController() {
     handleCancelDeepLink,
     handleOpenSupport,
     handleOpenOsClock,
+    handleAcknowledgeWhatsNew,
+    handleRestartOnboardingFromWhatsNew,
+    handleDismissHint,
+    handleOnboardingGoal,
   };
 }

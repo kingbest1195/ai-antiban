@@ -604,4 +604,3 @@ fn owns_recognises_the_confirmed_and_the_in_flight_value_only() {
     assert!(j.owns(&env("A"), &ev("x")));
     assert!(!j.owns(&env("A"), &ev("other")));
 }
-

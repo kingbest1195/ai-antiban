@@ -106,7 +106,12 @@ fn verify_unblock_decision_respects_killswitch_geo_and_critical_checks() {
         "hop",
         None,
     )];
-    assert!(!should_verify_unblock(false, &red_travel, &base_state, false));
+    assert!(!should_verify_unblock(
+        false,
+        &red_travel,
+        &base_state,
+        false
+    ));
     assert!(should_verify_unblock(
         false,
         &red_travel,
@@ -149,12 +154,7 @@ async fn allow_provider_session_persists_exception_without_leaking_unrelated_blo
             .await
             .unwrap(),
     );
-    let pm = proxy::ProxyManager {
-        hold_queue: Arc::clone(&server.hold_queue),
-        guard: Arc::clone(&server.guard),
-        coverage: Arc::clone(&server.coverage),
-        server,
-    };
+    let pm = proxy::ProxyManager::from_server(server);
     pm.guard.sync_gates_with_state(&state).await;
 
     allow_provider_session_inner("anthropic", &state, &auditor, &pm)
@@ -163,17 +163,31 @@ async fn allow_provider_session_persists_exception_without_leaking_unrelated_blo
 
     assert!(!state.is_provider_blocked("anthropic").await);
     assert!(state.is_provider_session_allowed("anthropic").await);
-    assert!(state.is_ip_trusted_for_provider("anthropic", "5.5.5.5").await);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Anthropic), proxy::Gate::Open);
+    assert!(
+        state
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Anthropic),
+        proxy::Gate::Open
+    );
     // Unrelated blocked provider remains blocked.
     assert!(state.is_provider_blocked("openai").await);
-    assert_eq!(pm.guard.gate_for(auditor::ProviderId::Openai), proxy::Gate::Blocked);
+    assert_eq!(
+        pm.guard.gate_for(auditor::ProviderId::Openai),
+        proxy::Gate::Blocked
+    );
 
     // Reload from disk: session allowance clears, persistent trusted exception survives.
     drop(state);
     let reloaded = state::AppState::load_or_default(path);
     assert!(!reloaded.is_provider_session_allowed("anthropic").await);
-    assert!(reloaded.is_ip_trusted_for_provider("anthropic", "5.5.5.5").await);
+    assert!(
+        reloaded
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
 
     let guard2 = Arc::new(proxy::NetworkGuard::new());
     let st2 = remove_trusted_exception_inner(&reloaded, &guard2, "anthropic", "5.5.5.5")
@@ -207,14 +221,20 @@ async fn set_provider_monitoring_toggles_state_and_guard_cleanly() {
     let guard = Arc::new(proxy::NetworkGuard::new());
     state.block_provider("gemini").await.unwrap();
     guard.sync_gates_with_state(&state).await;
-    assert_eq!(guard.gate_for(auditor::ProviderId::Gemini), proxy::Gate::Blocked);
+    assert_eq!(
+        guard.gate_for(auditor::ProviderId::Gemini),
+        proxy::Gate::Blocked
+    );
 
     let st_off = set_provider_monitoring_inner(&state, &guard, "gemini", false)
         .await
         .unwrap();
     assert!(st_off.disabled_providers.contains("gemini"));
     assert!(!st_off.blocked_providers.contains("gemini"));
-    assert_eq!(guard.gate_for(auditor::ProviderId::Gemini), proxy::Gate::Open);
+    assert_eq!(
+        guard.gate_for(auditor::ProviderId::Gemini),
+        proxy::Gate::Open
+    );
 
     let st_on = set_provider_monitoring_inner(&state, &guard, "gemini", true)
         .await
@@ -271,7 +291,11 @@ fn finalize_audit_report_applies_pinned_travel_grace_to_critical_and_warning() {
         "GB",
         auditor::CheckResult::critical("IMPOSSIBLE_TRAVEL_CRITICAL", "DE -> GB", None),
     );
-    assert!(finalize_audit_report_for_state(&st, auditor::ProviderId::Anthropic, &mut claude));
+    assert!(finalize_audit_report_for_state(
+        &st,
+        auditor::ProviderId::Anthropic,
+        &mut claude
+    ));
     assert_eq!(claude.overall_status, auditor::OverallStatus::Green);
     assert_eq!(claude.travel_result.code, "TRAVEL_PINNED_RETURN");
 
@@ -280,7 +304,11 @@ fn finalize_audit_report_applies_pinned_travel_grace_to_critical_and_warning() {
         "GB",
         auditor::CheckResult::warning("IMPOSSIBLE_TRAVEL_WARNING", "DE -> GB", None),
     );
-    assert!(finalize_audit_report_for_state(&st, auditor::ProviderId::Openai, &mut openai));
+    assert!(finalize_audit_report_for_state(
+        &st,
+        auditor::ProviderId::Openai,
+        &mut openai
+    ));
     assert_eq!(openai.overall_status, auditor::OverallStatus::Green);
     assert_eq!(openai.travel_result.code, "TRAVEL_PINNED_RETURN");
 
@@ -427,7 +455,10 @@ mod pin_tests {
             st1.pinned_ips.get("default").map(String::as_str),
             Some("2.2.2.2")
         );
-        assert_eq!(st1.pinned_ip_for_provider("anthropic", false), Some("3.3.3.3"));
+        assert_eq!(
+            st1.pinned_ip_for_provider("anthropic", false),
+            Some("3.3.3.3")
+        );
 
         // Unpinning anthropic clears pinned_ips["anthropic"], preserving "default" for OpenAI/Gemini.
         unpin_ip_inner(&state, Some("anthropic".to_string()))
@@ -439,7 +470,10 @@ mod pin_tests {
             st2.pinned_ips.get("default").map(String::as_str),
             Some("2.2.2.2")
         );
-        assert_eq!(st2.pinned_ip_for_provider("anthropic", false), Some("2.2.2.2"));
+        assert_eq!(
+            st2.pinned_ip_for_provider("anthropic", false),
+            Some("2.2.2.2")
+        );
 
         // Without "default", unpinning explicit unrouted anthropic leaves it completely unpinned.
         state.clear_all_pinned_ips().await.unwrap();

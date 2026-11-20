@@ -1,7 +1,8 @@
+import type { ReactNode } from "react";
 import type { StepItem } from "../../ui";
 import type { AppStateData } from "../../types";
 import { setWarmupTimer } from "../../utils/api";
-import { Badge, Button, Card, Progress, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
+import { Badge, Banner, Button, Card, Progress, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
 import { subscription } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 
@@ -11,29 +12,56 @@ const list = subscription.checklist;
 /** Рекомендуемый срок прогрева, часы (4 дня): совет, а не гарантия; источника статистики нет. */
 export const WARMUP_TARGET_HOURS = 96;
 
-/** Состояние прогрева по времени старта. Формулы те же, что были в BinCheckerTab. */
+/** Состояние прогрева по времени старта (поддерживает Unix-секунды и миллисекунды). */
 export function warmupProgress(startedAt: number | null | undefined, now: number = Date.now()) {
-  const started = startedAt || null;
-  const elapsedMs = started ? Math.max(0, now - started) : 0;
+  const startedRaw = startedAt || null;
+  const started = startedRaw ? (startedRaw < 1e11 ? startedRaw * 1000 : startedRaw) : null;
+  const nowMs = now < 1e11 ? now * 1000 : now;
+  const elapsedMs = started ? Math.max(0, nowMs - started) : 0;
   const elapsedHours = Math.floor(elapsedMs / (1000 * 60 * 60));
   const percent = started ? Math.min(100, Math.round((elapsedHours / WARMUP_TARGET_HOURS) * 100)) : 0;
   return { started, elapsedHours, percent, done: elapsedHours >= WARMUP_TARGET_HOURS };
 }
 
-interface WarmupProps {
+export interface WarmupProps {
   state?: AppStateData | null;
+  /** Явное время старта прогрева (например, из активного профиля «Чистой комнаты»). */
+  warmupStartedAt?: number | null;
+  /** Переопределение запуска прогрева (например, startCleanProfileWarmup). */
+  onStartWarmup?: () => Promise<unknown> | void;
+  /** Переопределение сброса прогрева. */
+  onResetWarmup?: () => Promise<unknown> | void;
+  /** Скрыть кнопку сброса (если таймер привязан к профилю песочницы). */
+  hideReset?: boolean;
+  /** Честный дисклеймер о том, что 96ч снижает эвристические риски, но не гарантирует отсутствие KYC. */
+  disclaimer?: ReactNode;
   onStateChange?: () => void;
   onNavigateToPaymentGuide?: () => void;
   onToast?: ShowToast;
 }
 
 /** Таймер прогрева аккаунта (Stat и Progress), чеклист перед оплатой (Steps) и переход к руководству. */
-export function Warmup({ state, onStateChange, onNavigateToPaymentGuide, onToast }: WarmupProps) {
-  const { started, elapsedHours, percent, done } = warmupProgress(state?.warmup_started_at);
+export function Warmup({
+  state,
+  warmupStartedAt,
+  onStartWarmup,
+  onResetWarmup,
+  hideReset = false,
+  disclaimer,
+  onStateChange,
+  onNavigateToPaymentGuide,
+  onToast,
+}: WarmupProps) {
+  const effectiveStartedAt = warmupStartedAt !== undefined ? warmupStartedAt : state?.warmup_started_at;
+  const { started, elapsedHours, percent, done } = warmupProgress(effectiveStartedAt);
 
   const start = async () => {
     try {
-      await setWarmupTimer(Date.now());
+      if (onStartWarmup) {
+        await onStartWarmup();
+      } else {
+        await setWarmupTimer(Date.now());
+      }
       onToast?.(copy.toast.started, copy.toast.startedText, "success");
       onStateChange?.();
     } catch (err: unknown) {
@@ -43,7 +71,11 @@ export function Warmup({ state, onStateChange, onNavigateToPaymentGuide, onToast
 
   const reset = async () => {
     try {
-      await setWarmupTimer(null);
+      if (onResetWarmup) {
+        await onResetWarmup();
+      } else {
+        await setWarmupTimer(null);
+      }
       onToast?.(copy.toast.reset, copy.toast.resetText, "info");
       onStateChange?.();
     } catch (err: unknown) {
@@ -85,11 +117,13 @@ export function Warmup({ state, onStateChange, onNavigateToPaymentGuide, onToast
             ) : (
               <Badge tone="info">{copy.running}</Badge>
             )}
-            <div>
-              <Button variant="quiet" size="sm" icon="refresh" onClick={reset}>
-                {copy.reset}
-              </Button>
-            </div>
+            {!hideReset && (
+              <div>
+                <Button variant="quiet" size="sm" icon="refresh" onClick={reset}>
+                  {copy.reset}
+                </Button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="subs-timer">
@@ -99,6 +133,11 @@ export function Warmup({ state, onStateChange, onNavigateToPaymentGuide, onToast
               {copy.start}
             </Button>
           </div>
+        )}
+        {disclaimer && (
+          <Banner tone="info" icon="info" title="Честно о прогреве 96 часов">
+            {disclaimer}
+          </Banner>
         )}
       </Card>
 

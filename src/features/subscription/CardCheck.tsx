@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 import type { BinAuditResult } from "../../types";
 import { checkPaymentBin } from "../../utils/api";
-import { Badge, Banner, Button, Card, Field, Mono, Row, Rows, Section } from "../../ui";
+import { Badge, Banner, Button, Card, Field, InfoTip, Mono, Row, Rows, Section } from "../../ui";
 import type { BannerTone } from "../../ui";
 import { subscription } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
@@ -11,9 +11,11 @@ import { detectBrand } from "./binBrand";
 
 const copy = subscription.card;
 
-interface CardCheckProps {
+export interface CardCheckProps {
   /** Страна выхода: BIN проверяется относительно неё. */
-  country: string;
+  country?: string;
+  /** Явный код страны выхода (алиас для встраивания в «Чистую комнату»). */
+  exitCountry?: string;
   onToast?: ShowToast;
   onNavigateToPaymentGuide?: () => void;
 }
@@ -26,7 +28,13 @@ function verdictTone(status: BinAuditResult["status"]): BannerTone {
 }
 
 /** Проверка BIN: поле и кнопка, вердикт словом (Banner нужного тона) и детали строками. */
-export function CardCheck({ country, onToast, onNavigateToPaymentGuide }: CardCheckProps) {
+export function CardCheck({ country, exitCountry, onToast, onNavigateToPaymentGuide }: CardCheckProps) {
+  const resolvedCountry =
+    exitCountry && exitCountry !== "--"
+      ? exitCountry
+      : country && country !== "--"
+        ? country
+        : "NL";
   const [binInput, setBinInput] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [result, setResult] = useState<BinAuditResult | null>(null);
@@ -53,7 +61,7 @@ export function CardCheck({ country, onToast, onNavigateToPaymentGuide }: CardCh
     setError(null);
 
     try {
-      const res = await checkPaymentBin(clean, country);
+      const res = await checkPaymentBin(clean, resolvedCountry);
       setResult(res);
       if (onToast) {
         if (res.status === "ok") {
@@ -83,7 +91,18 @@ export function CardCheck({ country, onToast, onNavigateToPaymentGuide }: CardCh
 
   return (
     <>
-      <Card title={copy.title} aside={<Badge>{copy.gateway(country)}</Badge>}>
+      <Card
+        title={copy.title}
+        aside={
+          <span className="zs-field-row">
+            <Badge>{copy.gateway(resolvedCountry)}</Badge>
+            <InfoTip
+              title="Проверка BIN и IP"
+              text="BIN (первые 6–8 цифр карты) определяет страну банка-эмитента и тип карты. Для Stripe важно, чтобы страна IP выхода совпадала со страной карты (IP ≈ Card)."
+            />
+          </span>
+        }
+      >
         <p className="zs-t-body subs-lead">{copy.text}</p>
 
         <form onSubmit={handleSubmit} className="subs-form">

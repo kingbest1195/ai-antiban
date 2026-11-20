@@ -530,5 +530,114 @@ fn partial_admin_auth_required_rolls_back_and_returns_prefix() {
     let err2 = enable_pac(&mut j2, &p2, PAC).unwrap_err();
     assert!(err2.starts_with("ADMIN_AUTH_REQUIRED:"), "{err2}");
     assert_eq!(p2.pac_of(&usb()), pac(None, Some(false)));
-    assert!(j2.is_empty(), "journal must be rolled back: {:?}", j2.entries());
+    assert!(
+        j2.is_empty(),
+        "journal must be rolled back: {:?}",
+        j2.entries()
+    );
+}
+
+#[test]
+fn apply_pac_deduplicates_skipped_vpn_and_admin_auth_diagnostics_and_logs_transitions() {
+    use super::super::apply::apply_pac_with;
+
+    let (fs, p) = setup();
+    let _vpn = p.add_vpn_service("Alpha VPN", true);
+    p.set_effective_pac(Some("http://vpn.example/p.pac"), false);
+    let mut j = open(&fs);
+    let guard = HealGuard::new();
+    let diag_state = Mutex::new(None);
+    let mut logs: Vec<String> = Vec::new();
+    let t0 = Instant::now();
+
+    // 1. Initial call logs once; 4 subsequent 5s ticks with identical state are deduplicated.
+    for i in 0..5u64 {
+        apply_pac_with(
+            &mut j,
+            &p,
+            PAC,
+            Some((&guard, t0 + Duration::from_secs(5 * i))),
+            &diag_state,
+            &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+        )
+        .unwrap();
+    }
+    assert_eq!(logs.len(), 1, "expected 1 log, got: {logs:?}");
+    assert!(logs[0].contains("Alpha VPN"));
+
+    // 2. State transition (effective_pac changes) logs immediately even within 300s.
+    p.set_effective_pac(Some("http://vpn.example/other.pac"), true);
+    apply_pac_with(
+        &mut j,
+        &p,
+        PAC,
+        Some((&guard, t0 + Duration::from_secs(25))),
+        &diag_state,
+        &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+    )
+    .unwrap();
+    assert_eq!(logs.len(), 2, "state transition must log: {logs:?}");
+
+    // 3. Same state after 300s TTL logs again.
+    apply_pac_with(
+        &mut j,
+        &p,
+        PAC,
+        Some((&guard, t0 + Duration::from_secs(325))),
+        &diag_state,
+        &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+    )
+    .unwrap();
+    assert_eq!(logs.len(), 3, "TTL expiry must log: {logs:?}");
+
+    // 4. Clearing mismatch (matching effective_pac) resets state so re-appearance logs at once.
+    p.set_effective_pac(Some(PAC), true);
+    apply_pac_with(
+        &mut j,
+        &p,
+        PAC,
+        Some((&guard, t0 + Duration::from_secs(330))),
+        &diag_state,
+        &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+    )
+    .unwrap();
+    assert_eq!(logs.len(), 3);
+    p.set_effective_pac(Some("http://vpn.example/other.pac"), true);
+    apply_pac_with(
+        &mut j,
+        &p,
+        PAC,
+        Some((&guard, t0 + Duration::from_secs(335))),
+        &diag_state,
+        &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+    )
+    .unwrap();
+    assert_eq!(
+        logs.len(),
+        4,
+        "re-appearance after clear must log: {logs:?}"
+    );
+
+    // 5. AdminAuthRequired is also deduplicated on identical repeats and logs on transition.
+    p.seed_pac(&wifi(), pac(None, Some(false)));
+    for i in 0..3u64 {
+        p.fail_next_auth(PlatOp::SetPac);
+        let err = apply_pac_with(
+            &mut j,
+            &p,
+            PAC,
+            Some((&guard, t0 + Duration::from_secs(340 + 5 * i))),
+            &diag_state,
+            &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+        )
+        .unwrap_err();
+        assert!(err.starts_with("ADMIN_AUTH_REQUIRED:"));
+    }
+    assert_eq!(
+        logs.iter()
+            .filter(|l| l.contains("admin_auth_required"))
+            .count(),
+        1,
+        "repeated AdminAuthRequired should log once: {logs:?}"
+    );
 }

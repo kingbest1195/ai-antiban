@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const GUIDE_PERSONAL_VPN: &str = "01-personal-vpn-15min";
 pub const GUIDE_PAYMENT_CARDS: &str = "02-safe-payment-cards";
 pub const GUIDE_OS_PRIVACY: &str = "03-os-privacy-setup";
+pub const GUIDE_OS_NETWORK: &str = "03-os-privacy-setup#geo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

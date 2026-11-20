@@ -36,8 +36,7 @@ async fn test_red_claude_never_blocks_healthy_chatgpt_ask_popup() {
 
     let h = harness(audit, "203.0.113.10").await;
     // Bind Gemini to a Zastava key so only Anthropic & OpenAI are unrouted.
-    let fr_route =
-        crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+    let fr_route = crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
     let fr_id = h.state.upsert_route(fr_route).await.unwrap();
     h.state
         .bind_provider_route("gemini", Some(&fr_id))
@@ -45,11 +44,10 @@ async fn test_red_claude_never_blocks_healthy_chatgpt_ask_popup() {
         .unwrap();
 
     h.change("203.0.113.10").await;
-    let ready = h
-        .io
-        .wait_for("interceptor://enriched", 3000)
-        .await
-        .expect("enriched ready");
+    let ready =
+        h.io.wait_for("interceptor://enriched", 3000)
+            .await
+            .expect("enriched ready");
     assert_eq!(ready.0["phase"], "ready");
     let id = ready.0["id"].as_str().expect("alert id");
 
@@ -87,8 +85,7 @@ async fn test_red_claude_never_blocks_healthy_chatgpt_silent_and_auto_allow() {
             Box::pin(async move {
                 match provider {
                     ProviderId::Anthropic => {
-                        let mut r =
-                            test_report(provider, OverallStatus::Red, "203.0.113.10", "GB");
+                        let mut r = test_report(provider, OverallStatus::Red, "203.0.113.10", "GB");
                         r.checks = vec![CheckResult::critical(
                             "IMPOSSIBLE_TRAVEL_CRITICAL",
                             "Country changed FR -> GB in 2 min",
@@ -166,8 +163,7 @@ async fn test_finish_audit_opens_all_healthy_providers_when_affected_is_empty() 
         })
     });
     let h = harness(audit, "145.241.193.245").await;
-    let fr_route =
-        crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+    let fr_route = crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
     let fr_id = h.state.upsert_route(fr_route).await.unwrap();
     h.state
         .bind_provider_route("gemini", Some(&fr_id))
@@ -289,8 +285,7 @@ async fn test_routing_gemini_does_not_freeze_or_reset_anthropic_and_openai() {
     assert_eq!(h.io.count("interceptor://risk-detected"), 0);
 
     // Bind Gemini to a Zastava key -> unrouted shrinks from 3 to 2.
-    let fr_route =
-        crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+    let fr_route = crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
     let fr_id = h.state.upsert_route(fr_route).await.unwrap();
     h.state
         .bind_provider_route("gemini", Some(&fr_id))
@@ -391,8 +386,13 @@ async fn guard_audit_all_with_unbound_routes_never_probes_provider_domains() {
         system: Arc::new(FakeSystem::healthy()),
     };
     let auditor = Auditor::with_env(env).unwrap();
-    let tel = test_report(ProviderId::Anthropic, OverallStatus::Green, "203.0.113.9", "NL")
-        .telemetry;
+    let tel = test_report(
+        ProviderId::Anthropic,
+        OverallStatus::Green,
+        "203.0.113.9",
+        "NL",
+    )
+    .telemetry;
     auditor.resolver.set_cached(tel).await;
 
     let state = AppState::new_in_memory();
@@ -412,4 +412,3 @@ async fn guard_audit_all_with_unbound_routes_never_probes_provider_domains() {
         );
     }
 }
-

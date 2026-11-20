@@ -5,7 +5,9 @@ use super::super::ide::{IDE_ENV_KEYS, PROXY_VARS, TZ_VARS_REMOVABLE, ide_candida
 use super::super::journal::{Journal, Outcome, ReportItem, Resource};
 use super::super::jsonc;
 use super::super::platform::Platform;
-use super::super::shell_rc::{SAFE_LOCALE, find_block, is_generated_block, remove_block, sanitize_timezone};
+use super::super::shell_rc::{
+    SAFE_LOCALE, find_block, is_generated_block, remove_block, sanitize_timezone,
+};
 use super::super::{FileCtx, KNOWN_NO_PROXY_VALUES, state};
 use super::files::{HostOs, restore_profile};
 use crate::state::CliMode;
@@ -28,7 +30,6 @@ pub(super) const SHELL_WRITE_FILES: [&str; 2] = [".zshrc", ".bash_profile"];
 /// `nc -z` probe made hundreds of calls).
 pub(super) const ZSHENV: &str = ".zshenv";
 
-
 pub(super) fn read_utf8(fs: &dyn Fs, file: &Path) -> Result<Option<String>, &'static str> {
     match fs.read(file) {
         Ok(None) => Ok(None),
@@ -44,7 +45,6 @@ pub(super) fn text_block_res(file: &Path) -> Resource {
         file: file.to_string_lossy().into_owned(),
     }
 }
-
 
 /// What cutting a block out of a profile by its exact markers came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,4 +331,3 @@ pub(super) fn migrate_legacy_files(
     }
     notes
 }
-

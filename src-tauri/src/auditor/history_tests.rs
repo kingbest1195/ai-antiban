@@ -115,13 +115,8 @@ fn route_bound_to_zastava_key_never_mismatches_global_vpn_pin() {
     assert!(is_pinned);
 
     // Meanwhile Direct VPN provider (Claude) still validates against global VPN pin.
-    let (direct_ok, direct_pinned) = evaluate_ip_pinning_for_route(
-        None,
-        Some("145.241.193.245"),
-        true,
-        "145.241.193.245",
-        None,
-    );
+    let (direct_ok, direct_pinned) =
+        evaluate_ip_pinning_for_route(None, Some("145.241.193.245"), true, "145.241.193.245", None);
     assert_eq!(
         (direct_ok.status, direct_ok.code.as_str()),
         (CheckStatus::Ok, "PINNED_IP_MATCH")
@@ -177,7 +172,11 @@ fn impossible_travel_with_pin_allows_pinned_return_and_blocks_unpinned_or_sancti
     assert_eq!(unpinned_openai.code, "IMPOSSIBLE_TRAVEL_WARNING");
 
     // Pinned return to non-sanctioned GB within <4h is allowed cleanly.
-    for pid in [ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+    for pid in [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+    ] {
         let pinned_ok = evaluate_impossible_travel_with_pin(&history, "GB", now, pid, true);
         assert_eq!(pinned_ok.status, CheckStatus::Ok);
         assert_eq!(pinned_ok.code, "TRAVEL_PINNED_RETURN");

@@ -417,8 +417,7 @@ async fn geo_cascade_falls_through_and_reports_why_it_failed() {
         "<html>",
         "{\"country_code\":\"XX\"}",
     ] {
-        let ResolverView::Unmeasured(u) = measure(dns(), &FakeProbe::body(200, body)).await
-        else {
+        let ResolverView::Unmeasured(u) = measure(dns(), &FakeProbe::body(200, body)).await else {
             panic!()
         };
         assert_eq!(u.reason, UnknownReason::EmptyResponse, "{body}");
@@ -541,7 +540,10 @@ fn geo_answers_of_all_three_services_give_asn_and_organisation() {
     .unwrap();
     assert_eq!((i.country.as_str(), i.asn), ("AU", Some(13335)));
     assert!(i.org.as_deref().unwrap().contains("Cloudflare"));
-    let f = parse_freeipapi("{\"countryCode\":\"US\",\"asn\":\"AS36692\",\"asnOrganization\":\"Cisco OpenDNS, LLC\"}").unwrap();
+    let f = parse_freeipapi(
+        "{\"countryCode\":\"US\",\"asn\":\"AS36692\",\"asnOrganization\":\"Cisco OpenDNS, LLC\"}",
+    )
+    .unwrap();
     assert_eq!(
         (f.asn, f.org.as_deref()),
         (Some(36692), Some("Cisco OpenDNS, LLC"))
@@ -600,5 +602,81 @@ fn country_of_a_public_resolver_is_not_applicable_not_a_warning() {
         r.message.contains("Cloudflare")
             && r.message.contains("anycast")
             && r.message.contains("ECS")
+    );
+}
+
+#[test]
+fn bug2_and_bug3_dns_country_guide_ref_and_zastava_key_preconditions() {
+    use crate::auditor::geo_matrix::GUIDE_OS_NETWORK;
+    use crate::auditor::leaks::AuditProtectionContext;
+
+    let ru_view = located("77.88.8.8", "RU");
+    let gb_view = located("81.2.69.142", "GB");
+
+    // Bug #2: DNS_COUNTRY_SPLIT must point to GUIDE_OS_NETWORK.
+    let split = evaluate_dns_country(&ru_view, "NL");
+    assert_eq!(split.code, "DNS_COUNTRY_SPLIT");
+    assert_eq!(split.guide_ref.as_deref(), Some(GUIDE_OS_NETWORK));
+
+    let healthy = AuditProtectionContext {
+        route_usable: true,
+        sysproxy_active: true,
+        cli_or_sandbox_protection_active: false,
+        os_pac_deferred: false,
+    };
+    let cli_only = AuditProtectionContext {
+        route_usable: true,
+        sysproxy_active: false,
+        cli_or_sandbox_protection_active: true,
+        os_pac_deferred: false,
+    };
+
+    // Bug #3: via_zastava_key + all 3 preconditions pass -> Ok with non-AI OS DNS explanation.
+    for ctx in [healthy, cli_only] {
+        let ru_ok = evaluate_dns_country_for_route_with_protection(&ru_view, "NL", true, ctx);
+        assert_eq!(
+            (ru_ok.status, ru_ok.code.as_str()),
+            (CheckStatus::Ok, "DNS_KEY_REMOTE_RESOLVE")
+        );
+        assert!(ru_ok.message.contains("non-AI") && ru_ok.message.contains("DNS ОС"));
+
+        let gb_ok = evaluate_dns_country_for_route_with_protection(&gb_view, "FR", true, ctx);
+        assert_eq!(
+            (gb_ok.status, gb_ok.code.as_str()),
+            (CheckStatus::Ok, "DNS_KEY_COUNTRY_ISOLATED")
+        );
+        assert!(gb_ok.message.contains("non-AI") && gb_ok.message.contains("DNS ОС"));
+    }
+
+    // Failing any precondition -> Warning("DNS_COUNTRY_SPLIT").
+    let failing_cases = [
+        AuditProtectionContext {
+            route_usable: false,
+            ..healthy
+        },
+        AuditProtectionContext {
+            route_usable: true,
+            sysproxy_active: false,
+            cli_or_sandbox_protection_active: false,
+            os_pac_deferred: false,
+        },
+        AuditProtectionContext {
+            os_pac_deferred: true,
+            ..healthy
+        },
+    ];
+    for bad in failing_cases {
+        let res = evaluate_dns_country_for_route_with_protection(&ru_view, "NL", true, bad);
+        assert_eq!(
+            (res.status, res.code.as_str()),
+            (CheckStatus::Warning, "DNS_COUNTRY_SPLIT")
+        );
+    }
+
+    // Direct mode (via_zastava_key == false) preserves strictness even with healthy flags.
+    let direct_ru = evaluate_dns_country_for_route_with_protection(&ru_view, "NL", false, healthy);
+    assert_eq!(
+        (direct_ru.status, direct_ru.code.as_str()),
+        (CheckStatus::Warning, "DNS_COUNTRY_SPLIT")
     );
 }

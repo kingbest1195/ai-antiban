@@ -1,0 +1,384 @@
+/* Shell v3 «Разделы» — только токены ДС (0 raw hex/rgb), изумрудный --brand CTA, 460×660 zero-scroll Home Hub. */
+
+.zs-shell-page {
+  flex-direction: column;
+  align-items: center;
+}
+
+.zs-v3-app {
+  width: 100%;
+  max-width: 460px;
+  margin: 0 auto;
+  gap: var(--space-2);
+}
+
+/* Шапка */
+.zs-v3-bar {
+  gap: var(--space-1);
+}
+.zs-v3-bar .zs-app__name {
+  margin-left: var(--space-1);
+}
+.zs-v3-ping {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.zs-v3-ping:hover {
+  background: var(--bg-3);
+  color: var(--ink);
+}
+.zs-v3-ping:disabled {
+  cursor: progress;
+}
+.zs-v3-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-right: 2px;
+}
+
+/* Заголовок подстраницы с «Назад» */
+.zs-v3-page-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.zs-v3-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+  padding: 0 10px 0 4px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+.zs-v3-back:hover {
+  background: var(--bg-2);
+  color: var(--ink);
+}
+.zs-v3-page-head__title {
+  margin: 0;
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.zs-v3-home-btn {
+  flex: none;
+}
+
+/* Компактный горизонтальный Hero (~135–145px) */
+.zs-v3-hero {
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.zs-v3-hero__top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.zs-v3-hero__mascot {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+}
+.zs-v3-hero__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.zs-v3-verdict {
+  margin: 0;
+  font-size: 18px;
+  line-height: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.zs-v3-verdict--ok {
+  color: var(--ink);
+}
+.zs-v3-verdict--warn {
+  color: var(--warn-text);
+}
+.zs-v3-verdict--danger {
+  color: var(--danger-text);
+}
+.zs-v3-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-2);
+}
+.zs-v3-trust-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-3);
+}
+.zs-v3-trust__num {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.zs-v3-trust__num--ok {
+  color: var(--brand-text);
+}
+.zs-v3-trust__num--warn {
+  color: var(--warn-text);
+}
+.zs-v3-trust__num--danger {
+  color: var(--danger-text);
+}
+.zs-v3-persona-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-2);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.zs-v3-persona-pill--ok {
+  background: var(--brand-soft);
+  color: var(--brand-text);
+  border-color: color-mix(in srgb, var(--brand) 35%, transparent);
+}
+.zs-v3-persona-pill--warn {
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+.zs-v3-persona-pill--danger {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+/* 1-строчная компактная статистика */
+.zs-v3-stats-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.zs-v3-stats-bar:hover {
+  background: var(--bg-3);
+  color: var(--ink);
+}
+
+/* PowerPill */
+.zs-v3-pill {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: 10px var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-2);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.zs-v3-pill:disabled {
+  cursor: progress;
+  opacity: 0.78;
+}
+.zs-v3-pill.is-on {
+  background: var(--brand-soft);
+  border-color: color-mix(in srgb, var(--brand) 45%, transparent);
+}
+.zs-v3-pill__icon {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  color: var(--ink-2);
+}
+.zs-v3-pill.is-on .zs-v3-pill__icon {
+  background: var(--brand);
+  color: var(--on-brand);
+}
+.zs-v3-pill__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.zs-v3-pill__title {
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+}
+.zs-v3-pill.is-on .zs-v3-pill__title {
+  color: var(--brand-text);
+}
+.zs-v3-pill__sub {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-3);
+}
+.zs-v3-pill__knob {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+}
+.zs-v3-pill__knob::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  background: var(--ink-2);
+  transition: transform 0.15s ease;
+}
+.zs-v3-pill.is-on .zs-v3-pill__knob {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.zs-v3-pill.is-on .zs-v3-pill__knob::after {
+  transform: translateX(18px);
+  background: var(--on-brand);
+}
+
+/* Приоритетный AlertStrip */
+.zs-v3-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.zs-v3-alerts__more {
+  align-self: flex-end;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.zs-v3-alerts__more:hover {
+  background: var(--bg-3);
+  color: var(--ink);
+}
+
+/* 5 разделов (~220px) */
+.zs-v3-sections {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+.zs-v3-sections .zs-row {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+.zs-v3-sections .zs-row__body {
+  flex: 1 0 auto;
+}
+.zs-v3-sections .zs-row__title {
+  white-space: nowrap;
+}
+.zs-v3-sections .zs-row__trail {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.zs-v3-sum {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ink-3);
+  text-align: right;
+}
+.zs-v3-sum--warn {
+  color: var(--warn-text);
+}
+.zs-v3-sum--danger {
+  color: var(--danger-text);
+}
+.zs-v3-sum--ok {
+  color: var(--brand-text);
+}
+
+/* Стоп сети */
+.zs-v3-stop {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.zs-v3-stop .zs-btn {
+  flex: 1;
+}

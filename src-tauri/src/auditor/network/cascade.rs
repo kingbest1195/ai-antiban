@@ -185,7 +185,10 @@ struct FreeIpApiResponse {
 }
 
 impl NetworkResolver {
-    pub(super) async fn cascade_via_route(&self, route: &Route) -> Result<NetworkTelemetry, String> {
+    pub(super) async fn cascade_via_route(
+        &self,
+        route: &Route,
+    ) -> Result<NetworkTelemetry, String> {
         if route.entries.is_empty() {
             return Err("route has no entry nodes".to_string());
         }

@@ -351,4 +351,3 @@ fn rebase_is_logged_without_values_and_writes_the_journal_before_the_os() {
     let calls = p.calls().join(" ");
     assert!(!calls.contains("secret-foreign-value"));
 }
-

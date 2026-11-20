@@ -84,35 +84,29 @@ pub fn get_desktop_dir(home: &Path) -> PathBuf {
 }
 
 pub fn get_claude_desktop_config_path(home: &Path) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let p = home
-            .join("Library")
-            .join("Application Support")
-            .join("Claude")
-            .join("claude_desktop_config.json");
-        if p.exists() {
-            return Some(p);
-        }
-    }
+    use crate::auditor::geo_matrix::ProviderId;
     #[cfg(target_os = "windows")]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let p = PathBuf::from(appdata)
-                .join("Claude")
-                .join("claude_desktop_config.json");
-            if p.exists() {
-                return Some(p);
-            }
-        }
-        let fallback = home
-            .join("AppData")
-            .join("Roaming")
-            .join("Claude")
-            .join("claude_desktop_config.json");
-        if fallback.exists() {
-            return Some(fallback);
+    use crate::auditor::profile_switcher::resolve_ai_app_data_dirs;
+    use crate::auditor::profile_switcher::resolve_ai_app_data_dirs_for_platform;
+
+    #[cfg(target_os = "macos")]
+    let os = "macos";
+    #[cfg(target_os = "windows")]
+    let os = "windows";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let os = "linux";
+
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+    let mut dirs =
+        resolve_ai_app_data_dirs_for_platform(ProviderId::Anthropic, os, Some(home), None, None);
+    #[cfg(target_os = "windows")]
+    for dir in resolve_ai_app_data_dirs(ProviderId::Anthropic) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
         }
     }
-    None
+
+    dirs.into_iter()
+        .map(|dir| dir.join("claude_desktop_config.json"))
+        .find(|p| p.exists())
 }

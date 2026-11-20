@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ClaudeExportResult, ClaudeLocalDataSummary, ProviderId } from "../../types";
 import { cleanAppCache, exportClaudeLocalData, scanClaudeLocalData } from "../../utils/api";
 import { writeClipboard } from "../lib/clipboard";
-import { common, toast as t } from "../copy/ru";
+import { backup as backupCopy, common, toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
 /** Бэкап и очистка данных Claude для вкладки «Бэкап». Выгрузка запускается и из трея, поэтому хук живёт в оболочке. */
@@ -81,7 +81,29 @@ export function useClaudeBackup(showToast: ShowToast) {
         const totalFiles = res.files_removed || 0;
         const mbFreed = ((res.bytes_freed || 0) / (1024 * 1024)).toFixed(1);
         const clientName = isClaude ? "Claude Desktop" : "ChatGPT Desktop";
-        showToast(t.backup.cacheCleaned(clientName), t.backup.cacheCleanedText(totalFiles, mbFreed), "success");
+        const lockedTargets = res.locked_targets ?? [];
+
+        if (lockedTargets.length > 0) {
+          showToast(
+            backupCopy.cache.lockedTitle(clientName),
+            backupCopy.cache.lockedText(clientName, lockedTargets, totalFiles),
+            "warning",
+          );
+        } else if (res.found_dir === false) {
+          showToast(
+            backupCopy.cache.notFoundTitle(clientName),
+            backupCopy.cache.notFoundText(clientName),
+            "info",
+          );
+        } else if (totalFiles === 0) {
+          showToast(
+            backupCopy.cache.alreadyCleanTitle(clientName),
+            backupCopy.cache.alreadyCleanText(clientName),
+            "info",
+          );
+        } else {
+          showToast(t.backup.cacheCleaned(clientName), t.backup.cacheCleanedText(totalFiles, mbFreed), "success");
+        }
       } catch (err: any) {
         showToast(t.backup.cacheError, err?.message || String(err), "error");
       } finally {

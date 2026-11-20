@@ -1,18 +1,17 @@
 //! Journaled application, revert, and active-policy checks for browser policy specs.
 
-use super::{
-    KEY_PROXY_MODE, KEY_PROXY_PAC_URL, PROXY_MODE_PAC_SCRIPT, PolicyApplyReport, PolicySpec,
-    PolicyStore, PolicyValue,
-    chromium::{clean_pac_url, policy_specs_with_pac, same_pac_url},
-    reconcile::{apply_browser_prefs_with_pac, detect_browser_pac_status_with},
-};
 #[cfg(test)]
 use super::chromium::MACOS_CHROMIUM_DOMAIN_NAMES;
 #[cfg(all(test, target_os = "windows"))]
 use super::chromium::WINDOWS_CHROMIUM_DOMAIN_NAMES;
 #[cfg(test)]
 use super::process::inspect_running_browsers;
-use crate::sysproxy::{Os, RealProbe, SystemProbe};
+use super::{
+    KEY_PROXY_MODE, KEY_PROXY_PAC_URL, PROXY_MODE_PAC_SCRIPT, PolicyApplyReport, PolicySpec,
+    PolicyStore, PolicyValue,
+    chromium::{clean_pac_url, policy_specs_with_pac, same_pac_url},
+    reconcile::{apply_browser_prefs_with_pac, detect_browser_pac_status_with},
+};
 use crate::sysproxy::FileCtx;
 use crate::sysproxy::journal::{ApplyOutcome, Journal, JournalError, Resource, Value};
 #[cfg(test)]
@@ -20,6 +19,7 @@ use crate::sysproxy::journal::{Outcome, RecoveryReport, ReportItem};
 #[cfg(test)]
 use crate::sysproxy::os_effects_enabled;
 use crate::sysproxy::platform::{Platform, PlatformError};
+use crate::sysproxy::{Os, RealProbe, SystemProbe};
 #[cfg(test)]
 use std::collections::BTreeMap;
 

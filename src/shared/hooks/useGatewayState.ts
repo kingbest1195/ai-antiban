@@ -76,7 +76,7 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   const [reports, setReports] = useState<Partial<Record<ProviderId, RiskReport>>>({});
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [scanLatencyMs, setScanLatencyMs] = useState<number>(38);
-  const [sysproxyActive, setSysproxyActive] = useState<boolean>(true);
+  const [sysproxyActive, setSysproxyActive] = useState<boolean>(false);
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState<boolean>(true);
   /** Текст последней ошибки аудита; сбрасывается при успешном проходе. Нужен экрану «нет сети». */
   const [auditError, setAuditError] = useState<string | null>(null);

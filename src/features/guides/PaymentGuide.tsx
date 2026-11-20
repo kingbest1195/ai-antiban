@@ -1,4 +1,5 @@
-import { Badge, Banner, Card, Row, Steps } from "../../ui";
+import { useRef } from "react";
+import { Badge, Banner, Button, Card, Row, Steps } from "../../ui";
 import type { StepItem } from "../../ui";
 import { common, guides as copy } from "../../shared/copy/ru";
 import { openExternal } from "../../utils/opener";
@@ -10,10 +11,23 @@ import { Rich } from "./Rich";
 import { VIRTUAL_CARD_PROVIDERS } from "./providers";
 import type { VirtualCardProvider } from "./providers";
 
+export interface PaymentGuideProps {
+  onOpenPaymentTools?: () => void;
+}
+
 /** Раздел «Оплата»: BIN-чекер, безналоговый адрес США, сервисы виртуальных карт и правила платежной гигиены. */
-export function PaymentGuide() {
+export function PaymentGuide({ onOpenPaymentTools }: PaymentGuideProps) {
   const { currentCountry, onToast } = useGuide();
+  const paymentToolsRef = useRef<HTMLDivElement>(null);
   const t = copy.payment;
+
+  const handleOpenPaymentTools = () => {
+    if (onOpenPaymentTools) {
+      onOpenPaymentTools();
+      return;
+    }
+    paymentToolsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const open = (card: VirtualCardProvider) => {
     openExternal(card.url);
@@ -28,13 +42,24 @@ export function PaymentGuide() {
 
   return (
     <>
-      <Banner tone="warn" icon="lock" title={t.pitchTitle}>
+      <Banner
+        tone="warn"
+        icon="lock"
+        title={t.pitchTitle}
+        action={
+          <Button size="sm" variant="secondary" onClick={handleOpenPaymentTools}>
+            {t.openPaymentTools}
+          </Button>
+        }
+      >
         {t.pitchText}
       </Banner>
 
-      <CardCheck country={currentCountry} onToast={onToast} />
+      <div ref={paymentToolsRef} className="zs-stack">
+        <CardCheck country={currentCountry} onToast={onToast} />
 
-      <AddressCard onToast={onToast} />
+        <AddressCard onToast={onToast} />
+      </div>
 
       <Card title={t.servicesTitle}>
         <p className="guides-note guides-note--tight">{t.servicesAside}</p>

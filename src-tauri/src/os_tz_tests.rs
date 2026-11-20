@@ -217,8 +217,7 @@ fn dry_run_prevents_real_os_effects_in_tests() {
 #[test]
 fn sync_writes_atomic_baseline_preserves_original_on_resync_and_restores() {
     let dir = TempDir::new().unwrap();
-    let fake =
-        FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(true));
+    let fake = FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(true));
 
     let status = sync_os_timezone_with(&fake, dir.path(), "Europe/Amsterdam").unwrap();
     assert!(status.synced);
@@ -263,8 +262,7 @@ fn sync_writes_atomic_baseline_preserves_original_on_resync_and_restores() {
 #[test]
 fn sync_refuses_sanctioned_tz_and_cleans_up_on_elevation_cancel() {
     let dir = TempDir::new().unwrap();
-    let fake =
-        FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
+    let fake = FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
 
     // Refuse syncing TO a Russian/Belarusian timezone.
     let err = sync_os_timezone_with(&fake, dir.path(), "Europe/Minsk").unwrap_err();
@@ -282,14 +280,12 @@ fn sync_refuses_sanctioned_tz_and_cleans_up_on_elevation_cancel() {
 #[test]
 fn restore_failure_preserves_baseline_for_retry_and_startup_recovery() {
     let dir = TempDir::new().unwrap();
-    let fake =
-        FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
+    let fake = FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(false));
 
     sync_os_timezone_with(&fake, dir.path(), "Europe/London").unwrap();
 
     // Simulate user cancelling restore prompt on quit / disable.
-    *fake.fail_restore.lock().unwrap() =
-        Some("OS_TZ_ELEVATION_CANCELLED: cancelled".to_string());
+    *fake.fail_restore.lock().unwrap() = Some("OS_TZ_ELEVATION_CANCELLED: cancelled".to_string());
     assert!(restore_if_synced_on_disable_with(&fake, dir.path()).is_err());
     assert!(read_baseline(dir.path()).unwrap().is_some());
 

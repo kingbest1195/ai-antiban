@@ -70,11 +70,8 @@ impl ProxyServer {
         match resolution {
             Ok(Ok(HoldResolution::Allow)) => {
                 if self.guard.is_manual_killswitch() {
-                    return send_forbidden(
-                        client,
-                        "Network kill-switch is engaged in Zastava.",
-                    )
-                    .await;
+                    return send_forbidden(client, "Network kill-switch is engaged in Zastava.")
+                        .await;
                 }
                 let entry = IpHistoryEntry::new(
                     report.telemetry.ip.clone(),
@@ -133,9 +130,7 @@ impl ProxyServer {
                 let now_allowed = self.guard.restore_epoch() != hold_epoch
                     || st_now.is_provider_disabled(provider.as_str())
                     || crate::routing::select_route_id(&st_now, provider.as_str()).is_some()
-                    || st_now
-                        .session_allowed_providers
-                        .contains(provider.as_str())
+                    || st_now.session_allowed_providers.contains(provider.as_str())
                     || crate::proxy::guard::report_allowed_for_state(
                         report,
                         &st_now,
@@ -175,9 +170,7 @@ impl ProxyServer {
                 let provider_disabled = st_now.is_provider_disabled(provider.as_str());
                 let provider_routed =
                     crate::routing::select_route_id(&st_now, provider.as_str()).is_some();
-                let session_allowed = st_now
-                    .session_allowed_providers
-                    .contains(provider.as_str());
+                let session_allowed = st_now.session_allowed_providers.contains(provider.as_str());
                 let now_allowed = epoch_changed
                     || provider_disabled
                     || provider_routed
@@ -228,10 +221,8 @@ impl ProxyServer {
                     .await;
                 if timed_out_active
                     || (!session_allowed
-                        && !st_now.is_ip_trusted_for_provider(
-                            provider.as_str(),
-                            &report.telemetry.ip,
-                        ))
+                        && !st_now
+                            .is_ip_trusted_for_provider(provider.as_str(), &report.telemetry.ip))
                 {
                     let _ = self.state.block_provider(provider.as_str()).await;
                     self.guard.sync_gates_with_state(&self.state).await;

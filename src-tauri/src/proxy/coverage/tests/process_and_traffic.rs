@@ -395,4 +395,3 @@ fn stale_confirmation_without_a_readable_fact_is_unknown() {
     assert!(claude.installed);
     assert_eq!(claude.ai_requests, 1);
 }
-

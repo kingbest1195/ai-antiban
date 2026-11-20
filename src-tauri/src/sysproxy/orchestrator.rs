@@ -128,7 +128,6 @@ pub(crate) fn real_user_env(name: &str) -> Option<String> {
     platform::RealPlatform.get_user_env(name).ok().flatten()
 }
 
-
 /// Runs `f` on the journal and the user's files (real home). Same gates as [`with_journal`].
 pub(crate) fn with_files<T>(
     what: &str,
@@ -291,7 +290,6 @@ pub fn run_cleanup_cli() -> i32 {
     }
 }
 
-
 /// Enables systemic PAC proxy with the given PAC URL (e.g. "http://127.0.0.1:8899/proxy.pac").
 /// Every touched setting is recorded in the journal first; when a VPN holds temporary DNS on
 /// macOS, `networksetup` PAC writes are gracefully deferred (`os_pac_deferred = true`) while
@@ -393,7 +391,6 @@ pub fn reapply_browser_policies(pac_url: Option<&str>) -> Result<PolicyApplyRepo
     }
 }
 
-
 /// The refresh pass, run inside the `OS_OPS` lock. The flag is read here, under the lock: a
 /// switch-off that already cleared it (before its restore) wins, and the PAC is not put back.
 pub(super) fn refresh_with(
@@ -445,7 +442,6 @@ fn enable_system_proxy(
     }
 }
 
-
 /// Returns whether systemic PAC proxy is currently active.
 pub fn is_sysproxy_active() -> bool {
     state().sys_proxy_active()
@@ -473,4 +469,3 @@ pub fn refresh_if_services_changed() -> bool {
         Run::Failed(_) | Run::Blocked => false,
     }
 }
-

@@ -139,27 +139,14 @@ fn windows_detect_browser_pac_status_uses_hkcu_policies_and_wininet() {
         &edge_prefs,
         r#"{"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac"}}"#,
     );
-    let s0 = detect_browser_pac_status_with(
-        Some(&ctx),
-        Os::Windows,
-        &probe,
-        Some(pac),
-        &*store,
-        &plat,
-    );
+    let s0 =
+        detect_browser_pac_status_with(Some(&ctx), Os::Windows, &probe, Some(pac), &*store, &plat);
     assert!(s0.browsers_pac_active.is_empty());
     assert!(s0.browsers_needing_restart.is_empty());
 
     // When only WinINet AutoConfigURL matches, WinINet is reported.
     plat.seed_inet("AutoConfigURL", RegValue::sz(pac));
-    let s1 = detect_browser_pac_status_with(
-        None,
-        Os::Windows,
-        &probe,
-        Some(pac),
-        &*store,
-        &plat,
-    );
+    let s1 = detect_browser_pac_status_with(None, Os::Windows, &probe, Some(pac), &*store, &plat);
     assert_eq!(
         s1.browsers_pac_active,
         vec!["Windows Internet Settings (WinINet)".to_string()]
@@ -180,14 +167,8 @@ fn windows_detect_browser_pac_status_uses_hkcu_policies_and_wininet() {
     assert_eq!(rep.failed, 0);
 
     plat.seed_inet("AutoConfigURL", RegValue::sz(""));
-    let s2 = detect_browser_pac_status_with(
-        Some(&ctx),
-        Os::Windows,
-        &probe,
-        Some(pac),
-        &*store,
-        &plat,
-    );
+    let s2 =
+        detect_browser_pac_status_with(Some(&ctx), Os::Windows, &probe, Some(pac), &*store, &plat);
     assert_eq!(
         s2.browsers_pac_active,
         vec!["Microsoft Edge".to_string(), "Yandex Browser".to_string()]

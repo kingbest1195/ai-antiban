@@ -110,14 +110,9 @@ async fn browser_extension_connect_and_ws_tunnel_for_ai_apis_succeeds() {
         state.allow_provider_for_session(p).await.unwrap();
     }
     let server = Arc::new(
-        ProxyServer::bind_ephemeral(
-            auditor,
-            state,
-            Arc::new(HoldQueue::new()),
-            Some(echo_addr),
-        )
-        .await
-        .expect("bind"),
+        ProxyServer::bind_ephemeral(auditor, state, Arc::new(HoldQueue::new()), Some(echo_addr))
+            .await
+            .expect("bind"),
     );
     let addr = server.bound_addr;
     let srv = Arc::clone(&server);
@@ -344,4 +339,3 @@ fn report_allowed_for_state_allows_yellow_and_trusted_exceptions_without_blockin
         false
     ));
 }
-

@@ -151,3 +151,95 @@ fn report_fixture() -> RiskReport {
     }
 }
 
+#[test]
+fn bug3_via_zastava_key_dns_scoring_respects_all_preconditions() {
+    use crate::auditor::leaks::{
+        AuditProtectionContext, evaluate_dns_resolver_for_route_with_protection,
+    };
+    use crate::auditor::probes::whoami::{
+        ResolverView, evaluate_dns_country_for_route_with_protection,
+    };
+
+    let ru_view = ResolverView::Located {
+        ip: "77.88.8.8".parse().unwrap(),
+        country: "RU".to_string(),
+        public_service: None,
+        sources: vec![],
+    };
+    let os_ru_cfg = CheckResult::warning(
+        "DNS_DOMESTIC_WARNING",
+        "В системном DNS обнаружен провайдер РФ",
+        Some(crate::auditor::geo_matrix::GUIDE_OS_NETWORK.to_string()),
+    );
+
+    let healthy = AuditProtectionContext {
+        route_usable: true,
+        sysproxy_active: true,
+        cli_or_sandbox_protection_active: false,
+        os_pac_deferred: false,
+    };
+    let dns_ok = evaluate_dns_resolver_for_route_with_protection(
+        os_ru_cfg.clone(),
+        &ru_view,
+        "NL",
+        true,
+        healthy,
+    );
+    let country_ok = evaluate_dns_country_for_route_with_protection(&ru_view, "NL", true, healthy);
+    assert_eq!(dns_ok.code, "DNS_KEY_REMOTE_RESOLVE");
+    assert_eq!(country_ok.code, "DNS_KEY_REMOTE_RESOLVE");
+
+    let verdict_ok = score_checks(&all_checks(&[(6, dns_ok), (10, country_ok)]), false);
+    assert_eq!(verdict_ok.overall_status, OverallStatus::Green);
+    assert!(
+        verdict_ok.trust_score >= 95,
+        "got {}",
+        verdict_ok.trust_score
+    );
+
+    // Any failed precondition or Direct mode preserves Warning (-15 penalty per check).
+    let failure_modes = [
+        (
+            true,
+            AuditProtectionContext {
+                route_usable: false,
+                ..healthy
+            },
+        ),
+        (
+            true,
+            AuditProtectionContext {
+                sysproxy_active: false,
+                cli_or_sandbox_protection_active: false,
+                os_pac_deferred: false,
+                route_usable: true,
+            },
+        ),
+        (
+            true,
+            AuditProtectionContext {
+                os_pac_deferred: true,
+                ..healthy
+            },
+        ),
+        (false, healthy),
+    ];
+
+    for (via_key, ctx) in failure_modes {
+        let dns_warn = evaluate_dns_resolver_for_route_with_protection(
+            os_ru_cfg.clone(),
+            &ru_view,
+            "NL",
+            via_key,
+            ctx,
+        );
+        let country_warn =
+            evaluate_dns_country_for_route_with_protection(&ru_view, "NL", via_key, ctx);
+        assert_eq!(dns_warn.status, CheckStatus::Warning);
+        assert_eq!(country_warn.status, CheckStatus::Warning);
+
+        let verdict_warn = score_checks(&all_checks(&[(6, dns_warn), (10, country_warn)]), false);
+        assert_eq!(verdict_warn.overall_status, OverallStatus::Yellow);
+        assert_eq!(verdict_warn.trust_score, 70);
+    }
+}

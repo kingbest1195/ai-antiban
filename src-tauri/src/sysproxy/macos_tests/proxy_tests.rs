@@ -507,4 +507,3 @@ fn an_unreadable_bypass_list_does_not_stop_the_chain() {
     assert_eq!(p.chain_of(&wifi()).http.enabled, Some(false));
     assert!(j.entry(&Resource::Bypass { service: wifi() }).is_none());
 }
-

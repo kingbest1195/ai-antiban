@@ -98,7 +98,8 @@ async fn hosting_is_ok_and_costs_nothing() {
         (CheckStatus::Ok, "IP_TYPE_HOSTING")
     );
     assert!(
-        r.message.starts_with("Datacenter / VPS IP (не резидентский)"),
+        r.message
+            .starts_with("Datacenter / VPS IP (не резидентский)"),
         "{}",
         r.message
     );

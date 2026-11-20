@@ -3,11 +3,14 @@ import {
   Activity,
   ArrowRight,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleHelp,
   Copy,
   Download,
   Ellipsis,
+  Eye,
+  EyeOff,
   Folder,
   Globe,
   Info,
@@ -23,14 +26,17 @@ import {
 } from "lucide-react";
 import { cx } from "./cx";
 
-/** 19 иконок ДС (design/zastava-ds/icons) → имена lucide-react. */
+/** 22 иконки ДС (design/zastava-ds/icons) → имена lucide-react. */
 export const ICONS = {
   alert: TriangleAlert,
   arrow: ArrowRight,
+  back: ChevronLeft,
   check: Check,
   chev: ChevronRight,
   copy: Copy,
   download: Download,
+  eye: Eye,
+  eyeOff: EyeOff,
   folder: Folder,
   globe: Globe,
   help: CircleHelp,

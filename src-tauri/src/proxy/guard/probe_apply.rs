@@ -106,7 +106,12 @@ impl NetworkGuard {
         };
 
         let needs_reaudit = std::mem::take(&mut inner.needs_reaudit);
-        if inner.pending.as_ref().is_some_and(|p| p.target_ip == new_ip) && !needs_reaudit {
+        if inner
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.target_ip == new_ip)
+            && !needs_reaudit
+        {
             let st = env.state.get_data().await;
             self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
             return;
@@ -126,7 +131,10 @@ impl NetworkGuard {
             .map(|b| (b.ip.clone(), b.trusted, b.country.clone()))
             && baseline_ip == new_ip
         {
-            let pending_other_ip = inner.pending.as_ref().is_some_and(|p| p.target_ip != new_ip);
+            let pending_other_ip = inner
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.target_ip != new_ip);
             let observed_other_ip = prev_observed_ip
                 .as_deref()
                 .is_some_and(|prev| prev != new_ip.as_str());
@@ -266,9 +274,7 @@ impl NetworkGuard {
                 .await
                 .ok()
                 .map(|t| t.country_code);
-            let country_ok = country
-                .as_deref()
-                .is_some_and(|c| !is_blocked_geo_code(c));
+            let country_ok = country.as_deref().is_some_and(|c| !is_blocked_geo_code(c));
             let trusted = matches_pinned || matches_exception || country_ok;
             inner.baseline = Some(Baseline {
                 ip: ip.clone(),
@@ -328,5 +334,4 @@ impl NetworkGuard {
 
         self.handle_change_locked(env, inner, ip, t0).await;
     }
-
 }

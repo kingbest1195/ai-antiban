@@ -195,4 +195,3 @@ pub fn parse_reg_sz(output: &str, value_name: &str) -> Option<String> {
     }
     None
 }
-

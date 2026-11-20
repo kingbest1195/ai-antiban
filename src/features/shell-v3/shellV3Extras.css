@@ -1,0 +1,183 @@
+/* Стопка уведомлений (без backdrop-filter: blur), sales-карточки, WhatsNewSheet — только токены. */
+
+.zs-v3-notes {
+  position: fixed;
+  z-index: 45;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: calc(100% - 32px);
+  max-width: 428px;
+  pointer-events: none;
+}
+.zs-v3-notes__stack {
+  position: relative;
+  pointer-events: auto;
+}
+.zs-v3-notes__stack.has-more {
+  cursor: pointer;
+  margin-top: 16px;
+}
+.zs-v3-notes__stack .zs-toast {
+  position: relative;
+  z-index: 2;
+  max-width: none;
+  border: 1px solid var(--line);
+}
+.zs-v3-notes__ghost {
+  position: absolute;
+  z-index: 1;
+  left: calc(var(--i) * 10px);
+  right: calc(var(--i) * 10px);
+  top: calc(var(--i) * -8px);
+  height: 48px;
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  opacity: calc(1 - var(--i) * 0.35);
+}
+.zs-v3-notes__more {
+  position: absolute;
+  z-index: 3;
+  top: -11px;
+  right: 12px;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.zs-v3-notes-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 44;
+  background: color-mix(in srgb, var(--bg-0) 72%, transparent);
+}
+.zs-v3-notes.is-open {
+  pointer-events: auto;
+  max-height: min(60vh, 440px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-2) var(--space-2);
+  border-radius: var(--radius-lg);
+  background: var(--bg-1);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-pop);
+}
+.zs-v3-notes__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 calc(var(--space-2) * -1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+}
+.zs-v3-notes__title {
+  margin-right: auto;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.zs-v3-notes__chip {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-pill);
+  background: var(--bg-3);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.zs-v3-notes__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.zs-v3-notes__list .zs-toast {
+  max-width: none;
+  border: 1px solid var(--line);
+}
+
+/* Sales cards (ConnectScreen layout="sales") */
+.zs-sale {
+  border: 1px solid var(--line-strong);
+}
+.zs-sale--key {
+  border-color: color-mix(in srgb, var(--brand) 55%, transparent);
+  background: color-mix(in srgb, var(--brand-soft) 45%, var(--bg-1));
+}
+.zs-sale__list {
+  margin: 0 0 var(--space-3);
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--ink);
+}
+.zs-sale__list li {
+  display: flex;
+  gap: var(--space-2);
+}
+.zs-sale__list li::before {
+  content: "✓";
+  flex: none;
+  color: var(--brand-text);
+  font-weight: 700;
+}
+
+.zs-v3-muted {
+  filter: grayscale(1);
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+.zs-v3-muted:hover,
+.zs-v3-muted:focus-within {
+  opacity: 0.85;
+}
+
+/* WhatsNewSheet */
+.zs-v3-whatsnew {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.zs-v3-whatsnew__card {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+}
+.zs-v3-whatsnew__title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.zs-v3-whatsnew__text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--ink-2);
+}
+.zs-v3-whatsnew__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}

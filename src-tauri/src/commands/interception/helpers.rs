@@ -171,23 +171,15 @@ pub(super) async fn resolve_interception_with_params(
                     .await?;
             } else {
                 for p in &targets {
-                    let (tel_opt, ip_opt) = resolve_provider_telemetry_for_allow(
-                        id,
-                        p,
-                        state,
-                        auditor,
-                        proxy_manager,
-                    )
-                    .await;
+                    let (tel_opt, ip_opt) =
+                        resolve_provider_telemetry_for_allow(id, p, state, auditor, proxy_manager)
+                            .await;
                     state
                         .allow_provider_for_session(p)
                         .await
                         .map_err(|e| e.to_string())?;
                     if !proxy_manager.guard.is_manual_killswitch() {
-                        state
-                            .unblock_provider(p)
-                            .await
-                            .map_err(|e| e.to_string())?;
+                        state.unblock_provider(p).await.map_err(|e| e.to_string())?;
                     }
                     if let Some(ip) = ip_opt
                         && !ip.trim().is_empty()
@@ -342,9 +334,8 @@ pub(crate) async fn toggle_or_clear_stop_core(
         }
         None => {
             let st = state.get_data().await;
-            let has_any_stop = is_manual
-                || guard.any_provider_gate_closed()
-                || !st.blocked_providers.is_empty();
+            let has_any_stop =
+                is_manual || guard.any_provider_gate_closed() || !st.blocked_providers.is_empty();
             if has_any_stop {
                 if is_manual {
                     let frozen = guard.set_manual_killswitch(false, state).await;

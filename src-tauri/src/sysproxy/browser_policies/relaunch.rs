@@ -7,11 +7,11 @@ use super::{
     process::inspect_running_browsers,
     reconcile::{apply_browser_prefs_for_browser, detect_browser_pac_status_in},
 };
-use crate::sysproxy::{Os, SystemProbe};
 use crate::sysproxy::FileCtx;
 use crate::sysproxy::journal::Journal;
 use crate::sysproxy::platform::Platform;
 use crate::sysproxy::relaunch::{AppLauncher, QuitTiming};
+use crate::sysproxy::{Os, SystemProbe};
 use std::time::{Duration, Instant};
 
 fn is_osascript_permission_denied(stderr: &str) -> bool {

@@ -59,7 +59,10 @@ pub(super) async fn send_status(
     client.flush().await
 }
 
-pub(super) async fn send_bad_gateway(client: &mut TcpStream, reason: &str) -> Result<(), std::io::Error> {
+pub(super) async fn send_bad_gateway(
+    client: &mut TcpStream,
+    reason: &str,
+) -> Result<(), std::io::Error> {
     let resp = format!(
         "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         reason.len(),
@@ -93,7 +96,10 @@ pub(super) async fn send_canary_protected(client: &mut TcpStream) -> Result<(), 
     client.flush().await
 }
 
-pub(super) async fn send_forbidden(client: &mut TcpStream, reason: &str) -> Result<(), std::io::Error> {
+pub(super) async fn send_forbidden(
+    client: &mut TcpStream,
+    reason: &str,
+) -> Result<(), std::io::Error> {
     let resp = format!(
         "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         reason.len(),

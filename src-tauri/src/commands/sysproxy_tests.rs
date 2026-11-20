@@ -80,8 +80,14 @@ Wireless LAN adapter Wi-Fi:
     assert!(!joined.contains("Ethernet adapter Ethernet"), "{joined}");
     assert!(joined.contains("198.18.0.2"), "{joined}");
     assert!(joined.contains("1.1.1.1"), "{joined}");
-    assert!(!joined.contains("172.19.0.1"), "must not leak host IP: {joined}");
-    assert!(!joined.contains("192.168.1.42"), "must not leak host IP: {joined}");
+    assert!(
+        !joined.contains("172.19.0.1"),
+        "must not leak host IP: {joined}"
+    );
+    assert!(
+        !joined.contains("192.168.1.42"),
+        "must not leak host IP: {joined}"
+    );
 
     // Localized Russian Windows output
     let ru_sample = "\
@@ -95,7 +101,10 @@ Wireless LAN adapter Wi-Fi:
 ";
     let ru_lines = parse_windows_ipconfig_snapshot(ru_sample);
     let ru_joined = ru_lines.join("\n");
-    assert!(ru_joined.contains("Неизвестный адаптер Happ"), "{ru_joined}");
+    assert!(
+        ru_joined.contains("Неизвестный адаптер Happ"),
+        "{ru_joined}"
+    );
     assert!(ru_joined.contains("TUN/VPN"), "{ru_joined}");
     assert!(ru_joined.contains("198.18.0.2"), "{ru_joined}");
     assert!(!ru_joined.contains("10.0.0.2"), "{ru_joined}");

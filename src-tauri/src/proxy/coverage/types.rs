@@ -251,4 +251,3 @@ pub(super) fn steps_of(keys: &[&str]) -> Vec<String> {
 
 /// Text when Antigravity runs but nothing of it reached the gateway.
 pub const ANTIGRAVITY_BYPASS_DETAIL: &str = "Запросы Antigravity, похоже, идут мимо Заставы";
-

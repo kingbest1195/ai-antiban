@@ -5,7 +5,6 @@ use crate::sysproxy::platform::ServiceId;
 use std::path::Path;
 use std::sync::Arc;
 
-
 pub(super) const DIR: &str = "/data";
 
 pub(super) fn open(fs: &FakeFs) -> Journal {
@@ -24,7 +23,6 @@ pub(super) fn env_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-
-mod restore_tests;
 mod migration_tests;
+mod restore_tests;
 mod vpn_tests;

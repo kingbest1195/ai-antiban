@@ -102,8 +102,11 @@ fn browser_pac_policy_active_ignores_plist_only_and_detects_preferences_and_flag
         KEY_PROXY_MODE,
         PolicyValue::Sz(PROXY_MODE_PAC_SCRIPT.into()),
     );
-    rig.policy_store
-        .preset(win_domain, KEY_PROXY_PAC_URL, PolicyValue::Sz(OUR_PAC.into()));
+    rig.policy_store.preset(
+        win_domain,
+        KEY_PROXY_PAC_URL,
+        PolicyValue::Sz(OUR_PAC.into()),
+    );
     rig.platform.seed_inet("AutoConfigURL", RegValue::sz(""));
     let win_snap = win_tracker.snapshot(&rig.env(PacSource::Inet, false), true);
     assert!(win_snap.browser_pac_policy_active);
@@ -298,7 +301,9 @@ fn opencode_in_ai_only_is_off_with_bypass_suspected_even_with_service_json() {
 fn opencode_in_global_terminal_is_configured_and_traffic_confirms() {
     let rig = Rig::new();
     let bin = home().join(".opencode").join("bin").join("opencode");
-    rig.fs.create_private_dir_all(bin.parent().unwrap()).unwrap();
+    rig.fs
+        .create_private_dir_all(bin.parent().unwrap())
+        .unwrap();
     rig.fs.put(&bin, b"#!/bin/sh\n", 0o755);
 
     let (_, t) = tracker(FakeProbe::failing());

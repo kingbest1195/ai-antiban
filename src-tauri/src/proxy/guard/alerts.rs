@@ -13,9 +13,7 @@ use crate::proxy::hold_queue::{
 
 use super::audit_summary::AuditSummary;
 use super::policy::{network_change, now_unix_ms, resolve_gate_reason_with_cooldown};
-use super::types::{
-    ALL_PROVIDERS, AuditResults, Baseline, Env, Inner, NetworkGuard, Pending,
-};
+use super::types::{ALL_PROVIDERS, AuditResults, Baseline, Env, Inner, NetworkGuard, Pending};
 
 impl NetworkGuard {
     #[allow(clippy::too_many_arguments)]
@@ -343,5 +341,4 @@ impl NetworkGuard {
         )
         .await;
     }
-
 }

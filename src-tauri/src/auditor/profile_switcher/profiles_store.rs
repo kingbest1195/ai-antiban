@@ -207,8 +207,9 @@ fn switch_claude_profile_in_locked(
         let now = current_timestamp();
         storage.profiles[target_idx].last_used_at = now;
         if storage.profiles[target_idx].bound_route_id.is_none() {
-            storage.profiles[target_idx].bound_route_id =
-                resolve_route_id_for_key(storage.profiles[target_idx].bound_upstream_key.as_deref());
+            storage.profiles[target_idx].bound_route_id = resolve_route_id_for_key(
+                storage.profiles[target_idx].bound_upstream_key.as_deref(),
+            );
         }
         let active_profile = storage.profiles[target_idx].clone();
         save_storage_in(storage_dir, &storage)?;

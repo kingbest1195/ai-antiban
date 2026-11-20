@@ -158,7 +158,9 @@ impl NetworkGuard {
                     .get(p)
                     .is_some_and(|r| is_pinned_transient_unknown_geo(r, &st_before, false))
         };
-        let has_transient_pinned = newly_affected.iter().any(|p| is_transient_pinned_failure(p));
+        let has_transient_pinned = newly_affected
+            .iter()
+            .any(|p| is_transient_pinned_failure(p));
         let newly_affected: Vec<&'static str> = newly_affected
             .into_iter()
             .filter(|p| !is_transient_pinned_failure(p))
@@ -274,7 +276,12 @@ impl NetworkGuard {
     /// Background verification spawned immediately after instant auto-recovery onto a verified
     /// baseline or pinned/excepted IP. Updates tray & Direct IP history; only re-blocks if a real
     /// non-travel critical violation (`Ok(Red)`) is reported for the restored network.
-    pub(super) fn spawn_verify_restored_baseline(self: &Arc<Self>, env: &Env, ip: String, epoch: u64) {
+    pub(super) fn spawn_verify_restored_baseline(
+        self: &Arc<Self>,
+        env: &Env,
+        ip: String,
+        epoch: u64,
+    ) {
         let guard = Arc::clone(self);
         let env = env.clone();
         tokio::spawn(async move {
@@ -333,7 +340,10 @@ impl NetworkGuard {
                         .get(p)
                         .is_some_and(|r| is_pinned_transient_unknown_geo(r, &st, false))
             };
-            let any_transient_pinned = summary.affected_providers.iter().any(|p| is_transient_pinned(p));
+            let any_transient_pinned = summary
+                .affected_providers
+                .iter()
+                .any(|p| is_transient_pinned(p));
             let real_violations: Vec<&'static str> = summary
                 .affected_providers
                 .iter()

@@ -11,11 +11,11 @@ mod task_xml;
 #[cfg(target_os = "windows")]
 mod windows;
 
-#[cfg_attr(not(any(target_os = "windows", test)), allow(unused_imports))]
-use elevate::write_install_error_file;
 #[cfg(test)]
 #[allow(unused_imports)]
 use elevate::read_install_error_file;
+#[cfg_attr(not(any(target_os = "windows", test)), allow(unused_imports))]
+use elevate::write_install_error_file;
 use serde::{Deserialize, Serialize};
 
 pub use elevate::{build_elevated_cli_params, parse_install_cli_args};

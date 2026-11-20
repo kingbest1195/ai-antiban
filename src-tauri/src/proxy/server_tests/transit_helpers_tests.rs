@@ -102,7 +102,9 @@ pub(super) async fn read_request(s: &mut TcpStream) -> Vec<u8> {
 }
 
 /// Fake origin / upstream HTTP server: records each request it fully received and answers `body`.
-pub(super) async fn spawn_http_server(body: &'static str) -> (SocketAddr, Arc<Mutex<Vec<Vec<u8>>>>) {
+pub(super) async fn spawn_http_server(
+    body: &'static str,
+) -> (SocketAddr, Arc<Mutex<Vec<Vec<u8>>>>) {
     let l = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
     let addr = l.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -245,4 +247,3 @@ pub(super) fn last_request(seen: &Arc<Mutex<Vec<Vec<u8>>>>) -> String {
     String::from_utf8_lossy(seen.lock().unwrap().last().expect("origin got no request"))
         .into_owned()
 }
-

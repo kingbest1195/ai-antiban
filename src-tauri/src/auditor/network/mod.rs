@@ -35,8 +35,7 @@ pub const CACHE_TTL_SECONDS: u64 = 15;
 pub const REQUEST_TIMEOUT_MS: u64 = 3500;
 
 /// Neutral browser-like User-Agent for telemetry and exit probes (never identifies Zastava).
-pub const NEUTRAL_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+pub const NEUTRAL_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub const SUSPICIOUS_ANONYMIZER_MARKERS: &[&str] = &[
     "tor-exit",
@@ -187,7 +186,7 @@ pub fn evaluate_dns_country_consistency(
                 format!(
                     "Обнаружен рассинхрон юрисдикций: выходной IP находится в {exit_country}, а вторичный резолвер сообщает о локации {sec}. Это может указывать на утечку DNS или прозрачный DNS-прокси."
                 ),
-                Some(crate::auditor::geo_matrix::GUIDE_OS_PRIVACY.to_string()),
+                Some(crate::auditor::geo_matrix::GUIDE_OS_NETWORK.to_string()),
             );
         }
     }

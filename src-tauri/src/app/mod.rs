@@ -17,7 +17,10 @@ use deep_links::{
 };
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
-use watchers::{spawn_cowork_guard_watcher, spawn_tray_status_watcher, spawn_update_checker};
+use watchers::{
+    spawn_bunker_scheduler, spawn_cowork_guard_watcher, spawn_tray_status_watcher,
+    spawn_update_checker,
+};
 
 pub fn run() {
     tauri::Builder::default()
@@ -69,6 +72,7 @@ pub fn run() {
             spawn_tray_status_watcher(app, &risk_auditor, &app_state, guard_for_watcher.clone());
             spawn_update_checker(app, &app_state);
             spawn_cowork_guard_watcher(app);
+            spawn_bunker_scheduler(app, &app_state);
 
             // Window starts hidden (`visible: false` in tauri.conf.json) so `--minimized`
             // keeps Zastava strictly in the tray; show it on interactive launches.
@@ -204,7 +208,30 @@ pub fn run() {
             commands::coverage::reapply_browser_policies_cmd,
             commands::coverage::relaunch_browsers_with_pac_cmd,
             commands::restart_app::restart_app_with_gateway,
-            commands::deeplink::take_pending_deep_link
+            commands::deeplink::take_pending_deep_link,
+            commands::clean_room::run_clean_room_audit,
+            commands::clean_room::discover_clean_browsers,
+            commands::clean_room::list_clean_profiles,
+            commands::clean_room::create_clean_profile,
+            commands::clean_room::update_clean_profile_step,
+            commands::clean_room::start_clean_profile_warmup,
+            commands::clean_room::launch_clean_browser,
+            commands::clean_room::mark_clean_profile_tainted,
+            commands::clean_room::delete_clean_profile,
+            commands::clean_room::mark_ip_tainted,
+            commands::state_v3::complete_onboarding_v3,
+            commands::state_v3::mark_whats_new_v3_seen,
+            commands::state_v3::dismiss_hint,
+            commands::state_v3::reset_dismissed_hints,
+            commands::bunker::get_bunker_status,
+            commands::bunker::update_bunker_settings,
+            commands::bunker::run_bunker_backup_now,
+            commands::bunker::list_bunker_snapshots,
+            commands::bunker::open_bunker_folder,
+            commands::bunker::convert_web_export,
+            commands::bunker::generate_bunker_restore_prompt,
+            commands::sos::get_persona_risk_report,
+            commands::sos::update_persona_self_check
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -257,6 +284,8 @@ fn init_services(
     let bin_checker = bin_checker::BinChecker::new();
     app.manage(bin_checker);
 
+    app.manage(crate::clean_room::browser_sandbox::SandboxProcessRegistry::new());
+
     Ok((app_state, risk_auditor))
 }
 
@@ -283,11 +312,7 @@ fn start_proxy(
 }
 
 /// Protection is ON by default: route AI domains through the local interceptor.
-fn enable_default_protection(
-    app: &tauri::AppHandle,
-    app_state: &state::AppState,
-    pac_url: &str,
-) {
+fn enable_default_protection(app: &tauri::AppHandle, app_state: &state::AppState, pac_url: &str) {
     match sysproxy::enable_sysproxy(pac_url) {
         Ok(status) => println!(
             "Застава: сетевой контроль включен ({} сетевых служб)",

@@ -7,12 +7,13 @@ mod persistence;
 mod pinning;
 mod routes;
 mod schema;
+mod schema_v3;
 mod settings;
 mod stats;
 
-use std::path::PathBuf;
 #[cfg(test)]
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 
@@ -23,10 +24,12 @@ use crate::routing::{DIRECT_ROUTE_ID, RouteSelection, select_route, select_route
 pub use persistence::init_app_state;
 pub use pinning::{ip_history_key_for_selection, ip_history_scope_key};
 pub use schema::{
-    AppStateData, CURRENT_SCHEMA_VERSION, CliMode, DEFAULT_IP_CHANGE_COOLDOWN_SECS,
-    InterceptionBehavior, IpHistoryEntry, KNOWN_PROVIDERS, MAX_HISTORY_ENTRIES_PER_PROVIDER,
-    PROVIDER_ANTHROPIC, PROVIDER_GEMINI, PROVIDER_OPENAI, PopupPosition, STATE_FILE_NAME,
-    STATE_V1_BACKUP_NAME, StateError, UpstreamProxyConfig,
+    AppStateData, BunkerSettings, CURRENT_SCHEMA_VERSION, CleanProfileStatus, CleanRoomProfile,
+    CleanRoomState, CliMode, DEFAULT_BUNKER_INTERVAL_HOURS, DEFAULT_BUNKER_RETENTION_COUNT,
+    DEFAULT_IP_CHANGE_COOLDOWN_SECS, InterceptionBehavior, IpHistoryEntry, KNOWN_PROVIDERS,
+    MAX_HISTORY_ENTRIES_PER_PROVIDER, PROVIDER_ANTHROPIC, PROVIDER_GEMINI, PROVIDER_OPENAI,
+    PersonaSelfCheck, PopupPosition, STATE_FILE_NAME, STATE_V1_BACKUP_NAME, STATE_V2_BACKUP_NAME,
+    StateError, UpstreamProxyConfig,
 };
 pub use stats::{GatewayStatsSnapshot, GatewayStatsTracker, RecentGatewayEvent, TunnelGuard};
 

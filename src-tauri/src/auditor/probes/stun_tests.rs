@@ -203,8 +203,7 @@ async fn unreachable_servers_are_a_network_error_unknown() {
 
 #[tokio::test]
 async fn one_silent_server_does_not_hide_the_answer_of_the_other() {
-    let udp =
-        FakeUdp::new().with_server(SERVERS[1].addr, echoing(Ipv4Addr::new(203, 0, 113, 9)));
+    let udp = FakeUdp::new().with_server(SERVERS[1].addr, echoing(Ipv4Addr::new(203, 0, 113, 9)));
     let ok = check(&udp, "203.0.113.9").await;
     assert_eq!(ok.status, CheckStatus::Ok);
     assert_eq!(ok.measured_via.as_deref(), Some("stun:google"));
@@ -292,8 +291,7 @@ fn route_via_zastava_key_allows_foreign_vpn_udp_or_blocked_udp_but_warns_on_ru()
     ];
 
     // Direct mode still flags HTTP (FR key) vs UDP (UK VPN) mismatch.
-    let direct =
-        evaluate_udp_stun_for_route(&foreign_answers, "136.244.114.42", false, Some("GB"));
+    let direct = evaluate_udp_stun_for_route(&foreign_answers, "136.244.114.42", false, Some("GB"));
     assert_eq!(direct.status, CheckStatus::Warning);
     assert_eq!(direct.code, "UDP_STUN_MISMATCH");
 
@@ -315,8 +313,21 @@ fn route_via_zastava_key_allows_foreign_vpn_udp_or_blocked_udp_but_warns_on_ru()
 
     // Sanctioned UDP country (e.g. RU) still produces Warning even with Zastava key.
     let ru_answers = [(&SERVERS[0], ServerAnswer::Addr(Ipv4Addr::new(5, 8, 8, 8)))];
-    let routed_ru =
-        evaluate_udp_stun_for_route(&ru_answers, "136.244.114.42", true, Some("RU"));
+    let routed_ru = evaluate_udp_stun_for_route(&ru_answers, "136.244.114.42", true, Some("RU"));
     assert_eq!(routed_ru.status, CheckStatus::Warning);
     assert_eq!(routed_ru.code, "UDP_STUN_MISMATCH");
+    assert_eq!(
+        routed_ru.guide_ref.as_deref(),
+        Some(crate::auditor::geo_matrix::GUIDE_OS_NETWORK)
+    );
+}
+
+#[tokio::test]
+async fn bug2_udp_stun_mismatch_points_to_guide_os_network() {
+    use crate::auditor::geo_matrix::GUIDE_OS_NETWORK;
+
+    let udp = both(Ipv4Addr::new(198, 51, 100, 77));
+    let r = check(&udp, "203.0.113.9").await;
+    assert_eq!(r.code, "UDP_STUN_MISMATCH");
+    assert_eq!(r.guide_ref.as_deref(), Some(GUIDE_OS_NETWORK));
 }

@@ -100,7 +100,9 @@ fn collect_macos_claude_pids() -> Vec<String> {
         vec!["-f", "Claude\\.app/Contents/"],
         vec!["-x", "ShipIt"],
     ] {
-        if let Ok(out) = crate::sysproxy::silent_command("pgrep").args(&args).output()
+        if let Ok(out) = crate::sysproxy::silent_command("pgrep")
+            .args(&args)
+            .output()
             && out.status.success()
         {
             for line in String::from_utf8_lossy(&out.stdout).lines() {

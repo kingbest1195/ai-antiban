@@ -78,7 +78,6 @@ pub fn spawn_signal_cleanup_watcher() {
     });
 }
 
-
 fn cleanup_os_and_policies_pass() -> RecoveryReport {
     match with_journal("ownership_cleanup", |j, p| {
         // The PAC flag goes down before the restore, under the same lock (see `restore_pass`).
@@ -187,15 +186,8 @@ pub fn cleaned_components() -> Vec<String> {
 mod tests;
 
 #[cfg(test)]
-pub(super) use migration::{
-    LAUNCHD_MIGRATION_MARK, LEGACY_MIGRATION_MARK, VPN_PAC_MIGRATION_MARK, migrate_legacy,
-    migrate_legacy_pac,
-};
-#[cfg(test)]
-pub(super) use restore::{Scope, restore_with, restore_with_probe};
-#[cfg(test)]
 #[allow(unused_imports)]
-use crate::sysproxy::{Os, SystemProbe};
+use crate::sysproxy::FileCtx;
 #[cfg(test)]
 #[allow(unused_imports)]
 use crate::sysproxy::browser_policies;
@@ -210,7 +202,14 @@ use crate::sysproxy::journal::{EntryState, Journal, Outcome, Resource, Value};
 use crate::sysproxy::platform::{FakePlatform, PacState, PlatOp, Platform, RegKind, RegValue};
 #[cfg(test)]
 #[allow(unused_imports)]
-use crate::sysproxy::FileCtx;
+use crate::sysproxy::{Os, SystemProbe};
+#[cfg(test)]
+pub(super) use migration::{
+    LAUNCHD_MIGRATION_MARK, LEGACY_MIGRATION_MARK, VPN_PAC_MIGRATION_MARK, migrate_legacy,
+    migrate_legacy_pac,
+};
+#[cfg(test)]
+pub(super) use restore::{Scope, restore_with, restore_with_probe};
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::collections::BTreeMap;

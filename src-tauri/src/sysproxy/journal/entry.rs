@@ -247,9 +247,7 @@ pub(super) fn same_as_written(res: &Resource, known: &Value, cur: &Value) -> boo
             Resource::BrowserPolicy { key, .. },
             Value::Policy(Some(PolicyValue::Sz(a))),
             Value::Policy(Some(PolicyValue::Sz(b))),
-        ) if key == crate::sysproxy::browser_policies::KEY_PROXY_PAC_URL => {
-            urls_equivalent(a, b)
-        }
+        ) if key == crate::sysproxy::browser_policies::KEY_PROXY_PAC_URL => urls_equivalent(a, b),
         (Resource::BrowserPacPref { .. }, Value::Json(Some(a)), Value::Json(Some(b))) => {
             crate::sysproxy::browser_policies::same_browser_proxy_json(a, b)
         }

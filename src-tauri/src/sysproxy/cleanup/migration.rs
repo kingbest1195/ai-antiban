@@ -1,5 +1,7 @@
 use super::super::journal::{Journal, Outcome, ReportItem, Resource};
-use super::super::platform::{PacState, Platform, PlatformError, RegKind, RegValue, classify_services};
+use super::super::platform::{
+    PacState, Platform, PlatformError, RegKind, RegValue, classify_services,
+};
 use super::signatures::{is_zastava_pac_signature, legacy_env_plan_with_gateway};
 use std::collections::BTreeMap;
 
@@ -339,4 +341,3 @@ fn migrate_vpn_pac_leftovers(
     }
     items
 }
-

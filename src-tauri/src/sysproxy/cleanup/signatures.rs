@@ -111,4 +111,3 @@ pub fn legacy_env_plan_with_gateway(
         .map(|(k, _)| k.clone())
         .collect()
 }
-

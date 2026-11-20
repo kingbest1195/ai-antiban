@@ -24,13 +24,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[allow(unused_imports)]
+#[cfg(any(target_os = "macos", test))]
+pub use chromium::policy_specs_for_macos;
+#[allow(unused_imports)]
 pub use chromium::{
     CHROMIUM_BROWSERS, ChromiumBrowserDef, MACOS_CHROMIUM_DOMAIN_NAMES,
     WINDOWS_CHROMIUM_POLICY_BROWSERS, policy_specs_with_pac,
 };
-#[allow(unused_imports)]
-#[cfg(any(target_os = "macos", test))]
-pub use chromium::policy_specs_for_macos;
 #[allow(unused_imports)]
 #[cfg(any(target_os = "windows", test))]
 pub use chromium::{WINDOWS_CHROMIUM_DOMAIN_NAMES, policy_specs_for_windows};
@@ -164,8 +164,6 @@ mod fakes;
 pub use fakes::FakePolicyStore;
 
 #[cfg(test)]
-use crate::sysproxy::{Os, SystemProbe};
-#[cfg(test)]
 use crate::sysproxy::FileCtx;
 #[cfg(test)]
 use crate::sysproxy::fs::Fs;
@@ -173,6 +171,8 @@ use crate::sysproxy::fs::Fs;
 use crate::sysproxy::journal::{Journal, Outcome, Resource};
 #[cfg(test)]
 use crate::sysproxy::relaunch::{AppLauncher, QuitTiming};
+#[cfg(test)]
+use crate::sysproxy::{Os, SystemProbe};
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]

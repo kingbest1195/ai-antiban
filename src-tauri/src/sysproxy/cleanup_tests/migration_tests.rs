@@ -248,4 +248,3 @@ fn the_start_pass_cuts_an_old_block_out_of_zshenv_and_leaves_a_half_marker_alone
     assert!(report.external() >= 1, "{}", report.summary());
     assert_eq!(fs.get(&zshenv).unwrap(), broken.as_bytes());
 }
-

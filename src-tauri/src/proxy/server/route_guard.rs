@@ -6,7 +6,9 @@ use crate::auditor::geo_matrix::ProviderId;
 use crate::proxy::upstream::connect_via_route_with_chained;
 use crate::routing::{Route, RouteDownReason, RouteSelection};
 
-use super::responses::{send_bad_gateway, send_canary_intercepted, send_canary_protected, send_forbidden};
+use super::responses::{
+    send_bad_gateway, send_canary_intercepted, send_canary_protected, send_forbidden,
+};
 use super::{
     CANARY_PROBE_HOST, CANARY_PROBE_TIMEOUT_MS, ProxyServer, ROUTE_ALERT_THROTTLE_SECS,
     RouteUnavailablePayload, VERDICT_ROUTE_DOWN,

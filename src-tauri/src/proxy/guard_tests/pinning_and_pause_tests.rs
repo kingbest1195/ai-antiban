@@ -143,8 +143,7 @@ async fn test_returning_to_baseline_with_critical_audit_stays_blocked() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn test_transient_route_flicker_on_non_pinned_warning_network_recovers_and_keeps_allows()
-{
+async fn test_transient_route_flicker_on_non_pinned_warning_network_recovers_and_keeps_allows() {
     let probe_calls = Arc::new(AtomicUsize::new(0));
     let probe_calls2 = Arc::clone(&probe_calls);
     let probe: ProbeFn = Arc::new(move || {
@@ -396,8 +395,7 @@ async fn gate_reason_populated_on_ready_risk_detected_event() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn pause_until_network_change_stays_on_same_ip_and_clears_on_change_or_invalidate_cache()
-{
+async fn pause_until_network_change_stays_on_same_ip_and_clears_on_change_or_invalidate_cache() {
     let probe_ip = Arc::new(std::sync::Mutex::new("1.1.1.1".to_string()));
     let probe_ip_env = Arc::clone(&probe_ip);
     let h = harness_env(
@@ -480,4 +478,3 @@ async fn pause_until_network_change_stays_on_same_ip_and_clears_on_change_or_inv
     assert_eq!(h.guard.pause_mode(), PauseMode::Manual);
     assert_eq!(h.guard.gate(), Gate::Blocked);
 }
-

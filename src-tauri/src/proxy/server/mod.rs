@@ -1,3 +1,4 @@
+mod alias;
 mod connect;
 mod connect_hold;
 mod http_handler;
@@ -7,8 +8,8 @@ mod ssrf;
 mod tunnel;
 
 pub use ssrf::{
-    DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_forbidden_ip,
-    is_internal_hostname, is_tun_fake_ip, parse_host_port, validate_tunnel_target,
+    DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_forbidden_ip, is_internal_hostname,
+    is_tun_fake_ip, parse_host_port, validate_tunnel_target,
 };
 
 use serde::Serialize;
@@ -95,6 +96,16 @@ pub struct ProxyServer {
     /// Outbound side for transit (non-AI) traffic: DNS cache, Happy Eyeballs, chained proxy.
     transit: Arc<Transit>,
     hold_ttl: Duration,
+    is_alias: bool,
+    alias_route_id: Option<String>,
+}
+
+impl Drop for ProxyServer {
+    fn drop(&mut self) {
+        if self.is_alias {
+            crate::core::net_safety::unregister_alias_port(self.bound_addr.port());
+        }
+    }
 }
 
 impl ProxyServer {
@@ -133,6 +144,8 @@ impl ProxyServer {
             direct_connects: AtomicU64::new(0),
             transit: Arc::new(Transit::system()),
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
+            is_alias: false,
+            alias_route_id: None,
         })
     }
 
@@ -164,6 +177,8 @@ impl ProxyServer {
             direct_connects: AtomicU64::new(0),
             transit: Arc::new(Transit::system()),
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
+            is_alias: false,
+            alias_route_id: None,
         })
     }
 
@@ -178,6 +193,33 @@ impl ProxyServer {
     pub fn with_transit(mut self, transit: Transit) -> Self {
         self.transit = Arc::new(transit);
         self
+    }
+
+    /// Binds a dedicated loopback alias listener (`127.0.0.1:0`) for a Clean Room profile,
+    /// sharing `guard`, `state`, `auditor`, and `coverage`, and registering the alias port
+    /// in Layer-0 `net_safety` for anti-SSRF protection.
+    pub async fn bind_alias(&self, bound_route_id: Option<String>) -> Result<Self, std::io::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let bound_addr = listener.local_addr()?;
+        crate::core::net_safety::register_alias_port(bound_addr.port());
+        Ok(Self {
+            bound_addr,
+            listener,
+            auditor: self.auditor.clone(),
+            state: self.state.clone(),
+            hold_queue: Arc::clone(&self.hold_queue),
+            guard: Arc::clone(&self.guard),
+            coverage: Arc::clone(&self.coverage),
+            app_handle: self.app_handle.clone(),
+            upstream_redirect: self.upstream_redirect,
+            conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
+            route_alerts: std::sync::Mutex::new(HashMap::new()),
+            direct_connects: AtomicU64::new(0),
+            transit: Arc::clone(&self.transit),
+            hold_ttl: self.hold_ttl,
+            is_alias: true,
+            alias_route_id: bound_route_id,
+        })
     }
 
     /// Number of direct (non-routed) outbound connections attempted, including the test redirect.
@@ -278,7 +320,6 @@ impl ProxyServer {
         // (origin-form `GET /` and the like).
         send_gateway_info(&mut client).await
     }
-
 }
 
 #[cfg(test)]

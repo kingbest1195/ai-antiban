@@ -291,16 +291,14 @@ fn a_zshenv_block_without_its_partner_is_reported_and_not_touched() {
     crate::sysproxy::force_os_dry_run();
     let e = env();
     let zshenv = e.ctx.home.join(".zshenv");
-    let broken = format!(
-        "export A=1\n{ZASTAVA_RC_START}\nexport HTTP_PROXY=\"http://127.0.0.1:8899\"\n"
-    );
+    let broken =
+        format!("export A=1\n{ZASTAVA_RC_START}\nexport HTTP_PROXY=\"http://127.0.0.1:8899\"\n");
     e.fs.put(&zshenv, broken.as_bytes(), 0o644);
     let a = e.apply(Some(URL), None, CliMode::AiOnly, HostOs::Unix);
     assert_eq!(e.text(&zshenv), broken);
     assert!(
-        a.notes.contains(
-            &"обнаружен незавершённый блок Заставы в ~/.zshenv — не изменён".to_string()
-        ),
+        a.notes
+            .contains(&"обнаружен незавершённый блок Заставы в ~/.zshenv — не изменён".to_string()),
         "{:?}",
         a.notes
     );
@@ -444,10 +442,7 @@ fn lc_all_is_in_no_output_of_any_writer() {
         CliMode::AiOnly,
     );
     assert!(!report.shell_command.contains("LC_ALL"));
-    assert!(
-        report.shell_command.contains("LANG=") && report.shell_command.contains("LC_TIME=")
-    );
+    assert!(report.shell_command.contains("LANG=") && report.shell_command.contains("LC_TIME="));
     assert!(!build_shell_block(8899, Some(URL), Some(ZONE)).contains("LC_ALL"));
     assert!(!build_powershell_block(8899, Some(URL), Some(ZONE)).contains("LC_ALL"));
 }
-

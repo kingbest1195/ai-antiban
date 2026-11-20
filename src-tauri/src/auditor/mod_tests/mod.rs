@@ -25,7 +25,6 @@ pub(super) fn all_checks(over: &[(usize, CheckResult)]) -> Vec<CheckResult> {
 /// Number of checks in a report (`claude_exit` is the 14th, index 13).
 pub(super) const CHECK_COUNT: usize = 14;
 
-
 pub(super) fn rich_telemetry() -> NetworkTelemetry {
     NetworkTelemetry {
         ip: "203.0.113.9".into(),
@@ -73,7 +72,12 @@ pub(super) fn env_of(dns: FakeDns, probe: FakeProbe, system: FakeSystem) -> Audi
     env_with_udp(dns, probe, system, FakeUdp::new())
 }
 
-pub(super) fn env_with_udp(dns: FakeDns, probe: FakeProbe, system: FakeSystem, udp: FakeUdp) -> AuditEnv {
+pub(super) fn env_with_udp(
+    dns: FakeDns,
+    probe: FakeProbe,
+    system: FakeSystem,
+    udp: FakeUdp,
+) -> AuditEnv {
     AuditEnv {
         dns: Arc::new(dns),
         probe: Arc::new(probe),
@@ -147,6 +151,6 @@ pub(super) fn healthy_env() -> AuditEnv {
     )
 }
 
-mod scoring_tests;
 mod evaluate_core_tests;
 mod evaluate_scenarios_tests;
+mod scoring_tests;

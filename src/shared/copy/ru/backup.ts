@@ -33,14 +33,28 @@ export const backup = {
   cache: {
     section: "Сброс кэша",
     title: "Кэш и метки устройства",
-    text: "Сбрасывает cookies, идентификатор устройства и сессии выбранного приложения. Приложение попросит войти заново.",
+    text: "Удаляет только локальные cookies, кэш сессий и локальный идентификатор устройства deviceId (ant-device-registry.json). Серверный Org ID и статус биллинга хранятся у провайдера и с диска не сбрасываются. Приложение попросит войти заново.",
     claude: "Claude Desktop",
     chatgpt: "ChatGPT Desktop",
     clean: "Сбросить кэш",
     cleaning: "Сбрасываем…",
     confirmTitle: (client: string) => `Сбросить кэш ${client}?`,
-    confirmText: "Будут удалены cookies, идентификатор устройства и сессии. Это нельзя отменить, придётся войти заново.",
+    confirmText:
+      "Будут удалены локальные cookies, кэш сессий и локальный deviceId (ant-device-registry.json); серверный Org ID при этом не меняется. Это нельзя отменить, придётся войти заново.",
     confirmAction: "Сбросить кэш",
+    notFoundTitle: (client: string) => `Данные ${client} не найдены`,
+    notFoundText: (client: string) =>
+      `Папка локальных данных ${client} не обнаружена — кэш, cookies и deviceId уже отсутствуют.`,
+    alreadyCleanTitle: (client: string) => `Кэш ${client} уже чист`,
+    alreadyCleanText: (client: string) =>
+      `Новых локальных cookies, сессий и записей deviceId для ${client} не найдено.`,
+    lockedTitle: (client: string) => `${client} всё ещё открыт`,
+    lockedText: (client: string, lockedTargets: string[], removedCount: number) => {
+      const preview = lockedTargets.slice(0, 3).join(", ");
+      const tail = lockedTargets.length > 3 ? ` и ещё ${lockedTargets.length - 3}` : "";
+      const removedNote = removedCount > 0 ? ` Остальных файлов удалено: ${removedCount}.` : "";
+      return `Не удалось очистить занятые файлы (${preview}${tail}) — закройте ${client} полностью и повторите сброс.${removedNote}`;
+    },
   },
   profiles: {
     section: "Профили Claude",

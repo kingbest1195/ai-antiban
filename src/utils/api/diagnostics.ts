@@ -39,7 +39,7 @@ export async function exportDiagnosticBundle(): Promise<string> {
   }
   return JSON.stringify(
     {
-      app_version: "2.3.0",
+      app_version: "3.0.0",
       os: "macos",
       arch: "aarch64",
       sysproxy_enabled: mockFlags.sysproxyActive,

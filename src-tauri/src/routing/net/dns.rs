@@ -1,13 +1,13 @@
 //! Hickory & DoH DNS fallback resolvers for entry nodes when system DNS fails (e.g. TUN VPN).
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::auditor::dnsbl::parse_doh_json_a_response;
 use crate::auditor::network::NEUTRAL_USER_AGENT;
 use crate::auditor::seams::{LookupOutcome, is_usable_nameserver};
+use crate::core::net_safety::{is_forbidden_ip, is_tun_fake_ip};
 
 const HICKORY_DNS_TIMEOUT: Duration = Duration::from_millis(1200);
 const DOH_DNS_TIMEOUT: Duration = Duration::from_millis(1800);
@@ -81,7 +81,10 @@ pub(super) async fn hickory_resolve_addrs(
     let fqdn = format!("{}.", host.trim_end_matches('.'));
     let (res_a, res_aaaa) = tokio::join!(
         tokio::time::timeout(HICKORY_DNS_TIMEOUT, resolver.lookup(&fqdn, RecordType::A)),
-        tokio::time::timeout(HICKORY_DNS_TIMEOUT, resolver.lookup(&fqdn, RecordType::AAAA)),
+        tokio::time::timeout(
+            HICKORY_DNS_TIMEOUT,
+            resolver.lookup(&fqdn, RecordType::AAAA)
+        ),
     );
 
     let mut addrs = Vec::new();
@@ -121,15 +124,57 @@ pub(super) async fn hickory_resolve_addrs(
     ))
 }
 
-async fn doh_resolve_addrs_from_url(
+pub(super) fn parse_doh_json_addrs(body: &str) -> LookupOutcome {
+    #[derive(serde::Deserialize)]
+    struct DohAnswer {
+        #[serde(default)]
+        r#type: u16,
+        #[serde(default)]
+        data: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct DohResponse {
+        #[serde(rename = "Status")]
+        status: i32,
+        #[serde(rename = "Answer", default)]
+        answer: Vec<DohAnswer>,
+    }
+
+    let Ok(parsed) = serde_json::from_str::<DohResponse>(body) else {
+        return LookupOutcome::Failed;
+    };
+    match parsed.status {
+        0 => {
+            let addrs: Vec<IpAddr> = parsed
+                .answer
+                .into_iter()
+                .filter_map(|a| match a.r#type {
+                    1 => a.data.trim().parse::<Ipv4Addr>().ok().map(IpAddr::V4),
+                    28 => a.data.trim().parse::<Ipv6Addr>().ok().map(IpAddr::V6),
+                    _ => None,
+                })
+                .collect();
+            if addrs.is_empty() {
+                LookupOutcome::NotFound
+            } else {
+                LookupOutcome::Addrs(addrs)
+            }
+        }
+        3 => LookupOutcome::NotFound,
+        _ => LookupOutcome::Failed,
+    }
+}
+
+async fn doh_query_rr_type(
     client: &reqwest::Client,
     doh_url: &str,
     host: &str,
+    rr_type: &str,
     port: u16,
 ) -> io::Result<Vec<SocketAddr>> {
     let resp = client
         .get(doh_url)
-        .query(&[("name", host), ("type", "A")])
+        .query(&[("name", host), ("type", rr_type)])
         .header(reqwest::header::ACCEPT, "application/dns-json")
         .timeout(DOH_DNS_TIMEOUT)
         .send()
@@ -152,7 +197,7 @@ async fn doh_resolve_addrs_from_url(
         .text()
         .await
         .map_err(|e| io::Error::other(format!("DoH response read failed: {e}")))?;
-    match parse_doh_json_a_response(&body) {
+    match parse_doh_json_addrs(&body) {
         LookupOutcome::Addrs(ips) => Ok(ips
             .into_iter()
             .map(|ip| SocketAddr::new(ip, port))
@@ -167,6 +212,31 @@ async fn doh_resolve_addrs_from_url(
         )),
         LookupOutcome::Failed => Err(io::Error::other("DoH response parse failed")),
     }
+}
+
+async fn doh_resolve_addrs_from_url(
+    client: &reqwest::Client,
+    doh_url: &str,
+    host: &str,
+    port: u16,
+) -> io::Result<Vec<SocketAddr>> {
+    let (res_a, res_aaaa) = tokio::join!(
+        doh_query_rr_type(client, doh_url, host, "A", port),
+        doh_query_rr_type(client, doh_url, host, "AAAA", port),
+    );
+    let mut addrs = Vec::new();
+    let mut last_err = None;
+    for res in [res_a, res_aaaa] {
+        match res {
+            Ok(list) => addrs.extend(list),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if !addrs.is_empty() {
+        return Ok(addrs);
+    }
+    Err(last_err
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DoH returned no addresses")))
 }
 
 pub(super) async fn doh_resolve_addrs(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
@@ -189,33 +259,57 @@ pub(super) async fn doh_resolve_addrs(host: &str, port: u16) -> io::Result<Vec<S
     Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DoH found no records")))
 }
 
-/// Races system-config Hickory, public Hickory (1.1.1.1 / 8.8.8.8), and DoH in parallel under
-/// [`FALLBACK_DNS_TIMEOUT`] so a single hung resolver cannot eat the route connect budget.
+/// Races public Hickory (`1.1.1.1` / `8.8.8.8`, `use_system_conf = false`) and DoH (`A` + `AAAA`)
+/// in parallel under [`FALLBACK_DNS_TIMEOUT`]. Clean public answers win immediately; Fake-IP
+/// answers are held back until all resolvers finish so DoH can override TUN UDP-53 interception.
 pub(super) async fn parallel_fallback_resolve_addrs(
     host: &str,
     port: u16,
 ) -> io::Result<Vec<SocketAddr>> {
     let race = async {
         let mut set = tokio::task::JoinSet::new();
-        for use_sys in [true, false] {
+        {
             let h = host.to_string();
-            set.spawn(async move { hickory_resolve_addrs(&h, port, use_sys).await });
+            set.spawn(async move { hickory_resolve_addrs(&h, port, false).await });
         }
         {
             let h = host.to_string();
             set.spawn(async move { doh_resolve_addrs(&h, port).await });
         }
+        let mut fake_candidate: Option<Vec<SocketAddr>> = None;
+        let mut rejected_candidate: Option<Vec<SocketAddr>> = None;
         let mut last_err: Option<io::Error> = None;
         while let Some(joined) = set.join_next().await {
             match joined {
-                Ok(Ok(addrs)) if !addrs.is_empty() => return Ok(addrs),
+                Ok(Ok(addrs)) if !addrs.is_empty() => {
+                    let has_non_fake_forbidden = addrs
+                        .iter()
+                        .any(|a| is_forbidden_ip(&a.ip()) && !is_tun_fake_ip(&a.ip()));
+                    let has_fake = addrs.iter().any(|a| is_tun_fake_ip(&a.ip()));
+                    if !has_non_fake_forbidden && !has_fake {
+                        return Ok(addrs);
+                    }
+                    if !has_non_fake_forbidden && fake_candidate.is_none() {
+                        fake_candidate = Some(addrs);
+                    } else if rejected_candidate.is_none() {
+                        rejected_candidate = Some(addrs);
+                    }
+                }
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => last_err = Some(e),
-                Err(e) => last_err = Some(io::Error::other(format!("DNS fallback task failed: {e}"))),
+                Err(e) => {
+                    last_err = Some(io::Error::other(format!("DNS fallback task failed: {e}")))
+                }
             }
         }
+        if let Some(addrs) = fake_candidate.or(rejected_candidate) {
+            return Ok(addrs);
+        }
         Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "entry DNS fallback found no addresses")
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "entry DNS fallback found no addresses",
+            )
         }))
     };
     tokio::time::timeout(FALLBACK_DNS_TIMEOUT, race)

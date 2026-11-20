@@ -4,12 +4,15 @@ import { Button, Progress } from "../../ui";
 import { getFocusable, trapTab } from "../../ui/dom";
 import { onboarding as copy } from "../../shared/copy/ru";
 import { ONBOARDING_STEPS } from "./useOnboarding";
+import type { OnboardingGoal } from "./types";
 import { StepWelcome } from "./StepWelcome";
 import { StepNetwork } from "./StepNetwork";
 import { StepProtect } from "./StepProtect";
 import { StepAlert } from "./StepAlert";
 import { StepDone } from "./StepDone";
 import "./onboarding.css";
+
+export type { OnboardingGoal } from "./types";
 
 /** Куда перейти после закрытия знакомства. Без значения — остаться где были. */
 export type OnboardingExit = "overview" | "connect" | undefined;
@@ -27,23 +30,32 @@ export interface OnboardingFlowProps {
   cliProtected: boolean;
   onToggleSysproxy: () => void;
   onToggleCli: () => void;
-  /** Тот же аудит, что и на «Обзоре» (runFullAudit(true)). */
+  /** Аудит сети (runFullAudit). */
   onRecheck: () => void;
-  /** Закрытие: «Пропустить», Esc или завершение. Флаг «пройдено» ставит вызывающий. */
-  onClose: (to?: OnboardingExit) => void;
+  /** Завершение 5-го шага с выбранной целью для автоматического перехода. */
+  onComplete?: (goal?: OnboardingGoal) => void;
+  /** Закрытие: «Пропустить», Esc или переход. Флаг «пройдено» ставит вызывающий. */
+  onClose: (to?: OnboardingExit) => Promise<unknown> | void;
 }
 
-const DONE_STEP = ONBOARDING_STEPS + 1;
-
-/** Полноэкранный сценарий первого запуска поверх оболочки: четыре шага и финал. */
-export function OnboardingFlow({ initialStep = 1, onClose, ...data }: OnboardingFlowProps) {
+/** Полноэкранный сценарий первого запуска v3.0: 5 шагов (шаг 5 — финал с 4 цветами трея). */
+export function OnboardingFlow({ initialStep = 1, onComplete, onClose, ...data }: OnboardingFlowProps) {
   const [step, setStep] = useState(initialStep);
+  const [goal, setGoal] = useState<OnboardingGoal>("protect");
   const layerRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
-  const next = useCallback(() => setStep((s) => Math.min(DONE_STEP, s + 1)), []);
+  const next = useCallback(() => setStep((s) => Math.min(ONBOARDING_STEPS, s + 1)), []);
   const back = useCallback(() => setStep((s) => Math.max(1, s - 1)), []);
+
+  const handleComplete = useCallback(
+    (chosenGoal: OnboardingGoal) => {
+      onComplete?.(chosenGoal);
+      onClose("overview");
+    },
+    [onComplete, onClose],
+  );
 
   // Окно диалога: фокус внутрь при открытии и возврат при закрытии.
   useEffect(() => {
@@ -89,15 +101,15 @@ export function OnboardingFlow({ initialStep = 1, onClose, ...data }: Onboarding
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const finished = step === DONE_STEP;
-  const isAlertStep = step === ONBOARDING_STEPS;
+  const finished = step === ONBOARDING_STEPS;
+  const isAlertStep = step === 4;
   // На шаге с пробной тревогой кнопка в шапке ведёт к финалу («Продолжить»), на остальных закрывает знакомство.
   const headerAction = () => (isAlertStep ? next() : onClose());
 
   let body;
   switch (step) {
     case 1:
-      body = <StepWelcome onNext={next} />;
+      body = <StepWelcome goal={goal} onSelectGoal={setGoal} onNext={next} />;
       break;
     case 2:
       body = (
@@ -131,7 +143,7 @@ export function OnboardingFlow({ initialStep = 1, onClose, ...data }: Onboarding
       body = <StepAlert onReacted={next} onBack={back} />;
       break;
     default:
-      body = <StepDone onOpenOverview={() => onClose("overview")} />;
+      body = <StepDone goal={goal} onComplete={handleComplete} onBack={back} />;
   }
 
   return (

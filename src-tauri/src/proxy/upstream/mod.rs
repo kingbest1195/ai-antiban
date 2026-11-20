@@ -112,7 +112,10 @@ async fn connect_via_route_inner(
     if route.entries.is_empty() {
         crate::diagnostics::record(
             "proxy:route",
-            &format!("route={} phase=connect err=route has no entry nodes", route.id),
+            &format!(
+                "route={} phase=connect err=route has no entry nodes",
+                route.id
+            ),
         );
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -241,7 +244,6 @@ pub async fn connect_via_upstream(
     })?;
     connect_via_route(&route, target_host, target_port, timeout, 0).await
 }
-
 
 #[cfg(test)]
 #[path = "../upstream_tests.rs"]

@@ -23,9 +23,7 @@ mod io;
 mod recovery;
 
 pub use entry::{Entry, EntryState, Resource, Value};
-pub use recovery::{
-    ApplyOutcome, JournalError, Outcome, RecoveryReport, ReportItem, recover_with,
-};
+pub use recovery::{ApplyOutcome, JournalError, Outcome, RecoveryReport, ReportItem, recover_with};
 
 use crate::sysproxy::browser_policies::{PolicyStore, RealPolicyStore};
 use crate::sysproxy::fs::{Fs, FsLock, LockError, WriteMode};

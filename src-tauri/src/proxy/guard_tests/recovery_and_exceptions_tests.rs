@@ -98,17 +98,31 @@ async fn test_trusted_exception_survives_restart_and_network_change_no_alert() {
         .allow_network_alert(&id, &["anthropic".to_string()])
         .await
         .unwrap();
-    assert!(state1.is_ip_trusted_for_provider("anthropic", "5.5.5.5").await);
+    assert!(
+        state1
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
 
     // Simulate switching away and restarting app from disk (session_allowed cleared,
     // trusted_exceptions preserved). Force-allowing openai & gemini too for completeness.
-    state1.add_trusted_exception("openai", "5.5.5.5").await.unwrap();
-    state1.add_trusted_exception("gemini", "5.5.5.5").await.unwrap();
+    state1
+        .add_trusted_exception("openai", "5.5.5.5")
+        .await
+        .unwrap();
+    state1
+        .add_trusted_exception("gemini", "5.5.5.5")
+        .await
+        .unwrap();
     drop(state1);
 
     let state2 = AppState::load_or_default(state_path);
     assert!(!state2.is_provider_session_allowed("anthropic").await);
-    assert!(state2.is_ip_trusted_for_provider("anthropic", "5.5.5.5").await);
+    assert!(
+        state2
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
 
     let io2 = Arc::new(TestIo::default());
     let env2 = Env {
@@ -176,7 +190,12 @@ async fn test_disabled_provider_skipped_in_audit_gates_and_alerts() {
     assert!(h.env.hold_queue.current_alert().is_none());
     assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
     assert_eq!(h.guard.gate(), Gate::Open);
-    assert!(!audited_providers.lock().unwrap().contains(&ProviderId::Gemini));
+    assert!(
+        !audited_providers
+            .lock()
+            .unwrap()
+            .contains(&ProviderId::Gemini)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -222,18 +241,16 @@ async fn test_already_blocked_alert_suppression_and_partial_newly_affected_alert
     h.state.unblock_provider("openai").await.unwrap();
     h.guard.sync_gates_with_state(&h.state).await;
     h.change("7.7.7.7").await;
-    let det = h
-        .io
-        .wait_for("interceptor://risk-detected", 2000)
-        .await
-        .expect("detecting alert for newly affected openai");
+    let det =
+        h.io.wait_for("interceptor://risk-detected", 2000)
+            .await
+            .expect("detecting alert for newly affected openai");
     assert_eq!(det.0["phase"], "detecting");
     assert_eq!(det.0["provider"], "openai");
-    let enr = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("ready enrichment for newly affected openai");
+    let enr =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("ready enrichment for newly affected openai");
     assert_eq!(enr.0["phase"], "ready");
     let id = enr.0["id"].as_str().unwrap().to_string();
     let affected = h
@@ -245,10 +262,7 @@ async fn test_already_blocked_alert_suppression_and_partial_newly_affected_alert
     assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
     assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Pending);
 
-    h.guard
-        .allow_network_alert(&id, &affected)
-        .await
-        .unwrap();
+    h.guard.allow_network_alert(&id, &affected).await.unwrap();
     assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Open);
     assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
     assert!(h.state.is_provider_blocked("anthropic").await);
@@ -407,8 +421,14 @@ async fn test_sync_provider_route_change_unbind_triggers_reaudit() {
         })
     });
     let h = harness(audit, "1.1.1.1").await;
-    h.state.set_provider_monitoring("openai", false).await.unwrap();
-    h.state.set_provider_monitoring("gemini", false).await.unwrap();
+    h.state
+        .set_provider_monitoring("openai", false)
+        .await
+        .unwrap();
+    h.state
+        .set_provider_monitoring("gemini", false)
+        .await
+        .unwrap();
     {
         let mut inner = h.guard.inner.lock().await;
         inner.baseline = Some(Baseline {
@@ -422,11 +442,10 @@ async fn test_sync_provider_route_change_unbind_triggers_reaudit() {
     // Simulate unbinding Anthropic route on the SAME baseline IP -> must reset handled_ip,
     // arm needs_reaudit, and kick an immediate re-audit so Critical violation is caught!
     h.guard.sync_provider_route_change("anthropic", false);
-    let ev = h
-        .io
-        .wait_for("interceptor://risk-detected", 2000)
-        .await
-        .expect("reaudit alert after route unbind");
+    let ev =
+        h.io.wait_for("interceptor://risk-detected", 2000)
+            .await
+            .expect("reaudit alert after route unbind");
     assert_eq!(ev.0["provider"], "anthropic");
     assert!(audit_calls.load(Ordering::SeqCst) >= 1);
 }
@@ -531,7 +550,10 @@ async fn test_kick_reaudit_and_route_sync_never_drop_when_inner_is_locked() {
         .set_interception_behavior(InterceptionBehavior::AutoLockSilent)
         .await
         .unwrap();
-    h.state.set_provider_monitoring("gemini", false).await.unwrap();
+    h.state
+        .set_provider_monitoring("gemini", false)
+        .await
+        .unwrap();
 
     let route = crate::routing::parse_route_key("socks5://10.0.0.1:1080#nl", 1).unwrap();
     let route_id = h.state.upsert_route(route).await.unwrap();
@@ -589,7 +611,10 @@ async fn test_confirm_provider_session_routed_does_not_mark_direct_baseline_trus
             env.resolve = Some(Arc::new(move || {
                 resolve_calls2.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {
-                    Ok(test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU").telemetry)
+                    Ok(
+                        test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU")
+                            .telemetry,
+                    )
                 })
             }));
         },
@@ -644,4 +669,3 @@ async fn test_confirm_provider_session_routed_does_not_mark_direct_baseline_trus
             .trusted
     );
 }
-

@@ -1,6 +1,6 @@
 pub use crate::core::net_safety::{
-    DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_forbidden_ip,
-    is_internal_hostname, is_tun_fake_ip, validate_tunnel_target,
+    DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_forbidden_ip, is_internal_hostname,
+    is_tun_fake_ip, validate_tunnel_target,
 };
 
 pub fn parse_host_port(target: &str) -> (String, u16) {

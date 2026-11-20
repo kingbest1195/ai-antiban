@@ -197,7 +197,10 @@ impl NetworkGuard {
                 .map(|p| p.affected_providers.clone())
                 .unwrap_or_default();
             if providers.is_empty() || providers.iter().any(|p| p == ALL_PROVIDERS) {
-                pending_affected.into_iter().map(|p| p.to_string()).collect()
+                pending_affected
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect()
             } else {
                 let mut seen = HashSet::new();
                 let mut list = Vec::new();
@@ -290,5 +293,4 @@ impl NetworkGuard {
         }
         Ok(())
     }
-
 }

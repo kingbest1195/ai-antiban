@@ -322,7 +322,10 @@ fn public_socks_route(id: &str, host: &str, port: u16) -> Route {
 }
 
 /// Local HTTP CONNECT proxy stub that redirects `CONNECT <expected_target>` to `bridge_port`.
-async fn spawn_chained_http_bridge(expected_target: String, bridge_port: u16) -> (u16, Arc<AtomicU64>) {
+async fn spawn_chained_http_bridge(
+    expected_target: String,
+    bridge_port: u16,
+) -> (u16, Arc<AtomicU64>) {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let hits = Arc::new(AtomicU64::new(0));
@@ -348,9 +351,7 @@ async fn spawn_chained_http_bridge(expected_target: String, bridge_port: u16) ->
                 );
                 h.fetch_add(1, Ordering::SeqCst);
                 let Ok(mut upstream) = TcpStream::connect(("127.0.0.1", bridge_port)).await else {
-                    let _ = client
-                        .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-                        .await;
+                    let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
                     return;
                 };
                 let _ = client

@@ -1,11 +1,15 @@
+#[path = "leaks_dns.rs"]
+mod dns;
+
 use std::time::Duration;
 
-use crate::auditor::geo_matrix::{CheckResult, CheckStatus, GUIDE_OS_PRIVACY, UnknownReason};
-use crate::auditor::probes::whoami::{
-    MEASURED_VIA, ResolverView, normalized_country, same_operator_note,
-};
-use crate::auditor::seams::{
-    HttpProbeOutcome, IpProbe, RealSystem, ReqwestProbe, SystemInfo, SystemReadError,
+use crate::auditor::geo_matrix::{CheckResult, GUIDE_OS_NETWORK, UnknownReason};
+use crate::auditor::seams::{HttpProbeOutcome, IpProbe, RealSystem, ReqwestProbe, SystemInfo};
+
+pub use dns::{
+    AuditProtectionContext, AuditProtectionFlags, check_dns_leak, check_dns_leak_with,
+    evaluate_dns_listing, evaluate_dns_resolver, evaluate_dns_resolver_for_route,
+    evaluate_dns_resolver_for_route_with_protection,
 };
 
 pub const IPV6_CHECK_URL: &str = "https://[2606:4700:4700::1111]/cdn-cgi/trace";
@@ -188,7 +192,7 @@ pub async fn check_ipv6_leak_with_route(
             format!(
                 "КРИТИЧНО: Обнаружена утечка IPv6! Трафик идет мимо VPN напрямую из {ipv6_loc} по IPv6. Немедленно отключите IPv6 в настройках сети ОС.",
             ),
-            Some(GUIDE_OS_PRIVACY.to_string()),
+            Some(GUIDE_OS_NETWORK.to_string()),
         );
     }
 
@@ -224,7 +228,7 @@ pub async fn check_ipv6_leak_with_route(
             format!(
                 "Рассинхрон маршрутов: IPv4 идет через {ipv4_country}, а IPv6 — через {ipv6_loc}. Рекомендуется отключить IPv6 для 100% защиты туннеля.",
             ),
-            Some(GUIDE_OS_PRIVACY.to_string()),
+            Some(GUIDE_OS_NETWORK.to_string()),
         );
     }
 
@@ -232,260 +236,6 @@ pub async fn check_ipv6_leak_with_route(
         "IPV6_ENCAPSULATED",
         format!(
             "IPv6-проба вышла из {ipv6_loc}, как и IPv4: IPv6-трафик идет тем же маршрутом, что и IPv4."
-        ),
-    )
-}
-
-/// Checks OS DNS resolvers for Russian domestic ISP leaks (`scutil --dns` on macOS, `ipconfig /all` on Windows).
-pub fn check_dns_leak(ipv4_country: &str, russian_keywords: &[String]) -> CheckResult {
-    check_dns_leak_with(&RealSystem, ipv4_country, russian_keywords)
-}
-
-/// [`check_dns_leak`] through `system` (injectable for tests).
-pub fn check_dns_leak_with(
-    system: &dyn SystemInfo,
-    ipv4_country: &str,
-    russian_keywords: &[String],
-) -> CheckResult {
-    match system.dns_listing() {
-        Ok(text) => evaluate_dns_listing(&text, ipv4_country, russian_keywords),
-        Err(SystemReadError::Unsupported) => CheckResult::unknown(
-            "DNS_UNSUPPORTED_OS",
-            "Проверка DNS-резолверов не выполнена: на этой системе список DNS-серверов ОС не читается.",
-            UnknownReason::UnsupportedOs,
-        ),
-        Err(SystemReadError::Failed) => CheckResult::unknown(
-            "DNS_RESOLVERS_UNREADABLE",
-            "Проверка DNS-резолверов не выполнена: список DNS-серверов ОС не удалось прочитать.",
-            UnknownReason::InternalError,
-        ),
-    }
-}
-
-/// Verdict of the DNS-resolver check: by the resolver that really sees the requests (`view`, from
-/// the whoami sources); the OS DNS configuration (`config`, [`check_dns_leak_with`]) is reference.
-///
-/// * a resolver in Russia (unless the exit is Russian) or in another country than the exit is a
-///   `Warning`;
-/// * a finding of the configuration check (a domestic provider, Yandex DNS) stays a `Warning`
-///   whatever the real resolver is: measuring never loosens an existing finding;
-/// * without a measured resolver nothing is verified: `Unknown`, except for such a finding.
-pub fn evaluate_dns_resolver(
-    config: CheckResult,
-    view: &ResolverView,
-    exit_country: &str,
-) -> CheckResult {
-    evaluate_dns_resolver_for_route(config, view, exit_country, false)
-}
-
-/// Route-aware DNS resolver check.
-///
-/// * When both whoami sources return TUN Fake-IP (`198.18.0.0/15`) and the OS DNS config check
-///   found no domestic Russian ISP / Yandex resolvers (`config.status == CheckStatus::Ok`), returns
-///   `Ok("DNS_TUN_FAKE_IP_SAFE")`.
-/// * When `via_zastava_key` is true and the OS resolver belongs to a non-sanctioned foreign VPN
-///   country different from the key's `exit_country`, returns `Ok("DNS_KEY_REMOTE_RESOLVE")`.
-pub fn evaluate_dns_resolver_for_route(
-    config: CheckResult,
-    view: &ResolverView,
-    exit_country: &str,
-    via_zastava_key: bool,
-) -> CheckResult {
-    let sources = match view {
-        ResolverView::Located { sources, .. } => sources,
-        ResolverView::Unmeasured(u) => &u.sources,
-    };
-    resolve_dns_verdict(config, view, exit_country, via_zastava_key).with_sources(sources)
-}
-
-fn resolve_dns_verdict(
-    config: CheckResult,
-    view: &ResolverView,
-    exit_country: &str,
-    via_zastava_key: bool,
-) -> CheckResult {
-    let config_note = match config.status {
-        CheckStatus::Ok => "в списке DNS ОС нет резолверов провайдеров РФ и Яндекс.DNS",
-        CheckStatus::Unknown => "список DNS ОС прочитать не удалось",
-        _ => "в списке DNS ОС есть замечание",
-    };
-    let config_finding = matches!(config.status, CheckStatus::Warning | CheckStatus::Critical);
-    let caveat = "Страна определена по адресу резолвера; ECS и DNS-over-HTTPS в браузере или приложении могут менять картину.";
-
-    let (ip, country, public_service) = match view {
-        ResolverView::Located {
-            ip,
-            country,
-            public_service,
-            ..
-        } => (ip, country, public_service),
-        ResolverView::Unmeasured(u) => {
-            if config_finding {
-                let mut kept = config;
-                kept.message = format!(
-                    "{} Реальный резолвер определить не удалось: {}.",
-                    kept.message, u.detail
-                );
-                return kept;
-            }
-            if config.status == CheckStatus::Ok
-                && u.code == "DNS_WHOAMI_FAKE_IP"
-                && crate::auditor::probes::whoami::all_sources_tun_fake_ip(&u.sources)
-            {
-                return CheckResult::ok(
-                    "DNS_TUN_FAKE_IP_SAFE",
-                    "DNS защищён режимом Fake-IP вашего VPN-туннеля, резолверов провайдеров РФ в системе нет.",
-                );
-            }
-            return CheckResult::unknown(
-                u.code,
-                format!(
-                    "Проверка DNS-резолвера не выполнена: {}. Справочно, настройки ОС: {config_note}.",
-                    u.detail
-                ),
-                u.reason,
-            );
-        }
-    };
-
-    let exit = normalized_country(exit_country);
-    if country == "RU" && exit.as_deref() != Some("RU") {
-        return CheckResult::warning(
-            "DNS_DOMESTIC_WARNING",
-            format!(
-                "Ваши DNS-запросы видит резолвер {ip}, расположенный в РФ, при выходе через {}. Пропишите публичный DNS (1.1.1.1 / 8.8.8.8) и убедитесь, что DNS идёт через туннель. {caveat}",
-                exit.as_deref().unwrap_or("страну, которая не определена"),
-            ),
-            Some(GUIDE_OS_PRIVACY.to_string()),
-        )
-        .with_measured_via(MEASURED_VIA);
-    }
-    if let Some(service) = public_service {
-        // An anycast service is placed in the country of its nearest point of presence: the
-        // country is not compared. A finding of the OS list still stands.
-        if config_finding {
-            let mut kept = config;
-            kept.message = format!(
-                "{} Реальный резолвер — публичный {service} ({ip}); замечание касается настроек ОС.",
-                kept.message
-            );
-            return kept.with_measured_via(MEASURED_VIA);
-        }
-        let same_operator = match view {
-            ResolverView::Located { sources, .. } => same_operator_note(sources, service),
-            ResolverView::Unmeasured(_) => String::new(),
-        };
-        return CheckResult::ok(
-            "DNS_PUBLIC_RESOLVER",
-            format!(
-                "Резолвер: {service} (публичный DNS). Запросы DNS идут на {ip}; страна резолвера не сравнивается: это anycast-сервис.{same_operator} Настройки DNS ОС (справочно): {config_note}. ECS и DNS-over-HTTPS в браузере или приложении могут менять картину."
-            ),
-        )
-        .with_measured_via(MEASURED_VIA);
-    }
-    if let Some(exit) = exit.as_deref().filter(|e| *e != country.as_str()) {
-        if via_zastava_key && !crate::sanctions::is_sanctioned_or_blocked_country(country) {
-            if config_finding {
-                let mut kept = config;
-                kept.message = format!(
-                    "{} Трафик AI изолирован через ВПН Заставы ({exit}), но в настройках ОС есть замечание.",
-                    kept.message
-                );
-                return kept.with_measured_via(MEASURED_VIA);
-            }
-            return CheckResult::ok(
-                "DNS_KEY_REMOTE_RESOLVE",
-                format!(
-                    "DNS-резолвер ОС ({ip}, {country}) относится к системному VPN, а запросы к AI-провайдеру резолвятся удалённо на ВПН Заставы ({exit}) через TCP CONNECT. Настройки DNS ОС (справочно): {config_note}."
-                ),
-            )
-            .with_measured_via(MEASURED_VIA);
-        }
-        return CheckResult::warning(
-            "DNS_RESOLVER_MISMATCH",
-            format!(
-                "Ваши DNS-запросы видит резолвер {ip} в {country}, а выход находится в {exit}: DNS и трафик идут разными путями. У публичных anycast-резолверов (1.1.1.1, 8.8.8.8) страна по адресу бывает неточной. {caveat}"
-            ),
-            Some(GUIDE_OS_PRIVACY.to_string()),
-        )
-        .with_measured_via(MEASURED_VIA);
-    }
-    if config_finding {
-        let mut kept = config;
-        kept.message = format!(
-            "{} Реальный резолвер ({ip}, {country}) вопросов не вызывает; замечание касается настроек ОС.",
-            kept.message
-        );
-        return kept.with_measured_via(MEASURED_VIA);
-    }
-
-    let compared = match &exit {
-        Some(exit) => format!("страна совпадает со страной выхода ({exit})"),
-        None => "страну выхода сравнить не с чем".to_string(),
-    };
-    CheckResult::ok(
-        "DNS_CLEAN",
-        format!(
-            "Ваши DNS-запросы видит резолвер {ip} в {country}: не РФ, {compared}. Настройки DNS ОС (справочно): {config_note}. {caveat}"
-        ),
-    )
-    .with_measured_via(MEASURED_VIA)
-}
-
-/// Decision of the DNS check on the text of the OS resolver configuration.
-pub fn evaluate_dns_listing(
-    text: &str,
-    ipv4_country: &str,
-    russian_keywords: &[String],
-) -> CheckResult {
-    // Only the lines about DNS carry names of resolvers and search domains; the rest of
-    // `ipconfig /all` / `scutil --dns` (adapter names, flags) would give false matches.
-    let dns_lines: Vec<String> = text
-        .lines()
-        .map(str::to_lowercase)
-        .filter(|l| l.contains("dns") || l.contains("domain") || l.contains("nameserver"))
-        .collect();
-    let has_addresses = text
-        .split(|c: char| !(c.is_ascii_hexdigit() || c == '.' || c == ':'))
-        .any(|t| t.parse::<std::net::IpAddr>().is_ok());
-    if !has_addresses {
-        return CheckResult::unknown(
-            "DNS_RESOLVERS_EMPTY",
-            "Проверка DNS-резолверов не выполнена: в настройках ОС не найдено ни одного DNS-адреса.",
-            UnknownReason::EmptyResponse,
-        );
-    }
-
-    for kw in russian_keywords {
-        let kw_lower = kw.to_lowercase();
-        if !kw_lower.is_empty() && dns_lines.iter().any(|l| l.contains(&kw_lower)) {
-            return CheckResult::warning(
-                "DNS_DOMESTIC_WARNING",
-                format!(
-                    "В системном DNS обнаружен провайдер «{kw}». Пропишите публичный DNS (1.1.1.1 / 8.8.8.8) в настройках сети."
-                ),
-                Some(GUIDE_OS_PRIVACY.to_string()),
-            );
-        }
-    }
-
-    // A known domestic public DNS (Yandex DNS, 77.88.8.x) as a whole address, not as a substring.
-    let yandex_dns = text
-        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .any(|t| t.starts_with("77.88.8.") && t.parse::<std::net::Ipv4Addr>().is_ok());
-    if yandex_dns && ipv4_country != "RU" {
-        return CheckResult::warning(
-            "DNS_YANDEX_LEAK",
-            "Обнаружен Яндекс.DNS (77.88.8.8) при зарубежном VPN. Смените DNS на Cloudflare (1.1.1.1).",
-            Some(GUIDE_OS_PRIVACY.to_string()),
-        );
-    }
-
-    CheckResult::ok(
-        "DNS_CLEAN",
-        format!(
-            "В настройках DNS ОС нет имён {} провайдеров РФ и Яндекс.DNS; проверен только список настроенных резолверов, не фактический путь запросов.",
-            russian_keywords.len()
         ),
     )
 }

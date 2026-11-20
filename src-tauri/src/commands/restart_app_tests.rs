@@ -8,8 +8,7 @@ use std::time::Duration;
 const BUNDLE_LINE: &str = "/Applications/Antigravity.app/Contents/MacOS/Electron";
 const AGENT_LINE: &str =
     "/Applications/Antigravity.app/Contents/Resources/app/bin/language_server_macos_arm";
-const OTHER_LINES: &str =
-    "/usr/sbin/cfprefsd\n/Applications/Safari.app/Contents/MacOS/Safari\n";
+const OTHER_LINES: &str = "/usr/sbin/cfprefsd\n/Applications/Safari.app/Contents/MacOS/Safari\n";
 
 /// Process list answers in order; the last one repeats. `None` — the listing failed.
 struct FakeProbe {
@@ -346,9 +345,7 @@ fn arguments_are_separate_items_and_the_address_is_the_gateways() {
     assert_eq!(args[5], "HTTP_PROXY=http://127.0.0.1:9");
     // No argument carries more than one `--env` pair or a shell separator.
     assert!(
-        args.iter().all(|a| !a.contains(';')
-            && !a.contains('&')
-            && !a.contains('|')
-            && !a.contains(' '))
+        args.iter()
+            .all(|a| !a.contains(';') && !a.contains('&') && !a.contains('|') && !a.contains(' '))
     );
 }

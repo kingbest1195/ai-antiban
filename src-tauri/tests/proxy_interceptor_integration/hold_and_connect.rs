@@ -354,7 +354,10 @@ async fn test_connect_yellow_passes_without_hold_or_block() {
         );
         if simulate_dns_disagree {
             assert!(
-                report.checks.iter().any(|c| c.code == "DNS_WHOAMI_DISAGREE"),
+                report
+                    .checks
+                    .iter()
+                    .any(|c| c.code == "DNS_WHOAMI_DISAGREE"),
                 "expected DNS_WHOAMI_DISAGREE in checks: {:?}",
                 report.checks
             );

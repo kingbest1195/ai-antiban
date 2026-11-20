@@ -216,37 +216,43 @@ pub(super) async fn connect_entry_with(
         return Err(err);
     }
 
-    let chained_res: Result<UpstreamStream, PhaseError> =
-        match tokio::time::timeout(rem, async {
-            let tcp = connect_entry_tcp_via_chained(cp, entry, rem, gateway_port)
-                .await
-                .map_err(|ce| match ce {
-                    ChainedError::Unreachable(e) => PhaseError::new(RoutePhase::TcpChained, e),
-                    ChainedError::Refused { status } => PhaseError::new(
-                        RoutePhase::TcpChained,
-                        io::Error::new(
-                            io::ErrorKind::ConnectionRefused,
-                            format!("chained proxy refused entry tunnel (status {status})"),
-                        ),
+    let chained_res: Result<UpstreamStream, PhaseError> = match tokio::time::timeout(rem, async {
+        let tcp = connect_entry_tcp_via_chained(cp, entry, rem, gateway_port)
+            .await
+            .map_err(|ce| match ce {
+                ChainedError::Unreachable(e) => PhaseError::new(RoutePhase::TcpChained, e),
+                ChainedError::Refused { status } => PhaseError::new(
+                    RoutePhase::TcpChained,
+                    io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        format!("chained proxy refused entry tunnel (status {status})"),
                     ),
-                })?;
-            handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
-        })
-        .await
-        {
-            Ok(res) => res,
-            Err(_) => Err(PhaseError::new(
-                RoutePhase::TcpChained,
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("{} chained entry connection timed out", entry.proto.as_str()),
                 ),
-            )),
-        };
+            })?;
+        handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
+    })
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => Err(PhaseError::new(
+            RoutePhase::TcpChained,
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{} chained entry connection timed out",
+                    entry.proto.as_str()
+                ),
+            ),
+        )),
+    };
 
     match chained_res {
         Ok(stream) => {
-            record_route_phase(RoutePhase::TcpChained, entry, "status=recovered_via_chained");
+            record_route_phase(
+                RoutePhase::TcpChained,
+                entry,
+                "status=recovered_via_chained",
+            );
             Ok(stream)
         }
         Err(pe) => {

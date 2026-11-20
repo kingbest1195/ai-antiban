@@ -22,7 +22,9 @@ pub(super) use legacy::clean_zshenv;
 
 use super::journal::{RecoveryReport, Resource};
 use super::shell_rc::{SAFE_LOCALE, normalize_proxy_url_and_port, sanitize_timezone};
-use super::{CliProtectionReport, NO_PROXY_VALUE, Run, SysState, journal_failure_text, state, with_files};
+use super::{
+    CliProtectionReport, NO_PROXY_VALUE, Run, SysState, journal_failure_text, state, with_files,
+};
 use crate::state::CliMode;
 use files::{FilePlan, FilesApplied, HostOs, apply_files};
 use legacy::migrate_legacy_files;
@@ -241,7 +243,6 @@ fn finish_disable(st: &SysState, run: Run<FilesApplied>, report: &mut RecoveryRe
     st.set_cli_proxy(None);
 }
 
-
 #[cfg(test)]
 #[path = "../cli_protection_tests/mod.rs"]
 mod file_tests;
@@ -275,9 +276,7 @@ use detect::{files_show_protection, files_show_tz_sync};
 use files::{apply_profile_block, disable_files};
 #[cfg(test)]
 #[allow(unused_imports)]
-use legacy::{
-    LEGACY_FILES_MARK, LEGACY_SHELL_MARK, Strip, clean_legacy_json, strip_marked_block,
-};
+use legacy::{LEGACY_FILES_MARK, LEGACY_SHELL_MARK, Strip, clean_legacy_json, strip_marked_block};
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::path::Path;

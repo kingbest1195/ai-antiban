@@ -155,4 +155,3 @@ pub fn reset_shutdown_cleanup_guard() {
 pub fn is_shutdown_cleanup_completed() -> bool {
     SHUTDOWN_GUARD.is_completed()
 }
-

@@ -28,7 +28,8 @@ pub use geo::{
     GeoInfo, PUBLIC_DNS_SERVICES, PublicDns, geo_of_ip, measure_resolver, public_dns_service,
 };
 pub use verdict::{
-    evaluate_dns_country, evaluate_dns_country_for_route, normalized_country, same_operator_note,
+    evaluate_dns_country, evaluate_dns_country_for_route,
+    evaluate_dns_country_for_route_with_protection, normalized_country, same_operator_note,
 };
 
 pub const AKAMAI_HOST: &str = "whoami.akamai.net";

@@ -1,7 +1,9 @@
 //! Pure IP, hostname, and tunnel-target safety checks (SSRF protection, FakeIP detection,
 //! and special/non-routable address classification).
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{OnceLock, RwLock};
 
 /// Default local gateway listen port.
 pub const DEFAULT_PROXY_PORT: u16 = 8899;
@@ -9,6 +11,38 @@ pub const DEFAULT_PROXY_PORT: u16 = 8899;
 pub const FALLBACK_PROXY_PORT: u16 = 8900;
 /// Ports allowed for outbound CONNECT tunnels through the local gateway.
 pub const ALLOWED_TUNNEL_PORTS: &[u16] = &[80, 443, 8443];
+
+static ALIAS_PORTS: OnceLock<RwLock<HashSet<u16>>> = OnceLock::new();
+
+fn alias_ports() -> &'static RwLock<HashSet<u16>> {
+    ALIAS_PORTS.get_or_init(|| RwLock::new(HashSet::new()))
+}
+
+/// Registers an ephemeral loopback alias port so SSRF checks and gateway-loop detection reject it.
+pub fn register_alias_port(port: u16) {
+    if port != 0 {
+        alias_ports()
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(port);
+    }
+}
+
+/// Unregisters an ephemeral loopback alias port when its listener shuts down.
+pub fn unregister_alias_port(port: u16) {
+    alias_ports()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&port);
+}
+
+/// Returns `true` if `port` is currently registered as a per-profile proxy alias port.
+pub fn is_alias_port(port: u16) -> bool {
+    alias_ports()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&port)
+}
 
 /// IPv4 address embedded in an IPv6 one: IPv4-mapped (`::ffff:a.b.c.d`), IPv4-compatible
 /// (`::a.b.c.d`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`).
@@ -42,8 +76,8 @@ pub fn embedded_ipv4(v6: &Ipv6Addr) -> Option<Ipv4Addr> {
     None
 }
 
-/// Returns `true` if `ip` belongs to the RFC 2544 benchmarking / TUN FakeIP pool (`198.18.0.0/15`)
-/// or its IPv4-mapped IPv6 form (`::ffff:198.18.0.0/15`).
+/// Returns `true` if `ip` belongs to the RFC 2544 benchmarking / TUN FakeIP pool (`198.18.0.0/15`),
+/// its IPv4-mapped IPv6 form (`::ffff:198.18.0.0/15`), or the IPv6 FakeIP pool (`fc00::/18`).
 /// Used by VPN / TUN software such as sing-box, Throne, Nekoray, Hiddify, and Clash in FakeIP mode.
 pub fn is_tun_fake_ip(ip: &IpAddr) -> bool {
     match ip {
@@ -51,9 +85,17 @@ pub fn is_tun_fake_ip(ip: &IpAddr) -> bool {
             let octets = v4.octets();
             octets[0] == 198 && (octets[1] & 0xfe) == 18
         }
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .is_some_and(|v4| is_tun_fake_ip(&IpAddr::V4(v4))),
+        IpAddr::V6(v6) => {
+            if v6
+                .to_ipv4_mapped()
+                .is_some_and(|v4| is_tun_fake_ip(&IpAddr::V4(v4)))
+            {
+                return true;
+            }
+            let s = v6.segments();
+            // TUN FakeIPv6 pool fc00::/18 (mask ffff:c000::).
+            s[0] == 0xfc00 && (s[1] & 0xc000) == 0
+        }
     }
 }
 
@@ -133,6 +175,7 @@ pub fn validate_tunnel_target(
     if port == bound_proxy_port
         || port == DEFAULT_PROXY_PORT
         || port == FALLBACK_PROXY_PORT
+        || is_alias_port(port)
         || !ALLOWED_TUNNEL_PORTS.contains(&port)
     {
         return Err("SSRF Protection: target port is not permitted by Zastava Gateway.");
@@ -195,12 +238,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tun_fake_ip_covers_ipv4_and_mapped_ipv6() {
+    fn tun_fake_ip_covers_ipv4_mapped_and_ipv6_fc00_18() {
         assert!(is_tun_fake_ip(&"198.18.0.1".parse().unwrap()));
         assert!(is_tun_fake_ip(&"198.19.255.254".parse().unwrap()));
         assert!(is_tun_fake_ip(&"::ffff:198.18.0.5".parse().unwrap()));
         assert!(!is_tun_fake_ip(&"198.20.0.1".parse().unwrap()));
         assert!(!is_tun_fake_ip(&"1.1.1.1".parse().unwrap()));
+
+        // fc00::/18 boundaries: fc00:0000:: .. fc00:3fff:ffff:...
+        assert!(is_tun_fake_ip(&"fc00::1".parse().unwrap()));
+        assert!(is_tun_fake_ip(&"fc00:3fff::1".parse().unwrap()));
+        assert!(!is_tun_fake_ip(&"fc00:4000::1".parse().unwrap()));
+        assert!(!is_tun_fake_ip(&"fc01::1".parse().unwrap()));
+        assert!(!is_tun_fake_ip(&"fd12:3456::1".parse().unwrap()));
+
+        // Direct literals in fc00::/7 (both fc00::/18 and fd12:3456::1) remain forbidden
+        assert!(is_forbidden_ip(&"fc00::1".parse().unwrap()));
+        assert!(is_forbidden_ip(&"fd12:3456::1".parse().unwrap()));
+        assert!(validate_tunnel_target("fc00::1", 443, 8899).is_err());
+        assert!(validate_tunnel_target("fd12:3456::1", 443, 8899).is_err());
+    }
+
+    #[test]
+    fn alias_port_registry_rejects_registered_ports_in_validate_tunnel_target() {
+        struct Guard(u16);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unregister_alias_port(self.0);
+            }
+        }
+        // Use 8443 (in ALLOWED_TUNNEL_PORTS) to prove alias port rejection specifically triggers
+        assert!(validate_tunnel_target("example.com", 8443, 8899).is_ok());
+        register_alias_port(8443);
+        let _guard = Guard(8443);
+        assert!(is_alias_port(8443));
+        assert!(validate_tunnel_target("example.com", 8443, 8899).is_err());
+        unregister_alias_port(8443);
+        assert!(!is_alias_port(8443));
+        assert!(validate_tunnel_target("example.com", 8443, 8899).is_ok());
+
+        register_alias_port(0);
+        assert!(!is_alias_port(0));
     }
 
     #[test]

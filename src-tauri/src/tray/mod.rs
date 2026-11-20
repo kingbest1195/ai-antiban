@@ -43,6 +43,7 @@ pub struct TrayProfilesSubmenu(pub Submenu<tauri::Wry>);
 pub(crate) const TRAY_ICON_GREEN: &[u8] = include_bytes!("../../icons/tray-green.png");
 pub(crate) const TRAY_ICON_YELLOW: &[u8] = include_bytes!("../../icons/tray-yellow.png");
 pub(crate) const TRAY_ICON_RED: &[u8] = include_bytes!("../../icons/tray-red.png");
+pub(crate) const TRAY_ICON_GRAY: &[u8] = include_bytes!("../../icons/tray-gray.png");
 
 /// Single entry point for any work with `TrayIcon` / `MenuItem` (including dropping clones).
 /// Always dispatches through `run_on_main_thread` (non-blocking; tauri runs it inline on main).
@@ -59,6 +60,7 @@ pub(crate) enum TrayColor {
     Green,
     Yellow,
     Red,
+    Gray,
 }
 
 impl TrayColor {
@@ -67,6 +69,7 @@ impl TrayColor {
             TrayColor::Green => TRAY_ICON_GREEN,
             TrayColor::Yellow => TRAY_ICON_YELLOW,
             TrayColor::Red => TRAY_ICON_RED,
+            TrayColor::Gray => TRAY_ICON_GRAY,
         }
     }
 
@@ -75,12 +78,15 @@ impl TrayColor {
         match name {
             "green" => TrayColor::Green,
             "red" => TrayColor::Red,
+            "gray" => TrayColor::Gray,
             _ => TrayColor::Yellow,
         }
     }
 }
 
 const STOP_TITLE: &str = " СТОП СЕТИ";
+const PROTECTION_OFF_TITLE: &str = " Защита выключена";
+const PROTECTION_OFF_HEADER: &str = "Защита выключена";
 /// Menu bar title prefix when the audit finished, but some checks could not be performed.
 const INCOMPLETE_TITLE: &str = " Проверено частично";
 const INCOMPLETE_HEADER: &str = "Проверено частично";
@@ -231,12 +237,30 @@ impl TrayView {
             TrayColor::Red => STOP_TITLE,
             TrayColor::Yellow => " Внимание",
             TrayColor::Green => " Защита",
+            TrayColor::Gray => PROTECTION_OFF_TITLE,
         };
         let title = title_override.unwrap_or(default_title);
         TrayView {
             icon: Some(icon),
             title: Some(title.to_string()),
             tooltip: Some(format!("Застава · {title}")),
+            ..Default::default()
+        }
+    }
+
+    /// Protection was turned off by the user (`!sysproxy_active`): gray icon, never yellow/green.
+    pub(crate) fn protection_off() -> Self {
+        TrayView {
+            icon: Some(TrayColor::Gray),
+            title: Some(PROTECTION_OFF_TITLE.to_string()),
+            tooltip: Some("Застава · Защита выключена пользователем".to_string()),
+            header: Some((
+                format!(
+                    "Застава v{} — {PROTECTION_OFF_HEADER}",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                TrayColor::Gray,
+            )),
             ..Default::default()
         }
     }
@@ -382,6 +406,11 @@ pub fn update_tray_status(app: &tauri::AppHandle, color: &str, title_override: O
     submit(app, TrayView::from_status(color, title_override));
 }
 
+/// Protection was turned off by the user (`!sysproxy_active`): shows the 4th gray tray icon.
+pub fn update_tray_protection_off(app: &tauri::AppHandle) {
+    submit(app, TrayView::protection_off());
+}
+
 /// Updates the killswitch menu item text/icon. Safe to call from any thread.
 pub fn update_tray_killswitch(app: &tauri::AppHandle, frozen: bool) {
     submit(app, TrayView::from_killswitch(frozen));
@@ -390,6 +419,28 @@ pub fn update_tray_killswitch(app: &tauri::AppHandle, frozen: bool) {
 /// Updates only the tray tooltip. Safe to call from any thread.
 pub fn update_tray_tooltip(app: &tauri::AppHandle, tooltip: String) {
     submit(app, TrayView::from_tooltip(tooltip));
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn inspect_tray_state_transition(
+    has_blocked: bool,
+    sysproxy_active: bool,
+    status: auditor::OverallStatus,
+) -> (&'static str, String, &'static [u8]) {
+    let view = if !has_blocked && !sysproxy_active {
+        TrayView::protection_off()
+    } else {
+        TrayView::from_report(status, "US", "198.51.100.1", true, has_blocked, 1, 0, 0)
+    };
+    let color_name = match view.icon {
+        Some(TrayColor::Green) => "green",
+        Some(TrayColor::Yellow) => "yellow",
+        Some(TrayColor::Red) => "red",
+        Some(TrayColor::Gray) => "gray",
+        None => "none",
+    };
+    let bytes = view.icon.map_or(&[][..], |c| c.bytes());
+    (color_name, view.title.unwrap_or_default(), bytes)
 }
 
 #[cfg(test)]

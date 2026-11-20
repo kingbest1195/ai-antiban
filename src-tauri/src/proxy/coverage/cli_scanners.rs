@@ -1,6 +1,6 @@
 use super::ide_scanners::antigravity_kind;
-use super::{CoverageEnv, CoverageStatus, proxy_value_targets_gateway};
 use super::types::{Verdict, steps, steps_of};
+use super::{CoverageEnv, CoverageStatus, proxy_value_targets_gateway};
 use crate::state::CliMode;
 use crate::sysproxy::FileCtx;
 use crate::sysproxy::fs::Fs;

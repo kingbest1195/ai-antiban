@@ -31,14 +31,8 @@ fn preferences_json_injection_preserves_existing_keys_and_reverts() {
         .unwrap()
         .with_policy_store(store.clone());
 
-    let rep = apply_browser_policies_with_pac_in(
-        &mut j,
-        &plat,
-        Some(pac),
-        Some(&ctx),
-        Os::Macos,
-        &probe,
-    );
+    let rep =
+        apply_browser_policies_with_pac_in(&mut j, &plat, Some(pac), Some(&ctx), Os::Macos, &probe);
     assert_eq!(rep.failed, 0);
     assert!(rep.pac_policy_active);
 
@@ -123,14 +117,8 @@ fn corrupt_or_non_object_preferences_are_skipped_without_overwrite() {
     let mut j = Journal::open(fs.clone(), Path::new(DIR))
         .unwrap()
         .with_policy_store(store);
-    let rep = apply_browser_policies_with_pac_in(
-        &mut j,
-        &plat,
-        Some(pac),
-        Some(&ctx),
-        Os::Macos,
-        &probe,
-    );
+    let rep =
+        apply_browser_policies_with_pac_in(&mut j, &plat, Some(pac), Some(&ctx), Os::Macos, &probe);
     assert_eq!(rep.failed, 1);
     assert!(!rep.pac_policy_active);
     assert_eq!(fs.read(&bad_prefs).unwrap().unwrap(), raw_bad);
@@ -188,8 +176,7 @@ fn running_browser_skips_preferences_injection_and_revert_until_exited() {
     assert_eq!(read_json(&fs, &chrome_prefs)["proxy"]["pac_url"], pac);
 
     // Now Yandex is running at revert time -> Yandex revert is skipped, Chrome reverts.
-    let running_yandex =
-        StubProbe::fixed(Some("/Applications/Yandex.app/Contents/MacOS/Yandex\n"));
+    let running_yandex = StubProbe::fixed(Some("/Applications/Yandex.app/Contents/MacOS/Yandex\n"));
     let rec = revert_browser_policies_with(&mut j, &plat, Os::Macos, &running_yandex);
     assert!(!rec.has_failures());
     assert!(read_json(&fs, &chrome_prefs).get("proxy").is_none());
@@ -405,4 +392,3 @@ fn relaunch_browsers_with_pac_returns_unsupported_on_windows() {
     assert!(summary.failed.is_empty());
     assert!(launcher.calls.lock().unwrap().is_empty());
 }
-

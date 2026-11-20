@@ -48,8 +48,7 @@ async fn evaluate_all_whoami_timeout_keeps_report_green_100() {
 
 #[tokio::test]
 async fn evaluate_all_ipv6_timeout_under_vpn_keeps_report_green_100_not_incomplete() {
-    let probe =
-        probe_locating("NL").with_route("2606:4700:4700::1111", HttpProbeOutcome::Timeout);
+    let probe = probe_locating("NL").with_route("2606:4700:4700::1111", HttpProbeOutcome::Timeout);
     let env = env_with_udp(
         with_whoami(
             zones_answering(FakeDns::new(LookupOutcome::Timeout)),
@@ -278,8 +277,7 @@ async fn evaluate_all_force_refresh_clears_os_check_cache() {
 #[tokio::test]
 async fn gemini_fr_route_does_not_contaminate_direct_gb_providers() {
     let state = AppState::new_in_memory();
-    let fr_route =
-        crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+    let fr_route = crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
     let fr_sel = RouteSelection::Route(fr_route.clone());
     let fr_id = state.upsert_route(fr_route.clone()).await.unwrap();
     state
@@ -483,8 +481,14 @@ async fn evaluate_all_applies_pinned_travel_grace_without_hiding_unpinned_or_san
         .evaluate_all(ProviderId::Openai, &state, false)
         .await
         .unwrap();
-    assert_eq!(claude_unpinned.travel_result.code, "IMPOSSIBLE_TRAVEL_CRITICAL");
+    assert_eq!(
+        claude_unpinned.travel_result.code,
+        "IMPOSSIBLE_TRAVEL_CRITICAL"
+    );
     assert_eq!(claude_unpinned.overall_status, OverallStatus::Red);
-    assert_eq!(openai_unpinned.travel_result.code, "IMPOSSIBLE_TRAVEL_WARNING");
+    assert_eq!(
+        openai_unpinned.travel_result.code,
+        "IMPOSSIBLE_TRAVEL_WARNING"
+    );
     assert_eq!(openai_unpinned.overall_status, OverallStatus::Yellow);
 }

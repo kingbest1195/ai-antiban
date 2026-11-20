@@ -1,0 +1,17 @@
+/* Бункер данных и Индекс риска Persona: только токены дизайн-системы. */
+.zs-bunker__block { margin-top: var(--space-3); }
+.zs-bunker__actions { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-3); }
+.zs-bunker__row-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.zs-bunker__controls { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-3); }
+.zs-bunker__selects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+.zs-bunker__subtitle { margin: 0 0 var(--space-3); color: var(--ink-2); }
+.zs-bunker__section-label { margin: var(--space-3) 0 var(--space-2); color: var(--ink-2); }
+.zs-bunker__steps { margin: 0 0 var(--space-3); padding-left: var(--space-4); color: var(--ink-2); display: flex; flex-direction: column; gap: var(--space-1); }
+.zs-bunker__links { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-3); justify-content: center; }
+.zs-bunker__form { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; text-align: left; }
+.zs-bunker__preview { margin-top: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--bg-2); border: 1px solid var(--line); color: var(--ink); font-family: var(--font-mono); font-size: 12px; line-height: 16px; white-space: pre-wrap; max-height: 140px; overflow-y: auto; }
+.zs-bunker__risk-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-2); }
+.zs-bunker__risk-score { display: flex; align-items: baseline; gap: var(--space-2); }
+.zs-bunker__risk-checks { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-3); }
+.zs-bunker__check-item { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--bg-2); border: 1px solid var(--line); }
+.zs-bunker__check-label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }

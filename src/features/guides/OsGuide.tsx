@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { Badge, Banner, Button, Card, Segmented } from "../../ui";
 import { guides as copy } from "../../shared/copy/ru";
-import { openOsDatetimeSettings, setSyncAiTzEnabled, syncAiAgentsTimezone } from "../../utils/api";
+import {
+  openOsDatetimeSettings,
+  openOsNetworkSettings,
+  setSyncAiTzEnabled,
+  syncAiAgentsTimezone,
+} from "../../utils/api";
 import { CopyBlock } from "./CopyBlock";
 import { CMD_TZ_MAC, PROXY_EXPORT_LINE } from "./commands";
 import { useGuide } from "./context";
@@ -97,9 +102,32 @@ function TimezoneCard() {
 }
 
 function GeoCards() {
-  const { mac, win, ipv6, cli } = copy.os;
+  const { onToast } = useGuide();
+  const { dns, mac, win, ipv6, cli } = copy.os;
+
+  const openNetwork = async () => {
+    try {
+      await openOsNetworkSettings();
+      onToast?.(copy.toast.osNetwork, copy.toast.osNetworkText, "info");
+    } catch (err: unknown) {
+      onToast?.(copy.toast.osNetworkError, err instanceof Error ? err.message : String(err), "error");
+    }
+  };
+
   return (
     <>
+      <Card title={dns.title} aside={<Badge tone="warn" icon="alert">{dns.badge}</Badge>}>
+        <p className="guides-lead">
+          <Rich text={dns.text} />
+        </p>
+        <div>
+          <Button variant="primary" icon="arrow" onClick={openNetwork}>
+            {dns.openNetwork}
+          </Button>
+        </div>
+        <p className="guides-note">{dns.note}</p>
+      </Card>
+
       <Card title={mac.title} aside={<Badge>{mac.badge}</Badge>}>
         <p className="guides-lead">
           <Rich text={mac.text} />

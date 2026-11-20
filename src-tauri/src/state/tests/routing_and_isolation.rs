@@ -360,8 +360,7 @@ async fn scoped_ip_history_isolates_routes_and_preserves_legacy_state_json() {
     .unwrap();
 
     let state = AppState::load_or_default(path.clone());
-    let fr_route =
-        crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
+    let fr_route = crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
     let fr_sel = RouteSelection::Route(fr_route.clone());
     let fr_id = state.upsert_route(fr_route).await.unwrap();
     state
@@ -469,10 +468,7 @@ async fn trusted_exceptions_persist_across_restarts_and_canonicalize() {
         .add_trusted_exception("openai", "2001:0db8::1")
         .await
         .unwrap();
-    state
-        .allow_provider_for_session("anthropic")
-        .await
-        .unwrap();
+    state.allow_provider_for_session("anthropic").await.unwrap();
 
     assert!(
         state
@@ -489,7 +485,10 @@ async fn trusted_exceptions_persist_across_restarts_and_canonicalize() {
             .is_ip_trusted_for_provider("openai", "2001:db8::1")
             .await
     );
-    assert_eq!(state.get_data().await.trusted_exceptions["anthropic"].len(), 1);
+    assert_eq!(
+        state.get_data().await.trusted_exceptions["anthropic"].len(),
+        1
+    );
 
     // Simulate app restart: session allowances clear, trusted exceptions survive.
     let reloaded = AppState::load_or_default(path.clone());
@@ -534,7 +533,10 @@ async fn disabled_providers_persist_clear_blocks_and_filter_unrouted() {
     state.block_provider("gemini").await.unwrap();
     assert!(state.is_provider_blocked("gemini").await);
 
-    state.set_provider_monitoring("gemini", false).await.unwrap();
+    state
+        .set_provider_monitoring("gemini", false)
+        .await
+        .unwrap();
     assert!(state.is_provider_disabled("gemini").await);
     assert!(!state.is_provider_blocked("gemini").await);
     assert_eq!(
@@ -562,10 +564,7 @@ async fn clear_provider_blocks_and_session_isolates_provider_and_preserves_excep
     let state = AppState::new_in_memory();
     state.block_provider("anthropic").await.unwrap();
     state.block_provider("openai").await.unwrap();
-    state
-        .allow_provider_for_session("anthropic")
-        .await
-        .unwrap();
+    state.allow_provider_for_session("anthropic").await.unwrap();
     state
         .add_trusted_exception("anthropic", "1.2.3.4")
         .await
@@ -622,14 +621,20 @@ async fn has_explicit_pinned_ip_distinguishes_provider_pin_from_default() {
         .unwrap();
     assert!(state.has_explicit_pinned_ip("anthropic").await);
     assert_eq!(
-        state.get_data().await.pinned_ip_for_provider("anthropic", false),
+        state
+            .get_data()
+            .await
+            .pinned_ip_for_provider("anthropic", false),
         Some("1.1.1.1")
     );
 
     state.set_pinned_ip_for("anthropic", None).await.unwrap();
     assert!(!state.has_explicit_pinned_ip("anthropic").await);
     assert_eq!(
-        state.get_data().await.pinned_ip_for_provider("anthropic", false),
+        state
+            .get_data()
+            .await
+            .pinned_ip_for_provider("anthropic", false),
         Some("2.2.2.2")
     );
 }

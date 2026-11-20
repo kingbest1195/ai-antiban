@@ -41,6 +41,7 @@ export interface SettingsModalProps {
   updaterStatus?: UpdateStatusPayload | null;
   onLoadRollbackVersions?: () => Promise<void>;
   onInstallRollback?: (version: string) => Promise<void>;
+  onReplayOnboarding?: () => void;
 }
 
 /** Настройки: поведение при обрыве VPN, домены ИИ, автообновление, приватность, сброс системного прокси. */
@@ -67,6 +68,7 @@ export function SettingsModal({
   updaterStatus = null,
   onLoadRollbackVersions,
   onInstallRollback,
+  onReplayOnboarding,
 }: SettingsModalProps) {
   const ctrl = useSettingsController({
     open,
@@ -170,6 +172,16 @@ export function SettingsModal({
             cleaningProxy={ctrl.cleaningProxy}
             proxyResult={ctrl.proxyResult}
             onRequestCleanProxy={() => ctrl.setConfirmProxy(true)}
+            hintsResetBusy={ctrl.hintsResetBusy}
+            onResetDismissedHints={ctrl.handleResetDismissedHints}
+            onReplayOnboarding={
+              onReplayOnboarding
+                ? () => {
+                    onClose();
+                    onReplayOnboarding();
+                  }
+                : undefined
+            }
           />
         </div>
       </Modal>

@@ -134,8 +134,7 @@ impl NetworkGuard {
                 .filter(|p| !st_after.blocked_providers.contains(*p))
                 .collect();
 
-            if !to_block.is_empty() && remaining_open.is_empty() && !guard.is_manual_killswitch()
-            {
+            if !to_block.is_empty() && remaining_open.is_empty() && !guard.is_manual_killswitch() {
                 guard.set_pause_mode_raw(PauseMode::UntilNetworkChange);
                 if guard.gate_reason().is_none() {
                     guard.set_gate_reason(Some(
@@ -171,7 +170,6 @@ impl NetworkGuard {
         });
     }
 
-
     pub(super) fn hide_popup(&self, env: &Env) {
         env.io.hide_alert_popup();
         env.io.emit(
@@ -182,11 +180,7 @@ impl NetworkGuard {
 
     pub(super) async fn update_tray(&self, env: &Env, report: &RiskReport) {
         let st = env.state.get_data().await;
-        let is_pinned = is_ip_pinned_for_state(
-            &st,
-            report.provider,
-            &report.telemetry.ip,
-        );
+        let is_pinned = is_ip_pinned_for_state(&st, report.provider, &report.telemetry.ip);
         let held = self.any_provider_gate_closed() || !st.blocked_providers.is_empty();
         let tray_report = effective_tray_report(report, held, &st);
         env.io.tray_report(&tray_report, is_pinned, held);
@@ -199,8 +193,13 @@ impl NetworkGuard {
         let env = env.clone();
         tokio::spawn(async move {
             let st = env.state.get_data().await;
-            let Some(pid) = st.enabled_providers().into_iter().find_map(ProviderId::from_id) else {
-                env.io.tray_status("green", Some("Мониторинг провайдеров отключён"));
+            let Some(pid) = st
+                .enabled_providers()
+                .into_iter()
+                .find_map(ProviderId::from_id)
+            else {
+                env.io
+                    .tray_status("green", Some("Мониторинг провайдеров отключён"));
                 return;
             };
             if let Ok(report) = (env.audit)(pid, false).await {

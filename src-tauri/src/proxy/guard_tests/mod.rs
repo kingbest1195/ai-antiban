@@ -193,7 +193,6 @@ fn alert_id(ev: &(serde_json::Value, TInstant)) -> String {
     ev.0["id"].as_str().expect("id").to_string()
 }
 
-
 struct DropCounter(Arc<AtomicUsize>);
 
 impl Drop for DropCounter {
@@ -206,11 +205,11 @@ fn all_providers() -> Vec<String> {
     KNOWN_PROVIDERS.iter().map(|p| p.to_string()).collect()
 }
 
-mod gates_tests;
-mod audit_lifecycle_tests;
 mod allow_and_ttl_tests;
+mod asn_cooldown_tests;
+mod audit_lifecycle_tests;
+mod gates_tests;
 mod pinning_and_pause_tests;
 mod provider_isolation_tests;
-mod recovery_and_exceptions_tests;
 mod real_ticker_tests;
-mod asn_cooldown_tests;
+mod recovery_and_exceptions_tests;

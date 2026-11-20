@@ -28,6 +28,8 @@ export interface TrayEventHandlers {
   refreshState: () => Promise<unknown>;
   /** Перечитать снимок маршрутов. */
   refreshRoutes?: () => Promise<unknown>;
+  /** Перечитать фактический статус системного прокси и защиты CLI. */
+  syncProtectionStatus?: () => Promise<void>;
   /** Обновить список профилей Claude в интерфейсе. */
   refreshProfiles?: () => void;
   checkUpdates: (silent?: boolean) => Promise<void>;
@@ -60,7 +62,7 @@ export function handleSysproxyAdminAuthRequired(
   payload?: string | null,
 ): void {
   const parsed = payload ? parseAdminAuthError(payload) : null;
-  const detail = parsed ? `${parsed} Откройте «Обзор» → «Разрешить с паролем».` : t.sysproxy.adminAuthText;
+  const detail = parsed ? `${parsed} Откройте «Нейросети и защита» → «Разрешить с паролем».` : t.sysproxy.adminAuthText;
   handlers.showToast(t.sysproxy.adminAuthTitle, detail, "warning");
 }
 
@@ -125,7 +127,23 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
 
     on("tray://state-changed", async () => {
       try {
-        await Promise.all([ref.current.refreshState(), ref.current.refreshRoutes?.()]);
+        await Promise.all([
+          ref.current.refreshState(),
+          ref.current.refreshRoutes?.(),
+          ref.current.syncProtectionStatus?.(),
+        ]);
+      } catch {}
+    });
+
+    on("tray://sysproxy-toggled", async () => {
+      try {
+        await ref.current.syncProtectionStatus?.();
+      } catch {}
+    });
+
+    on("tray://cli-toggled", async () => {
+      try {
+        await ref.current.syncProtectionStatus?.();
       } catch {}
     });
 

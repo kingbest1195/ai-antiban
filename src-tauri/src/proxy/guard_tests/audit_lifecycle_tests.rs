@@ -16,11 +16,10 @@ async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
 
     // Window-first: risk-detected (phase = detecting) fires immediately at t0 so user
     // gets instant feedback while traffic stays safely frozen (Pending) during slow audit.
-    let (detected, detected_at) = h
-        .io
-        .wait_for("interceptor://risk-detected", 300)
-        .await
-        .expect("immediate risk-detected");
+    let (detected, detected_at) =
+        h.io.wait_for("interceptor://risk-detected", 300)
+            .await
+            .expect("immediate risk-detected");
     assert!(detected_at.duration_since(started) < Duration::from_millis(300));
     assert_eq!(detected["phase"], "detecting");
     assert!(detected["report"].is_null());
@@ -32,7 +31,10 @@ async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
     assert_eq!(detected["network_change"]["new_ip"], "9.9.9.9");
     assert!(detected["network_change"]["new_country"].is_null());
     assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
-    assert_eq!(h.env.hold_queue.current_alert().expect("snapshot").phase, "detecting");
+    assert_eq!(
+        h.env.hold_queue.current_alert().expect("snapshot").phase,
+        "detecting"
+    );
     assert_eq!(
         h.io.trays.lock().unwrap().first().map(String::as_str),
         Some("yellow")
@@ -43,21 +45,19 @@ async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
 
     // Once the 2 s audit lands with Critical risk, enriched (phase = ready) and
     // network://changed are emitted.
-    let (enriched, enriched_at) = h
-        .io
-        .wait_for("interceptor://enriched", 4000)
-        .await
-        .expect("enriched");
+    let (enriched, enriched_at) =
+        h.io.wait_for("interceptor://enriched", 4000)
+            .await
+            .expect("enriched");
     assert!(enriched_at.duration_since(started) >= Duration::from_secs(2));
     assert_eq!(enriched["phase"], "ready");
     assert_eq!(enriched["network_change"]["new_country"], "NL");
     assert!(enriched["report"].is_object());
 
-    let changed = h
-        .io
-        .wait_for("network://changed", 1000)
-        .await
-        .expect("network://changed");
+    let changed =
+        h.io.wait_for("network://changed", 1000)
+            .await
+            .expect("network://changed");
     assert!(detected_at <= enriched_at && enriched_at <= changed.1);
     assert_eq!(h.guard.gate(), Gate::Pending);
     let snapshot = h.env.hold_queue.current_alert().expect("snapshot");
@@ -73,10 +73,9 @@ async fn test_stale_audit_result_is_ignored() {
     )
     .await;
     h.change("9.9.9.9").await;
-    let first = h
-        .io
-        .first("interceptor://risk-detected")
-        .expect("first immediate risk-detected");
+    let first =
+        h.io.first("interceptor://risk-detected")
+            .expect("first immediate risk-detected");
     assert_eq!(first.0["phase"], "detecting");
     let first_id = alert_id(&first);
     let first_epoch = h.guard.inner.lock().await.epoch;
@@ -117,11 +116,10 @@ async fn test_stale_audit_result_is_ignored() {
     assert_eq!(h.io.count("interceptor://enriched"), 0);
 
     // Only the current alert emits enriched (phase = ready).
-    let enriched = h
-        .io
-        .wait_for("interceptor://enriched", 3000)
-        .await
-        .expect("enriched");
+    let enriched =
+        h.io.wait_for("interceptor://enriched", 3000)
+            .await
+            .expect("enriched");
     assert_eq!(enriched.0["id"], second_id.as_str());
     assert_eq!(enriched.0["phase"], "ready");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -213,11 +211,10 @@ async fn test_audit_failure_keeps_gate_closed_and_does_not_reopen_window() {
     h.change("9.9.9.9").await;
     assert_eq!(h.io.count("interceptor://risk-detected"), 1);
 
-    let enriched = h
-        .io
-        .wait_for("interceptor://enriched", 3000)
-        .await
-        .expect("failed enriched");
+    let enriched =
+        h.io.wait_for("interceptor://enriched", 3000)
+            .await
+            .expect("failed enriched");
     assert_eq!(enriched.0["phase"], "failed");
     assert_eq!(
         h.io.trays.lock().unwrap().last().map(String::as_str),
@@ -261,11 +258,10 @@ async fn test_audit_timeout_is_a_failure() {
     guard.inner.lock().await.baseline = h.guard.inner.lock().await.baseline.clone();
     h.guard = guard;
     h.change("9.9.9.9").await;
-    let enriched = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("failed enrichment");
+    let enriched =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("failed enrichment");
     assert_eq!(enriched.0["phase"], "failed");
     assert_eq!(h.guard.gate(), Gate::Pending);
 }
@@ -279,11 +275,10 @@ async fn test_decision_block_and_allow_after_ready_audit() {
     )
     .await;
     h.change("9.9.9.9").await;
-    let ev = h
-        .io
-        .wait_for("interceptor://risk-detected", 2000)
-        .await
-        .expect("risk-detected");
+    let ev =
+        h.io.wait_for("interceptor://risk-detected", 2000)
+            .await
+            .expect("risk-detected");
     let id = alert_id(&ev);
     assert!(h.env.hold_queue.resolve(&id, HoldResolution::Block).await);
     for _ in 0..200 {
@@ -305,11 +300,10 @@ async fn test_decision_block_and_allow_after_ready_audit() {
     )
     .await;
     h.change("9.9.9.9").await;
-    let enriched = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("ready enrichment");
+    let enriched =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("ready enrichment");
     let id = enriched.0["id"].as_str().unwrap().to_string();
     assert!(h.env.hold_queue.resolve(&id, HoldResolution::Allow).await);
     for _ in 0..200 {
@@ -374,18 +368,16 @@ async fn test_route_dirty_with_new_ip_freezes_gate_until_audit_completes() {
     h.guard.check_route_and_tick(&env).await;
     assert!(started.elapsed() < Duration::from_millis(300));
     // Alert-first emits detecting immediately while slow audit runs; gate stays Pending.
-    let ev = h
-        .io
-        .first("interceptor://risk-detected")
-        .expect("immediate risk-detected");
+    let ev =
+        h.io.first("interceptor://risk-detected")
+            .expect("immediate risk-detected");
     assert_eq!(ev.0["phase"], "detecting");
     assert_eq!(h.guard.gate(), Gate::Pending);
 
-    let enr = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("enriched after audit");
+    let enr =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("enriched after audit");
     assert_eq!(enr.0["phase"], "ready");
     assert_eq!(h.guard.gate(), Gate::Pending);
 }
@@ -499,4 +491,3 @@ fn test_summarize_failure_rules() {
     let s = summarize(&r, &["anthropic", "gemini"]).unwrap();
     assert!(s.all_green);
 }
-

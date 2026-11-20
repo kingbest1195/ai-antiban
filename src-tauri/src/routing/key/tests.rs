@@ -73,9 +73,8 @@ fn test_v2_rejections() {
 #[test]
 fn test_errors_never_contain_password() {
     // Password given with a wrong type: serde would normally quote the value.
-    let k = zkey(
-        r#"{"v":2,"entry":[{"proto":"https","host":"a.example.net","port":"TopSecret42"}]}"#,
-    );
+    let k =
+        zkey(r#"{"v":2,"entry":[{"proto":"https","host":"a.example.net","port":"TopSecret42"}]}"#);
     let err = parse_route_key(&k, 0).unwrap_err();
     assert!(!err.contains("TopSecret42"), "{err}");
 

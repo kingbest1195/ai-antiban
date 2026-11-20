@@ -1,0 +1,134 @@
+/* Застава v3.0.0 — стили маскота и 5 функциональных анимаций.
+   Только CSS-переменные токенов, без сырых цветов, без filter: blur() / drop-shadow().
+   В @keyframes анимируются исключительно GPU-композитные transform и opacity. */
+
+.zs-mascot{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--ink);transition:transform .25s ease,opacity .25s ease}
+.zs-mascot__svg{display:block;width:100%;height:100%;overflow:visible}
+.zs-mascot__halo{transform-origin:48px 48px}
+.zs-mascot--protected .zs-mascot__halo{animation:zs-mascot-halo 4s ease-in-out infinite}
+.zs-mascot--protected .zs-mascot__chest{transform-origin:48px 66px;animation:zs-mascot-breathe 4s ease-in-out infinite}
+.zs-mascot--protected .zs-mascot__eyes{transform-origin:48px 40px;animation:zs-mascot-blink 5.2s ease-in-out infinite}
+.zs-mascot__scan-beam{opacity:0}
+.zs-mascot--scanning .zs-mascot__scan-beam{opacity:.9;animation:zs-mascot-scan 1.8s ease-in-out infinite}
+.zs-mascot--scanning .zs-mascot__head{transform-origin:48px 46px;animation:zs-mascot-tilt 2.4s ease-in-out infinite}
+.zs-mascot--alert .zs-mascot__svg{animation:zs-mascot-alert-snap .36s cubic-bezier(.2,.9,.3,1.1) 1}
+.zs-mascot--alert .zs-mascot__halo{opacity:.9}
+.zs-mascot--sleep{opacity:.88}
+.zs-mascot--warmup .zs-mascot__warmup-ring{transform-origin:76px 72px;animation:zs-mascot-warmup-pulse 2.6s ease-in-out infinite}
+
+@keyframes zs-mascot-breathe{0%,100%{transform:scaleY(1)}50%{transform:scaleY(1.025)}}
+@keyframes zs-mascot-halo{0%,100%{opacity:.45;transform:scale(1)}50%{opacity:.8;transform:scale(1.03)}}
+@keyframes zs-mascot-blink{0%,92%,100%{transform:scaleY(1);opacity:1}96%{transform:scaleY(.15);opacity:.7}}
+@keyframes zs-mascot-scan{0%{transform:translateX(-22px);opacity:.2}50%{transform:translateX(22px);opacity:.95}100%{transform:translateX(-22px);opacity:.2}}
+@keyframes zs-mascot-tilt{0%,100%{transform:rotate(0deg)}50%{transform:rotate(-3deg)}}
+@keyframes zs-mascot-alert-snap{0%{transform:scale(.92);opacity:.75}60%{transform:scale(1.06);opacity:1}100%{transform:scale(1);opacity:1}}
+@keyframes zs-mascot-warmup-pulse{0%,100%{opacity:.55;transform:scale(.95)}50%{opacity:1;transform:scale(1.08)}}
+
+/* Анимация 1: Split-Routing */
+.zs-anim-split{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-1);border:1px solid var(--line)}
+.zs-anim-split--compact{padding:var(--space-2) var(--space-3)}
+.zs-anim-split__lane{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:var(--space-2);padding:var(--space-2);border-radius:var(--radius-sm);background:var(--bg-2)}
+.zs-anim-split__lane--ai{background:color-mix(in srgb,var(--brand-soft) 55%,var(--bg-2));border:1px solid color-mix(in srgb,var(--brand) 30%,transparent)}
+.zs-anim-split__label{display:flex;flex-direction:column;gap:1px;min-width:0}
+.zs-anim-split__title{font-size:12px;line-height:16px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.zs-anim-split__sub{font-size:11px;line-height:14px;color:var(--ink-3)}
+.zs-anim-split__track{position:relative;width:72px;height:18px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.zs-anim-split__line{width:100%;height:2px;border-radius:var(--radius-pill);background:var(--line-strong)}
+.zs-anim-split__lane--ai .zs-anim-split__line{background:color-mix(in srgb,var(--brand) 55%,transparent)}
+.zs-anim-split__dot{position:absolute;left:0;width:7px;height:7px;border-radius:var(--radius-pill);background:var(--ink-2);opacity:0}
+.zs-anim-split__lane--ai .zs-anim-split__dot{background:var(--brand-text)}
+.zs-anim-split--active .zs-anim-split__dot{animation:zs-flow-x 1.9s linear infinite}
+.zs-anim-split--active .zs-anim-split__dot--delay{animation-delay:.95s}
+.zs-anim-split__node{display:inline-flex;align-items:center;justify-content:flex-end;gap:5px;font-size:12px;line-height:16px;font-weight:600;color:var(--ink-2);white-space:nowrap}
+.zs-anim-split__lane--ai .zs-anim-split__node{color:var(--brand-text)}
+@keyframes zs-flow-x{0%{transform:translateX(0);opacity:0}18%{opacity:1}82%{opacity:1}100%{transform:translateX(64px);opacity:0}}
+
+/* Анимация 2: Kill-Switch (0.04 мс) */
+.zs-anim-ks{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);border:1px solid var(--line)}
+.zs-anim-ks--triggered{background:color-mix(in srgb,var(--danger-soft) 55%,var(--bg-2));border-color:color-mix(in srgb,var(--danger) 40%,transparent)}
+.zs-anim-ks--compact{padding:var(--space-2) var(--space-3);gap:var(--space-2)}
+.zs-anim-ks__stage{position:relative;width:68px;height:36px;flex:none;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:var(--radius-sm);background:var(--bg-1)}
+.zs-anim-ks__packet{position:absolute;left:6px;width:8px;height:8px;border-radius:var(--radius-pill);background:var(--warn)}
+.zs-anim-ks--triggered .zs-anim-ks__packet{background:var(--danger);animation:zs-ks-block 1.6s ease-out infinite}
+.zs-anim-ks__gate{width:24px;height:24px;display:grid;place-items:center;color:var(--brand-text);transform-origin:center}
+.zs-anim-ks--triggered .zs-anim-ks__gate{color:var(--danger-text);animation:zs-ks-snap .28s cubic-bezier(.2,.9,.3,1.1) 1}
+.zs-anim-ks__body{flex:1;min-width:0}
+.zs-anim-ks__head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
+.zs-anim-ks__title{font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
+.zs-anim-ks__ms{font-family:var(--font-mono);font-size:11px;line-height:16px;font-weight:600;padding:1px 6px;border-radius:var(--radius-pill);background:var(--brand-soft);color:var(--brand-text)}
+.zs-anim-ks--triggered .zs-anim-ks__ms{background:var(--danger-soft);color:var(--danger-text)}
+.zs-anim-ks__sub{margin:2px 0 0;font-size:12px;line-height:16px;color:var(--ink-2)}
+@keyframes zs-ks-snap{0%{transform:scale(1.25) translateY(-4px);opacity:.4}100%{transform:scale(1) translateY(0);opacity:1}}
+@keyframes zs-ks-block{0%{transform:translateX(0);opacity:0}25%{opacity:1}45%{transform:translateX(20px) scale(1);opacity:1}65%{transform:translateX(16px) scale(.75);opacity:.4}100%{transform:translateX(16px) scale(.6);opacity:0}}
+
+/* Анимация 3: 4-слойный радар Чистой комнаты */
+.zs-anim-radar{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);border:1px solid var(--line)}
+.zs-anim-radar__dial{position:relative;width:56px;height:56px;flex:none}
+.zs-anim-radar__sweep{transform-origin:28px 28px;opacity:.25}
+.zs-anim-radar--scanning .zs-anim-radar__sweep{opacity:.95;animation:zs-radar-spin 2.2s linear infinite}
+.zs-anim-radar__layers{flex:1;min-width:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.zs-anim-radar__layer{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:var(--radius-sm);background:var(--bg-1);font-size:12px;line-height:16px;color:var(--ink-2)}
+.zs-anim-radar__layer--active{color:var(--ink);background:var(--brand-soft)}
+.zs-anim-radar__layer--ok{color:var(--brand-text)}
+.zs-anim-radar__layer--warn{color:var(--warn-text);background:color-mix(in srgb,var(--warn-soft) 55%,var(--bg-1))}
+.zs-anim-radar__layer--critical{color:var(--danger-text);background:color-mix(in srgb,var(--danger-soft) 55%,var(--bg-1))}
+.zs-anim-radar__dot{width:7px;height:7px;flex:none;border-radius:var(--radius-pill);background:var(--ink-3)}
+.zs-anim-radar__layer--ok .zs-anim-radar__dot,.zs-anim-radar__layer--active .zs-anim-radar__dot{background:var(--brand-text)}
+.zs-anim-radar__layer--warn .zs-anim-radar__dot{background:var(--warn-text)}
+.zs-anim-radar__layer--critical .zs-anim-radar__dot{background:var(--danger-text)}
+.zs-anim-radar--scanning .zs-anim-radar__dot{animation:zs-radar-dot 1.6s ease-in-out infinite}
+.zs-anim-radar--scanning .zs-anim-radar__layer--1 .zs-anim-radar__dot{animation-delay:0s}
+.zs-anim-radar--scanning .zs-anim-radar__layer--2 .zs-anim-radar__dot{animation-delay:.4s}
+.zs-anim-radar--scanning .zs-anim-radar__layer--3 .zs-anim-radar__dot{animation-delay:.8s}
+.zs-anim-radar--scanning .zs-anim-radar__layer--4 .zs-anim-radar__dot{animation-delay:1.2s}
+@keyframes zs-radar-spin{to{transform:rotate(360deg)}}
+@keyframes zs-radar-dot{0%,100%{opacity:.35;transform:scale(.9)}50%{opacity:1;transform:scale(1.2)}}
+
+/* Анимация 4: SmartScreen / Gatekeeper 2-кадровый гайд */
+.zs-smartguide{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-1);border:1px solid var(--line)}
+.zs-smartguide__toggle{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);width:100%;padding:0;border:0;background:none;color:var(--ink);font:inherit;font-size:13px;line-height:18px;font-weight:600;text-align:left;cursor:pointer}
+.zs-smartguide__toggle:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:var(--radius-sm)}
+.zs-smartguide__tabs{display:inline-flex;gap:4px;padding:2px;border-radius:var(--radius-sm);background:var(--bg-2);align-self:flex-start}
+.zs-smartguide__tab{padding:4px 10px;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--ink-2);font:inherit;font-size:12px;line-height:16px;font-weight:500;cursor:pointer}
+.zs-smartguide__tab[aria-selected="true"]{background:var(--bg-3);color:var(--ink);font-weight:600}
+.zs-smartguide__frames{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-2)}
+.zs-smartguide__frame{display:flex;flex-direction:column;gap:6px;padding:var(--space-2);border-radius:var(--radius-sm);background:var(--bg-2);border:1px solid var(--line)}
+.zs-smartguide__step{font-size:11px;line-height:14px;font-weight:600;color:var(--ink-3)}
+.zs-smartguide__mock{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:var(--radius-sm);background:var(--bg-0);border:1px solid var(--line)}
+.zs-smartguide__mock-bar{height:6px;width:68%;border-radius:var(--radius-pill);background:var(--bg-3)}
+.zs-smartguide__cta{display:inline-flex;align-items:center;gap:4px;align-self:flex-start;padding:3px 8px;border-radius:var(--radius-sm);background:var(--brand-soft);border:1px solid color-mix(in srgb,var(--brand) 45%,transparent);color:var(--brand-text);font-size:11px;line-height:15px;font-weight:600;animation:zs-guide-cue 2.2s ease-in-out infinite}
+.zs-smartguide__frame--2 .zs-smartguide__cta{animation-delay:1.1s}
+.zs-smartguide__caption{margin:0;font-size:12px;line-height:16px;color:var(--ink-2)}
+@keyframes zs-guide-cue{0%,100%{transform:scale(1);opacity:.88}50%{transform:scale(1.03);opacity:1}}
+
+/* Анимация 5: Переход PowerPill (sleep <-> protected) */
+.zs-power-transition{transition:transform .22s ease,opacity .22s ease,background-color .22s ease,border-color .22s ease}
+.zs-power-transition--waking{animation:zs-power-wake .36s cubic-bezier(.2,.9,.3,1.05) 1}
+.zs-power-transition--sleeping{animation:zs-power-sleep .28s ease-out 1}
+@keyframes zs-power-wake{0%{transform:scale(.985);opacity:.85}55%{transform:scale(1.015);opacity:1}100%{transform:scale(1);opacity:1}}
+@keyframes zs-power-sleep{0%{transform:scale(1);opacity:1}100%{transform:scale(.99);opacity:.92}}
+
+/* Жёсткая экономия CPU/GPU (~0% в фоне и трее) */
+.zs-mascot--paused,
+.zs-mascot--paused *,
+.zs-mascot--paused *::before,
+.zs-mascot--paused *::after{
+  animation-play-state:paused !important;
+  animation:none !important;
+}
+
+@media (prefers-reduced-motion:reduce){
+  .zs-mascot,
+  .zs-mascot *,
+  .zs-anim-split *,
+  .zs-anim-ks *,
+  .zs-anim-radar *,
+  .zs-smartguide *,
+  .zs-power-transition,
+  .zs-power-transition--waking,
+  .zs-power-transition--sleeping{
+    animation-play-state:paused !important;
+    animation:none !important;
+    transition:none !important;
+  }
+}

@@ -80,8 +80,14 @@ pub async fn sync_active_profile_to_runtime(
     upstream_key: Option<&str>,
 ) -> Result<(), String> {
     let route_id = auditor::profile_switcher::resolve_route_id_for_key(upstream_key);
-    sync_active_profile_binding_to_runtime(state, guard, pinned_ip, upstream_key, route_id.as_deref())
-        .await
+    sync_active_profile_binding_to_runtime(
+        state,
+        guard,
+        pinned_ip,
+        upstream_key,
+        route_id.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -204,8 +210,11 @@ pub async fn bind_ip_to_claude_profile_cmd(
     state: tauri::State<'_, state::AppState>,
 ) -> Result<auditor::profile_switcher::ClaudeProfileListResponse, String> {
     let _runtime_lock = lock_profile_runtime().await;
-    let resp =
-        auditor::profile_switcher::update_profile_bound_ip(&profile_id, bind_ip.clone(), bind_country)?;
+    let resp = auditor::profile_switcher::update_profile_bound_ip(
+        &profile_id,
+        bind_ip.clone(),
+        bind_country,
+    )?;
     tray::menu::refresh_profiles_submenu(&app);
     if resp.active_profile_id == profile_id
         && let Err(err) = state

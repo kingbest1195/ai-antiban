@@ -130,7 +130,9 @@ pub(super) fn is_chained_eligible_for_entry(
     if entry_host.is_empty() || is_internal_hostname(&entry_host) {
         return false;
     }
-    if entry.port == cp.port && (entry_host == cp_host || hosts_same_loopback(&entry_host, &cp_host)) {
+    if entry.port == cp.port
+        && (entry_host == cp_host || hosts_same_loopback(&entry_host, &cp_host))
+    {
         return false;
     }
     if let Ok(ip) = entry_host.parse::<IpAddr>()

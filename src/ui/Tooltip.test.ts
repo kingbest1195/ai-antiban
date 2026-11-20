@@ -1,5 +1,14 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { clampTooltipPosition } from "./Tooltip";
+import {
+  INITIAL_TOOLTIP_STATE,
+  InfoTip,
+  Tip,
+  clampTooltipPosition,
+  isTooltipVisible,
+  reduceTooltipState,
+} from "./Tooltip";
 
 describe("clampTooltipPosition", () => {
   it("центрирует подсказку под якорем, когда она помещается в окно", () => {
@@ -73,5 +82,59 @@ describe("clampTooltipPosition", () => {
 
     expect(pos.top).toBe(12);
     expect(pos.top).toBeGreaterThanOrEqual(8);
+  });
+});
+
+describe("Tooltip interaction state (hover + focus + click toggle + Escape + outsideClick)", () => {
+  it("открывается при hover/focus и закрывается при уходе", () => {
+    const hovered = reduceTooltipState(INITIAL_TOOLTIP_STATE, "hoverStart");
+    expect(isTooltipVisible(hovered)).toBe(true);
+    expect(isTooltipVisible(reduceTooltipState(hovered, "hoverEnd"))).toBe(false);
+
+    const focused = reduceTooltipState(INITIAL_TOOLTIP_STATE, "focus");
+    expect(isTooltipVisible(focused)).toBe(true);
+    expect(isTooltipVisible(reduceTooltipState(focused, "blur"))).toBe(false);
+  });
+
+  it("clickToggle фиксирует подсказку даже после ухода курсора и закрывает при повторном клике", () => {
+    let s = reduceTooltipState(INITIAL_TOOLTIP_STATE, "hoverStart");
+    s = reduceTooltipState(s, "clickToggle");
+    expect(s.pinned).toBe(true);
+    expect(isTooltipVisible(s)).toBe(true);
+
+    // Курсор ушёл, но подсказка остаётся открытой, пока не кликнут снова или снаружи
+    s = reduceTooltipState(s, "hoverEnd");
+    expect(isTooltipVisible(s)).toBe(true);
+
+    // Навели и кликнули второй раз — закрывается сразу, даже при hover=true
+    s = reduceTooltipState(s, "hoverStart");
+    s = reduceTooltipState(s, "clickToggle");
+    expect(s.pinned).toBe(false);
+    expect(isTooltipVisible(s)).toBe(false);
+  });
+
+  it("закрывается по Escape и клику снаружи", () => {
+    const pinned = reduceTooltipState(INITIAL_TOOLTIP_STATE, "clickToggle");
+    expect(isTooltipVisible(pinned)).toBe(true);
+
+    const afterEsc = reduceTooltipState(pinned, "escape");
+    expect(isTooltipVisible(afterEsc)).toBe(false);
+
+    const afterOutside = reduceTooltipState(pinned, "outsideClick");
+    expect(isTooltipVisible(afterOutside)).toBe(false);
+  });
+
+  it("InfoTip рендерит доступную кнопку с aria-expanded и классом zs-info-i", () => {
+    const html = renderToStaticMarkup(createElement(InfoTip, { title: "ASN", text: "Номер провайдера" }));
+    expect(html).toContain("<button");
+    expect(html).toContain('class="zs-info-i"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Пояснение"');
+
+    const tipHtml = renderToStaticMarkup(
+      createElement(Tip, { text: "Текст", children: createElement("span", null, "Якорь") }),
+    );
+    expect(tipHtml).toContain('class="zs-tip"');
+    expect(tipHtml).toContain("Якорь");
   });
 });

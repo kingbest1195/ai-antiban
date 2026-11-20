@@ -350,8 +350,7 @@ async fn fake_dns_and_open_resolver_refusal_fall_back_to_doh_json() {
                 "name=2.0.0.127.zen.spamhaus.org",
                 HttpProbeOutcome::Response {
                     status: 200,
-                    body: r#"{"Status":0,"Answer":[{"type":1,"data":"127.255.255.254"}]}"#
-                        .into(),
+                    body: r#"{"Status":0,"Answer":[{"type":1,"data":"127.255.255.254"}]}"#.into(),
                 },
             )
             .with_route(

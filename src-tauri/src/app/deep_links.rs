@@ -75,11 +75,10 @@ pub async fn reconcile_active_profile_binding_async(
     }
 
     if let Some(ref key) = binding.bound_upstream_key {
-        let route_matches = binding.bound_route_id.as_deref().is_some_and(|rid| {
-            st.routes
-                .iter()
-                .any(|r| r.id == rid && r.raw_key == *key)
-        });
+        let route_matches = binding
+            .bound_route_id
+            .as_deref()
+            .is_some_and(|rid| st.routes.iter().any(|r| r.id == rid && r.raw_key == *key));
         let needs_apply = st.profile_route_invalid.is_some()
             || st.profile_route_id.as_deref() != binding.bound_route_id.as_deref()
             || !route_matches;
@@ -93,7 +92,9 @@ pub async fn reconcile_active_profile_binding_async(
         let st_after = app_state.get_data().await;
         if st_after.profile_route_invalid.is_none()
             && st_after.profile_route_id.is_some()
-            && st_after.blocked_providers.contains(state::PROVIDER_ANTHROPIC)
+            && st_after
+                .blocked_providers
+                .contains(state::PROVIDER_ANTHROPIC)
             && let Err(err) = app_state.unblock_provider(state::PROVIDER_ANTHROPIC).await
         {
             crate::diagnostics::record("startup_profile", &err.to_string());

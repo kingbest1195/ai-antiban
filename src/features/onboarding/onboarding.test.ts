@@ -6,7 +6,7 @@ import { onboarding as copy } from "../../shared/copy/ru";
 
 const tauriMock = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
-  invoke: vi.fn(async () => false as unknown),
+  invoke: vi.fn(async () => ({}) as unknown),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -29,6 +29,7 @@ import {
 } from "./useOnboarding";
 import { evaluateNetwork } from "./networkVerdict";
 import { OnboardingFlow } from "./OnboardingFlow";
+import type { OnboardingGoal } from "./OnboardingFlow";
 import { StepWelcome } from "./StepWelcome";
 import { StepNetwork } from "./StepNetwork";
 import { StepProtect } from "./StepProtect";
@@ -114,14 +115,14 @@ function makeReport(over: Partial<RiskReport> = {}): RiskReport {
   };
 }
 
-describe("useOnboarding & Tauri persistence (v2.2)", () => {
+describe("useOnboarding & Tauri persistence (v3.0)", () => {
   const originalWindow = globalThis.window;
 
   beforeEach(() => {
     tauriMock.isTauri.mockReset();
     tauriMock.isTauri.mockReturnValue(false);
     tauriMock.invoke.mockReset();
-    tauriMock.invoke.mockResolvedValue(false);
+    tauriMock.invoke.mockResolvedValue({ onboarding_v3_done: false });
     installMockWindow();
   });
 
@@ -133,8 +134,9 @@ describe("useOnboarding & Tauri persistence (v2.2)", () => {
     }
   });
 
-  it("uses v2.2 storage key and syncs localStorage in non-Tauri mode", async () => {
-    expect(ONBOARDING_DONE_KEY).toBe("zastava_onboarding_v2_2_done");
+  it("uses v3.0 storage key, 5 steps, and syncs localStorage in non-Tauri mode", async () => {
+    expect(ONBOARDING_DONE_KEY).toBe("zastava_onboarding_v3_done");
+    expect(ONBOARDING_STEPS).toBe(5);
     expect(readDoneFromStorage()).toBe(false);
     expect(await readOnboardingDone()).toBe(false);
 
@@ -147,23 +149,23 @@ describe("useOnboarding & Tauri persistence (v2.2)", () => {
     expect(readDoneFromStorage()).toBe(false);
   });
 
-  it("reads and persists state via Tauri commands and syncs localStorage cache", async () => {
+  it("reads onboarding_v3_done and persists via complete_onboarding_v3 in Tauri mode", async () => {
     tauriMock.isTauri.mockReturnValue(true);
-    tauriMock.invoke.mockResolvedValueOnce(true);
+    tauriMock.invoke.mockResolvedValueOnce({ onboarding_v3_done: true });
 
     const done = await readOnboardingDone();
     expect(done).toBe(true);
-    expect(tauriMock.invoke).toHaveBeenCalledWith("get_onboarding_v2_2_done");
+    expect(tauriMock.invoke).toHaveBeenCalledWith("get_state");
     expect(readDoneFromStorage()).toBe(true);
 
-    tauriMock.invoke.mockResolvedValueOnce(false);
+    tauriMock.invoke.mockResolvedValueOnce({ onboarding_v3_done: false });
     const notDone = await readOnboardingDone();
     expect(notDone).toBe(false);
     expect(readDoneFromStorage()).toBe(false);
 
-    tauriMock.invoke.mockResolvedValueOnce(undefined);
+    tauriMock.invoke.mockResolvedValueOnce({ onboarding_v3_done: true });
     await persistOnboardingDone(true);
-    expect(tauriMock.invoke).toHaveBeenCalledWith("set_onboarding_v2_2_done", { done: true });
+    expect(tauriMock.invoke).toHaveBeenCalledWith("complete_onboarding_v3");
     expect(readDoneFromStorage()).toBe(true);
   });
 
@@ -210,8 +212,8 @@ describe("useOnboarding & Tauri persistence (v2.2)", () => {
   });
 });
 
-describe("networkVerdict (v2.2 checks & country format)", () => {
-  it("treats v2.2 key-protected and AI-TZ-synced checks as green with formatted country", () => {
+describe("networkVerdict (v3.0 checks & country format)", () => {
+  it("treats key-protected and AI-TZ-synced checks as green with formatted country", () => {
     const report = makeReport();
     const v = evaluateNetwork({ anthropic: report, openai: report, gemini: report }, report);
     expect(v.good).toBe(true);
@@ -255,7 +257,7 @@ describe("networkVerdict (v2.2 checks & country format)", () => {
   });
 });
 
-describe("Onboarding v2.2 steps & OnboardingFlow", () => {
+describe("Onboarding v3 steps & OnboardingFlow", () => {
   const originalWindow = globalThis.window;
 
   beforeEach(() => {
@@ -286,17 +288,20 @@ describe("Onboarding v2.2 steps & OnboardingFlow", () => {
     onClose: () => {},
   };
 
-  it("StepWelcome introduces VPN + zastava:// keys and 14 prioritized checks", () => {
-    const html = renderToStaticMarkup(createElement(StepWelcome, { onNext: () => {} }));
-    expect(html).toContain("zastava://");
-    expect(html).toContain("14");
-    expect(html).toContain("Claude");
-    expect(html).toContain("ChatGPT");
-    expect(html).toContain("Gemini");
+  it("StepWelcome renders WatchdogMascot (protected) and 3 Quick-Pick Goal cards", () => {
+    const html = renderToStaticMarkup(
+      createElement(StepWelcome, { goal: "clean_room", onSelectGoal: () => {}, onNext: () => {} }),
+    );
+    expect(html).toContain('data-mascot-state="protected"');
+    expect(html).toContain("Защитить текущий аккаунт");
+    expect(html).toContain("Завести новый чистый аккаунт");
+    expect(html).toContain("Уже пришла проверка Persona или бан");
+    expect(html).toContain('data-onb-goal="clean_room"');
+    expect(html).toContain('aria-checked="true"');
     expect(html).toContain(copy.welcome.next);
   });
 
-  it("StepNetwork shows live verdict with country code and explains Маршруты по сервисам ИИ", () => {
+  it("StepNetwork embeds SplitRoutingAnim, live network verdict, and SmartScreenGuide", () => {
     const html = renderToStaticMarkup(
       createElement(StepNetwork, {
         reports: { anthropic: makeReport() },
@@ -311,15 +316,14 @@ describe("Onboarding v2.2 steps & OnboardingFlow", () => {
         onOpenConnect: () => {},
       }),
     );
+    expect(html).toContain("zs-anim-split");
     expect(html).toContain("136.244.114.42");
     expect(html).toContain("Франция (FR)");
     expect(html).toContain("14 из 14");
-    expect(html).toContain("Маршруты по сервисам ИИ");
-    expect(html).toContain("zastava://");
-    expect(html).toContain("Gemini");
+    expect(html).toContain("zs-smartguide");
   });
 
-  it("StepProtect explains the 3 v2.2 protection layers and reflects toggle state", () => {
+  it("StepProtect embeds CleanRoomRadarAnim, protection layers, and Free Local Bunker", () => {
     const htmlBoth = renderToStaticMarkup(
       createElement(StepProtect, {
         sysproxyActive: true,
@@ -330,15 +334,10 @@ describe("Onboarding v2.2 steps & OnboardingFlow", () => {
         onBack: () => {},
       }),
     );
-    expect(htmlBoth).toContain("Браузеры");
-    expect(htmlBoth).toContain("PAC");
-    expect(htmlBoth).toContain("QUIC/DoH");
-    expect(htmlBoth).toContain("V2Box Pro");
-    expect(htmlBoth).toContain("Приложения, CLI и IDE");
-    expect(htmlBoth).toContain("ai_only");
-    expect(htmlBoth).toContain("npm");
-    expect(htmlBoth).toContain("Часовой пояс для ИИ");
-    expect(htmlBoth).toContain("Синхронизировать для ИИ");
+    expect(htmlBoth).toContain("zs-anim-radar");
+    expect(htmlBoth).toContain("Браузеры и десктопные приложения");
+    expect(htmlBoth).toContain("Редакторы кода и терминал");
+    expect(htmlBoth).toContain("Бесплатный локальный Бункер данных");
     expect(htmlBoth).toContain(copy.protect.state.both);
 
     const htmlNone = renderToStaticMarkup(
@@ -354,34 +353,61 @@ describe("Onboarding v2.2 steps & OnboardingFlow", () => {
     expect(htmlNone).toContain(copy.protect.state.none);
   });
 
-  it("StepAlert explains gate_reason, pause until next network change, and Continue button", () => {
+  it("StepAlert embeds KillSwitchAnim (0.04 мс) and human-readable Точная причина остановки", () => {
     const html = renderToStaticMarkup(createElement(StepAlert, { onReacted: () => {}, onBack: () => {} }));
-    expect(html).toContain("gate_reason");
-    expect(html).toContain("Пауза до следующей смены сети");
+    expect(html).toContain("zs-anim-ks");
+    expect(html).toContain("0.04 мс");
+    expect(html).toContain("Точная причина остановки");
+    expect(html).not.toContain("gate_reason");
     expect(html).toContain(copy.alert.show);
     expect(html).toContain(copy.alert.continue);
   });
 
-  it("StepDone mentions clean system restore on shutdown/update", () => {
-    const html = renderToStaticMarkup(createElement(StepDone, { onOpenOverview: () => {} }));
-    expect(html).toContain(copy.done.shutdown.title);
-    expect(html).toContain(copy.done.shutdown.sub);
-    expect(html).toContain(copy.done.open);
+  it("StepDone renders all 4 tray indicator colors (including gray) and goal-specific CTA", () => {
+    const goals: OnboardingGoal[] = ["protect", "clean_room", "sos"];
+    for (const goal of goals) {
+      const html = renderToStaticMarkup(createElement(StepDone, { goal, onComplete: () => {} }));
+      expect(html).toContain("Зелёный");
+      expect(html).toContain("Жёлтый");
+      expect(html).toContain("Красный");
+      expect(html).toContain("Серый");
+      expect(html).toContain("zs-onb__tray-dot--gray");
+      expect(html).toContain(copy.done.ctaByGoal[goal]);
+    }
   });
 
-  it("OnboardingFlow header uses Пропустить on steps 1..3, Продолжить on step 4, and hides it on done", () => {
+  it("OnboardingFlow header uses Пропустить on steps 1..3, Продолжить on step 4, and doneProgress on step 5", () => {
     const step1 = renderToStaticMarkup(createElement(OnboardingFlow, { ...baseFlowProps, initialStep: 1 }));
-    expect(step1).toContain(`Шаг 1 из ${ONBOARDING_STEPS}`);
+    expect(step1).toContain("Шаг 1 из 5");
     expect(step1).toContain(copy.skip);
 
     const step4 = renderToStaticMarkup(createElement(OnboardingFlow, { ...baseFlowProps, initialStep: 4 }));
-    expect(step4).toContain(`Шаг 4 из ${ONBOARDING_STEPS}`);
+    expect(step4).toContain("Шаг 4 из 5");
     expect(step4).not.toContain(`>${copy.skip}<`);
     expect(step4).toContain(`>${copy.continue}<`);
 
-    const stepDone = renderToStaticMarkup(createElement(OnboardingFlow, { ...baseFlowProps, initialStep: 5 }));
-    expect(stepDone).toContain(copy.doneProgress);
-    expect(stepDone).not.toContain(`>${copy.skip}<`);
-    expect(stepDone).not.toContain(`>${copy.continue}<`);
+    const step5 = renderToStaticMarkup(createElement(OnboardingFlow, { ...baseFlowProps, initialStep: 5 }));
+    expect(step5).toContain(copy.doneProgress);
+    expect(step5).not.toContain(`>${copy.skip}<`);
+    expect(step5).not.toContain(`>${copy.continue}<`);
+  });
+
+  it("ru/onboarding copy is free of legacy v2.2 tabs and technical jargon", () => {
+    const serialized = JSON.stringify(copy);
+    for (const forbidden of [
+      "2.2",
+      "Обзор",
+      "обзоре",
+      "вкладке «Проверки»",
+      "вкладке «Подключение»",
+      "меню «Ещё»",
+      "PAC-политик",
+      "QUIC/DoH",
+      "V2Box",
+      "ai_only",
+      "gate_reason",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
   });
 });

@@ -112,7 +112,12 @@ impl GuardIo for TauriIo {
     }
 
     fn tray_report(&self, report: &RiskReport, is_pinned: bool, has_blocked: bool) {
-        crate::proxy::popup_port::update_tray_from_report(&self.app, report, is_pinned, has_blocked);
+        crate::proxy::popup_port::update_tray_from_report(
+            &self.app,
+            report,
+            is_pinned,
+            has_blocked,
+        );
     }
 
     fn tray_status(&self, color: &str, title: Option<&str>) {
@@ -302,7 +307,6 @@ impl Default for NetworkGuard {
     }
 }
 
-
 /// What the first (short, locked) part of a tick decided.
 pub(super) enum TickPlan {
     Done,
@@ -311,4 +315,3 @@ pub(super) enum TickPlan {
     /// Regular periodic probe. Both carry the route fingerprint the plan was made for.
     ProbeRegular(String),
 }
-

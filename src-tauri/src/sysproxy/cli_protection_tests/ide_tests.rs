@@ -409,4 +409,3 @@ fn a_failing_read_skips_that_file_and_records_nothing() {
     apply_agent_settings(&mut j, &e.p, &e.ctx, &claude, Some(URL), None).unwrap();
     assert!(e.text(&claude).contains("HTTPS_PROXY"));
 }
-

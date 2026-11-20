@@ -360,4 +360,3 @@ fn listing_and_agent_id_helpers() {
     assert!(is_antigravity_agent_id("language-server-macos-arm"));
     assert!(!is_antigravity_agent_id("antigravity"));
 }
-

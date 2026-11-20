@@ -1,5 +1,9 @@
 //! Persistent state schema types, constants, secret-redacting Debug impls, and UI redaction.
 
+pub use super::schema_v3::{
+    BunkerSettings, CleanProfileStatus, CleanRoomProfile, CleanRoomState,
+    DEFAULT_BUNKER_INTERVAL_HOURS, DEFAULT_BUNKER_RETENTION_COUNT, PersonaSelfCheck,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use thiserror::Error;
@@ -13,8 +17,10 @@ pub const DEFAULT_IP_CHANGE_COOLDOWN_SECS: u64 = 4 * 3600;
 pub const STATE_FILE_NAME: &str = "state.json";
 /// Copy of the original v1.3.x `state.json`, written once before the v1 -> v2 migration.
 pub const STATE_V1_BACKUP_NAME: &str = "state.v1.bak.json";
-/// `state.json` schema: 0/1 = v1.3.x (single `upstream_proxy`), 2 = routes.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+/// Copy of the original v2.x `state.json`, written once before the v2 -> v3 migration.
+pub const STATE_V2_BACKUP_NAME: &str = "state.v2.bak.json";
+/// `state.json` schema: 0/1 = v1.3.x (single `upstream_proxy`), 2 = routes, 3 = v3.0.0.
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -275,6 +281,18 @@ pub struct AppStateData {
     /// Unix timestamp (seconds) of the last Safe Logout of Claude Desktop/CLI.
     #[serde(default)]
     pub last_safe_logout_at: Option<i64>,
+    #[serde(default)]
+    pub clean_room: CleanRoomState,
+    #[serde(default)]
+    pub bunker: BunkerSettings,
+    #[serde(default)]
+    pub persona_self_check: PersonaSelfCheck,
+    #[serde(default)]
+    pub onboarding_v3_done: bool,
+    #[serde(default)]
+    pub whats_new_v3_seen: bool,
+    #[serde(default)]
+    pub dismissed_hints: Vec<String>,
 }
 
 impl std::fmt::Debug for AppStateData {
@@ -312,6 +330,12 @@ impl std::fmt::Debug for AppStateData {
             .field("manual_killswitch", &self.manual_killswitch)
             .field("ip_change_cooldown_until", &self.ip_change_cooldown_until)
             .field("last_safe_logout_at", &self.last_safe_logout_at)
+            .field("clean_room", &self.clean_room)
+            .field("bunker", &self.bunker)
+            .field("persona_self_check", &self.persona_self_check)
+            .field("onboarding_v3_done", &self.onboarding_v3_done)
+            .field("whats_new_v3_seen", &self.whats_new_v3_seen)
+            .field("dismissed_hints", &self.dismissed_hints)
             .field(
                 "skipped_routes",
                 &format_args!("<{} not shown>", self.skipped_routes.len()),
@@ -395,6 +419,12 @@ impl Default for AppStateData {
             skipped_routes: Vec::new(),
             ip_change_cooldown_until: None,
             last_safe_logout_at: None,
+            clean_room: CleanRoomState::default(),
+            bunker: BunkerSettings::default(),
+            persona_self_check: PersonaSelfCheck::default(),
+            onboarding_v3_done: false,
+            whats_new_v3_seen: false,
+            dismissed_hints: Vec::new(),
         }
     }
 }

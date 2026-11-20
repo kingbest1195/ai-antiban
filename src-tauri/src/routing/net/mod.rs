@@ -6,23 +6,24 @@
 //! * Nothing may point back to the gateway itself (loop), and link-local / metadata / multicast /
 //!   reserved ranges stay forbidden for everyone.
 
+mod cache;
 mod dns;
 
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 use super::Entry;
-use crate::proxy::server::{
-    DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_forbidden_ip, is_tun_fake_ip,
+use crate::core::net_safety::{
+    DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_alias_port, is_forbidden_ip,
+    is_tun_fake_ip,
 };
+use cache::{EntryCacheKey, EntryDnsCache, global_entry_dns_cache};
 use dns::parallel_fallback_resolve_addrs;
 
 /// DNS lookup limit for entry hosts.
@@ -61,11 +62,14 @@ fn is_loopback_or_unspecified(ip: &IpAddr) -> bool {
     }
 }
 
-/// True when `ip:port` is (or may be) the gateway itself. `gateway_port == 0` means "unknown":
-/// then both default gateway ports are assumed.
+/// True when `ip:port` is (or may be) the gateway itself or a registered profile alias port.
+/// `gateway_port == 0` means "unknown": then both default gateway ports are assumed.
 pub fn is_gateway_loop(ip: &IpAddr, port: u16, gateway_port: u16) -> bool {
     if !is_loopback_or_unspecified(ip) {
         return false;
+    }
+    if is_alias_port(port) {
+        return true;
     }
     if gateway_port != 0 {
         port == gateway_port
@@ -98,74 +102,6 @@ pub fn check_entry_ip(
     Err("entry node address belongs to a restricted local or reserved network")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct EntryCacheKey {
-    host: String,
-    port: u16,
-    allow_local: bool,
-    gateway_port: u16,
-}
-
-#[derive(Debug, Clone)]
-struct CachedEntryAddrs {
-    addrs: Vec<SocketAddr>,
-    resolved_at: tokio::time::Instant,
-    stale: bool,
-    last_refresh_attempt: Option<tokio::time::Instant>,
-}
-
-#[derive(Default)]
-struct EntryDnsCache {
-    entries: RwLock<HashMap<EntryCacheKey, CachedEntryAddrs>>,
-}
-
-impl EntryDnsCache {
-    fn get_within(&self, key: &EntryCacheKey, max_age: Duration) -> Option<Vec<SocketAddr>> {
-        let now = tokio::time::Instant::now();
-        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
-        let cached = guard.get(key)?;
-        if now.saturating_duration_since(cached.resolved_at) < max_age {
-            Some(cached.addrs.clone())
-        } else {
-            None
-        }
-    }
-
-    fn insert(&self, key: EntryCacheKey, addrs: Vec<SocketAddr>) {
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        guard.insert(
-            key,
-            CachedEntryAddrs {
-                addrs,
-                resolved_at: tokio::time::Instant::now(),
-                stale: false,
-                last_refresh_attempt: None,
-            },
-        );
-    }
-
-    fn mark_stale_and_claim_refresh(&self, key: &EntryCacheKey, cooldown: Duration) -> bool {
-        let now = tokio::time::Instant::now();
-        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let Some(cached) = guard.get_mut(key) else {
-            return false;
-        };
-        cached.stale = true;
-        let ready = cached
-            .last_refresh_attempt
-            .is_none_or(|last| now.saturating_duration_since(last) >= cooldown);
-        if ready {
-            cached.last_refresh_attempt = Some(now);
-        }
-        ready
-    }
-}
-
-fn global_entry_dns_cache() -> &'static EntryDnsCache {
-    static CACHE: OnceLock<EntryDnsCache> = OnceLock::new();
-    CACHE.get_or_init(EntryDnsCache::default)
-}
-
 trait EntryDnsBackend: Send + Sync {
     fn system_lookup<'a>(
         &'a self,
@@ -193,7 +129,9 @@ impl EntryDnsBackend for ProdEntryDnsBackend {
         Box::pin(async move {
             let resolved = tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
                 .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "entry DNS lookup timed out"))??;
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "entry DNS lookup timed out")
+                })??;
             Ok(resolved.collect())
         })
     }
@@ -213,6 +151,16 @@ fn validate_entry_addrs(
     allow_local: bool,
     gateway_port: u16,
 ) -> io::Result<()> {
+    validate_entry_addrs_tagged(addrs, via_hostname, allow_local, gateway_port, None)
+}
+
+fn validate_entry_addrs_tagged(
+    addrs: &[SocketAddr],
+    via_hostname: bool,
+    allow_local: bool,
+    gateway_port: u16,
+    source: Option<&str>,
+) -> io::Result<()> {
     if addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -220,10 +168,56 @@ fn validate_entry_addrs(
         ));
     }
     for a in addrs {
-        check_entry_ip(&a.ip(), a.port(), via_hostname, allow_local, gateway_port)
-            .map_err(|m| io::Error::new(io::ErrorKind::PermissionDenied, m))?;
+        if let Err(reason) =
+            check_entry_ip(&a.ip(), a.port(), via_hostname, allow_local, gateway_port)
+        {
+            let src = source.unwrap_or("literal");
+            crate::diagnostics::record(
+                "routing:dns",
+                &format!(
+                    "rejected ip={} port={} source={src} reason={reason}",
+                    a.ip(),
+                    a.port()
+                ),
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{reason} (rejected ip={}, source={src})", a.ip()),
+            ));
+        }
     }
     Ok(())
+}
+
+enum AddrsOutcome {
+    Clean(Vec<SocketAddr>),
+    FakeIp(Vec<SocketAddr>),
+}
+
+fn classify_entry_addrs(
+    host: &str,
+    addrs: Vec<SocketAddr>,
+    allow_local: bool,
+    gateway_port: u16,
+    source: &str,
+) -> io::Result<AddrsOutcome> {
+    validate_entry_addrs_tagged(&addrs, true, allow_local, gateway_port, Some(source))?;
+    if addrs.iter().any(|a| is_tun_fake_ip(&a.ip())) {
+        let fake_ips: Vec<String> = addrs
+            .iter()
+            .filter(|a| is_tun_fake_ip(&a.ip()))
+            .map(|a| a.ip().to_string())
+            .collect();
+        crate::diagnostics::record(
+            "routing:dns",
+            &format!(
+                "entry {host} got TUN FakeIP [{}] from {source}; querying public DNS/DoH",
+                fake_ips.join(",")
+            ),
+        );
+        return Ok(AddrsOutcome::FakeIp(addrs));
+    }
+    Ok(AddrsOutcome::Clean(addrs))
 }
 
 fn spawn_background_dns_refresh(entry: Entry, allow_local: bool, gateway_port: u16) {
@@ -242,16 +236,26 @@ fn spawn_background_dns_refresh(entry: Entry, allow_local: bool, gateway_port: u
             .system_lookup(&entry.host, entry.port, SYSTEM_DNS_ATTEMPT_TIMEOUT)
             .await
         {
-            Ok(addrs) if !addrs.is_empty() => Ok(addrs),
+            Ok(addrs)
+                if !addrs.is_empty()
+                    && !addrs.iter().any(|a| is_tun_fake_ip(&a.ip()))
+                    && validate_entry_addrs(&addrs, true, allow_local, gateway_port).is_ok() =>
+            {
+                Ok(addrs)
+            }
             _ => backend.fallback_lookup(&entry.host, entry.port).await,
         };
         if let Ok(addrs) = fresh
+            && !addrs.iter().any(|a| is_tun_fake_ip(&a.ip()))
             && validate_entry_addrs(&addrs, true, allow_local, gateway_port).is_ok()
         {
             global_entry_dns_cache().insert(key, addrs);
             crate::diagnostics::record(
                 "routing:dns",
-                &format!("entry {} refreshed asynchronously from stale cache", entry.host),
+                &format!(
+                    "entry {} refreshed asynchronously from stale cache",
+                    entry.host
+                ),
             );
         }
     });
@@ -285,6 +289,8 @@ async fn resolve_entry_checked_with(
     }
 
     let mut last_err: Option<io::Error> = None;
+    let mut fake_ip_candidate: Option<Vec<SocketAddr>> = None;
+    let mut saw_policy_rejection = false;
     for (attempt, attempt_timeout) in [SYSTEM_DNS_ATTEMPT_TIMEOUT, SYSTEM_DNS_RETRY_TIMEOUT]
         .into_iter()
         .enumerate()
@@ -303,9 +309,22 @@ async fn resolve_entry_checked_with(
             .await
         {
             Ok(addrs) if !addrs.is_empty() => {
-                validate_entry_addrs(&addrs, true, allow_local, gateway_port)?;
-                cache.insert(key, addrs.clone());
-                return Ok(addrs);
+                match classify_entry_addrs(&entry.host, addrs, allow_local, gateway_port, "system")
+                {
+                    Ok(AddrsOutcome::Clean(clean)) => {
+                        cache.insert(key, clean.clone());
+                        return Ok(clean);
+                    }
+                    Ok(AddrsOutcome::FakeIp(fake)) => {
+                        fake_ip_candidate = Some(fake);
+                        break;
+                    }
+                    Err(e) => {
+                        saw_policy_rejection = true;
+                        last_err = Some(e);
+                        break;
+                    }
+                }
             }
             Ok(_) => {
                 last_err = Some(io::Error::new(
@@ -321,16 +340,28 @@ async fn resolve_entry_checked_with(
 
     match backend.fallback_lookup(&entry.host, entry.port).await {
         Ok(addrs) if !addrs.is_empty() => {
-            validate_entry_addrs(&addrs, true, allow_local, gateway_port)?;
-            cache.insert(key, addrs.clone());
-            crate::diagnostics::record(
-                "routing:dns",
-                &format!(
-                    "entry {} resolved via DNS fallback after system lookup failed",
-                    entry.host
-                ),
-            );
-            return Ok(addrs);
+            match classify_entry_addrs(&entry.host, addrs, allow_local, gateway_port, "fallback") {
+                Ok(AddrsOutcome::Clean(clean)) => {
+                    cache.insert(key, clean.clone());
+                    crate::diagnostics::record(
+                        "routing:dns",
+                        &format!(
+                            "entry {} resolved via public DNS fallback after system lookup",
+                            entry.host
+                        ),
+                    );
+                    return Ok(clean);
+                }
+                Ok(AddrsOutcome::FakeIp(fake)) => {
+                    if fake_ip_candidate.is_none() {
+                        fake_ip_candidate = Some(fake);
+                    }
+                }
+                Err(e) => {
+                    saw_policy_rejection = true;
+                    last_err = Some(e);
+                }
+            }
         }
         Ok(_) => {
             if last_err.is_none() {
@@ -347,26 +378,39 @@ async fn resolve_entry_checked_with(
         }
     }
 
-    for (ttl, label, emergency) in [
-        (ENTRY_DNS_STALE_TTL, "stale", false),
-        (ENTRY_DNS_EMERGENCY_STALE_TTL, "emergency stale", true),
-    ] {
-        if let Some(stale) = cache.get_within(&key, ttl)
-            && validate_entry_addrs(&stale, true, allow_local, gateway_port).is_ok()
-        {
-            let should_refresh =
-                cache.mark_stale_and_claim_refresh(&key, EMERGENCY_REFRESH_COOLDOWN);
-            if emergency && allow_bg_refresh && should_refresh {
-                spawn_background_dns_refresh(entry.clone(), allow_local, gateway_port);
+    if !saw_policy_rejection && let Some(fake) = fake_ip_candidate {
+        crate::diagnostics::record(
+            "routing:dns",
+            &format!(
+                "entry {} accepting TUN FakeIP as last resort after public DNS/DoH failed",
+                entry.host
+            ),
+        );
+        return Ok(fake);
+    }
+
+    if !saw_policy_rejection {
+        for (ttl, label, emergency) in [
+            (ENTRY_DNS_STALE_TTL, "stale", false),
+            (ENTRY_DNS_EMERGENCY_STALE_TTL, "emergency stale", true),
+        ] {
+            if let Some(stale) = cache.get_within(&key, ttl)
+                && validate_entry_addrs(&stale, true, allow_local, gateway_port).is_ok()
+            {
+                let should_refresh =
+                    cache.mark_stale_and_claim_refresh(&key, EMERGENCY_REFRESH_COOLDOWN);
+                if emergency && allow_bg_refresh && should_refresh {
+                    spawn_background_dns_refresh(entry.clone(), allow_local, gateway_port);
+                }
+                crate::diagnostics::record(
+                    "routing:dns",
+                    &format!(
+                        "entry {} using {label} cached DNS after lookup failure",
+                        entry.host
+                    ),
+                );
+                return Ok(stale);
             }
-            crate::diagnostics::record(
-                "routing:dns",
-                &format!(
-                    "entry {} using {label} cached DNS after lookup failure",
-                    entry.host
-                ),
-            );
-            return Ok(stale);
         }
     }
 
@@ -381,6 +425,13 @@ async fn resolve_entry_checked_with(
         &format!("phase=dns host={} err={err}", entry.host),
     );
     Err(err)
+}
+
+/// Resolves `host` via public Hickory (`1.1.1.1`/`8.8.8.8`, `use_system_conf = false`)
+/// and DoH (`A` + `AAAA`), bypassing system/TUN FakeDNS when possible.
+pub async fn resolve_public_dns_ips(host: &str) -> io::Result<Vec<IpAddr>> {
+    let addrs = parallel_fallback_resolve_addrs(host, 0).await?;
+    Ok(addrs.into_iter().map(|a| a.ip()).collect())
 }
 
 /// Resolves the entry host (once) and verifies EVERY returned address. The caller must connect to

@@ -4,9 +4,7 @@ use chrono::Local;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::scan::{
-    decode_project_slug, extract_last_user_query_from_jsonl, scan_claude_dir,
-};
+use super::scan::{decode_project_slug, extract_last_user_query_from_jsonl, scan_claude_dir};
 use super::{
     ClaudeExportResult, ClaudeLocalDataSummary, get_claude_desktop_config_path, get_desktop_dir,
     get_home_dir,
@@ -152,10 +150,15 @@ pub fn generate_restore_prompt_md(export_dir_path: &str) -> String {
 1. Инженерная карта проектов: `{export_dir_path}/INDEX_SUMMARY.md`
 2. Директории проектов и сессий: `{export_dir_path}/projects/`
 3. Директория планов: `{export_dir_path}/plans/`
+4. Конфигурации MCP и CLI: `{export_dir_path}/configs/claude_desktop_config.json`, `{export_dir_path}/configs/claude_cli_config.json`
+
+Контекст Cursor IDE и MCP:
+- Проверь подключённые MCP-серверы в `{export_dir_path}/configs/claude_desktop_config.json` (Claude Desktop) и локальной конфигурации Cursor IDE (`~/.cursor/mcp.json`, настройки редактора и правила `.cursorrules`), если работа продолжается в Cursor IDE.
+- Для полного резервного копирования Cursor IDE, MCP и санитизации секретов используй Data Bunker в Zastava.
 
 Инструкция по развертыванию контекста:
 1. Перед началом работы по любому проекту открой `{export_dir_path}/INDEX_SUMMARY.md`, найди нужный проект по имени или пути и прочитай его файл долговременной памяти `projects/<slug>/memory/MEMORY.md` (если существует) и последний транскрипт сессии `projects/<slug>/*.jsonl`.
-2. Сохраняй стиль кодовой базы, архитектурные решения, стек технологий и ограничения, зафиксированные в планах `plans/*.md`.
+2. Сохраняй стиль кодовой базы, архитектурные решения, стек технологий, правила `CLAUDE.md` / `.cursorrules`, настройки MCP-серверов и ограничения, зафиксированные в планах `plans/*.md`.
 3. Не предлагай писать проект с нуля или переделывать рабочие модули без явного запроса. Продолжай разработку с точки, зафиксированной в последних запросах сессий.
 "#
     )

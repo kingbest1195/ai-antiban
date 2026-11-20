@@ -281,7 +281,6 @@ impl Fs for RealFs {
     }
 }
 
-
 #[cfg(test)]
 mod tests;
 

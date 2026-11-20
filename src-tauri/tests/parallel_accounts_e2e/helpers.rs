@@ -124,7 +124,11 @@ impl DnsLookup for DynamicDns {
         })
     }
 
-    fn lookup_uncached<'a>(&'a self, host: &'a str, limit: Duration) -> BoxFuture<'a, LookupOutcome> {
+    fn lookup_uncached<'a>(
+        &'a self,
+        host: &'a str,
+        limit: Duration,
+    ) -> BoxFuture<'a, LookupOutcome> {
         self.lookup(host, limit)
     }
 
@@ -177,7 +181,9 @@ pub(crate) async fn spawn_socks_echo() -> (u16, Arc<AtomicU64>) {
                     .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                     .await;
                 let mut buf = [0u8; 256];
-                let Ok(n) = s.read(&mut buf).await else { return };
+                let Ok(n) = s.read(&mut buf).await else {
+                    return;
+                };
                 if n == 0 || buf[0] == 0x16 {
                     // Immediate close on TLS probe (non-echo audit probe).
                     return;
@@ -229,10 +235,17 @@ pub(crate) async fn start_gateway(
     force_os_dry_run();
     let exit = Arc::new(RwLock::new(initial_exit));
     let env = AuditEnv {
-        dns: Arc::new(DynamicDns { exit: Arc::clone(&exit) }),
-        probe: Arc::new(DynamicProbe { exit: Arc::clone(&exit) }),
+        dns: Arc::new(DynamicDns {
+            exit: Arc::clone(&exit),
+        }),
+        probe: Arc::new(DynamicProbe {
+            exit: Arc::clone(&exit),
+        }),
         udp: Arc::new(FakeUdp::new()),
-        system: Arc::new(FakeSystem { global_ipv6: Some(true), ..FakeSystem::healthy() }),
+        system: Arc::new(FakeSystem {
+            global_ipv6: Some(true),
+            ..FakeSystem::healthy()
+        }),
     };
     let auditor = Auditor::with_env(env).unwrap();
     let state = AppState::new_in_memory();
@@ -243,9 +256,14 @@ pub(crate) async fn start_gateway(
     let hold_queue = Arc::new(HoldQueue::new());
     let (direct_sink, direct_hits) = spawn_direct_echo_sink().await;
     let server = Arc::new(
-        ProxyServer::bind_ephemeral(auditor.clone(), state.clone(), Arc::clone(&hold_queue), Some(direct_sink))
-            .await
-            .unwrap(),
+        ProxyServer::bind_ephemeral(
+            auditor.clone(),
+            state.clone(),
+            Arc::clone(&hold_queue),
+            Some(direct_sink),
+        )
+        .await
+        .unwrap(),
     );
     let guard = Arc::clone(&server.guard);
     let probe_exit = Arc::clone(&exit);
@@ -258,7 +276,13 @@ pub(crate) async fn start_gateway(
         let e = Arc::clone(&res_exit);
         Box::pin(async move { Ok(e.read().await.telemetry()) })
     });
-    guard.start_with_test_env(auditor.clone(), state.clone(), hold_queue, Some(probe), Some(resolve));
+    guard.start_with_test_env(
+        auditor.clone(),
+        state.clone(),
+        hold_queue,
+        Some(probe),
+        Some(resolve),
+    );
     let srv_bg = Arc::clone(&server);
     tokio::spawn(async move { srv_bg.run().await });
     (state, server, guard, exit, direct_hits, auditor)
@@ -271,10 +295,18 @@ pub(crate) async fn wait_for_gate(guard: &NetworkGuard, provider: ProviderId, ex
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    assert_eq!(guard.gate_for(provider), expected, "timed out waiting for {provider:?} gate");
+    assert_eq!(
+        guard.gate_for(provider),
+        expected,
+        "timed out waiting for {provider:?} gate"
+    );
 }
 
-pub(crate) async fn connect_and_echo(addr: SocketAddr, host: &str, msg: &[u8]) -> (String, Vec<u8>) {
+pub(crate) async fn connect_and_echo(
+    addr: SocketAddr,
+    host: &str,
+    msg: &[u8],
+) -> (String, Vec<u8>) {
     let mut s = TcpStream::connect(addr).await.unwrap();
     s.write_all(format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n").as_bytes())
         .await

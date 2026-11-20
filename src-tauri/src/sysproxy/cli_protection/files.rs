@@ -55,7 +55,6 @@ pub(super) struct FilesApplied {
     pub report: RecoveryReport,
 }
 
-
 /// Puts the Zastava block into a shell / PowerShell profile through the journal. Refused (nothing
 /// written) when the markers are partial or repeated, when the file is not UTF-8, or when an
 /// existing block is not one Zastava wrote and the journal has no record of it (the user's own
@@ -117,7 +116,6 @@ pub(super) fn restore_profile(j: &mut Journal, p: &dyn Platform, file: &Path) ->
     }
     items
 }
-
 
 /// Writes (or gives back) the CLI / IDE side to match `plan`. Every target is independent: a file
 /// that cannot be edited safely is skipped (and named in the log, without values), the others go
@@ -231,7 +229,6 @@ pub(super) fn disable_files(
     j.restore_where(p, Resource::is_file_resource)
 }
 
-
 /// The file side of a complete cleanup (exit, `--cleanup`, the "clean everything" button): IDE /
 /// CLI settings, shell profiles, PowerShell profiles; both parts, proxy and time zone. Nothing is
 /// changed when the journal cannot be opened.
@@ -257,4 +254,3 @@ pub(crate) fn disable_cli_files() -> RecoveryReport {
         },
     }
 }
-

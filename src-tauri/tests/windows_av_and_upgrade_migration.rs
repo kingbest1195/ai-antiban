@@ -12,7 +12,7 @@ use zastava_lib::cowork_guard::{
     parse_sc_running, parse_tasklist_has_claude, validate_windows_task_xml,
 };
 use zastava_lib::routing::RouteSelection;
-use zastava_lib::state::{AppState, AppStateData, CURRENT_SCHEMA_VERSION};
+use zastava_lib::state::{AppState, AppStateData, CURRENT_SCHEMA_VERSION, STATE_V2_BACKUP_NAME};
 use zastava_lib::sysproxy::{build_powershell_guard_block_with_tz, force_os_dry_run};
 use zastava_lib::win_reg::{
     decode_dword, decode_multi_sz, decode_utf16_le_string, encode_utf16_le_bytes, encode_utf16_nul,
@@ -281,7 +281,10 @@ async fn upgrade_from_v2_2_1_state_json_handles_pinned_ips_stale_blocks_and_unkn
     assert_eq!(data.skipped_routes.len(), 1);
 
     // New v2.2.2 features work on top of migrated v2.2.1 state and persist across restart
-    state.set_provider_monitoring("openai", false).await.unwrap();
+    state
+        .set_provider_monitoring("openai", false)
+        .await
+        .unwrap();
     state
         .add_trusted_exception("anthropic", "5.6.7.8")
         .await
@@ -398,6 +401,142 @@ fn upgrade_from_legacy_profiles_json_without_bound_route_id_migrates_cleanly() {
     assert_eq!(synced, Some(Some(new_key.to_string())));
 }
 
+#[tokio::test]
+async fn upgrade_from_v2_3_0_state_json_migrates_to_v3_with_backup_and_zero_data_loss() {
+    force_os_dry_run();
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("state.json");
+    let v2_bak_path = dir.path().join(STATE_V2_BACKUP_NAME);
+
+    let v230_json = r#"{
+      "schema_version": 2,
+      "pinned_ip": "185.10.20.30",
+      "pinned_ips": { "default": "185.10.20.30", "openai": "198.51.100.7" },
+      "strict_pinning_enabled": true,
+      "onboarding_v2_2_done": true,
+      "hide_ip_mode": true,
+      "ip_history": {
+        "anthropic": [
+          { "ip": "185.10.20.30", "country_code": "NL", "asn": 20473, "timestamp": 1730000000 }
+        ]
+      },
+      "trusted_exceptions": { "anthropic": ["185.10.20.30"] },
+      "disabled_providers": ["gemini"],
+      "warmup_started_at": 1730001234,
+      "synced_ai_timezone": "Europe/Amsterdam",
+      "sync_ai_tz_enabled": false,
+      "cli_mode": "global_terminal",
+      "custom_ai_domains": ["my-ai.example.com"],
+      "routes": [
+        {
+          "id": "route-nl",
+          "label": "NL Node",
+          "raw_key": "socks5://alice:s3cret@185.10.20.30:1080#NL",
+          "enabled": true,
+          "entries": [
+            { "proto": "socks5", "host": "185.10.20.30", "port": 1080, "username": "alice", "password": "s3cret", "sni": null }
+          ],
+          "added_at": 1730000000
+        },
+        {
+          "id": "route-de",
+          "label": "DE Node",
+          "raw_key": "http://198.51.100.7:8080#DE",
+          "enabled": true,
+          "entries": [
+            { "proto": "http", "host": "198.51.100.7", "port": 8080, "username": null, "password": null, "sni": null }
+          ],
+          "added_at": 1730000100
+        }
+      ],
+      "provider_routes": { "openai": "route-de" },
+      "default_route_id": "route-nl",
+      "profile_route_id": "route-nl",
+      "ip_change_cooldown_until": 1730014400,
+      "last_safe_logout_at": 1730000000
+    }"#;
+
+    fs::write(&state_path, v230_json).unwrap();
+    let state = AppState::load_or_default(state_path.clone());
+    let data = state.get_data().await;
+
+    // Backup state.v2.bak.json created once with original v2.3.0 payload.
+    assert!(v2_bak_path.exists(), "state.v2.bak.json must be created");
+    assert_eq!(fs::read_to_string(&v2_bak_path).unwrap(), v230_json);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&v2_bak_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    // Schema bumped to 3 & v3 migration defaults applied.
+    assert_eq!(data.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 3);
+    assert!(data.onboarding_v3_done);
+    assert!(!data.whats_new_v3_seen);
+    assert!(data.bunker.auto_backup_enabled);
+    assert_eq!(data.bunker.interval_hours, 24);
+    assert_eq!(data.bunker.retention_count, 7);
+    assert_eq!(data.bunker.last_backup_at, None);
+    assert_eq!(data.bunker.last_backup_size_bytes, None);
+    assert!(data.clean_room.profiles.is_empty());
+    assert_eq!(data.clean_room.active_profile_id, None);
+    assert!(data.clean_room.tainted_ips.is_empty());
+    assert!(!data.persona_self_check.bought_or_grey_account);
+    assert!(!data.persona_self_check.virtual_sms_used);
+    assert!(!data.persona_self_check.reseller_payment_used);
+    assert!(!data.persona_self_check.multi_account_same_browser);
+    assert!(data.dismissed_hints.is_empty());
+
+    // Zero data loss across EVERY v2.3.0 field.
+    assert_eq!(data.routes.len(), 2);
+    assert_eq!(
+        data.provider_routes.get("openai").map(String::as_str),
+        Some("route-de")
+    );
+    assert_eq!(data.default_route_id.as_deref(), Some("route-nl"));
+    assert_eq!(data.profile_route_id.as_deref(), Some("route-nl"));
+    assert_eq!(
+        data.pinned_ips.get("openai").map(String::as_str),
+        Some("198.51.100.7")
+    );
+    assert_eq!(
+        data.trusted_exceptions.get("anthropic").unwrap(),
+        &vec!["185.10.20.30".to_string()]
+    );
+    assert_eq!(
+        data.ip_history.get("anthropic").unwrap()[0].asn,
+        Some(20473)
+    );
+    assert_eq!(data.ip_change_cooldown_until, Some(1730014400));
+    assert_eq!(data.last_safe_logout_at, Some(1730000000));
+    assert_eq!(data.custom_ai_domains, vec!["my-ai.example.com"]);
+    assert!(data.disabled_providers.contains("gemini"));
+    assert_eq!(data.cli_mode, zastava_lib::state::CliMode::GlobalTerminal);
+    assert!(!data.sync_ai_tz_enabled);
+    assert_eq!(data.warmup_started_at, Some(1730001234));
+
+    // Sentinel check: state.v2.bak.json is NOT overwritten on subsequent loads, and migration is idempotent.
+    fs::write(&v2_bak_path, "sentinel-keep-me").unwrap();
+    let reloaded = AppState::load_or_default(state_path.clone());
+    assert_eq!(reloaded.get_data().await, data);
+    assert_eq!(
+        fs::read_to_string(&v2_bak_path).unwrap(),
+        "sentinel-keep-me"
+    );
+
+    // Also verify onboarding_v2_2_done=false yields onboarding_v3_done=false.
+    let dir2 = tempfile::tempdir().unwrap();
+    let p2 = dir2.path().join("state.json");
+    fs::write(&p2, r#"{"schema_version":2,"onboarding_v2_2_done":false}"#).unwrap();
+    let s2 = AppState::load_or_default(p2);
+    let d2 = s2.get_data().await;
+    assert_eq!(d2.schema_version, 3);
+    assert!(!d2.onboarding_v3_done);
+    assert!(!d2.whats_new_v3_seen);
+}
+
 #[test]
 fn cowork_guard_handles_v2_2_0_and_v2_2_1_upgrade_repair_and_windows_encodings() {
     // 1. Overwrite/repair uses `/Create ... /F` for idempotent replacement of v2.2.0/v2.2.1 tasks
@@ -466,5 +605,7 @@ fn cowork_guard_handles_v2_2_0_and_v2_2_1_upgrade_repair_and_windows_encodings()
         parse_reg_start_dword("    Start    REG_DWORD    0x3\r\n"),
         Some(3)
     );
-    assert!(parse_tasklist_has_claude("\"claude.exe\",\"4242\",\"Console\",\"1\",\"90,000 K\""));
+    assert!(parse_tasklist_has_claude(
+        "\"claude.exe\",\"4242\",\"Console\",\"1\",\"90,000 K\""
+    ));
 }

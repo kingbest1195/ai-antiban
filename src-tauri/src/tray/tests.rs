@@ -171,3 +171,23 @@ fn audit_error_is_yellow_with_time_of_last_check() {
     assert_eq!(m.icon, Some(TrayColor::Yellow));
     assert_eq!(m.killswitch, Some((KS_FREEZE_TEXT, TrayColor::Red)));
 }
+
+#[test]
+fn gray_state_represents_protection_off_and_embeds_valid_png() {
+    assert!(!TRAY_ICON_GRAY.is_empty());
+    assert_eq!(TrayColor::from_name("gray"), TrayColor::Gray);
+    assert_eq!(TrayColor::Gray.bytes(), TRAY_ICON_GRAY);
+
+    let off = TrayView::protection_off();
+    assert_eq!(off.icon, Some(TrayColor::Gray));
+    assert_eq!(off.title.as_deref(), Some(" Защита выключена"));
+    assert_eq!(off.header.as_ref().map(|h| h.1), Some(TrayColor::Gray));
+
+    let from_st = TrayView::from_status("gray", None);
+    assert_eq!(from_st.icon, Some(TrayColor::Gray));
+    assert_eq!(from_st.title.as_deref(), Some(" Защита выключена"));
+
+    // Merging protection_off replaces previous green icon with gray.
+    let merged = report_view(S::Green, false, false).merged_with(off);
+    assert_eq!(merged.icon, Some(TrayColor::Gray));
+}

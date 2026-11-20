@@ -10,6 +10,7 @@ pub mod ip_type;
 pub mod leaks;
 pub mod network;
 pub mod os_env;
+pub mod persona_risk;
 pub mod probes;
 pub mod profile_switcher;
 pub mod rules;
@@ -24,6 +25,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::routing::{Route, RouteSelection};
 use crate::state::AppState;
+#[cfg(test)]
+use cache::OS_TTL;
 pub use cache_cleaner::clean_ai_app_cache;
 pub use dnsbl::{
     check_all_dnsbl, check_all_dnsbl_with, check_all_dnsbl_with_doh, evaluate_dnsbl_report,
@@ -36,9 +39,10 @@ pub use history::{
 };
 pub use ip_type::{ExitIdentity, IpType, TorLookup, evaluate_ip_reputation, lookup_tor};
 pub use leaks::{
-    check_dns_leak, check_dns_leak_with, check_ipv6_leak, check_ipv6_leak_with,
-    check_ipv6_leak_with_route, check_ipv6_leak_with_split, evaluate_dns_resolver,
-    evaluate_dns_resolver_for_route,
+    AuditProtectionContext, AuditProtectionFlags, check_dns_leak, check_dns_leak_with,
+    check_ipv6_leak, check_ipv6_leak_with, check_ipv6_leak_with_route, check_ipv6_leak_with_split,
+    evaluate_dns_resolver, evaluate_dns_resolver_for_route,
+    evaluate_dns_resolver_for_route_with_protection,
 };
 pub use network::{
     NetworkResolver, NetworkTelemetry, build_upstream_client, evaluate_dns_country_consistency,
@@ -49,8 +53,6 @@ pub use os_env::{
     evaluate_locale_env_hygiene_with, evaluate_system_timezone, evaluate_system_timezone_with,
     evaluate_system_timezone_with_sync,
 };
-#[cfg(test)]
-use cache::OS_TTL;
 #[cfg(test)]
 use probes::{stun, whoami};
 pub use rules::RuleSet;
@@ -128,6 +130,8 @@ pub struct Auditor {
     use_env_probe_for_direct: bool,
     /// Last logged set of unfinished checks per provider (the journal gets a line on change only).
     incomplete_logged: Arc<Mutex<HashMap<String, String>>>,
+    /// Layer-3 protection state injected for Precondition 2 of `via_zastava_key` DNS evaluation.
+    protection_flags: Arc<Mutex<AuditProtectionFlags>>,
 }
 
 impl Default for Auditor {
@@ -146,7 +150,22 @@ impl Auditor {
             env: AuditEnv::real(),
             use_env_probe_for_direct: false,
             incomplete_logged: Arc::default(),
+            protection_flags: Arc::default(),
         })
+    }
+
+    pub fn set_protection_flags(&self, flags: AuditProtectionFlags) {
+        *self
+            .protection_flags
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = flags;
+    }
+
+    pub fn current_protection_flags(&self) -> AuditProtectionFlags {
+        *self
+            .protection_flags
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// An auditor whose DNS, probe and host reads come from `env` (tests: no network, no processes).
@@ -258,8 +277,59 @@ impl Auditor {
         sink: Option<ProgressSink>,
     ) -> Result<RiskReport, String> {
         let selection = state.route_selection(provider.as_str()).await;
-        self.evaluate_all_inner(provider, state, &selection, force_refresh_telemetry, sink)
-            .await
+        let protection = self.current_protection_flags();
+        self.evaluate_all_inner(
+            provider,
+            state,
+            &selection,
+            force_refresh_telemetry,
+            sink,
+            protection,
+        )
+        .await
+    }
+
+    /// [`Self::evaluate_all`] with explicit Layer-3 protection flags for Precondition 2.
+    pub async fn evaluate_all_with_protection(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        force_refresh_telemetry: bool,
+        protection: AuditProtectionFlags,
+    ) -> Result<RiskReport, String> {
+        self.set_protection_flags(protection);
+        let selection = state.route_selection(provider.as_str()).await;
+        self.evaluate_all_inner(
+            provider,
+            state,
+            &selection,
+            force_refresh_telemetry,
+            None,
+            protection,
+        )
+        .await
+    }
+
+    /// [`Self::evaluate_all_progress`] with explicit Layer-3 protection flags for Precondition 2.
+    pub async fn evaluate_all_progress_with_protection(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        force_refresh_telemetry: bool,
+        sink: Option<ProgressSink>,
+        protection: AuditProtectionFlags,
+    ) -> Result<RiskReport, String> {
+        self.set_protection_flags(protection);
+        let selection = state.route_selection(provider.as_str()).await;
+        self.evaluate_all_inner(
+            provider,
+            state,
+            &selection,
+            force_refresh_telemetry,
+            sink,
+            protection,
+        )
+        .await
     }
 
     /// [`Self::evaluate_all`] on an already taken route snapshot (see [`Self::resolve_for_selection`]).
@@ -270,8 +340,37 @@ impl Auditor {
         selection: &RouteSelection,
         force_refresh_telemetry: bool,
     ) -> Result<RiskReport, String> {
-        self.evaluate_all_inner(provider, state, selection, force_refresh_telemetry, None)
-            .await
+        let protection = self.current_protection_flags();
+        self.evaluate_all_inner(
+            provider,
+            state,
+            selection,
+            force_refresh_telemetry,
+            None,
+            protection,
+        )
+        .await
+    }
+
+    /// [`Self::evaluate_all_with`] with explicit Layer-3 protection flags for Precondition 2.
+    pub async fn evaluate_all_with_selection_protection(
+        &self,
+        provider: ProviderId,
+        state: &AppState,
+        selection: &RouteSelection,
+        force_refresh_telemetry: bool,
+        protection: AuditProtectionFlags,
+    ) -> Result<RiskReport, String> {
+        self.set_protection_flags(protection);
+        self.evaluate_all_inner(
+            provider,
+            state,
+            selection,
+            force_refresh_telemetry,
+            None,
+            protection,
+        )
+        .await
     }
 
     /// Writes a journal line when the set of checks that could not be performed changes

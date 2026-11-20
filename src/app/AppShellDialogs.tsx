@@ -4,6 +4,7 @@ import { CrashTestModal } from "../features/crash-test";
 import { hasBrowserTraffic } from "../features/coverage/coverageModel";
 import { OnboardingFlow } from "../features/onboarding";
 import { SettingsModal } from "../features/settings";
+import { WhatsNewSheet, shouldShowWhatsNew } from "../features/shell-v3";
 import { AboutModal } from "./AboutModal";
 import { DeepLinkModal } from "./DeepLinkModal";
 import { EventsModal } from "./EventsModal";
@@ -14,6 +15,15 @@ import type { useAppShellController } from "./useAppShellController";
 
 interface AppShellDialogsProps {
   ctrl: ReturnType<typeof useAppShellController>;
+}
+
+/** Завершает онбординг и только после записи в state.json обновляет состояние оболочки. */
+export async function completeAndRefreshOnboarding(
+  finish: () => Promise<unknown> | void,
+  refreshState: () => Promise<unknown>,
+): Promise<void> {
+  await finish();
+  await refreshState().catch(() => {});
 }
 
 export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
@@ -43,10 +53,14 @@ export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
     updater,
     intercept,
     version,
+    whatsNewBusy,
     handleConfirmDeepLink,
     handleCancelDeepLink,
     handleOpenSupport,
     handleOpenOsClock,
+    handleAcknowledgeWhatsNew,
+    handleRestartOnboardingFromWhatsNew,
+    handleOnboardingGoal,
   } = ctrl;
   const payload = intercept.interceptPayload;
 
@@ -75,6 +89,7 @@ export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
         updaterStatus={updater.updaterStatus}
         onLoadRollbackVersions={updater.handleLoadRollbackVersions}
         onInstallRollback={updater.handleInstallRollback}
+        onReplayOnboarding={onboarding.start}
       />
       <CrashTestModal open={crashTestOpen} onClose={() => setCrashTestOpen(false)} onToast={showToast} />
       <TimezoneModal
@@ -119,12 +134,20 @@ export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
           onToggleSysproxy={toggles.handleToggleSysproxy}
           onToggleCli={() => toggles.handleToggleCliProtection({ quiet: true })}
           onRecheck={() => gw.runFullAudit(true, true)}
-          onClose={(to) => {
-            onboarding.finish();
-            if (to) nav.goTab(to);
+          onComplete={handleOnboardingGoal}
+          onClose={async (to) => {
+            if (to && to !== "overview") nav.goTab(to);
+            await completeAndRefreshOnboarding(onboarding.finish, gw.refreshState);
           }}
         />
       )}
+
+      <WhatsNewSheet
+        open={shouldShowWhatsNew(gw.state) && !onboarding.open}
+        busy={whatsNewBusy}
+        onAcknowledge={() => void handleAcknowledgeWhatsNew()}
+        onRestartOnboarding={() => void handleRestartOnboardingFromWhatsNew()}
+      />
 
       {!isTauri() && (browserSimulation || payload) && (
         <AlertOverlay

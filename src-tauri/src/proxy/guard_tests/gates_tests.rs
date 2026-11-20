@@ -145,4 +145,3 @@ async fn test_manual_killswitch_flag_is_distinct_from_automatic_freeze() {
 }
 
 // ---- window-first alert flow (event seam + AuditFn / ProbeFn seams) ----
-

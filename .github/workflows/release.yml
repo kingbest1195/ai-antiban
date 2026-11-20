@@ -18,7 +18,10 @@ concurrency:
 jobs:
   build:
     permissions:
-      contents: write  # tauri-action создаёт черновик релиза и грузит ассеты
+      contents: write      # tauri-action создаёт черновик релиза и грузит ассеты
+      actions: read        # SignPath.io читает загруженный workflow artifact
+      id-token: write      # OIDC-токен для GitHub Build Provenance Attestation
+      attestations: write  # публикация SLSA/provenance-аттестаций артефактов
     strategy:
       fail-fast: false
       matrix:
@@ -107,6 +110,95 @@ jobs:
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
+
+      # Bug #9: опциональная подпись Authenticode через SignPath.io OSS (активируется после верификации проекта).
+      # 1) Загружаем Windows-инсталляторы как workflow artifact (без него SignPath падает).
+      - name: Upload Windows installers for SignPath
+        id: upload-windows-installers
+        if: matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' && secrets.SIGNPATH_API_TOKEN != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 1
+
+      # 2) Отправляем артефакт в SignPath.io и скачиваем подписанные бинарники в signed-windows-installers/.
+      - name: Sign Windows installers via SignPath.io OSS
+        if: matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' && secrets.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-windows-installers.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-windows-installers
+
+      # 3) Подменяем локальные бандлы подписанными, переподписываем minisign (.sig) и обновляем draft-релиз + latest.json.
+      - name: Re-sign minisign & refresh draft release after SignPath
+        if: matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' && secrets.SIGNPATH_API_TOKEN != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          nsis_dir="src-tauri/target/release/bundle/nsis"
+          msi_dir="src-tauri/target/release/bundle/msi"
+          for f in "$nsis_dir"/*.exe "$msi_dir"/*.msi; do
+            base="$(basename "$f")"
+            signed="$(find signed-windows-installers -type f -name "$base" | head -n 1)"
+            [ -n "$signed" ] || { echo "Missing signed artifact for $base"; exit 1; }
+            cp -f "$signed" "$f"
+            pnpm tauri signer sign "$f"
+          done
+          if [ "$IS_TAG" = "true" ]; then
+            assets=()
+            for f in "$nsis_dir"/*.exe "$nsis_dir"/*.exe.sig "$msi_dir"/*.msi "$msi_dir"/*.msi.sig; do
+              assets+=("$f")
+            done
+            gh release upload "$TAG" "${assets[@]}" --repo "$REPO" --clobber
+            tmp_dir="$(mktemp -d)"
+            gh release download "$TAG" --repo "$REPO" --pattern "latest.json" --dir "$tmp_dir"
+            EXE_SIG="$(cat "$nsis_dir"/*.exe.sig)"
+            MSI_SIG="$(cat "$msi_dir"/*.msi.sig)"
+            node -e '
+              const fs = require("fs");
+              const p = process.argv[1];
+              const lj = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (lj.platforms?.["windows-x86_64"]) lj.platforms["windows-x86_64"].signature = process.env.MSI_SIG.trim();
+              if (lj.platforms?.["windows-x86_64-msi"]) lj.platforms["windows-x86_64-msi"].signature = process.env.MSI_SIG.trim();
+              if (lj.platforms?.["windows-x86_64-nsis"]) lj.platforms["windows-x86_64-nsis"].signature = process.env.EXE_SIG.trim();
+              fs.writeFileSync(p, JSON.stringify(lj, null, 2));
+            ' "$tmp_dir/latest.json"
+            gh release upload "$TAG" "$tmp_dir/latest.json" --repo "$REPO" --clobber
+            rm -rf "$tmp_dir"
+          fi
+
+      # Bug #9: SLSA Build Provenance Attestation для всех артефактов релиза (.dmg, .tar.gz, .exe, .msi).
+      - name: Attest build provenance (macOS)
+        if: matrix.platform == 'macos-latest'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz
+
+      - name: Attest build provenance (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
 
   # Проверка черновика: набор ассетов, latest.json, minisign-подписи. Падение => релиз остаётся draft.
   verify:

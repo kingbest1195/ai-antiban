@@ -3,8 +3,7 @@
 use super::{PResult, PlatformError, RegKind, RegValue};
 
 /// Registry keys below `HKEY_CURRENT_USER`, accessed through Win32 `advapi32` FFI (`crate::win_reg`).
-pub(super) const INET_SUBKEY: &str =
-    r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+pub(super) const INET_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 pub(super) const ENV_SUBKEY: &str = "Environment";
 
 /// `reg query <key> /v <name>` -> value with exact type. `None` = no such value.
@@ -139,7 +138,11 @@ pub fn reg_read_outcome(
 
 /// One value of `HKEY_CURRENT_USER\<subkey>`, read through the registry API.
 #[cfg(target_os = "windows")]
-pub(super) fn registry_get(subkey: &str, name: &str, op: &'static str) -> PResult<Option<RegValue>> {
+pub(super) fn registry_get(
+    subkey: &str,
+    name: &str,
+    op: &'static str,
+) -> PResult<Option<RegValue>> {
     let r = crate::win_reg::read_raw(crate::win_reg::RootKey::HkeyCurrentUser, subkey, name);
     reg_read_outcome(r.status, r.kind, &r.data, op)
 }

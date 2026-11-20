@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AppStateData, CoverageSnapshot, PartialAudit, ProviderId, RiskReport } from "../../types";
-import { Badge, Banner, Button, Card, EmptyState, ExpandRow, Row, Rows, Section, Segmented, cx } from "../../ui";
+import { Badge, Banner, Button, Card, EmptyState, ExpandRow, HintCard, Row, Rows, Section, Segmented, cx } from "../../ui";
 import type { Tone } from "../../ui";
 import { checks as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
@@ -47,7 +47,12 @@ export interface ChecksScreenProps {
   rechecking?: boolean;
   /** Возраст данных в минутах, если отчёт устарел или последний аудит упал; иначе null. */
   dataAgeMinutes?: number | null;
+  /** Показывать ли секцию «Покрытие приложений» внизу экрана (в Shell v3 она живёт в «Нейросети и защита»). */
+  showCoverage?: boolean;
+  onDismissHint?: (hintId: string) => Promise<unknown> | void;
 }
+
+const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform || navigator.userAgent || "");
 
 /** Экран «Проверки»: переключатель провайдеров, вердикт, приоритетные проверки, тесты защиты. */
 export function ChecksScreen({
@@ -70,14 +75,26 @@ export function ChecksScreen({
   onRecheck,
   rechecking,
   dataAgeMinutes,
+  showCoverage = true,
+  onDismissHint,
 }: ChecksScreenProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [passedOpen, setPassedOpen] = useState(false);
   const [manualProvider, setManualProvider] = useState<ProviderId | null>(null);
+  const [localDismissed, setLocalDismissed] = useState<string[]>(() => state?.dismissed_hints ?? []);
 
   useEffect(() => {
     setManualProvider(null);
   }, [provider]);
+
+  useEffect(() => {
+    if (state?.dismissed_hints) setLocalDismissed(state.dismissed_hints);
+  }, [state?.dismissed_hints]);
+
+  const handleDismissHint = (id: string) => {
+    setLocalDismissed((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    void onDismissHint?.(id);
+  };
 
   const resolvedReports = reports ?? (report ? { [report.provider]: report } : undefined);
   const defaultProvider =
@@ -147,7 +164,11 @@ export function ChecksScreen({
   const activePartial = partial?.provider === activeProvider ? partial : null;
   const built = activeReport ? buildChecks(activeReport, state) : buildPendingChecks(activePartial, state);
   const { items, counts, total } = built;
-  const { actionItems, passedItems } = partitionChecksForProvider(items, activeProvider);
+  const { actionItems: rawActionItems, passedItems: rawPassedItems } = partitionChecksForProvider(items, activeProvider);
+  const hideWifiGeo = (item: CheckItem) =>
+    IS_MAC && item.id === "wifi_geo" && item.result.code === "OS_LOCATION_NOT_APPLICABLE";
+  const actionItems = rawActionItems.filter((i) => !hideWifiGeo(i));
+  const passedItems = rawPassedItems.filter((i) => !hideWifiGeo(i));
   const waiting = counts.pending > 0;
   const progress = progressOf(built);
   const passed = counts.ok;
@@ -176,6 +197,13 @@ export function ChecksScreen({
 
   return (
     <div className="zs-stack">
+      <HintCard
+        hintId="checks_intro"
+        title="14 проверок сети и окружения перед работой"
+        body="Сначала исправьте пункты с высоким приоритетом (страна, IPv6, DNS, часовой пояс) — это снижает риск проверок и блокировок аккаунта."
+        dismissedHints={localDismissed}
+        onDismiss={handleDismissHint}
+      />
       {switcher}
       <Card aria-label={waiting ? copy.pending.busyLabel : undefined}>
         <div className="zs-verdict__head" aria-busy={waiting || undefined} role={waiting ? "status" : undefined}>
@@ -220,10 +248,15 @@ export function ChecksScreen({
               </>
             )}
             {dataAgeMinutes != null && <p className="zs-verdict__text">{copy.dataAge(dataAgeMinutes, Boolean(auditError))}</p>}
-            {onRecheck && !waiting && (
+            {!waiting && (
               <div className="zs-verdict__actions">
-                <Button size="sm" icon="refresh" onClick={onRecheck} disabled={rechecking}>
-                  {rechecking ? copy.rechecking : copy.recheck}
+                {onRecheck && (
+                  <Button size="sm" icon="refresh" onClick={onRecheck} disabled={rechecking}>
+                    {rechecking ? copy.rechecking : copy.recheck}
+                  </Button>
+                )}
+                <Button size="sm" variant="secondary" icon="pulse" onClick={onOpenCrashTest}>
+                  {copy.tests.crashTitle}
                 </Button>
               </div>
             )}
@@ -299,13 +332,15 @@ export function ChecksScreen({
         </Rows>
       </Card>
 
-      <CoverageSection
-        variant="checks"
-        initialSnapshot={coverageSnapshot}
-        pending={startupPending}
-        protection={protection}
-        onToast={onToast}
-      />
+      {showCoverage && (
+        <CoverageSection
+          variant="checks"
+          initialSnapshot={coverageSnapshot}
+          pending={startupPending}
+          protection={protection}
+          onToast={onToast}
+        />
+      )}
 
       <Section title={copy.tests.title}>
         <Card>

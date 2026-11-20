@@ -11,11 +11,12 @@ use super::evaluate_checks::{
 use super::probes::whoami;
 use super::run_check::{blocking_check, run_check};
 use super::{
-    AuditProgress, Auditor, ProgressSink, ProviderId, RiskReport, check_all_dnsbl_with_doh,
-    check_ipv6_leak_with_route, check_os_location_services_with, dnsbl, evaluate_dnsbl_report,
+    AuditProgress, AuditProtectionContext, AuditProtectionFlags, Auditor, ProgressSink, ProviderId,
+    RiskReport, check_all_dnsbl_with_doh, check_ipv6_leak_with_route,
+    check_os_location_services_with, dnsbl, evaluate_dnsbl_report,
     evaluate_impossible_travel_with_pin_and_exit, evaluate_ip_pinning_for_route,
     evaluate_ip_reputation, evaluate_provider_geo, evaluate_reverse_dns_ptr_with_dns, leaks,
-    lookup_tor, score_checks, seams,
+    lookup_tor, network, score_checks, seams,
 };
 use crate::auditor::ip_type::ExitIdentity;
 use crate::routing::RouteSelection;
@@ -29,6 +30,7 @@ impl Auditor {
         selection: &RouteSelection,
         force_refresh_telemetry: bool,
         sink: Option<ProgressSink>,
+        protection_flags: AuditProtectionFlags,
     ) -> Result<RiskReport, String> {
         if force_refresh_telemetry {
             self.resolver.check_cache().os.clear().await;
@@ -53,6 +55,9 @@ impl Auditor {
             _ => None,
         };
         let via_zastava_key = bound_route.is_some();
+        let route_usable =
+            bound_route.is_some_and(|r| r.check_usable(network::current_timestamp()).is_ok());
+        let dns_protection = AuditProtectionContext::from_flags(route_usable, protection_flags);
         let route_label = bound_route.map(|r| r.label.clone());
 
         let provider_pinned = state_data.pinned_ips.get(provider.as_str()).cloned();
@@ -95,9 +100,11 @@ impl Auditor {
         let pinning = tracked(
             &sink,
             1,
-            run_check("IP Pinning", CHECK_LIMIT_LOCAL, async move {
-                pinning_verdict
-            }),
+            run_check(
+                "IP Pinning",
+                CHECK_LIMIT_LOCAL,
+                async move { pinning_verdict },
+            ),
         );
         let geo_allows_travel_grace = {
             let geo = evaluate_provider_geo(&matrix, provider, &country);
@@ -224,6 +231,7 @@ impl Auditor {
                 country.clone(),
                 env.clone(),
                 via_zastava_key,
+                dns_protection,
             ),
         );
         let timezone = tracked(
@@ -268,7 +276,12 @@ impl Auditor {
                 let (cache, country, env) = (cache.clone(), country.clone(), env.clone());
                 async move {
                     let view = resolver_view(&env, &cache).await;
-                    whoami::evaluate_dns_country_for_route(&view, &country, via_zastava_key)
+                    whoami::evaluate_dns_country_for_route_with_protection(
+                        &view,
+                        &country,
+                        via_zastava_key,
+                        dns_protection,
+                    )
                 }
             }),
         );

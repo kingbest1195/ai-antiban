@@ -116,7 +116,10 @@ impl AppState {
         let changed = {
             let mut w = self.inner.write().await;
             let list = w.trusted_exceptions.entry(key).or_default();
-            if list.iter().any(|existing| normalize_ip_str(existing) == norm_ip) {
+            if list
+                .iter()
+                .any(|existing| normalize_ip_str(existing) == norm_ip)
+            {
                 false
             } else {
                 list.push(norm_ip);
@@ -170,10 +173,7 @@ impl AppState {
         }
     }
 
-    pub async fn clear_trusted_exceptions(
-        &self,
-        provider: Option<&str>,
-    ) -> Result<(), StateError> {
+    pub async fn clear_trusted_exceptions(&self, provider: Option<&str>) -> Result<(), StateError> {
         let changed = {
             let mut w = self.inner.write().await;
             match provider.map(str::trim).filter(|s| !s.is_empty()) {

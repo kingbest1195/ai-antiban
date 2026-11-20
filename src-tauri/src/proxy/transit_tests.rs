@@ -174,8 +174,7 @@ async fn slow_resolver_does_not_block_other_lookups() {
         let _ = c2.resolve("slow.example").await;
     });
     tokio::task::yield_now().await;
-    let quick =
-        tokio::time::timeout(Duration::from_secs(1), cache.resolve("fast.example")).await;
+    let quick = tokio::time::timeout(Duration::from_secs(1), cache.resolve("fast.example")).await;
     assert!(
         quick
             .expect("fast lookup must not wait for the slow one")
@@ -359,6 +358,52 @@ fn resolved_private_answers_are_refused_but_tun_fakeip_is_allowed_for_names() {
     assert!(check_resolved("a.example", &[ip("93.184.216.34"), ip("127.0.0.1")]).is_err());
     assert!(check_resolved("a.example", &[ip("198.18.0.7")]).is_ok());
     assert!(check_resolved("198.18.0.7", &[ip("198.18.0.7")]).is_err());
+    assert!(check_resolved("a.example", &[ip("fc00::1")]).is_ok());
+    assert!(check_resolved("fc00::1", &[ip("fc00::1")]).is_err());
+    assert!(check_resolved("a.example", &[ip("fd12:3456::1")]).is_err());
+}
+
+#[tokio::test]
+async fn transit_anti_ssrf_overrides_fake_ip_and_forbidden_ip_with_public_dns() {
+    // 1. FakeIPv6 fc00::1 overridden by public DNS.
+    let ips = resolve_transit_ips_with(
+        "api.example.com",
+        async { Ok(vec![ip("fc00::1")]) },
+        async { Ok(vec![ip("93.184.216.34")]) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ips, vec![ip("93.184.216.34")]);
+
+    // 2. Forbidden local IP 127.0.0.1 overridden by public DNS.
+    let ips2 = resolve_transit_ips_with(
+        "api.example.com",
+        async { Ok(vec![ip("127.0.0.1")]) },
+        async { Ok(vec![ip("93.184.216.34")]) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ips2, vec![ip("93.184.216.34")]);
+
+    // 3. FakeIPv6 fc00::1 accepted as last resort when public DNS fails.
+    let ips3 = resolve_transit_ips_with(
+        "api.example.com",
+        async { Ok(vec![ip("fc00::1")]) },
+        async { Err(io::Error::new(io::ErrorKind::TimedOut, "offline")) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(ips3, vec![ip("fc00::1")]);
+
+    // 4. Local LAN IP fd12:3456::1 is NEVER accepted when public DNS fails.
+    let err = resolve_transit_ips_with(
+        "api.example.com",
+        async { Ok(vec![ip("fd12:3456::1")]) },
+        async { Err(io::Error::new(io::ErrorKind::TimedOut, "offline")) },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
 }
 
 #[test]

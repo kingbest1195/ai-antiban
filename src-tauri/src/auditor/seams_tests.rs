@@ -33,7 +33,8 @@ fn defaults_output_parsing() {
 
 #[test]
 fn reg_output_parsing() {
-    let one = "\nHKEY_CURRENT_USER\\Control Panel\\International\n    LocaleName    REG_SZ    ru-RU\n";
+    let one =
+        "\nHKEY_CURRENT_USER\\Control Panel\\International\n    LocaleName    REG_SZ    ru-RU\n";
     assert_eq!(parse_reg_string_values(one), vec!["ru-RU"]);
     let many = "    Languages    REG_MULTI_SZ    ru-RU\\0en-US\n";
     assert_eq!(parse_reg_string_values(many), vec!["ru-RU", "en-US"]);
@@ -59,9 +60,8 @@ fn not_found_is_told_apart_from_a_broken_resolver() {
     assert!(is_name_not_found(&nx));
     let glibc = Error::other("Name or service not known");
     assert!(is_name_not_found(&glibc));
-    let broken = Error::other(
-        "failed to lookup address information: Temporary failure in name resolution",
-    );
+    let broken =
+        Error::other("failed to lookup address information: Temporary failure in name resolution");
     assert!(!is_name_not_found(&broken));
 }
 

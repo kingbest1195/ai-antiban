@@ -6,7 +6,8 @@ fn raw<'a>(t: &'a str, p: &[&str]) -> Option<&'a str> {
 
 #[test]
 fn finds_top_level_and_nested_values() {
-    let t = "{\n  \"a\": 1,\n  \"terminal.integrated.env.osx\": {\n    \"HTTP_PROXY\": \"x\"\n  }\n}\n";
+    let t =
+        "{\n  \"a\": 1,\n  \"terminal.integrated.env.osx\": {\n    \"HTTP_PROXY\": \"x\"\n  }\n}\n";
     assert_eq!(raw(t, &["a"]), Some("1"));
     assert_eq!(
         raw(t, &["terminal.integrated.env.osx", "HTTP_PROXY"]),
@@ -24,8 +25,7 @@ fn finds_top_level_and_nested_values() {
 
 #[test]
 fn replace_touches_only_the_value_bytes() {
-    let t =
-        "{\n  // keep me\n  \"http.proxy\": \"http://old\", /* tail */\n  \"b\": [1, 2]\n}\n";
+    let t = "{\n  // keep me\n  \"http.proxy\": \"http://old\", /* tail */\n  \"b\": [1, 2]\n}\n";
     let out = set(t, &["http.proxy"], "\"http://new\"").unwrap();
     assert_eq!(
         out,
@@ -81,9 +81,7 @@ fn bom_is_preserved_in_every_edit() {
 fn comments_of_both_kinds_survive_and_a_trailing_comment_stays_in_place() {
     let t = "{\n  // top\n  \"x\": 1 // about x\n  /* block */\n}\n";
     let out = set(t, &["k"], "2").unwrap();
-    assert!(
-        out.contains("// top") && out.contains("// about x") && out.contains("/* block */")
-    );
+    assert!(out.contains("// top") && out.contains("// about x") && out.contains("/* block */"));
     validate(&out).unwrap();
     assert_eq!(raw(&out, &["x"]), Some("1"));
     assert_eq!(raw(&out, &["k"]), Some("2"));
@@ -123,8 +121,7 @@ fn a_comment_after_the_last_comma_stays_with_its_member_and_the_bytes_come_back(
 
 #[test]
 fn unicode_in_strings_and_urls_is_untouched() {
-    let t =
-        "{\n  \"路径\": \"http://пример.рф/a?b=ü\",\n  \"e\": \"\\u00e9\\ud83d\\ude00\"\n}\n";
+    let t = "{\n  \"路径\": \"http://пример.рф/a?b=ü\",\n  \"e\": \"\\u00e9\\ud83d\\ude00\"\n}\n";
     let out = set(t, &["k"], "1").unwrap();
     assert!(out.contains("http://пример.рф/a?b=ü") && out.contains("\\ud83d\\ude00"));
     assert_eq!(raw(&out, &["路径"]), Some("\"http://пример.рф/a?b=ü\""));

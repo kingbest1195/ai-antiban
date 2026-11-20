@@ -131,7 +131,7 @@ fn app<'a>(snap: &'a CoverageSnapshot, id: &str) -> &'a AppCoverageItem {
 
 const OUR_PAC: &str = "http://127.0.0.1:8899/proxy.pac";
 
-mod process_and_traffic;
 mod apps_and_cli;
-mod vpn_and_antigravity;
 mod browser_policies_and_opencode;
+mod process_and_traffic;
+mod vpn_and_antigravity;

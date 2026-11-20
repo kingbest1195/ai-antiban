@@ -337,15 +337,10 @@ async fn hold_timeout_with_changed_restore_epoch_or_trusted_exception_never_bloc
     let state2 = AppState::new_in_memory();
     let hq2 = Arc::new(HoldQueue::new());
     let server2 = Arc::new(
-        ProxyServer::bind_ephemeral(
-            auditor2,
-            state2.clone(),
-            Arc::clone(&hq2),
-            Some(echo_addr),
-        )
-        .await
-        .expect("bind")
-        .with_hold_ttl(Duration::from_millis(120)),
+        ProxyServer::bind_ephemeral(auditor2, state2.clone(), Arc::clone(&hq2), Some(echo_addr))
+            .await
+            .expect("bind")
+            .with_hold_ttl(Duration::from_millis(120)),
     );
     let addr2 = server2.bound_addr;
     let srv2 = Arc::clone(&server2);
@@ -441,7 +436,10 @@ async fn manual_killswitch_blocks_even_disabled_provider_on_superseded_hold() {
     assert!(hold_seen, "expected active hold");
 
     // Disable monitoring AND engage manual kill-switch, then supersede the hold.
-    state.set_provider_monitoring("anthropic", false).await.unwrap();
+    state
+        .set_provider_monitoring("anthropic", false)
+        .await
+        .unwrap();
     server.guard.set_manual_killswitch(true, &state).await;
     hq.cancel_all_superseded().await;
 

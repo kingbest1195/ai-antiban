@@ -1,7 +1,9 @@
 //! Atomic file persistence (mode 0600 on Unix), v1 backup, and `AppState` lifecycle constructors.
 
 use super::AppState;
-use super::schema::{AppStateData, STATE_FILE_NAME, STATE_V1_BACKUP_NAME, StateError};
+use super::schema::{
+    AppStateData, STATE_FILE_NAME, STATE_V1_BACKUP_NAME, STATE_V2_BACKUP_NAME, StateError,
+};
 use super::stats::{GatewayStatsSnapshot, GatewayStatsTracker};
 use crate::routing::RouteHealthRegistry;
 use std::path::{Path, PathBuf};
@@ -68,6 +70,9 @@ impl AppState {
                     if loaded.schema_version < 2 {
                         Self::backup_v1_state_once(&storage_path);
                     }
+                    if loaded.schema_version >= 2 && loaded.schema_version < 3 {
+                        Self::backup_v2_state_once(&storage_path);
+                    }
                     needs_save = loaded.migrate(now);
                     loaded
                 }
@@ -115,6 +120,17 @@ impl AppState {
         }
         if let Err(e) = Self::copy_private(path, &backup) {
             eprintln!("Warning: could not back up the v1 state file: {e}");
+        }
+    }
+
+    /// Copies the original v2.x file next to it, once.
+    fn backup_v2_state_once(path: &Path) {
+        let backup = path.with_file_name(STATE_V2_BACKUP_NAME);
+        if backup.exists() {
+            return;
+        }
+        if let Err(e) = Self::copy_private(path, &backup) {
+            eprintln!("Warning: could not back up the v2 state file: {e}");
         }
     }
 

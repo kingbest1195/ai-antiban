@@ -23,19 +23,24 @@ pub(crate) use crate::diagnostics::{
 #[cfg_attr(not(test), allow(unused_imports))]
 use crate::{diagnostics, routing};
 
-#[tauri::command]
-pub async fn toggle_sysproxy(
+/// Shared system-proxy toggle used by both the `toggle_sysproxy` Tauri command and the tray menu.
+pub(crate) async fn toggle_sysproxy_shared(
     enable: bool,
-    state: tauri::State<'_, state::AppState>,
-    auditor: tauri::State<'_, auditor::Auditor>,
-    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
-    app: tauri::AppHandle,
+    state: &state::AppState,
+    auditor: &auditor::Auditor,
+    proxy_manager: &proxy::ProxyManager,
+    app: &tauri::AppHandle,
 ) -> Result<bool, String> {
     if enable {
-        enable_sysproxy_with(false, &state, &auditor, &proxy_manager).await
+        let enabled = enable_sysproxy_with(false, state, auditor, proxy_manager).await?;
+        if enabled {
+            crate::tray::update_tray_checking(app);
+        }
+        auditor.set_protection_flags(crate::commands::audit::read_runtime_protection_flags().await);
+        Ok(enabled)
     } else {
-        crate::startup::note_user_off(&app);
-        if let Some(dir) = os_tz::resolve_app_data_dir(Some(&app)) {
+        crate::startup::note_user_off(app);
+        if let Some(dir) = os_tz::resolve_app_data_dir(Some(app)) {
             let restore_res =
                 tokio::task::spawn_blocking(move || os_tz::restore_if_synced_on_disable(&dir))
                     .await;
@@ -59,6 +64,10 @@ pub async fn toggle_sysproxy(
         }
         let report = sysproxy::cleanup_all_persistent_settings();
         proxy_manager.coverage.invalidate_facts();
+        auditor.set_protection_flags(crate::commands::audit::read_runtime_protection_flags().await);
+        if !sysproxy::is_sysproxy_active() {
+            crate::tray::update_tray_protection_off(app);
+        }
         if report.has_failures() {
             crate::diagnostics::record(
                 "cmd:toggle_sysproxy_off",
@@ -73,6 +82,17 @@ pub async fn toggle_sysproxy(
     }
 }
 
+#[tauri::command]
+pub async fn toggle_sysproxy(
+    enable: bool,
+    state: tauri::State<'_, state::AppState>,
+    auditor: tauri::State<'_, auditor::Auditor>,
+    proxy_manager: tauri::State<'_, proxy::ProxyManager>,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    toggle_sysproxy_shared(enable, &state, &auditor, &proxy_manager, &app).await
+}
+
 /// User-triggered retry of enabling the macOS system proxy via administrator authorization
 /// (`osascript ... with administrator privileges`) after `toggle_sysproxy(true)` failed with
 /// `ADMIN_AUTH_REQUIRED:`. On non-macOS systems this delegates to normal `toggle_sysproxy(true)`.
@@ -82,7 +102,10 @@ pub async fn toggle_sysproxy_privileged(
     auditor: tauri::State<'_, auditor::Auditor>,
     proxy_manager: tauri::State<'_, proxy::ProxyManager>,
 ) -> Result<bool, String> {
-    enable_sysproxy_with(cfg!(target_os = "macos"), &state, &auditor, &proxy_manager).await
+    let enabled =
+        enable_sysproxy_with(cfg!(target_os = "macos"), &state, &auditor, &proxy_manager).await?;
+    auditor.set_protection_flags(crate::commands::audit::read_runtime_protection_flags().await);
+    Ok(enabled)
 }
 
 #[tauri::command]
@@ -102,6 +125,7 @@ pub async fn enable_cli_protection(
         }));
     }
     auditor.resolver.check_cache().os.clear().await;
+    auditor.set_protection_flags(crate::commands::audit::read_runtime_protection_flags().await);
     Ok(report)
 }
 
@@ -124,6 +148,7 @@ pub async fn disable_cli_protection(
         return Err(PARTIAL_RESTORE_TEXT.to_string());
     }
     auditor.resolver.check_cache().os.clear().await;
+    auditor.set_protection_flags(crate::commands::audit::read_runtime_protection_flags().await);
     Ok(false)
 }
 

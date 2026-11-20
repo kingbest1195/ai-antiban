@@ -21,12 +21,28 @@ fn e2e_scenario_1_browser_login_and_desktop_cli_isolation() {
     fs::create_dir_all(home_dir.join(".claude")).unwrap();
 
     // Seed Profile A (default) Desktop + CLI credentials + non-auth MCP settings
-    fs::write(claude_dir.join("Network/Cookies"), b"SESSION_COOKIE_ACCOUNT_A").unwrap();
-    fs::write(claude_dir.join("Local Storage/leveldb/0001.ldb"), b"STORAGE_A").unwrap();
+    fs::write(
+        claude_dir.join("Network/Cookies"),
+        b"SESSION_COOKIE_ACCOUNT_A",
+    )
+    .unwrap();
+    fs::write(
+        claude_dir.join("Local Storage/leveldb/0001.ldb"),
+        b"STORAGE_A",
+    )
+    .unwrap();
     fs::write(claude_dir.join("DawnWebGPUCache/blob.bin"), b"CACHE_A").unwrap();
     fs::write(claude_dir.join("Preferences"), r#"{"account":"A"}"#).unwrap();
-    fs::write(claude_dir.join("claude_desktop_config.json"), r#"{"mcpServers":{"local":{}}}"#).unwrap();
-    fs::write(home_dir.join(".claude/.credentials.json"), r#"{"claudeAiOauth":{"accessToken":"tok-A"}}"#).unwrap();
+    fs::write(
+        claude_dir.join("claude_desktop_config.json"),
+        r#"{"mcpServers":{"local":{}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        home_dir.join(".claude/.credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"tok-A"}}"#,
+    )
+    .unwrap();
     fs::write(
         home_dir.join(".claude.json"),
         json!({
@@ -40,42 +56,104 @@ fn e2e_scenario_1_browser_login_and_desktop_cli_isolation() {
     .unwrap();
 
     // Create Profile B (for browser login) and Profile C (empty check)
-    let list_b = create_claude_profile_in(&storage_dir, &claude_dir, "Account B", None, None, None).unwrap();
-    let prof_b = list_b.profiles.iter().find(|p| p.name == "Account B").unwrap().clone();
-    let list_c = create_claude_profile_in(&storage_dir, &claude_dir, "Profile C", None, None, None).unwrap();
-    let prof_c = list_c.profiles.iter().find(|p| p.name == "Profile C").unwrap().clone();
+    let list_b =
+        create_claude_profile_in(&storage_dir, &claude_dir, "Account B", None, None, None).unwrap();
+    let prof_b = list_b
+        .profiles
+        .iter()
+        .find(|p| p.name == "Account B")
+        .unwrap()
+        .clone();
+    let list_c =
+        create_claude_profile_in(&storage_dir, &claude_dir, "Profile C", None, None, None).unwrap();
+    let prof_c = list_c
+        .profiles
+        .iter()
+        .find(|p| p.name == "Profile C")
+        .unwrap()
+        .clone();
 
     // Switch A -> B: B must start clean for fresh browser login while A's backup stays intact
-    let sw_b = switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_b.id).unwrap();
+    let sw_b =
+        switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_b.id)
+            .unwrap();
     assert_eq!(sw_b.active_profile.id, prof_b.id);
-    assert!(!claude_dir.join("Network/Cookies").exists(), "A Cookies must not leak to B");
-    assert!(!claude_dir.join("Preferences").exists(), "A Preferences must not leak to B");
-    assert!(claude_dir.join("claude_desktop_config.json").exists(), "Desktop MCP config must be preserved");
-    assert!(!claude_dir.join("DawnWebGPUCache/blob.bin").exists(), "Electron cache must be purged");
-    assert!(!home_dir.join(".claude/.credentials.json").exists(), "A CLI credentials must not leak to B");
+    assert!(
+        !claude_dir.join("Network/Cookies").exists(),
+        "A Cookies must not leak to B"
+    );
+    assert!(
+        !claude_dir.join("Preferences").exists(),
+        "A Preferences must not leak to B"
+    );
+    assert!(
+        claude_dir.join("claude_desktop_config.json").exists(),
+        "Desktop MCP config must be preserved"
+    );
+    assert!(
+        !claude_dir.join("DawnWebGPUCache/blob.bin").exists(),
+        "Electron cache must be purged"
+    );
+    assert!(
+        !home_dir.join(".claude/.credentials.json").exists(),
+        "A CLI credentials must not leak to B"
+    );
     let cli_b_json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home_dir.join(".claude.json")).unwrap()).unwrap();
     assert!(cli_b_json.get("oauthAccount").is_none());
     assert!(cli_b_json.get("userID").is_none());
-    assert!(cli_b_json.get("mcpServers").is_some(), "non-auth mcpServers must survive");
+    assert!(
+        cli_b_json.get("mcpServers").is_some(),
+        "non-auth mcpServers must survive"
+    );
     assert_eq!(
         fs::read_to_string(storage_dir.join("default/snapshot/Network/Cookies")).unwrap(),
         "SESSION_COOKIE_ACCOUNT_A"
     );
-    assert!(storage_dir.join("default/snapshot/cli_credentials.json").exists());
+    assert!(
+        storage_dir
+            .join("default/snapshot/cli_credentials.json")
+            .exists()
+    );
 
     // Switch unlogged B -> C: B still never had real auth, so has_saved_session must remain false
-    let _ = switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_c.id).unwrap();
+    let _ =
+        switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_c.id)
+            .unwrap();
     let list_after_c = list_claude_profiles_in(&storage_dir, &claude_dir, None).unwrap();
-    let b_meta = list_after_c.profiles.iter().find(|p| p.id == prof_b.id).unwrap();
-    assert!(!b_meta.has_saved_session, "device-id files alone must not mark has_saved_session=true");
-    assert!(list_after_c.profiles.iter().find(|p| p.id == "default").unwrap().has_saved_session);
+    let b_meta = list_after_c
+        .profiles
+        .iter()
+        .find(|p| p.id == prof_b.id)
+        .unwrap();
+    assert!(
+        !b_meta.has_saved_session,
+        "device-id files alone must not mark has_saved_session=true"
+    );
+    assert!(
+        list_after_c
+            .profiles
+            .iter()
+            .find(|p| p.id == "default")
+            .unwrap()
+            .has_saved_session
+    );
 
     // Switch to B, perform browser/CLI login for B, then switch B -> A -> B
-    let _ = switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_b.id).unwrap();
+    let _ =
+        switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_b.id)
+            .unwrap();
     fs::create_dir_all(claude_dir.join("Network")).unwrap();
-    fs::write(claude_dir.join("Network/Cookies"), b"SESSION_COOKIE_ACCOUNT_B").unwrap();
-    fs::write(home_dir.join(".claude/.credentials.json"), r#"{"claudeAiOauth":{"accessToken":"tok-B"}}"#).unwrap();
+    fs::write(
+        claude_dir.join("Network/Cookies"),
+        b"SESSION_COOKIE_ACCOUNT_B",
+    )
+    .unwrap();
+    fs::write(
+        home_dir.join(".claude/.credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"tok-B"}}"#,
+    )
+    .unwrap();
     fs::write(
         home_dir.join(".claude.json"),
         json!({ "userID": "user-B", "oauthAccount": { "emailAddress": "bob@example.com" }, "mcpServers": { "github": { "command": "npx" } } }).to_string(),
@@ -83,24 +161,48 @@ fn e2e_scenario_1_browser_login_and_desktop_cli_isolation() {
     .unwrap();
 
     // Back to A: restores A verbatim without touching B's backup
-    let _ = switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), "default").unwrap();
-    assert_eq!(fs::read_to_string(claude_dir.join("Network/Cookies")).unwrap(), "SESSION_COOKIE_ACCOUNT_A");
-    assert!(fs::read_to_string(home_dir.join(".claude/.credentials.json")).unwrap().contains("tok-A"));
+    let _ =
+        switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), "default")
+            .unwrap();
     assert_eq!(
-        fs::read_to_string(storage_dir.join(format!("{}/snapshot/Network/Cookies", prof_b.id))).unwrap(),
+        fs::read_to_string(claude_dir.join("Network/Cookies")).unwrap(),
+        "SESSION_COOKIE_ACCOUNT_A"
+    );
+    assert!(
+        fs::read_to_string(home_dir.join(".claude/.credentials.json"))
+            .unwrap()
+            .contains("tok-A")
+    );
+    assert_eq!(
+        fs::read_to_string(storage_dir.join(format!("{}/snapshot/Network/Cookies", prof_b.id)))
+            .unwrap(),
         "SESSION_COOKIE_ACCOUNT_B"
     );
 
     // Switch back to B: restores B verbatim
-    let _ = switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_b.id).unwrap();
-    assert_eq!(fs::read_to_string(claude_dir.join("Network/Cookies")).unwrap(), "SESSION_COOKIE_ACCOUNT_B");
-    assert!(fs::read_to_string(home_dir.join(".claude/.credentials.json")).unwrap().contains("tok-B"));
+    let _ =
+        switch_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_b.id)
+            .unwrap();
+    assert_eq!(
+        fs::read_to_string(claude_dir.join("Network/Cookies")).unwrap(),
+        "SESSION_COOKIE_ACCOUNT_B"
+    );
+    assert!(
+        fs::read_to_string(home_dir.join(".claude/.credentials.json"))
+            .unwrap()
+            .contains("tok-B")
+    );
 
     // Deleting unused Profile C deletes only C without touching active B or backup A
-    let after_del = delete_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_c.id).unwrap();
+    let after_del =
+        delete_claude_profile_in_with_home(&storage_dir, &claude_dir, Some(&home_dir), &prof_c.id)
+            .unwrap();
     assert_eq!(after_del.profiles.len(), 2);
     assert!(!storage_dir.join(&prof_c.id).exists());
-    assert_eq!(fs::read_to_string(claude_dir.join("Network/Cookies")).unwrap(), "SESSION_COOKIE_ACCOUNT_B");
+    assert_eq!(
+        fs::read_to_string(claude_dir.join("Network/Cookies")).unwrap(),
+        "SESSION_COOKIE_ACCOUNT_B"
+    );
     assert_eq!(
         fs::read_to_string(storage_dir.join("default/snapshot/Network/Cookies")).unwrap(),
         "SESSION_COOKIE_ACCOUNT_A"
@@ -118,13 +220,23 @@ fn e2e_scenario_6_windows_macos_path_bom_crlf_symlink_parity() {
     let msix_claude = win_local.join("Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude");
     fs::create_dir_all(&msix_claude).unwrap();
     assert_eq!(
-        resolve_claude_desktop_dir_for_platform("windows", None, Some(&win_roaming), Some(&win_local)),
+        resolve_claude_desktop_dir_for_platform(
+            "windows",
+            None,
+            Some(&win_roaming),
+            Some(&win_local)
+        ),
         Some(msix_claude.clone())
     );
     let direct_win_claude = win_roaming.join("Claude");
     fs::create_dir_all(&direct_win_claude).unwrap();
     assert_eq!(
-        resolve_claude_desktop_dir_for_platform("windows", None, Some(&win_roaming), Some(&win_local)),
+        resolve_claude_desktop_dir_for_platform(
+            "windows",
+            None,
+            Some(&win_roaming),
+            Some(&win_local)
+        ),
         Some(direct_win_claude)
     );
 
@@ -150,7 +262,13 @@ fn e2e_scenario_6_windows_macos_path_bom_crlf_symlink_parity() {
     let bom_claude_json = "\u{FEFF}{\r\n  \"userID\": \"u1\",\r\n  \"oauthAccount\": {\"emailAddress\": \"bom@example.com\"},\r\n  \"mcpServers\": {\"fs\": {\"command\": \"npx\"}}\r\n}\r\n";
     fs::write(home.join(".claude.json"), bom_claude_json.as_bytes()).unwrap();
     let list = create_claude_profile_in(&storage, &claude, "Second", None, None, None).unwrap();
-    let second_id = list.profiles.iter().find(|p| p.name == "Second").unwrap().id.clone();
+    let second_id = list
+        .profiles
+        .iter()
+        .find(|p| p.name == "Second")
+        .unwrap()
+        .id
+        .clone();
 
     #[cfg(unix)]
     {
@@ -161,9 +279,21 @@ fn e2e_scenario_6_windows_macos_path_bom_crlf_symlink_parity() {
     }
 
     let _ = switch_claude_profile_in_with_home(&storage, &claude, Some(&home), &second_id).unwrap();
-    assert!(!storage.join("default/snapshot/cli_credentials.json").exists(), "symlink credentials must not be snapshotted");
-    assert!(!home.join(".claude/.credentials.json").exists(), "symlink credentials must be removed on switch");
-    assert!(fs::read_to_string(storage.join("default/snapshot/cli_oauth.json")).unwrap().contains("bom@example.com"));
+    assert!(
+        !storage
+            .join("default/snapshot/cli_credentials.json")
+            .exists(),
+        "symlink credentials must not be snapshotted"
+    );
+    assert!(
+        !home.join(".claude/.credentials.json").exists(),
+        "symlink credentials must be removed on switch"
+    );
+    assert!(
+        fs::read_to_string(storage.join("default/snapshot/cli_oauth.json"))
+            .unwrap()
+            .contains("bom@example.com")
+    );
 }
 
 #[test]
@@ -184,7 +314,12 @@ fn e2e_scenario_6b_claude_desktop_dir_missing_returns_none_cleanly() {
         Some(empty_home.join("Library/Application Support/Claude"))
     );
     assert_eq!(
-        resolve_claude_desktop_dir_for_platform("windows", None, Some(&empty_home), Some(&empty_home)),
+        resolve_claude_desktop_dir_for_platform(
+            "windows",
+            None,
+            Some(&empty_home),
+            Some(&empty_home)
+        ),
         Some(empty_home.join("Claude"))
     );
     let _ = Path::new(".");

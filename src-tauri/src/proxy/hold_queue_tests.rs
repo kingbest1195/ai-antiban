@@ -52,9 +52,7 @@ async fn test_resolve_all_for_provider() {
 #[tokio::test]
 async fn test_coalesces_concurrent_provider_holds_and_skips_simulations() {
     let queue = HoldQueue::new();
-    let _sim_rx = queue
-        .register("sim-123".to_string(), "anthropic")
-        .await;
+    let _sim_rx = queue.register("sim-123".to_string(), "anthropic").await;
 
     let (id1, rx1, leader1) = queue
         .register_or_coalesce_provider("hold-1".to_string(), "anthropic")

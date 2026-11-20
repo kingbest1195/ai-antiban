@@ -255,5 +255,7 @@ export async function cleanAppCache(provider: ProviderId): Promise<CleanResult> 
     bytes_freed: 14200000,
     success: true,
     message: "Локальные реестры и кэш успешно сброшены.",
+    found_dir: true,
+    locked_targets: [],
   };
 }

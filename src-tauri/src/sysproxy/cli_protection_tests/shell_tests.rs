@@ -2,7 +2,9 @@ use super::*;
 use crate::sysproxy::ZASTAVA_RC_START;
 use crate::sysproxy::ide::{ide_candidates, ide_env_key};
 use crate::sysproxy::platform::FakePlatform;
-use crate::sysproxy::shell_rc::{build_powershell_guard_block_with_tz, build_shell_rc_guard_block_with_tz};
+use crate::sysproxy::shell_rc::{
+    build_powershell_guard_block_with_tz, build_shell_rc_guard_block_with_tz,
+};
 use std::sync::Arc;
 
 // --- shell and PowerShell profiles -------------------------------------------------------
@@ -416,4 +418,3 @@ fn a_settings_file_with_the_2_0_0_no_proxy_is_cleaned_by_its_signature() {
     assert_eq!(raw(&after, &[key]), None, "{after}");
     assert_eq!(raw(&after, &["a"]), Some("1".into()));
 }
-

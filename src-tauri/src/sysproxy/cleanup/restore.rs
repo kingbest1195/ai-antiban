@@ -50,8 +50,11 @@ fn held_by_connected_vpn(j: &Journal, p: &dyn Platform, scope: Scope) -> Vec<Res
                 _ => return None,
             };
             let kind = kinds.iter().find(|(s, _)| s.key() == svc.key())?.1;
-            matches!(kind, super::super::platform::ServiceKind::Vpn { connected: true })
-                .then(|| e.resource.clone())
+            matches!(
+                kind,
+                super::super::platform::ServiceKind::Vpn { connected: true }
+            )
+            .then(|| e.resource.clone())
         })
         .collect()
 }
@@ -148,9 +151,12 @@ pub(crate) fn restore_and_migrate_with(
     at_app_start: bool,
 ) -> RecoveryReport {
     let mut report = restore_with(j, p, Scope::All);
-    report
-        .items
-        .extend(migrate_legacy_with(j, p, state().gateway_port(), at_app_start));
+    report.items.extend(migrate_legacy_with(
+        j,
+        p,
+        state().gateway_port(),
+        at_app_start,
+    ));
     if let Some(ctx) = FileCtx::real_with_fs(j.fs()) {
         let (strip, items) = super::super::cli_protection::clean_zshenv(j, p, &ctx);
         report.items.extend(items);
@@ -186,4 +192,3 @@ pub(crate) fn restore_user_env() -> RecoveryReport {
 pub(crate) fn cleanup_cli_files() -> RecoveryReport {
     super::super::cli_protection::disable_cli_files()
 }
-

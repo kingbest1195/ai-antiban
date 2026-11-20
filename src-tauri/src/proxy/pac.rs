@@ -177,9 +177,10 @@ pub fn get_all_ai_domains_filtered(
         if clean.is_empty() {
             continue;
         }
-        let owner_disabled = ProviderId::from_host_with_custom(&clean, std::slice::from_ref(&clean))
-            .map(|p| disabled.contains(p.as_str()))
-            .unwrap_or(false);
+        let owner_disabled =
+            ProviderId::from_host_with_custom(&clean, std::slice::from_ref(&clean))
+                .map(|p| disabled.contains(p.as_str()))
+                .unwrap_or(false);
         if !owner_disabled && !domains.iter().any(|d| d.eq_ignore_ascii_case(&clean)) {
             domains.push(clean);
         }
@@ -244,7 +245,6 @@ function FindProxyForURL(url, host) {{
 "#
     )
 }
-
 
 #[cfg(test)]
 #[path = "pac_tests.rs"]

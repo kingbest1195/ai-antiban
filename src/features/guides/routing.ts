@@ -22,13 +22,18 @@ const FROM_LEGACY_METHOD: Record<VpnSetupMethod, VpsMethod> = {
 /**
  * Идентификатор гайда из «Обзора», «Подключения», диалога обрыва и трея → раздел и способ.
  * Понимает прежние id: 01-personal-vpn-15min, 01-personal-vpn-amnezia, vless_one_cmd, cascade, terminal,
- * 02-safe-payment-cards, 03-os-privacy-setup. Неизвестный id открывает «Свой VPS».
+ * 02-safe-payment-cards, 03-os-privacy-setup, 03-os-privacy-setup#geo, 03-os-network-dns, os-geo.
+ * Неизвестный id открывает «Свой VPS».
  */
 export function resolveGuide(id: string | null | undefined): GuideTarget {
   switch (id) {
     case "02-safe-payment-cards":
     case "payment":
       return { section: "payment" };
+    case "03-os-privacy-setup#geo":
+    case "03-os-network-dns":
+    case "os-geo":
+      return { section: "os", part: "geo" };
     case "03-os-privacy-setup":
     case "os":
       return { section: "os", part: "tz" };

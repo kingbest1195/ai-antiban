@@ -84,7 +84,11 @@ impl NetworkGuard {
             let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
             if !*self.kill_tx.borrow() {
                 tx.send_replace(Gate::Open);
-                if self.provider_gates.values().all(|g| *g.borrow() == Gate::Open) {
+                if self
+                    .provider_gates
+                    .values()
+                    .all(|g| *g.borrow() == Gate::Open)
+                {
                     self.gate_tx.send_replace(Gate::Open);
                     inner.handled_ip = None;
                 }

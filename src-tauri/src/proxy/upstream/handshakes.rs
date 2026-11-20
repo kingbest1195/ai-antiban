@@ -50,11 +50,16 @@ pub(super) async fn tcp_connect_addrs(
     tcp_timeout: Duration,
 ) -> io::Result<TcpStream> {
     let ordered = order_socket_addrs(&addrs);
-    race_connect(ordered, HAPPY_EYEBALLS_STEP, tcp_timeout, |addr| async move {
-        let stream = TcpStream::connect(addr).await?;
-        configure_tcp_stream(&stream);
-        Ok(stream)
-    })
+    race_connect(
+        ordered,
+        HAPPY_EYEBALLS_STEP,
+        tcp_timeout,
+        |addr| async move {
+            let stream = TcpStream::connect(addr).await?;
+            configure_tcp_stream(&stream);
+            Ok(stream)
+        },
+    )
     .await
 }
 

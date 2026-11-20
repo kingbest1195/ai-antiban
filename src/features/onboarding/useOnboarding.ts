@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getOnboardingV22Done, setOnboardingV22Done } from "../../utils/api";
+import { completeOnboardingV3, fetchAppState } from "../../utils/api";
 import { isTauri } from "../../utils/api/client";
 
-/** Флаг «знакомство пройдено или пропущено» для версии 2.2 (хранится в state.json и кэшируется в localStorage). */
-export const ONBOARDING_DONE_KEY = "zastava_onboarding_v2_2_done";
+/** Флаг «знакомство пройдено или пропущено» для версии 3.0 (хранится в state.json и кэшируется в localStorage). */
+export const ONBOARDING_DONE_KEY = "zastava_onboarding_v3_done";
 
-export const ONBOARDING_STEPS = 4;
+export const ONBOARDING_STEPS = 5;
 
 export function readDoneFromStorage(): boolean {
   try {
@@ -29,7 +29,8 @@ export function writeDoneToStorage(done = true): void {
 export async function readOnboardingDone(): Promise<boolean> {
   if (isTauri()) {
     try {
-      const done = await getOnboardingV22Done();
+      const state = await fetchAppState();
+      const done = Boolean(state.onboarding_v3_done);
       writeDoneToStorage(done);
       return done;
     } catch {
@@ -41,12 +42,11 @@ export async function readOnboardingDone(): Promise<boolean> {
 
 export async function persistOnboardingDone(done = true): Promise<void> {
   writeDoneToStorage(done);
-  if (isTauri()) {
-    try {
-      await setOnboardingV22Done(done);
-    } catch {
-      // Ошибка записи в state.json не должна блокировать закрытие онбординга; localStorage уже обновлён.
-    }
+  if (!done) return;
+  try {
+    await completeOnboardingV3();
+  } catch {
+    // Ошибка записи в state.json не должна блокировать закрытие онбординга; localStorage уже обновлён.
   }
 }
 
@@ -80,12 +80,12 @@ function readInitial(): Initial {
   let step = 1;
   if (import.meta.env.DEV) {
     const n = Number(params.get("step"));
-    if (Number.isInteger(n) && n >= 1 && n <= ONBOARDING_STEPS + 1) step = n;
+    if (Number.isInteger(n) && n >= 1 && n <= ONBOARDING_STEPS) step = n;
   }
   return { open, step, forced, isAlertWindow };
 }
 
-/** Показ онбординга: первый запуск новой версии, повторный запуск из меню «Ещё», запись флага. */
+/** Показ онбординга v3.0: первый запуск, повторный запуск из Настроек, запись `onboarding_v3_done`. */
 export function useOnboarding() {
   const [initial] = useState(readInitial);
   const [open, setOpen] = useState(initial.open);
@@ -113,11 +113,11 @@ export function useOnboarding() {
   }, []);
 
   /** Закрыть и запомнить: и «Пропустить», и обычное завершение. */
-  const finish = useCallback(() => {
+  const finish = useCallback(async () => {
     userInteractedRef.current = true;
     writeDoneToStorage(true);
     setOpen(false);
-    void persistOnboardingDone(true);
+    await persistOnboardingDone(true);
   }, []);
 
   return { open, run, start, finish, initialStep: run === 0 ? initial.step : 1 };

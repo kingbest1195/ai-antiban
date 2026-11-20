@@ -25,6 +25,21 @@
   --info-soft: #0e2738; /* Подложка справочного баннера и бейджа. */
   --focus: #7dd3fc; /* Кольцо фокуса: сплошное 2px с отступом 2px, 3:1 и выше на всех фонах. */
 
+  /* Маскот Заставы (сторожевой пёс в плаще-щите): 4-цветная семантика + нейтральный мех */
+  --mascot-cloak: var(--brand);
+  --mascot-cloak-shade: #059669;
+  --mascot-shield-bg: var(--brand-soft);
+  --mascot-shield-stroke: var(--brand-text);
+  --mascot-fur: #e2a856;
+  --mascot-fur-shade: #c28434;
+  --mascot-muzzle: #f4e6d0;
+  --mascot-eye: #0a0c10;
+  --mascot-badge-bg: var(--bg-2);
+  --mascot-surface: var(--bg-1);
+  --mascot-sleep-cloak: var(--bg-3);
+  --mascot-sleep-fur: var(--ink-3);
+  --mascot-sleep-muzzle: var(--ink-2);
+
   --shadow-pop: 0 16px 40px rgba(0,0,0,0.55);
 
   --space-1: 4px;

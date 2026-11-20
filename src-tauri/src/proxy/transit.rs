@@ -279,7 +279,7 @@ where
 }
 
 /// Resolved addresses of a host name that must never be dialed (SSRF protection). A TUN FakeIP
-/// answer (198.18.0.0/15) is allowed for names, not for raw IPs.
+/// answer (`198.18.0.0/15` or `fc00::/18`) is allowed for names, not for raw IPs.
 pub fn check_resolved(host: &str, ips: &[IpAddr]) -> io::Result<()> {
     let host_is_raw_ip = host.parse::<IpAddr>().is_ok();
     for ip in ips {
@@ -289,18 +289,115 @@ pub fn check_resolved(host: &str, ips: &[IpAddr]) -> io::Result<()> {
             }
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "SSRF Protection: resolved IP belongs to a restricted local or private network.",
+                format!(
+                    "SSRF Protection: resolved IP {ip} belongs to a restricted local or private network."
+                ),
             ));
         }
     }
     Ok(())
 }
 
+fn record_transit_dns(msg: &str) {
+    crate::diagnostics::record("routing:dns", msg);
+}
+
+async fn resolve_transit_ips_with<FSys, FPub>(
+    host: &str,
+    system_lookup: FSys,
+    public_lookup: FPub,
+) -> io::Result<Vec<IpAddr>>
+where
+    FSys: Future<Output = io::Result<Vec<IpAddr>>>,
+    FPub: Future<Output = io::Result<Vec<IpAddr>>>,
+{
+    let mut fake_candidate: Option<Vec<IpAddr>> = None;
+    let mut sys_err: Option<io::Error> = None;
+    let mut rejected_sys_ip: Option<IpAddr> = None;
+
+    match system_lookup.await {
+        Ok(ips) if !ips.is_empty() => {
+            let bad: Vec<IpAddr> = ips
+                .iter()
+                .copied()
+                .filter(|ip| is_forbidden_ip(ip) && !is_tun_fake_ip(ip))
+                .collect();
+            let has_fake = ips.iter().any(is_tun_fake_ip);
+            if bad.is_empty() && !has_fake {
+                return Ok(ips);
+            }
+            if !bad.is_empty() {
+                rejected_sys_ip = Some(bad[0]);
+                for ip in bad {
+                    record_transit_dns(&format!(
+                        "transit rejected ip={ip} source=system host={host}"
+                    ));
+                }
+            } else {
+                record_transit_dns(&format!(
+                    "transit got TUN FakeIP from system for {host}; querying public DNS/DoH"
+                ));
+                fake_candidate = Some(ips);
+            }
+        }
+        Ok(_) => {
+            sys_err = Some(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no valid upstream addresses resolved",
+            ))
+        }
+        Err(e) => sys_err = Some(e),
+    }
+
+    match public_lookup.await {
+        Ok(pub_ips) if !pub_ips.is_empty() => {
+            if !pub_ips.iter().any(is_forbidden_ip) {
+                return Ok(pub_ips);
+            }
+            for ip in pub_ips
+                .iter()
+                .filter(|ip| is_forbidden_ip(ip) && !is_tun_fake_ip(ip))
+            {
+                record_transit_dns(&format!(
+                    "transit rejected ip={ip} source=fallback host={host}"
+                ));
+            }
+            if rejected_sys_ip.is_none() && pub_ips.iter().all(is_tun_fake_ip) {
+                return Ok(pub_ips);
+            }
+            Ok(fake_candidate.unwrap_or(pub_ips))
+        }
+        _ if rejected_sys_ip.is_none() => fake_candidate.ok_or_else(|| {
+            sys_err.unwrap_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no valid upstream addresses resolved",
+                )
+            })
+        }),
+        _ => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "SSRF Protection: rejected ip={} from system DNS and public fallback failed",
+                rejected_sys_ip.unwrap()
+            ),
+        )),
+    }
+}
+
 fn system_resolver() -> ResolveFn {
     Arc::new(|host: String| {
         Box::pin(async move {
-            let found = tokio::net::lookup_host((host.as_str(), 0)).await?;
-            Ok(found.map(|a| a.ip()).collect::<Vec<_>>())
+            let sys_host = host.clone();
+            resolve_transit_ips_with(
+                &host,
+                async move {
+                    let found = tokio::net::lookup_host((sys_host.as_str(), 0)).await?;
+                    Ok(found.map(|a| a.ip()).collect::<Vec<_>>())
+                },
+                crate::routing::net::resolve_public_dns_ips(&host),
+            )
+            .await
         })
     })
 }
@@ -382,7 +479,6 @@ impl Transit {
         race_connect(addrs, self.step, self.total, move |a| dial(a)).await
     }
 }
-
 
 #[cfg(test)]
 #[path = "transit_tests.rs"]

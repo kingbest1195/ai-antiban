@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { Banner, Card, Row, Rows, Section } from "../../ui";
-import { simulateInterception } from "../../utils/api";
+import { onInterceptorResolved, simulateInterception } from "../../utils/api";
+import { isTauri } from "../../utils/api/client";
 import { onboarding as copy } from "../../shared/copy/ru";
 import { AlertOverlay } from "../alert";
+import { KillSwitchAnim } from "../mascot";
 import { StepFooter, StepFrame } from "./parts";
 
 type Phase = "idle" | "waiting" | "error";
@@ -41,7 +41,7 @@ export function StepAlert({ onReacted, onBack }: { onReacted: () => void; onBack
     if (phase !== "waiting" || !isTauri()) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    listen("interceptor://resolved", () => react()).then((fn) => {
+    onInterceptorResolved(() => react()).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
     });
@@ -74,6 +74,7 @@ export function StepAlert({ onReacted, onBack }: { onReacted: () => void; onBack
           />
         }
       >
+        <KillSwitchAnim triggered latencyLabel="0.04 мс" compact />
         <div aria-live="polite" aria-atomic="true">
           {phase === "waiting" && (
             <Banner tone="info" title={copy.alert.waiting.title}>

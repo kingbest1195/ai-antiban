@@ -203,9 +203,7 @@ fn is_blocked_country_for_travel_grace(country_raw: &str) -> bool {
 fn is_travel_anomaly_code(code: &str) -> bool {
     matches!(
         code,
-        "IMPOSSIBLE_TRAVEL_CRITICAL"
-            | "IMPOSSIBLE_TRAVEL_WARNING"
-            | "TRAVEL_ASN_JUMP_SAME_COUNTRY"
+        "IMPOSSIBLE_TRAVEL_CRITICAL" | "IMPOSSIBLE_TRAVEL_WARNING" | "TRAVEL_ASN_JUMP_SAME_COUNTRY"
     )
 }
 
@@ -265,10 +263,7 @@ pub fn evaluate_impossible_travel_with_pin_and_exit(
 /// Downgrades `IMPOSSIBLE_TRAVEL_CRITICAL` / `IMPOSSIBLE_TRAVEL_WARNING` in `report` when
 /// `is_pinned` is `true`, exit geo is non-sanctioned/non-blocked (neither `Critical` nor `Unknown`),
 /// and no other check is `Critical`. Recomputes `overall_status`, `trust_score`, and counts.
-pub fn apply_pinned_travel_grace(
-    report: &mut crate::auditor::RiskReport,
-    is_pinned: bool,
-) -> bool {
+pub fn apply_pinned_travel_grace(report: &mut crate::auditor::RiskReport, is_pinned: bool) -> bool {
     if !is_pinned {
         return false;
     }

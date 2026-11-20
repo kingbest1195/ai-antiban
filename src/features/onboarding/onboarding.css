@@ -1,4 +1,4 @@
-/* Онбординг первого запуска. Только токены ДС: фон bg-0, слои bg-1, поля space-*, без рамок, свечений и градиентов.
+/* Онбординг первого запуска v3.0. Только токены ДС: bg-*, ink-*, brand*, ok/warn/danger, space-*.
    Слой z-index 40 лежит выше меню (30) и ниже демо-диалога (50) и уведомлений (60). */
 .zs-onb{position:fixed;inset:0;z-index:40;display:flex;justify-content:center;background:var(--bg-0)}
 .zs-onb:focus{outline:none}
@@ -13,6 +13,19 @@
 .zs-onb__lead{margin:0;color:var(--ink-2)}
 .zs-onb__note{margin:0;color:var(--ink-2);font-size:12px;line-height:16px}
 .zs-onb__result{display:flex;flex-direction:column;gap:var(--space-3)}
+.zs-onb__hero{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-2) 0}
+.zs-onb__goals{display:flex;flex-direction:column;gap:var(--space-2)}
+.zs-onb__goal{display:flex;flex-direction:column;gap:4px;width:100%;padding:var(--space-3);border-radius:var(--radius-md);border:1px solid var(--line);background:var(--bg-1);color:var(--ink-1);text-align:left;cursor:pointer;transition:border-color 140ms ease,background-color 140ms ease}
+.zs-onb__goal:hover{border-color:var(--line-strong);background:var(--bg-2)}
+.zs-onb__goal:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.zs-onb__goal--active{border-color:var(--brand);background:var(--brand-soft)}
+.zs-onb__goal-title{font-size:14px;font-weight:600;line-height:20px;color:var(--ink-1)}
+.zs-onb__goal-sub{font-size:12px;line-height:17px;color:var(--ink-2)}
+.zs-onb__tray-dot{display:inline-block;width:10px;height:10px;border-radius:999px;flex-shrink:0}
+.zs-onb__tray-dot--green{background:var(--ok)}
+.zs-onb__tray-dot--yellow{background:var(--warn)}
+.zs-onb__tray-dot--red{background:var(--danger)}
+.zs-onb__tray-dot--gray{background:var(--ink-3)}
 .zs-onb__foot{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3) var(--space-4) var(--space-4);background:var(--bg-0)}
 .zs-onb__foot-row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
 .zs-onb__foot--inline{flex-direction:row;align-items:center}

@@ -41,7 +41,6 @@ pub async fn gate_closed(rx: &mut watch::Receiver<Gate>) {
     }
 }
 
-
 impl NetworkGuard {
     /// Engages the kill flag and blocks the gate as one step with respect to `set_gate`.
     fn engage_kill(&self) {
@@ -336,5 +335,4 @@ impl NetworkGuard {
     pub async fn await_decision_for(&self, provider: ProviderId) -> Gate {
         Self::await_gate_rx(self.subscribe_for(provider)).await
     }
-
 }

@@ -228,11 +228,8 @@ fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_r
     );
 
     // OS TZ itself matches IP TZ -> Ok!
-    let matched = evaluate_system_timezone_with(
-        &sys(),
-        Some("Europe/Amsterdam"),
-        Some("Europe/Amsterdam"),
-    );
+    let matched =
+        evaluate_system_timezone_with(&sys(), Some("Europe/Amsterdam"), Some("Europe/Amsterdam"));
     assert_eq!(
         (matched.status, matched.code.as_str()),
         (CheckStatus::Ok, "TIMEZONE_MATCH")
@@ -472,9 +469,7 @@ fn no_text_of_the_locale_or_time_zone_checks_mentions_lc_all_or_the_proxy_protec
             },
             FakeSystem::offline(),
         ] {
-            texts.push(
-                evaluate_locale_env_hygiene_with(&host, Some("Europe/Amsterdam")).message,
-            );
+            texts.push(evaluate_locale_env_hygiene_with(&host, Some("Europe/Amsterdam")).message);
             texts.push(evaluate_locale_env_hygiene_with(&host, None).message);
         }
     }

@@ -32,13 +32,10 @@ export const coverageRowTone = (view: CoverageView): RowTone =>
   view === "confirmed" ? "ok" : view === "off" ? "warn" : "neutral";
 
 const LEGEND: { view: Exclude<CoverageView, "not_installed">; text: string }[] = [
-  { view: "off", text: "приложение не подключено к Заставе." },
-  { view: "configured", text: "Застава настроила приложение, но запросов через неё ещё не было." },
-  { view: "waiting", text: "вы нажали «Я настроил», Застава ждёт первый запрос." },
-  { view: "waiting_timeout", text: "запрос так и не пришёл — проверьте настройку." },
-  { view: "confirmed", text: "запросы этого приложения уже идут через Заставу." },
-  { view: "direct", text: "обычная программа терминала, идёт мимо Заставы специально — это нормально." },
-  { view: "unknown", text: "Застава не смогла прочитать настройки приложения." },
+  { view: "confirmed", text: "Подключено — запросы приложения уже идут через Заставу." },
+  { view: "configured", text: "Настроено — ждёт запрос от приложения." },
+  { view: "off", text: "Не подключено к Заставе." },
+  { view: "direct", text: "Напрямую (норма) — обычная программа терминала, идёт мимо Заставы специально." },
 ];
 
 export function CoverageLegend() {

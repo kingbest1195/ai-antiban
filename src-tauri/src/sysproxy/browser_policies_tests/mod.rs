@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 
 pub(super) const DIR: &str = "/data";
 
-
 pub(super) struct StubProbe {
     outputs: Mutex<Vec<Option<String>>>,
     fallback: Mutex<Option<String>>,
@@ -48,11 +47,7 @@ pub(super) struct StubLauncher {
 }
 
 impl AppLauncher for StubLauncher {
-    fn run(
-        &self,
-        program: &str,
-        args: &[String],
-    ) -> Option<crate::sysproxy::relaunch::RunResult> {
+    fn run(&self, program: &str, args: &[String]) -> Option<crate::sysproxy::relaunch::RunResult> {
         self.calls
             .lock()
             .unwrap()
@@ -93,7 +88,6 @@ pub(super) fn read_json(fs: &FakeFs, path: &Path) -> serde_json::Value {
     let bytes = fs.read(path).unwrap().unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
-
 
 mod policy_tests;
 mod prefs_tests;

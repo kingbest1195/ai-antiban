@@ -120,9 +120,9 @@ fn framing_is_determined_and_reemitted() {
 fn absolute_form_for_chained_proxy_keeps_the_full_uri() {
     let r = parse_request(&head("GET http://example.org:8080/p?q=1 HTTP/1.1\r\n\r\n")).unwrap();
     let out = String::from_utf8(r.build_head(RequestForm::Absolute)).unwrap();
-    assert!(out.starts_with(
-        "GET http://example.org:8080/p?q=1 HTTP/1.1\r\nHost: example.org:8080\r\n"
-    ));
+    assert!(
+        out.starts_with("GET http://example.org:8080/p?q=1 HTTP/1.1\r\nHost: example.org:8080\r\n")
+    );
 }
 
 #[test]

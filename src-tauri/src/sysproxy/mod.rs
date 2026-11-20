@@ -28,7 +28,6 @@ mod shell_rc;
 mod windows;
 
 pub use browser_policies::PolicyApplyReport;
-pub use process_probe::{Os, RealProbe, SystemProbe};
 pub use cleanup::{
     SHUTDOWN_PROGRESS_EVENT, SHUTDOWN_PROGRESS_TOTAL, ShutdownCleanupGuard,
     ShutdownProgressPayload, cleaned_components, cleanup_all_persistent_settings,
@@ -43,6 +42,7 @@ pub use cli_protection::{
     sync_ai_tz_active,
 };
 pub use ide::{candidate_ide_settings_paths, sanitize_jsonc};
+pub use process_probe::{Os, RealProbe, SystemProbe};
 pub use shell_rc::{
     build_powershell_guard_block_with_tz, build_shell_rc_guard_block,
     build_shell_rc_guard_block_with_tz, get_windows_powershell_profile_paths,
@@ -63,39 +63,37 @@ pub use parsing::{
     parse_networksetup_webproxy_output, parse_reg_dword, parse_reg_sz, parse_windows_proxy_server,
     set_chained_proxy,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use state::force_os_dry_run;
 pub use state::{
     APP_IDENTIFIER, OS_DRY_RUN_ENV, default_app_data_dir, dry_run_blocked_calls,
     dry_run_blocked_programs, os_effects_enabled,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use state::force_os_dry_run;
 
+#[cfg(target_os = "windows")]
+pub(crate) use orchestrator::real_user_env;
 pub(crate) use orchestrator::{
     EnableReport, Run, journal_base_dir, journal_failure_text, restore_pass, with_files,
     with_journal,
 };
-#[cfg(target_os = "windows")]
-pub(crate) use orchestrator::real_user_env;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use orchestrator::{cleanup_cli_gate, hold_app_lock, local_journal_base};
 #[cfg(test)]
 #[allow(unused_imports)]
 use orchestrator::{enable_with, recover_in, refresh_with};
-#[allow(unused_imports)]
-pub(crate) use state::{
-    FileCtx, KNOWN_NO_PROXY_VALUES, NO_PROXY_VALUE, NO_PROXY_VALUE_2_0, SysState,
-    ZASTAVA_RC_END, ZASTAVA_RC_START, is_known_no_proxy_value, note_dry_run_blocked, state,
-    user_home_dir,
-};
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)]
 pub(crate) use state::user_appdata_dir;
+#[allow(unused_imports)]
+pub(crate) use state::{
+    FileCtx, KNOWN_NO_PROXY_VALUES, NO_PROXY_VALUE, NO_PROXY_VALUE_2_0, SysState, ZASTAVA_RC_END,
+    ZASTAVA_RC_START, is_known_no_proxy_value, note_dry_run_blocked, state, user_home_dir,
+};
 
 use orchestrator::data_dir;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-
 
 /// Spawns a Command configured on Windows with `CREATE_NO_WINDOW` (0x08000000)
 /// to completely prevent cmd.exe / PowerShell / Terminal console windows flashing.
@@ -162,7 +160,6 @@ pub struct CliProtectionReport {
 pub fn disable_all_sysproxy() {
     let _ = cleanup_all_persistent_settings();
 }
-
 
 /// Removes stale Zastava `127.0.0.1:<any>/proxy.pac` entries from non-running Chromium profile
 /// `Preferences` files (used at startup when protection is OFF).
@@ -242,7 +239,6 @@ pub fn reconcile_browser_pac_prefs(pac_url: Option<&str>) -> bool {
     }
 }
 
-
 /// Gracefully quits running Chromium browsers that still need PAC, patches all their profile
 /// `Preferences` files via the journal, and relaunches them with `--proxy-pac-url=<pac_url>`.
 pub fn relaunch_browsers_with_pac(
@@ -255,7 +251,14 @@ pub fn relaunch_browsers_with_pac(
     };
     match with_files("relaunch_browsers_with_pac", |j, p, ctx| {
         browser_policies::relaunch_browsers_with_pac_with(
-            j, p, pac_url, ctx, os, &crate::sysproxy::RealProbe, &relaunch::RealLauncher, timing,
+            j,
+            p,
+            pac_url,
+            ctx,
+            os,
+            &crate::sysproxy::RealProbe,
+            &relaunch::RealLauncher,
+            timing,
         )
     }) {
         Run::Blocked => Ok(browser_policies::RelaunchSummary::default()),
@@ -263,7 +266,6 @@ pub fn relaunch_browsers_with_pac(
         Run::Done(summary) => Ok(summary),
     }
 }
-
 
 /// Shown when Quit could not put the PAC back because of a VPN with temporary DNS settings.
 /// No addresses, no values; no quotes either (it goes into an AppleScript string).
@@ -287,7 +289,6 @@ pub fn notify_restore_deferred() {
     }
 }
 
-
 pub struct SysProxy;
 
 impl SysProxy {
@@ -303,7 +304,6 @@ impl SysProxy {
         is_sysproxy_active()
     }
 }
-
 
 /// Spawns the native OS date and time settings panel.
 pub fn open_os_datetime_settings() -> Result<(), String> {

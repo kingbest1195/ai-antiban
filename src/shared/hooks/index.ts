@@ -13,5 +13,5 @@ export { useMockScenario } from "./useMockScenario";
 export { useClaudeBackup } from "./useClaudeBackup";
 export type { ClaudeBackup } from "./useClaudeBackup";
 export { useTrayEvents } from "./useTrayEvents";
-export { useNavigation, TAB_ORDER, DEFAULT_GUIDE } from "./useNavigation";
-export type { TabId } from "./useNavigation";
+export { useNavigation, pushRoute, popRoute, resetRouteStack, TAB_ORDER, DEFAULT_GUIDE } from "./useNavigation";
+export type { TabId, Route, ShellPage } from "./useNavigation";

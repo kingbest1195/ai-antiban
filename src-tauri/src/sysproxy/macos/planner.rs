@@ -2,7 +2,9 @@ use super::super::platform::{
     ChainState, Platform, PlatformError, ProxyEndpoint, ServiceId, ServiceKind, classify_services,
 };
 use super::super::{is_gateway_target, parse_gateway_port_from_pac_url, set_chained_proxy};
-use super::{HealGuard, MSG_ADMIN_AUTH_REQUIRED, MSG_KIND_UNKNOWN, MSG_ONLY_VPN, vpn_untouched_line};
+use super::{
+    HealGuard, MSG_ADMIN_AUTH_REQUIRED, MSG_KIND_UNKNOWN, MSG_ONLY_VPN, vpn_untouched_line,
+};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -252,4 +254,3 @@ pub(super) fn plan_physical_pac(
         os_pac_deferred: false,
     })
 }
-

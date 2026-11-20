@@ -115,12 +115,9 @@ fn register_cowork_guard_task() -> Result<(), String> {
     let xml = build_windows_task_xml();
     validate_windows_task_xml(&xml)?;
     let xml_bytes = encode_utf16_le_with_bom(&xml);
-    let xml_path = std::env::temp_dir().join(format!(
-        "zastava-cowork-task-{}.xml",
-        std::process::id()
-    ));
-    std::fs::write(&xml_path, &xml_bytes)
-        .map_err(|e| format!("failed to write task XML: {e}"))?;
+    let xml_path =
+        std::env::temp_dir().join(format!("zastava-cowork-task-{}.xml", std::process::id()));
+    std::fs::write(&xml_path, &xml_bytes).map_err(|e| format!("failed to write task XML: {e}"))?;
     let xml_path_str = xml_path.to_string_lossy().into_owned();
     let args = build_schtasks_create_args(&xml_path_str);
     let out = run_hidden_cmd("schtasks.exe", &args);
@@ -154,7 +151,11 @@ fn enforce_cowork_service_manual_and_stop() -> Result<(), String> {
     use crate::win_reg::{RootKey, get_dword, set_dword};
 
     let mut need_system_task = false;
-    match get_dword(RootKey::HkeyLocalMachine, COWORK_SERVICE_REG_SUBKEY, "Start") {
+    match get_dword(
+        RootKey::HkeyLocalMachine,
+        COWORK_SERVICE_REG_SUBKEY,
+        "Start",
+    ) {
         Ok(None) => return Ok(()),
         Ok(Some(cur)) => {
             if cur != 3 {
@@ -237,9 +238,11 @@ fn enforce_cowork_service_manual_and_stop() -> Result<(), String> {
     if need_system_task {
         if trigger_cowork_guard_task() {
             std::thread::sleep(std::time::Duration::from_millis(800));
-            if let Ok(Some(cur)) =
-                get_dword(RootKey::HkeyLocalMachine, COWORK_SERVICE_REG_SUBKEY, "Start")
-                && cur != 3
+            if let Ok(Some(cur)) = get_dword(
+                RootKey::HkeyLocalMachine,
+                COWORK_SERVICE_REG_SUBKEY,
+                "Start",
+            ) && cur != 3
             {
                 let msg = format!(
                     "SYSTEM task ran, but CoworkVMService Start is still {cur} instead of 3"

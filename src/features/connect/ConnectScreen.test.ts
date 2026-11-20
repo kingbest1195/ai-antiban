@@ -4,8 +4,23 @@ import { describe, expect, it, vi } from "vitest";
 import { connect as copy } from "../../shared/copy/ru";
 import { formatCountryWithCode } from "../../shared/lib/country";
 import type { RouteView, RoutesSnapshot } from "../../types";
+import { DIRECT_ROUTE_ID } from "../../utils/api";
 import { ConnectScreen, getAffectedProvidersForRoute, resolveProviderExitCountry } from "./ConnectScreen";
 import { HOSTINGS } from "./hostings";
+import { RouteDisableModals } from "./RouteDisableModals";
+import { RouteUnavailableBanner } from "./RouteUnavailableBanner";
+import {
+  disableRouteAndSwitchBindingsToDirect,
+  inspectRouteUsageForDisable,
+  resetProfileRouteAndDisable,
+  switchUnavailableBannerToDirect,
+  type RouteBindActions,
+} from "./routeDisableModel";
+
+vi.mock("../../ui/Modal", () => ({
+  Modal: ({ open, title, children, footer }: { open: boolean; title: string; children?: unknown; footer?: unknown }) =>
+    open ? createElement("div", { "data-modal": title }, children as never, footer as never) : null,
+}));
 
 const makeRoute = (id: string, country: string, exitIp: string, label: string): RouteView => ({
   id,
@@ -141,5 +156,210 @@ describe("resolveProviderExitCountry и ConnectScreen", () => {
     );
     expect(html).toContain("Vultr");
     expect(html).not.toContain("is*hosting");
+  });
+});
+
+describe("Bug #6: Route Toggle OFF UX, profile_route_id guard и Disabled banner", () => {
+  const routes: RouteView[] = [
+    makeRoute("default-r", "FR", "136.244.114.42", "Париж"),
+    makeRoute("profile-r", "NL", "185.212.102.40", "Амстердам"),
+    makeRoute("unused-r", "DE", "145.241.12.8", "Франкфурт"),
+  ];
+
+  const makeMockActions = (): RouteBindActions => ({
+    bindProvider: vi.fn(async () => ({ routes: [], provider_routes: {}, effective: {}, dangling: [] })),
+    setDefault: vi.fn(async () => ({ routes: [], provider_routes: {}, effective: {}, dangling: [] })),
+    setEnabled: vi.fn(async () => ({ routes: [], provider_routes: {}, effective: {}, dangling: [] })),
+    listProfiles: vi.fn(async () => ({
+      active_profile_id: "work-claude",
+      profiles: [],
+      claude_desktop_installed: false,
+      storage_dir: "/tmp",
+    })),
+    bindProfileRoute: vi.fn(async () => ({
+      active_profile_id: "work-claude",
+      profiles: [],
+      claude_desktop_installed: false,
+      storage_dir: "/tmp",
+    })),
+  });
+
+  it("getAffectedProvidersForRoute учитывает profile_route_id для anthropic", () => {
+    const snap: RoutesSnapshot = {
+      routes,
+      default_route_id: "default-r",
+      profile_route_id: "profile-r",
+      provider_routes: {
+        anthropic: "direct",
+        openai: "default-r",
+      },
+      effective: {},
+      dangling: [],
+    };
+
+    expect(getAffectedProvidersForRoute("profile-r", snap)).toEqual(["anthropic"]);
+    expect(getAffectedProvidersForRoute("default-r", snap)).toEqual(["openai", "gemini"]);
+    expect(getAffectedProvidersForRoute("unused-r", snap)).toEqual([]);
+  });
+
+  it("Route-OFF рендерит оба выбора (Direct vs остановка/блокировка) и отдельное предупреждение для profile_route_id", () => {
+    const snap: RoutesSnapshot = {
+      routes,
+      default_route_id: "default-r",
+      profile_route_id: "profile-r",
+      provider_routes: {},
+      effective: {},
+      dangling: [],
+    };
+    const usage = inspectRouteUsageForDisable("profile-r", snap, routes);
+    expect(usage.inUse).toBe(true);
+    expect(usage.isProfileRoute).toBe(true);
+
+    const choiceHtml = renderToStaticMarkup(
+      createElement(RouteDisableModals, {
+        pendingDisable: { routeId: "profile-r", routeLabel: "Амстердам", usage },
+        confirmProfileReset: null,
+        busy: false,
+        onCancelDisable: vi.fn(),
+        onChooseDirect: vi.fn(),
+        onChooseStopAndBlock: vi.fn(),
+        onCancelProfileReset: vi.fn(),
+        onConfirmProfileReset: vi.fn(),
+      }),
+    );
+
+    expect(choiceHtml).toContain(copy.routes.disableModal.switchToDirect);
+    expect(choiceHtml).toContain(copy.routes.disableModal.stopAndBlock);
+    expect(choiceHtml).toContain(copy.routes.disableModal.profileNote);
+
+    const profileConfirmHtml = renderToStaticMarkup(
+      createElement(RouteDisableModals, {
+        pendingDisable: null,
+        confirmProfileReset: { routeId: "profile-r", routeLabel: "Амстердам", usage },
+        busy: false,
+        onCancelDisable: vi.fn(),
+        onChooseDirect: vi.fn(),
+        onChooseStopAndBlock: vi.fn(),
+        onCancelProfileReset: vi.fn(),
+        onConfirmProfileReset: vi.fn(),
+      }),
+    );
+
+    expect(profileConfirmHtml).toContain(copy.routes.profileResetModal.title);
+    expect(profileConfirmHtml).toContain(copy.routes.profileResetModal.confirm);
+    expect(profileConfirmHtml).toContain("аккаунты");
+  });
+
+  it("перевод маршрута в Direct сбрасывает default/provider привязки, но блокирует тихий сброс profile_route_id без подтверждения", async () => {
+    const actions = makeMockActions();
+    const snap: RoutesSnapshot = {
+      routes,
+      default_route_id: "default-r",
+      profile_route_id: null,
+      provider_routes: { openai: "default-r" },
+      effective: {},
+      dangling: [],
+    };
+    const usage = inspectRouteUsageForDisable("default-r", snap, routes);
+    await disableRouteAndSwitchBindingsToDirect({ routeId: "default-r", routeLabel: "Париж", usage }, actions);
+
+    expect(actions.bindProvider).toHaveBeenCalledWith("openai", DIRECT_ROUTE_ID);
+    expect(actions.setDefault).toHaveBeenCalledWith(null);
+    expect(actions.setEnabled).toHaveBeenCalledWith("default-r", false);
+    expect(actions.bindProfileRoute).not.toHaveBeenCalled();
+
+    const profileSnap: RoutesSnapshot = {
+      ...snap,
+      profile_route_id: "profile-r",
+    };
+    const profileUsage = inspectRouteUsageForDisable("profile-r", profileSnap, routes);
+    await expect(
+      disableRouteAndSwitchBindingsToDirect(
+        { routeId: "profile-r", routeLabel: "Амстердам", usage: profileUsage },
+        actions,
+      ),
+    ).rejects.toThrow(/profile_route_id/);
+
+    await resetProfileRouteAndDisable(
+      { routeId: "profile-r", routeLabel: "Амстердам", usage: profileUsage },
+      actions,
+    );
+    expect(actions.bindProfileRoute).toHaveBeenCalledWith("work-claude", null);
+    expect(actions.setEnabled).toHaveBeenCalledWith("profile-r", false);
+  });
+
+  it("routeUnavailableBanner при reason='disabled' показывает 1-click переход на Direct, сохраняет CopyErrorLogButton и охраняет profile_route_id", async () => {
+    const disabledHtml = renderToStaticMarkup(
+      createElement(RouteUnavailableBanner, {
+        banner: {
+          route_id: "default-r",
+          provider: "openai",
+          reason: "disabled",
+          message: "Маршрут отключён пользователем",
+        },
+        dismissLabel: "Скрыть",
+        onOpenConnect: vi.fn(),
+        onDismiss: vi.fn(),
+      }),
+    );
+
+    expect(disabledHtml).toContain(copy.routes.switchToDirect);
+    expect(disabledHtml).toContain("Маршрут отключён пользователем");
+    expect(disabledHtml).toContain("Скопировать лог");
+
+    const unreachableHtml = renderToStaticMarkup(
+      createElement(RouteUnavailableBanner, {
+        banner: {
+          route_id: "default-r",
+          provider: "openai",
+          reason: "unreachable",
+          message: "Узел не отвечает",
+        },
+        dismissLabel: "Скрыть",
+        onOpenConnect: vi.fn(),
+        onDismiss: vi.fn(),
+      }),
+    );
+
+    expect(unreachableHtml).not.toContain(copy.routes.switchToDirect);
+    expect(unreachableHtml).toContain("Скопировать лог");
+
+    const actions = makeMockActions();
+    const snapWithProfile: RoutesSnapshot = {
+      routes,
+      default_route_id: "default-r",
+      profile_route_id: "profile-r",
+      provider_routes: { openai: "default-r" },
+      effective: {},
+      dangling: [],
+    };
+
+    const guardOutcome = await switchUnavailableBannerToDirect(
+      { route_id: "profile-r", provider: "anthropic", reason: "Disabled", message: "off" },
+      snapWithProfile,
+      { allowProfileReset: false },
+      actions,
+    );
+    expect(guardOutcome).toBe("needs_profile_confirmation");
+    expect(actions.bindProfileRoute).not.toHaveBeenCalled();
+
+    const confirmedOutcome = await switchUnavailableBannerToDirect(
+      { route_id: "profile-r", provider: "anthropic", reason: "Disabled", message: "off" },
+      snapWithProfile,
+      { allowProfileReset: true },
+      actions,
+    );
+    expect(confirmedOutcome).toBe("switched");
+    expect(actions.bindProfileRoute).toHaveBeenCalledWith("work-claude", null);
+    expect(actions.bindProvider).toHaveBeenCalledWith("anthropic", DIRECT_ROUTE_ID);
+
+    const directOutcome = await switchUnavailableBannerToDirect(
+      { route_id: "default-r", provider: "openai", reason: "disabled", message: "off" },
+      snapWithProfile,
+      {},
+      actions,
+    );
+    expect(directOutcome).toBe("switched");
+    expect(actions.bindProvider).toHaveBeenCalledWith("openai", DIRECT_ROUTE_ID);
   });
 });

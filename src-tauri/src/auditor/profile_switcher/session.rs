@@ -116,8 +116,8 @@ fn merge_cli_oauth_into_claude_json(
     for (k, v) in oauth_slice {
         obj.insert(k.clone(), v.clone());
     }
-    let updated = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
-        .map_err(|e| e.to_string())?;
+    let updated =
+        serde_json::to_string_pretty(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())?;
     write_json_atomic(&path, &updated)
 }
 
@@ -168,7 +168,8 @@ pub(super) fn snapshot_claude_session_with_home(
     snapshot_dir: &Path,
 ) -> Result<(bool, bool), String> {
     let desktop_exists = is_real_dir(claude_dir);
-    let cli_creds_exists = home_dir.is_some_and(|h| is_regular_file(&claude_cli_credentials_path(h)));
+    let cli_creds_exists =
+        home_dir.is_some_and(|h| is_regular_file(&claude_cli_credentials_path(h)));
     let cli_oauth = home_dir.and_then(read_cli_oauth_slice);
 
     if !desktop_exists && !cli_creds_exists && cli_oauth.is_none() {

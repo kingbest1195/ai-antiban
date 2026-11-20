@@ -164,8 +164,7 @@ async fn probe_provider_exit_returns_timeout_when_server_stalls() {
 }
 
 #[tokio::test]
-async fn probe_provider_exit_gemini_direct_is_not_applicable_and_bound_route_uses_route_label()
-{
+async fn probe_provider_exit_gemini_direct_is_not_applicable_and_bound_route_uses_route_label() {
     let url = spawn_http_mock(
         "200 OK",
         "application/json",

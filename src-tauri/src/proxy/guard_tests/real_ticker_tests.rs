@@ -47,9 +47,13 @@ async fn test_real_ticker_vpn_drop_no_1s_starvation_and_clean_return_auto_recove
         .set_pinned_ip(Some("185.10.10.10".to_string()))
         .await
         .unwrap();
-    let tel_vpn =
-        test_report(ProviderId::Anthropic, OverallStatus::Green, "185.10.10.10", "DE")
-            .telemetry;
+    let tel_vpn = test_report(
+        ProviderId::Anthropic,
+        OverallStatus::Green,
+        "185.10.10.10",
+        "DE",
+    )
+    .telemetry;
     let resolve_ip = Arc::clone(&current_ip);
     let env = Env {
         auditor: Auditor::new().expect("auditor"),
@@ -87,7 +91,13 @@ async fn test_real_ticker_vpn_drop_no_1s_starvation_and_clean_return_auto_recove
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(
-        guard.inner.lock().await.baseline.as_ref().map(|b| b.ip.as_str()),
+        guard
+            .inner
+            .lock()
+            .await
+            .baseline
+            .as_ref()
+            .map(|b| b.ip.as_str()),
         Some("185.10.10.10")
     );
     assert_eq!(guard.gate(), Gate::Open);
@@ -103,7 +113,11 @@ async fn test_real_ticker_vpn_drop_no_1s_starvation_and_clean_return_auto_recove
         .await
         .expect("immediate alert_first under real ticker");
     assert_eq!(detected["phase"], PHASE_DETECTING);
-    for p in [ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+    for p in [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+    ] {
         assert_eq!(
             guard.gate_for(p),
             Gate::Pending,
@@ -139,9 +153,9 @@ async fn test_real_ticker_vpn_drop_no_1s_starvation_and_clean_return_auto_recove
     assert!(env.hold_queue.resolve(id, HoldResolution::Block).await);
     for _ in 0..80 {
         if guard.pause_mode() == PauseMode::UntilNetworkChange
-            && KNOWN_PROVIDERS
-                .iter()
-                .all(|p| ProviderId::from_id(p).is_some_and(|pid| guard.gate_for(pid) == Gate::Blocked))
+            && KNOWN_PROVIDERS.iter().all(|p| {
+                ProviderId::from_id(p).is_some_and(|pid| guard.gate_for(pid) == Gate::Blocked)
+            })
         {
             break;
         }
@@ -172,7 +186,11 @@ async fn test_real_ticker_vpn_drop_no_1s_starvation_and_clean_return_auto_recove
     assert_eq!(guard.pause_mode(), PauseMode::None);
     assert!(state.get_data().await.blocked_providers.is_empty());
     assert!(!guard.any_provider_gate_closed());
-    for p in [ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+    for p in [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+    ] {
         assert_eq!(guard.gate_for(p), Gate::Open);
     }
     assert_eq!(
@@ -268,9 +286,7 @@ async fn test_real_ticker_auto_lock_silent_no_1s_starvation_and_recovery() {
     assert_eq!(guard.gate(), Gate::Pending);
 
     for _ in 0..80 {
-        if guard.pause_mode() == PauseMode::UntilNetworkChange
-            && guard.gate() == Gate::Blocked
-        {
+        if guard.pause_mode() == PauseMode::UntilNetworkChange && guard.gate() == Gate::Blocked {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -302,7 +318,7 @@ async fn test_real_ticker_auto_lock_silent_no_1s_starvation_and_recovery() {
 
 #[tokio::test]
 async fn test_real_ticker_pinned_a_to_vpn2_to_vpn3_to_pinned_a_within_4h_recovers_green_and_never_relapses()
-{
+ {
     use crate::auditor::{evaluate_impossible_travel, evaluate_ip_pinning_for_route, score_checks};
     use crate::routing::RouteSelection;
 
@@ -344,9 +360,7 @@ async fn test_real_ticker_pinned_a_to_vpn2_to_vpn3_to_pinned_a_within_4h_recover
             // Simulate transient `utun` stabilization failure on the first verification call(s).
             if ip == pinned_ip
                 && fail_ctr
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
-                        v.checked_sub(1)
-                    })
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
                     .is_ok()
             {
                 return Err("transient utun stabilization timeout".to_string());
@@ -366,11 +380,15 @@ async fn test_real_ticker_pinned_a_to_vpn2_to_vpn3_to_pinned_a_within_4h_recover
                 })
                 .await;
             let st_data = st_handle.get_data().await;
-            let history = st_data.ip_history_for_selection(provider.as_str(), &RouteSelection::Direct);
+            let history =
+                st_data.ip_history_for_selection(provider.as_str(), &RouteSelection::Direct);
             let now = crate::auditor::network::current_timestamp();
             let geo_res = CheckResult::ok("GEO_ALLOWED", cc);
             let (pin_res, is_pinned) = evaluate_ip_pinning_for_route(
-                st_data.pinned_ips.get(provider.as_str()).map(String::as_str),
+                st_data
+                    .pinned_ips
+                    .get(provider.as_str())
+                    .map(String::as_str),
                 st_data.pinned_ip.as_deref(),
                 st_data.strict_pinning_enabled,
                 &ip,
@@ -446,14 +464,20 @@ async fn test_real_ticker_pinned_a_to_vpn2_to_vpn3_to_pinned_a_within_4h_recover
     for _ in 0..80 {
         let st_now = state.get_data().await;
         if guard.pause_mode() == PauseMode::UntilNetworkChange
-            && KNOWN_PROVIDERS.iter().all(|p| st_now.blocked_providers.contains(*p))
+            && KNOWN_PROVIDERS
+                .iter()
+                .all(|p| st_now.blocked_providers.contains(*p))
         {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(guard.pause_mode(), PauseMode::UntilNetworkChange);
-    for p in [ProviderId::Anthropic, ProviderId::Openai, ProviderId::Gemini] {
+    for p in [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+    ] {
         assert_eq!(guard.gate_for(p), Gate::Blocked);
         state
             .record_ip_history_for_selection(
@@ -531,7 +555,8 @@ async fn test_real_ticker_pinned_a_to_vpn2_to_vpn3_to_pinned_a_within_4h_recover
     // Even while history still had DE -> GB (<4h), `effective_tray_report` MUST NOT brand
     // Pinned(A) as Red / "СТОП СЕТИ" (must be Green!).
     let st_check = state.get_data().await;
-    let mut red_travel_report = test_report(ProviderId::Anthropic, OverallStatus::Red, pinned_ip, "GB");
+    let mut red_travel_report =
+        test_report(ProviderId::Anthropic, OverallStatus::Red, pinned_ip, "GB");
     let travel_crit = CheckResult::critical("IMPOSSIBLE_TRAVEL_CRITICAL", "DE -> GB in 1m", None);
     red_travel_report.travel_result = travel_crit.clone();
     red_travel_report.checks = vec![

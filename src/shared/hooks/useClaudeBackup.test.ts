@@ -1,8 +1,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { exportClaudeLocalData } from "../../utils/api";
-import { common, toast as t } from "../copy/ru";
+import { cleanAppCache, exportClaudeLocalData } from "../../utils/api";
+import { backup as backupCopy, common, toast as t } from "../copy/ru";
 import { writeClipboard } from "../lib/clipboard";
 import { useClaudeBackup } from "./useClaudeBackup";
 import type { ClaudeBackup } from "./useClaudeBackup";
@@ -18,6 +18,7 @@ vi.mock("../lib/clipboard", () => ({
   writeClipboard: vi.fn(),
 }));
 
+const mockedClean = vi.mocked(cleanAppCache);
 const mockedExport = vi.mocked(exportClaudeLocalData);
 const mockedWriteClipboard = vi.mocked(writeClipboard);
 
@@ -87,5 +88,116 @@ describe("useClaudeBackup.handleCopyRestorePrompt", () => {
     expect(mockedWriteClipboard).toHaveBeenCalledWith("RESTORE PROMPT");
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(t.backup.promptError, common.copyFailText, "error");
+  });
+});
+
+describe("useClaudeBackup.handleCleanSpecificClientCache", () => {
+  beforeEach(() => {
+    mockedClean.mockReset();
+    vi.stubGlobal("window", {
+      clearTimeout: vi.fn(),
+      setTimeout: vi.fn(() => 1),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("показывает info-тост, если каталог приложения не найден (found_dir: false)", async () => {
+    mockedClean.mockResolvedValue({
+      provider: "anthropic",
+      cleaned_targets: [],
+      files_removed: 0,
+      bytes_freed: 0,
+      success: true,
+      message: "not found",
+      found_dir: false,
+      locked_targets: [],
+    });
+
+    const showToast = vi.fn();
+    const hook = mountHook(showToast);
+    await hook.handleCleanSpecificClientCache("anthropic");
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      backupCopy.cache.notFoundTitle("Claude Desktop"),
+      backupCopy.cache.notFoundText("Claude Desktop"),
+      "info",
+    );
+  });
+
+  it("показывает info-тост при files_removed === 0 и пустом locked_targets (уже чисто)", async () => {
+    mockedClean.mockResolvedValue({
+      provider: "openai",
+      cleaned_targets: [],
+      files_removed: 0,
+      bytes_freed: 0,
+      success: true,
+      message: "already clean",
+      found_dir: true,
+      locked_targets: [],
+    });
+
+    const showToast = vi.fn();
+    const hook = mountHook(showToast);
+    await hook.handleCleanSpecificClientCache("openai");
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      backupCopy.cache.alreadyCleanTitle("ChatGPT Desktop"),
+      backupCopy.cache.alreadyCleanText("ChatGPT Desktop"),
+      "info",
+    );
+  });
+
+  it("показывает warning-тост с перечислением заблокированных файлов при непустом locked_targets", async () => {
+    mockedClean.mockResolvedValue({
+      provider: "anthropic",
+      cleaned_targets: ["Cache"],
+      files_removed: 3,
+      bytes_freed: 1024,
+      success: false,
+      message: "locked",
+      found_dir: true,
+      locked_targets: ["Cookies", "Local Storage"],
+    });
+
+    const showToast = vi.fn();
+    const hook = mountHook(showToast);
+    await hook.handleCleanSpecificClientCache("anthropic");
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const [title, desc, kind] = showToast.mock.calls[0];
+    expect(title).toBe(backupCopy.cache.lockedTitle("Claude Desktop"));
+    expect(desc).toContain("Cookies");
+    expect(desc).toContain("Local Storage");
+    expect(desc).toContain("Claude Desktop");
+    expect(kind).toBe("warning");
+  });
+
+  it("показывает success-тост при нормальной очистке файлов без блокировок", async () => {
+    mockedClean.mockResolvedValue({
+      provider: "anthropic",
+      cleaned_targets: ["Cookies", "ant-device-registry.json"],
+      files_removed: 18,
+      bytes_freed: 14200000,
+      success: true,
+      message: "cleaned",
+      found_dir: true,
+      locked_targets: [],
+    });
+
+    const showToast = vi.fn();
+    const hook = mountHook(showToast);
+    await hook.handleCleanSpecificClientCache("anthropic");
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      t.backup.cacheCleaned("Claude Desktop"),
+      t.backup.cacheCleanedText(18, "13.5"),
+      "success",
+    );
   });
 });

@@ -12,9 +12,14 @@ export const PROVIDERS_FOR_MOCK: ProviderId[] = ["anthropic", "openai", "gemini"
 export type MockScenario = "clean" | "turkey" | "ru";
 
 export const mockState: AppStateData = {
+  schema_version: 3,
   pinned_ip: "185.212.102.40",
   pinned_ips: { default: "185.212.102.40" },
   strict_pinning_enabled: true,
+  onboarding_v2_2_done: false,
+  onboarding_v3_done: false,
+  whats_new_v3_seen: false,
+  dismissed_hints: [],
   ip_history: {},
   session_allowed_providers: [],
   blocked_providers: [],
@@ -34,6 +39,24 @@ export const mockState: AppStateData = {
   hide_ip_mode: false,
   ip_change_cooldown_until: null,
   last_safe_logout_at: null,
+  clean_room: {
+    profiles: [],
+    active_profile_id: null,
+    tainted_ips: {},
+  },
+  bunker: {
+    auto_backup_enabled: true,
+    interval_hours: 24,
+    retention_count: 7,
+    last_backup_at: null,
+    last_backup_size_bytes: null,
+  },
+  persona_self_check: {
+    bought_or_grey_account: false,
+    virtual_sms_used: false,
+    reseller_payment_used: false,
+    multi_account_same_browser: false,
+  },
 };
 
 export const mockFlags = {
@@ -138,6 +161,19 @@ export function snapshotMockState(): AppStateData {
     trusted_exceptions: clonedExceptions,
     disabled_providers: [...(mockState.disabled_providers ?? [])],
     custom_ai_domains: [...(mockState.custom_ai_domains ?? [])],
+    dismissed_hints: [...(mockState.dismissed_hints ?? [])],
+    clean_room: mockState.clean_room
+      ? {
+          profiles: mockState.clean_room.profiles.map((p) => ({
+            ...p,
+            completed_checklist: [...p.completed_checklist],
+          })),
+          active_profile_id: mockState.clean_room.active_profile_id,
+          tainted_ips: { ...mockState.clean_room.tainted_ips },
+        }
+      : undefined,
+    bunker: mockState.bunker ? { ...mockState.bunker } : undefined,
+    persona_self_check: mockState.persona_self_check ? { ...mockState.persona_self_check } : undefined,
   };
 }
 

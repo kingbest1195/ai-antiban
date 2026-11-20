@@ -452,7 +452,7 @@ async fn test_migration_from_v131_state_json() {
     // Migrated file was rewritten; a second load is stable (id does not change).
     let on_disk: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(on_disk["schema_version"], 2);
+    assert_eq!(on_disk["schema_version"], CURRENT_SCHEMA_VERSION);
     let again = AppState::load_or_default(path).get_data().await;
     assert_eq!(again.routes, data.routes);
     assert_eq!(again.default_route_id, data.default_route_id);
@@ -497,7 +497,10 @@ async fn test_ip_change_cooldown_helpers_and_ui_redaction() {
         state.ip_change_cooldown_remaining_secs(1_000_100).await,
         Some(14_300)
     );
-    assert_eq!(state.ip_change_cooldown_remaining_secs(1_014_400).await, None);
+    assert_eq!(
+        state.ip_change_cooldown_remaining_secs(1_014_400).await,
+        None
+    );
 
     let ui = state.get_data().await.redacted_for_ui();
     assert_eq!(ui.ip_change_cooldown_until, Some(1_014_400));
@@ -508,7 +511,10 @@ async fn test_ip_change_cooldown_helpers_and_ui_redaction() {
         reloaded.ip_change_cooldown_remaining_secs(1_000_000).await,
         Some(14_400)
     );
-    assert_eq!(reloaded.get_data().await.last_safe_logout_at, Some(1_000_000));
+    assert_eq!(
+        reloaded.get_data().await.last_safe_logout_at,
+        Some(1_000_000)
+    );
 
     reloaded.clear_ip_change_cooldown().await.unwrap();
     assert_eq!(
@@ -522,3 +528,48 @@ async fn test_ip_change_cooldown_helpers_and_ui_redaction() {
     assert_eq!(d.ip_change_cooldown_remaining_secs(2_000_400), None);
 }
 
+#[test]
+fn test_v3_schema_defaults_and_roundtrip_serialization() {
+    let mut d = AppStateData::default();
+    assert_eq!(d.schema_version, 3);
+    assert!(d.bunker.auto_backup_enabled);
+    assert_eq!(d.bunker.interval_hours, 24);
+    assert_eq!(d.bunker.retention_count, 7);
+    assert_eq!(d.bunker.last_backup_at, None);
+    assert_eq!(d.bunker.last_backup_size_bytes, None);
+    assert!(!d.onboarding_v3_done);
+    assert!(!d.whats_new_v3_seen);
+    assert!(d.dismissed_hints.is_empty());
+
+    d.clean_room.profiles.push(CleanRoomProfile {
+        id: "cr-1".to_string(),
+        label: "Work Claude".to_string(),
+        provider: "anthropic".to_string(),
+        browser_engine: "chrome".to_string(),
+        bound_route_id: Some("route-1".to_string()),
+        last_exit_ip: Some("185.10.20.30".to_string()),
+        last_exit_country: Some("NL".to_string()),
+        status: CleanProfileStatus::WarmingUp,
+        created_at: 1_750_000_000,
+        last_opened_at: Some(1_750_000_100),
+        warmup_started_at: Some(1_750_000_200),
+        launchpad_step: 3,
+        completed_checklist: vec!["no_ru_mail".to_string()],
+    });
+    d.clean_room.active_profile_id = Some("cr-1".to_string());
+    d.clean_room
+        .tainted_ips
+        .insert("198.51.100.9".to_string(), 1_750_000_300);
+    d.persona_self_check.virtual_sms_used = true;
+    d.bunker.last_backup_at = Some(1_750_000_400);
+    d.bunker.last_backup_size_bytes = Some(4096);
+    d.dismissed_hints.push("home".to_string());
+
+    let json = serde_json::to_string(&d).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(val["clean_room"]["profiles"][0]["status"], "warming_up");
+    assert_eq!(val["bunker"]["last_backup_size_bytes"], 4096);
+    assert_eq!(val["persona_self_check"]["virtual_sms_used"], true);
+    let roundtrip: AppStateData = serde_json::from_str(&json).unwrap();
+    assert_eq!(roundtrip, d);
+}

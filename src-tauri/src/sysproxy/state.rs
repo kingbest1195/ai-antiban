@@ -160,7 +160,6 @@ pub(crate) fn is_known_no_proxy_value(value: &str) -> bool {
     KNOWN_NO_PROXY_VALUES.contains(&v)
 }
 
-
 /// Environment variable that switches every OS side effect off (`1` or `true`).
 pub const OS_DRY_RUN_ENV: &str = "ZASTAVA_OS_DRY_RUN";
 
@@ -259,7 +258,6 @@ pub fn default_app_data_dir() -> Option<PathBuf> {
     base.map(|b| b.join(APP_IDENTIFIER))
 }
 
-
 /// Where the user's files are: the file system to use, the home directory and the roots under
 /// which editors keep their per-user data (`<root>/<Editor>/User/settings.json`). Production code
 /// builds it with [`FileCtx::real`]; tests hand in a `FakeFs` and a scratch home, so nothing in
@@ -331,7 +329,6 @@ impl FileCtx {
     }
 }
 
-
 pub(crate) fn user_home_dir() -> Option<PathBuf> {
     if !os_effects_enabled() {
         return Some(dry_run_home_dir());
@@ -354,4 +351,3 @@ pub(crate) fn user_appdata_dir() -> Option<PathBuf> {
     }
     std::env::var_os("APPDATA").map(PathBuf::from)
 }
-

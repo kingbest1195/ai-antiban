@@ -11,7 +11,6 @@
 //! Everything that touches the OS (`lsof` / `netstat` / `tasklist` / `ss`, `Platform`, files)
 //! goes through a seam, so the tests feed canned output and fakes instead of starting processes.
 
-
 mod catalog;
 mod cli_scanners;
 mod ide_scanners;
@@ -25,16 +24,16 @@ pub use cli_scanners::check_app_installed;
 #[cfg(test)]
 use cli_scanners::check_app_installed_in;
 pub(crate) use ide_scanners::antigravity_app_path;
+pub use ide_scanners::proxy_value_targets_gateway;
 #[cfg(test)]
 use ide_scanners::{AntigravityKind, antigravity_kind, jetbrains_fact, listing_has_antigravity};
-#[cfg(test)]
-use tracker::Step;
-pub use ide_scanners::proxy_value_targets_gateway;
 pub use process_lookup::{
     lookup_process_name_by_port, lookup_process_name_by_port_sync, lookup_process_with,
     parse_lsof_owner, parse_netstat_pid, parse_ss_owner, parse_tasklist_name,
 };
 pub use tracker::CoverageTracker;
+#[cfg(test)]
+use tracker::Step;
 pub(crate) use types::CoverageEnv;
 pub use types::{
     ANTIGRAVITY_BYPASS_DETAIL, AppCoverageItem, CONFIRM_TTL_MS, CoverageSnapshot, CoverageStatus,

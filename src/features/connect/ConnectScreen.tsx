@@ -14,14 +14,23 @@ import {
   toggleUpstreamProxy,
   upsertRoute,
 } from "../../utils/api";
-import { openExternal } from "../../utils/opener";
-import { Badge, Banner, Button, Card, Row, Rows } from "../../ui";
-import { common, connect as copy } from "../../shared/copy/ru";
+import { Banner, Button, HintCard } from "../../ui";
+import { connect as copy } from "../../shared/copy/ru";
 import { formatIp } from "../../shared/lib/format";
 import type { ShowToast } from "../../shared/hooks";
-import { HOSTINGS } from "./hostings";
+import { ConnectDefaultVpnCard, ConnectSalesCards } from "./ConnectSalesCards";
 import { ProviderRoutesSection } from "./ProviderRoutesSection";
+import { RouteDisableModals } from "./RouteDisableModals";
 import { type AddKeyScope, RouteListSection } from "./RouteListSection";
+import {
+  disableRouteAndSwitchBindingsToDirect,
+  getAffectedProvidersForRoute,
+  inspectRouteUsageForDisable,
+  resetProfileRouteAndDisable,
+  type PendingDisableRoute,
+} from "./routeDisableModel";
+
+export { getAffectedProvidersForRoute };
 
 export interface ConnectScreenProps {
   state: AppStateData | null;
@@ -34,21 +43,9 @@ export interface ConnectScreenProps {
   onAuditRefresh?: (providerId?: ProviderId) => Promise<void> | void;
   onOpenGuide: (guideId: string) => void;
   onToast: ShowToast;
-}
-
-const ALL_PROVIDERS: ProviderId[] = ["anthropic", "openai", "gemini"];
-
-/** Возвращает сервисы, на которые влияет маршрут, или `"all"`, если затронуты все/снимок неизвестен. */
-export function getAffectedProvidersForRoute(
-  routeId: string,
-  snapshot: RoutesSnapshot | null | undefined,
-): "all" | ProviderId[] {
-  if (!snapshot) return "all";
-  const affected = ALL_PROVIDERS.filter((p) => {
-    const explicit = snapshot.provider_routes[p];
-    return explicit === routeId || (!explicit && snapshot.default_route_id === routeId);
-  });
-  return affected.length === ALL_PROVIDERS.length ? "all" : affected;
+  onDismissHint?: (hintId: string) => Promise<unknown> | void;
+  /** default — классический порядок; sales — карточка «ВПН Заставы» первой, «Свой сервер» второй. */
+  layout?: "default" | "sales";
 }
 
 /** Определяет страну выхода для сервиса по выбранной привязке маршрута или текущему VPN. */
@@ -68,9 +65,7 @@ export function resolveProviderExitCountry(
   return currentCountry;
 }
 
-const VPN_GUIDE = "01-personal-vpn-15min";
-
-/** Экран «Подключение»: личный VPN, ключ Заставы, список маршрутов и привязки по сервисам. */
+/** Экран «Подключение»: личный VPN, ключ Заставы, маршруты и привязки по сервисам. */
 export function ConnectScreen({
   state,
   routesSnapshot: propSnapshot,
@@ -82,8 +77,11 @@ export function ConnectScreen({
   onAuditRefresh,
   onOpenGuide,
   onToast,
+  onDismissHint,
+  layout = "default",
 }: ConnectScreenProps) {
   const [localSnapshot, setLocalSnapshot] = useState<RoutesSnapshot | null>(null);
+  const [localDismissed, setLocalDismissed] = useState<string[]>(() => state?.dismissed_hints ?? []);
   const [inputKey, setInputKey] = useState<string>("");
   const [addScope, setAddScope] = useState<AddKeyScope>("all");
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +89,9 @@ export function ConnectScreen({
   const [testingId, setTestingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [pendingDisable, setPendingDisable] = useState<PendingDisableRoute | null>(null);
+  const [confirmProfileReset, setConfirmProfileReset] = useState<PendingDisableRoute | null>(null);
+  const [disablingAction, setDisablingAction] = useState<boolean>(false);
 
   const snapshot = propSnapshot ?? localSnapshot;
 
@@ -117,6 +118,10 @@ export function ConnectScreen({
       await onAuditRefresh(auditScope);
     }
   };
+
+  useEffect(() => {
+    if (state?.dismissed_hints) setLocalDismissed(state.dismissed_hints);
+  }, [state?.dismissed_hints]);
 
   useEffect(() => {
     if (!propSnapshot) {
@@ -156,9 +161,12 @@ export function ConnectScreen({
     }
   };
 
-  const handleToggleRoute = async (routeId: string, enabled: boolean) => {
+  const performToggleRoute = async (
+    routeId: string,
+    enabled: boolean,
+    affected: "all" | ProviderId[],
+  ) => {
     setTogglingId(routeId);
-    const affected = getAffectedProvidersForRoute(routeId, snapshot);
     try {
       await setRouteEnabled(routeId, enabled);
       await refresh(affected);
@@ -171,6 +179,71 @@ export function ConnectScreen({
       onToast(copy.key.toast.toggleError, err instanceof Error ? err.message : String(err), "error");
     } finally {
       setTogglingId(null);
+    }
+  };
+
+  const handleToggleRoute = async (routeId: string, enabled: boolean) => {
+    if (!enabled) {
+      const usage = inspectRouteUsageForDisable(routeId, snapshot, routes);
+      if (usage.inUse) {
+        const route = routes.find((r) => r.id === routeId);
+        setPendingDisable({
+          routeId,
+          routeLabel: route?.label || copy.key.defaultLabel,
+          usage,
+        });
+        return;
+      }
+    }
+    await performToggleRoute(routeId, enabled, getAffectedProvidersForRoute(routeId, snapshot));
+  };
+
+  const handleChooseStopAndBlock = async () => {
+    if (!pendingDisable) return;
+    const target = pendingDisable;
+    setDisablingAction(true);
+    try {
+      await performToggleRoute(target.routeId, false, target.usage.affected);
+      setPendingDisable(null);
+    } finally {
+      setDisablingAction(false);
+    }
+  };
+
+  const handleChooseDirect = async () => {
+    if (!pendingDisable) return;
+    const target = pendingDisable;
+    if (target.usage.isProfileRoute) {
+      setPendingDisable(null);
+      setConfirmProfileReset(target);
+      return;
+    }
+    setDisablingAction(true);
+    try {
+      await disableRouteAndSwitchBindingsToDirect(target);
+      await refresh(target.usage.affected);
+      onToast(copy.routes.disableModal.toastDirectTitle, copy.routes.disableModal.toastDirectText, "info");
+      setPendingDisable(null);
+    } catch (err: unknown) {
+      onToast(copy.key.toast.toggleError, err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setDisablingAction(false);
+    }
+  };
+
+  const handleConfirmProfileReset = async () => {
+    if (!confirmProfileReset) return;
+    const target = confirmProfileReset;
+    setDisablingAction(true);
+    try {
+      await resetProfileRouteAndDisable(target);
+      await refresh(target.usage.affected);
+      onToast(copy.routes.disableModal.toastDirectTitle, copy.routes.disableModal.toastDirectText, "info");
+      setConfirmProfileReset(null);
+    } catch (err: unknown) {
+      onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setDisablingAction(false);
     }
   };
 
@@ -310,6 +383,13 @@ export function ConnectScreen({
 
   return (
     <>
+      <HintCard
+        hintId="connect_intro"
+        title="Отдельные маршруты для каждого ИИ-сервиса"
+        body="Подключите ключ Заставы или свой сервер (VPS), чтобы направлять Claude, ChatGPT и Gemini через чистые и независимые адреса."
+        dismissedHints={localDismissed}
+        onDismiss={(id) => { setLocalDismissed((p) => (p.includes(id) ? p : [...p, id])); void onDismissHint?.(id); }}
+      />
       {hasDangling && (
         <Banner
           tone="danger"
@@ -338,59 +418,59 @@ export function ConnectScreen({
         </Banner>
       )}
 
-      <Card title={copy.vpn.title} aside={<Badge tone="ok">{copy.vpn.badge}</Badge>}>
-        <p className="zs-t-body mb-3 text-ink-2">{copy.vpn.text}</p>
-        <Rows>
-          {HOSTINGS.map((h) => (
-            <Row
-              key={h.id}
-              icon="globe"
-              title={h.name}
-              sub={h.sub}
-              trail={
-                <Button size="sm" variant="secondary" onClick={() => openExternal(h.url)}>
-                  {common.goTo}
-                </Button>
-              }
-            />
-          ))}
-        </Rows>
-        <Button
-          variant={hasRoutes || isLegacyConfigured ? "secondary" : "primary"}
-          block
-          className="mt-3"
-          onClick={() => onOpenGuide(VPN_GUIDE)}
-        >
-          {copy.vpn.open}
-        </Button>
-      </Card>
+      {layout === "sales" ? (
+        <ConnectSalesCards
+          routes={routes}
+          hasRoutes={hasRoutes}
+          isLegacyConfigured={isLegacyConfigured}
+          inputKey={inputKey}
+          addScope={addScope}
+          error={error}
+          connecting={connecting}
+          onInputKeyChange={(val) => {
+            setInputKey(val);
+            if (error) setError(null);
+          }}
+          onAddScopeChange={setAddScope}
+          onAddKey={handleAddKey}
+          onOpenGuide={onOpenGuide}
+        />
+      ) : (
+        <ConnectDefaultVpnCard
+          hasRoutes={hasRoutes}
+          isLegacyConfigured={isLegacyConfigured}
+          onOpenGuide={onOpenGuide}
+        />
+      )}
 
-      <RouteListSection
-        routes={routes}
-        upstream={upstream}
-        currentIp={currentIp}
-        currentCountry={currentCountry}
-        hideIpMode={hideIpMode}
-        addScope={addScope}
-        setAddScope={setAddScope}
-        inputKey={inputKey}
-        onInputKeyChange={(val) => {
-          setInputKey(val);
-          if (error) setError(null);
-        }}
-        error={error}
-        connecting={connecting}
-        testingId={testingId}
-        togglingId={togglingId}
-        deletingId={deletingId}
-        onAddKey={handleAddKey}
-        onToggleRoute={handleToggleRoute}
-        onTestRoute={handleTestRoute}
-        onSetDefaultRoute={handleSetDefaultRoute}
-        onRemoveRoute={handleRemoveRoute}
-        onLegacyToggle={handleLegacyToggle}
-        onLegacyDisconnect={handleLegacyDisconnect}
-      />
+      {(layout !== "sales" || hasRoutes || isLegacyConfigured) && (
+        <RouteListSection
+          routes={routes}
+          upstream={upstream}
+          currentIp={currentIp}
+          currentCountry={currentCountry}
+          hideIpMode={hideIpMode}
+          addScope={addScope}
+          setAddScope={setAddScope}
+          inputKey={inputKey}
+          onInputKeyChange={(val) => {
+            setInputKey(val);
+            if (error) setError(null);
+          }}
+          error={error}
+          connecting={connecting}
+          testingId={testingId}
+          togglingId={togglingId}
+          deletingId={deletingId}
+          onAddKey={handleAddKey}
+          onToggleRoute={handleToggleRoute}
+          onTestRoute={handleTestRoute}
+          onSetDefaultRoute={handleSetDefaultRoute}
+          onRemoveRoute={handleRemoveRoute}
+          onLegacyToggle={handleLegacyToggle}
+          onLegacyDisconnect={handleLegacyDisconnect}
+        />
+      )}
 
       {hasRoutes && (
         <ProviderRoutesSection
@@ -401,6 +481,17 @@ export function ConnectScreen({
           onBindProvider={handleBindProvider}
         />
       )}
+
+      <RouteDisableModals
+        pendingDisable={pendingDisable}
+        confirmProfileReset={confirmProfileReset}
+        busy={disablingAction}
+        onCancelDisable={() => setPendingDisable(null)}
+        onChooseDirect={() => void handleChooseDirect()}
+        onChooseStopAndBlock={() => void handleChooseStopAndBlock()}
+        onCancelProfileReset={() => setConfirmProfileReset(null)}
+        onConfirmProfileReset={() => void handleConfirmProfileReset()}
+      />
     </>
   );
 }

@@ -53,8 +53,7 @@ async fn test_stale_probe_never_opens_gate() {
 
     // The next tick handles the change and emits the window once the audit completes.
     h.guard.check_route_and_tick(&env).await;
-    h.io
-        .wait_for("interceptor://risk-detected", 1000)
+    h.io.wait_for("interceptor://risk-detected", 1000)
         .await
         .expect("risk-detected");
     assert_eq!(h.guard.gate(), Gate::Pending);
@@ -68,11 +67,10 @@ async fn test_allow_for_superseded_alert_changes_nothing() {
     )
     .await;
     h.change("9.9.9.9").await;
-    let ev = h
-        .io
-        .wait_for("interceptor://risk-detected", 2000)
-        .await
-        .expect("first risk-detected");
+    let ev =
+        h.io.wait_for("interceptor://risk-detected", 2000)
+            .await
+            .expect("first risk-detected");
     let id1 = ev.0["id"].as_str().unwrap().to_string();
 
     // A new change C arrives; the user's allow for alert 1 reaches the guard afterwards.
@@ -115,10 +113,9 @@ async fn test_network_allow_only_when_ready() {
     )
     .await;
     h.change("9.9.9.9").await;
-    let det = h
-        .io
-        .first("interceptor://risk-detected")
-        .expect("immediate detecting");
+    let det =
+        h.io.first("interceptor://risk-detected")
+            .expect("immediate detecting");
     assert_eq!(det.0["phase"], "detecting");
     let internal_id = alert_id(&det);
     assert_eq!(
@@ -132,11 +129,10 @@ async fn test_network_allow_only_when_ready() {
     assert!(!h.state.is_provider_session_allowed("anthropic").await);
 
     // Ready: enriched emitted, allow accepted, gate opens, trusted_exception written.
-    let ev = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("ready enriched");
+    let ev =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("ready enriched");
     assert_eq!(ev.0["phase"], "ready");
     let id = ev.0["id"].as_str().unwrap().to_string();
     h.guard
@@ -145,7 +141,11 @@ async fn test_network_allow_only_when_ready() {
         .expect("allowed");
     assert_eq!(h.guard.gate(), Gate::Open);
     assert!(h.state.is_provider_session_allowed("anthropic").await);
-    assert!(h.state.is_ip_trusted_for_provider("anthropic", "9.9.9.9").await);
+    assert!(
+        h.state
+            .is_ip_trusted_for_provider("anthropic", "9.9.9.9")
+            .await
+    );
     assert!(h.env.hold_queue.current_alert().is_none());
     assert_eq!(
         h.guard
@@ -170,11 +170,10 @@ async fn test_network_allow_only_when_ready() {
     let failing: AuditFn = Arc::new(|_, _| Box::pin(async { Err("geo down".to_string()) }));
     let h = harness(failing, "9.9.9.9").await;
     h.change("9.9.9.9").await;
-    let ev = h
-        .io
-        .wait_for("interceptor://enriched", 3000)
-        .await
-        .expect("failed enrichment");
+    let ev =
+        h.io.wait_for("interceptor://enriched", 3000)
+            .await
+            .expect("failed enrichment");
     assert_eq!(ev.0["phase"], "failed");
     let id = ev.0["id"].as_str().unwrap().to_string();
     assert_eq!(
@@ -204,11 +203,10 @@ async fn test_allow_without_audit_never_opens_gate() {
     let failing: AuditFn = Arc::new(|_, _| Box::pin(async { Err("geo down".to_string()) }));
     let h = harness(failing, "9.9.9.9").await;
     h.change("9.9.9.9").await;
-    let ev = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("failed enriched");
+    let ev =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("failed enriched");
     assert_eq!(ev.0["phase"], "failed");
     let id = ev.0["id"].as_str().unwrap().to_string();
     assert!(h.env.hold_queue.resolve(&id, HoldResolution::Allow).await);
@@ -230,8 +228,7 @@ async fn test_allow_without_audit_never_opens_gate() {
 
 #[tokio::test(start_paused = true)]
 async fn test_accept_current_error_does_not_open_gate() {
-    let tel =
-        test_report(ProviderId::Anthropic, OverallStatus::Green, "9.9.9.9", "NL").telemetry;
+    let tel = test_report(ProviderId::Anthropic, OverallStatus::Green, "9.9.9.9", "NL").telemetry;
     let ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ok2 = Arc::clone(&ok);
     let h = harness_env(
@@ -253,8 +250,7 @@ async fn test_accept_current_error_does_not_open_gate() {
     )
     .await;
     h.change("9.9.9.9").await;
-    h.io
-        .wait_for("interceptor://enriched", 2000)
+    h.io.wait_for("interceptor://enriched", 2000)
         .await
         .expect("ready enrichment");
     let hides = h.io.hides.load(Ordering::SeqCst);
@@ -284,8 +280,7 @@ async fn test_hold_ttl_blocks_a_ready_alert() {
     )
     .await;
     h.change("9.9.9.9").await;
-    h.io
-        .wait_for("interceptor://enriched", 2000)
+    h.io.wait_for("interceptor://enriched", 2000)
         .await
         .expect("ready enrichment");
     assert_eq!(h.guard.gate(), Gate::Pending);
@@ -314,10 +309,9 @@ async fn test_default_audit_timeout_then_ttl_blocks() {
     tokio::time::sleep(Duration::from_secs(AUDIT_TIMEOUT_SECS - 1)).await;
     assert_eq!(h.io.count("interceptor://enriched"), 0);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let failed = h
-        .io
-        .first("interceptor://enriched")
-        .expect("failed after the timeout");
+    let failed =
+        h.io.first("interceptor://enriched")
+            .expect("failed after the timeout");
     assert_eq!(failed.0["phase"], "failed");
     assert_eq!(h.guard.gate(), Gate::Pending);
 
@@ -359,4 +353,3 @@ async fn test_killswitch_mid_alert_really_cancels_the_audit() {
     assert_eq!(h.io.count("interceptor://enriched"), 0);
     assert_eq!(h.guard.gate(), Gate::Blocked);
 }
-

@@ -118,10 +118,11 @@ pub fn is_cli_protection_enabled() -> bool {
     #[cfg(target_os = "windows")]
     {
         let gw = state().gateway_port();
-        if super::super::real_user_env("HTTP_PROXY").is_some_and(|v| is_zastava_env_signature(&v, gw)) {
+        if super::super::real_user_env("HTTP_PROXY")
+            .is_some_and(|v| is_zastava_env_signature(&v, gw))
+        {
             return true;
         }
     }
     false
 }
-

@@ -2,6 +2,8 @@ mod app;
 pub mod auditor;
 pub mod autostart;
 pub mod bin_checker;
+pub mod bunker;
+pub mod clean_room;
 pub mod commands;
 pub mod core;
 pub mod cowork_guard;

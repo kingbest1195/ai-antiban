@@ -7,6 +7,33 @@
 
 ---
 
+## [3.0.0] — 2026-11-20
+
+Крупный мажорный релиз **Застава v3.0.0**: новая оболочка «Разделы» с маскотом-сторожем и 4-состоянным треем, интерактивная «Чистая комната» с изолированной песочницей браузеров (пер-профильный loopback proxy alias), бесплатный локальный Бункер с экспортом Cursor и веб-чатов, антикризисный раздел «SOS-верификация» с индексом риска `Persona Risk Index`, очистка кэша Windows MSIX Claude, защита DNS-проб под TUN Fake-IPv6 (anti-SSRF) и SLSA-аттестации сборок GitHub Build Provenance.
+
+### Добавлено
+* **Оболочка v3 «Разделы» и маскот-сторож (`src/features/shell-v3/`, `src/features/mascot/`, `src/app/AppShell.tsx`):**
+  * Новый главный экран-хаб (`HomeHub`, `SectionList`, `PowerPill`, `ProtectedRows`, `ServicesPage`, `StopNetwork`, `WhatsNewSheet`) с единым центром управления, компактной навигацией по разделам и экраном «Что нового».
+  * Анимированный маскот-сторож (`WatchdogMascot`, `KillSwitchAnim`, `CleanRoomRadarAnim`, `SplitRoutingAnim`, `SmartScreenGuide`) для наглядного отображения состояний шлюза и подсказок.
+* **«Чистая комната» и Browser Sandbox с пер-профильным loopback proxy alias (`src-tauri/src/clean_room/`, `src-tauri/src/proxy/server/alias.rs`, `src-tauri/src/commands/clean_room.rs`, `src/features/clean-room/`):**
+  * Пошаговый мастер чистого запуска (`PreFlightAuditCard`, `LaunchpadSteps`, `SandboxProfilesCard`): проверка остаточных процессов и переменных окружения (`detector.rs`, `detector_env.rs`), обнаружение браузеров (`browser_discovery.rs`) и контроль часового пояса (`tz_guard.rs`).
+  * Изолированная песочница профилей браузера (`browser_sandbox.rs`) с выделенным loopback-alias прокси (`proxy/server/alias.rs`) на каждый профиль для жёсткого разделения сессий и маршрутов.
+* **Бесплатный локальный Бункер и экспорт Cursor / веб-чатов (`src-tauri/src/bunker/`, `src-tauri/src/commands/bunker.rs`, `src/features/bunker/`):**
+  * Локальный архив контекста (`Local Bunker`) с политикой хранения (`retention.rs`), санитизацией секретов (`sanitize.rs`), планировщиком автоснимков (`scheduler.rs`) и генерацией промпта восстановления (`restore_prompt.rs`).
+  * Экспорт истории и контекста из **Cursor** (`cursor_export.rs`) и помощник экспорта веб-чатов (`web_helper.rs`, `web_parsers.rs`, `WebExportHelper.tsx`).
+* **«SOS-верификация» и `Persona Risk Index` (`src/features/sos/`, `src-tauri/src/auditor/persona_risk.rs`, `src-tauri/src/commands/sos.rs`):**
+  * Специализированный раздел помощи при проверках и ограничениях (`SmsBranch`, `PersonaBranch`, `PaymentBranch`, `BannedBranch`) с расчётом индекса риска личности/сессии (`persona_risk.rs`, `PersonaRiskCard.tsx`).
+* **4-состоянный системный трей (`src-tauri/icons/tray-gray.png`, `src-tauri/src/tray/`):** добавлено серое состояние иконки трея (`tray-gray.png`) для режима без защиты (в дополнение к зелёному, жёлтому и красному).
+* **Очистка кэша Windows MSIX Claude (`src-tauri/src/auditor/cache_cleaner.rs`, `cache_cleaner_process.rs`):** безопасное завершение фоновых процессов и очистка кэша MSIX-версии Claude Desktop на Windows.
+* **TUN Fake-IPv6 anti-SSRF DNS fallback (`src-tauri/src/auditor/leaks_dns.rs`, `src-tauri/src/core/net_safety.rs`):** безопасный DNS fallback при работе с TUN Fake-IPv6 с проверкой адресов против SSRF-утечек во внутренние сети.
+* **GitHub Build Provenance (`.github/workflows/release.yml`):** добавлена публикация SLSA/build-provenance аттестаций (`actions/attest-build-provenance@v2`) для релизных артефактов macOS и Windows.
+
+### Изменено
+* **Актуализированы тарифы ВПН Заставы (`src/shared/copy/ru/connect.ts`):** `PROMO_COPY.keyPriceLabel` обновлён на подтверждённый тариф `"769 ₽/мес · 1 949 ₽ за 3 мес"`, удалены релизные маркеры `[CONFIRM_BEFORE_RELEASE]`.
+* **Расширена схема состояния (`src-tauri/src/state/schema_v3.rs`, `src-tauri/src/commands/state_v3.rs`):** добавлены настройки оболочки v3, бункера и чистой комнаты с полной обратной совместимостью при миграции с v2.3.0.
+
+---
+
 ## [2.3.0] — 2026-11-18
 
 Релиз, выросший из разбора реального кейса бана со «100% защитой» и превративший слепую зону в рабочую броню: перехват скачка ASN внутри одной страны, «Безопасный выход» с сохранением `deviceId` и 4-часовым таймером, реальная PTR-проверка и честные гайды без посредников, плюс фикс 20-минутных таймаутов маршрутов поверх VPN на Windows, нативный буфер обмена и строгий откат `apply_pac` на macOS и 4-слойная архитектура ядра с [`CONSTITUTION.md`](CONSTITUTION.md).

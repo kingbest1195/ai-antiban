@@ -2,8 +2,9 @@
 
 use super::{MEASURED_VIA, ResolverView, all_sources_tun_fake_ip};
 use crate::auditor::geo_matrix::{
-    CheckResult, GUIDE_OS_PRIVACY, SourceState, SourceView, UnknownReason,
+    CheckResult, GUIDE_OS_NETWORK, SourceState, SourceView, UnknownReason,
 };
+use crate::auditor::leaks::AuditProtectionContext;
 
 /// The country as it is compared: upper case, `None` when it is not a country code.
 pub fn normalized_country(raw: &str) -> Option<String> {
@@ -32,15 +33,32 @@ pub fn evaluate_dns_country(view: &ResolverView, exit_country: &str) -> CheckRes
     evaluate_dns_country_for_route(view, exit_country, false)
 }
 
-/// Evaluates whether the measured DNS resolver country aligns with `exit_country`.
-///
-/// When `via_zastava_key` is true, traffic to the AI provider passes over TCP CONNECT through the
-/// remote Zastava key, so a non-sanctioned foreign VPN resolver country does not trigger a mismatch.
-/// Pure `198.18.0.0/15` TUN Fake-IP responses return `NotApplicable` so `report.incomplete` is not inflated.
+/// Evaluates whether the measured DNS resolver country aligns with `exit_country` assuming
+/// active route protection when `via_zastava_key` is `true`. Production audit execution uses
+/// [`evaluate_dns_country_for_route_with_protection`].
 pub fn evaluate_dns_country_for_route(
     view: &ResolverView,
     exit_country: &str,
     via_zastava_key: bool,
+) -> CheckResult {
+    let protection = if via_zastava_key {
+        AuditProtectionContext::assumed_active_for_route()
+    } else {
+        AuditProtectionContext::default()
+    };
+    evaluate_dns_country_for_route_with_protection(view, exit_country, via_zastava_key, protection)
+}
+
+/// Evaluates whether the measured DNS resolver country aligns with `exit_country`, enforcing
+/// all 3 `via_zastava_key` isolation preconditions:
+/// 1. bound route is usable (`route_usable`),
+/// 2. `(sysproxy_active || cli_or_sandbox_protection_active) && !os_pac_deferred`,
+/// 3. text explicitly states that normal non-AI browser traffic still uses OS DNS.
+pub fn evaluate_dns_country_for_route_with_protection(
+    view: &ResolverView,
+    exit_country: &str,
+    via_zastava_key: bool,
+    protection: AuditProtectionContext,
 ) -> CheckResult {
     let (ip, country, public_service, sources) = match view {
         ResolverView::Located {
@@ -91,12 +109,26 @@ pub fn evaluate_dns_country_for_route(
         .with_measured_via(MEASURED_VIA)
         .with_sources(sources);
     };
+    let zastava_isolated = via_zastava_key && protection.zastava_dns_isolated();
     if *country != exit {
-        if via_zastava_key && !crate::sanctions::is_sanctioned_or_blocked_country(country) {
+        if via_zastava_key
+            && protection.route_usable
+            && !crate::sanctions::is_sanctioned_or_blocked_country(country)
+        {
             return CheckResult::ok(
                 "DNS_KEY_COUNTRY_ISOLATED",
                 format!(
-                    "DNS-резолвер {ip} ({country}) работает через системный VPN, а трафик AI изолирован через ВПН Заставы ({exit}) по TCP CONNECT."
+                    "DNS-резолвер {ip} ({country}) работает через системный VPN, а трафик AI изолирован через ВПН Заставы ({exit}) по TCP CONNECT. Обычные non-AI сайты в стандартном браузере по-прежнему используют DNS ОС."
+                ),
+            )
+            .with_measured_via(MEASURED_VIA)
+            .with_sources(sources);
+        }
+        if zastava_isolated && country == "RU" {
+            return CheckResult::ok(
+                "DNS_KEY_REMOTE_RESOLVE",
+                format!(
+                    "Обычные non-AI сайты в стандартном браузере по-прежнему используют DNS ОС ({ip}, {country}), а трафик к AI-провайдерам резолвится удалённо через ВПН Заставы ({exit}) по TCP CONNECT."
                 ),
             )
             .with_measured_via(MEASURED_VIA)
@@ -107,7 +139,7 @@ pub fn evaluate_dns_country_for_route(
             format!(
                 "DNS-запросы видит резолвер {ip} в {country}, а выходной IP находится в {exit}: возможна утечка DNS мимо туннеля. Страна резолвера определена по его адресу, у публичных anycast-резолверов (1.1.1.1, 8.8.8.8) она бывает неточной; ECS и DNS-over-HTTPS в браузере могут менять картину."
             ),
-            Some(GUIDE_OS_PRIVACY.to_string()),
+            Some(GUIDE_OS_NETWORK.to_string()),
         )
         .with_measured_via(MEASURED_VIA)
         .with_sources(sources);

@@ -1,10 +1,11 @@
-import { Banner, Button, Card, EmptyState, Mono, Progress, Row, Rows, Section, Skeleton, Stat, Stats } from "../../ui";
-import type { ClaudeBackup } from "../../shared/hooks";
+import { Banner, Button, Card, Mono, Progress, Row, Rows, Section, Skeleton, Stat, Stats } from "../../ui";
+import type { ClaudeBackup, ShowToast } from "../../shared/hooks";
 import { backup as copy } from "../../shared/copy/ru";
 import { formatNumber } from "../../shared/lib/format";
+import { WebExportHelper } from "../bunker";
 
 /** Блок «Архив Claude»: сводка найденного, одна brand-кнопка, прогресс и результат. */
-export function ArchiveSection({ backup }: { backup: ClaudeBackup }) {
+export function ArchiveSection({ backup, onToast }: { backup: ClaudeBackup; onToast?: ShowToast }) {
   const { claudeSummary, loadingClaudeSummary, claudeExporting, claudeExportResult, copiedPrompt } = backup;
   const t = copy.archive;
   const missing = Boolean(claudeSummary) && !claudeSummary?.exists;
@@ -32,17 +33,7 @@ export function ArchiveSection({ backup }: { backup: ClaudeBackup }) {
             <Skeleton variant="block" height={72} className="zs-backup__block" />
           </div>
         ) : missing ? (
-          <EmptyState
-            icon="folder"
-            title={t.emptyTitle}
-            action={
-              <Button onClick={backup.loadClaudeSummary} disabled={loadingClaudeSummary}>
-                {t.emptyAction}
-              </Button>
-            }
-          >
-            {t.emptyText}
-          </EmptyState>
+          <WebExportHelper title={t.emptyTitle} onToast={onToast} />
         ) : (
           <>
             <p className="zs-t-body zs-backup__text">{t.text}</p>

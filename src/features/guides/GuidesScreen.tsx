@@ -17,20 +17,24 @@ import "./guides.css";
 export interface GuidesScreenProps {
   /** Какой гайд открыть: «Обзор», «Подключение», диалог обрыва и трей передают id (см. resolveGuide). */
   initialGuide?: string;
+  navKey?: number;
   currentIp?: string;
   currentCountry?: string;
   currentTimezone?: string;
   onPinIp?: (ip: string) => void;
+  onOpenPaymentTools?: () => void;
   onToast?: ShowToast;
 }
 
 /** Экран «Гайды»: три раздела (Свой VPS, Оплата, Защита ОС), внутри — способы и части с переключением. */
 export function GuidesScreen({
   initialGuide = "01-personal-vpn-15min",
+  navKey,
   currentIp = "185.212.102.40",
   currentCountry = "NL",
   currentTimezone,
   onPinIp,
+  onOpenPaymentTools,
   onToast,
 }: GuidesScreenProps) {
   // ?guide= из адреса применяется только при первом показе, дальше действует цель от вызывающего.
@@ -39,17 +43,19 @@ export function GuidesScreen({
   const [method, setMethod] = useState<VpsMethod>(first.method ?? "amnezia");
   const [part, setPart] = useState<OsPart>(first.part ?? "tz");
 
-  // Реагируем только на смену цели от вызывающего (в StrictMode эффект запускается дважды — сравниваем с прошлым значением).
+  // Реагируем на смену цели или повторную навигацию (navKey) от вызывающего.
   useEffect(markUrlGuideUsed, []);
-  const lastTarget = useRef(initialGuide);
+  const lastTarget = useRef<string | undefined>(initialGuide);
+  const lastNavKey = useRef<number | undefined>(navKey);
   useEffect(() => {
-    if (lastTarget.current === initialGuide) return;
+    if (lastTarget.current === initialGuide && lastNavKey.current === navKey) return;
     lastTarget.current = initialGuide;
+    lastNavKey.current = navKey;
     const target = resolveGuide(initialGuide);
     setSection(target.section);
     if (target.method) setMethod(target.method);
     if (target.part) setPart(target.part);
-  }, [initialGuide]);
+  }, [initialGuide, navKey]);
 
   const { copiedId, copy: copyText } = useCopy(onToast);
   const resolvedCountry = currentCountry && currentCountry !== "--" ? currentCountry : "NL";
@@ -84,7 +90,7 @@ export function GuidesScreen({
         />
 
         {section === "vps" && <VpsGuide method={method} onMethodChange={setMethod} />}
-        {section === "payment" && <PaymentGuide />}
+        {section === "payment" && <PaymentGuide onOpenPaymentTools={onOpenPaymentTools} />}
         {section === "os" && <OsGuide part={part} onPartChange={setPart} />}
 
         <Card>

@@ -2,8 +2,8 @@
 
 use super::PROXY_MODE_PAC_SCRIPT;
 use super::chromium::{CHROMIUM_BROWSERS, ChromiumBrowserDef, same_pac_url};
-use crate::sysproxy::Os;
 use crate::sysproxy::FileCtx;
+use crate::sysproxy::Os;
 use crate::sysproxy::fs::{Fs, WriteMode};
 use crate::sysproxy::platform::{PResult, PlatformError};
 use std::collections::BTreeSet;

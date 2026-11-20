@@ -15,6 +15,45 @@ export interface UpstreamProxyConfig {
   label?: string | null;
 }
 
+export type CleanProfileStatus = "active" | "warming_up" | "ready" | "tainted";
+
+export interface CleanRoomProfile {
+  id: string;
+  label: string;
+  provider: ProviderId | (string & {});
+  browser_engine: "chrome" | "edge" | "brave" | (string & {});
+  bound_route_id: string | null;
+  last_exit_ip: string | null;
+  last_exit_country: string | null;
+  status: CleanProfileStatus;
+  created_at: number;
+  last_opened_at: number | null;
+  warmup_started_at: number | null;
+  launchpad_step: number;
+  completed_checklist: string[];
+}
+
+export interface CleanRoomState {
+  profiles: CleanRoomProfile[];
+  active_profile_id: string | null;
+  tainted_ips: Record<string, number>;
+}
+
+export interface BunkerSettings {
+  auto_backup_enabled: boolean;
+  interval_hours: number;
+  retention_count: number;
+  last_backup_at: number | null;
+  last_backup_size_bytes: number | null;
+}
+
+export interface PersonaSelfCheck {
+  bought_or_grey_account: boolean;
+  virtual_sms_used: boolean;
+  reseller_payment_used: boolean;
+  multi_account_same_browser: boolean;
+}
+
 export interface AppStateData {
   schema_version?: number;
   pinned_ip: string | null;
@@ -61,6 +100,18 @@ export interface AppStateData {
   ip_change_cooldown_until?: number | null;
   /** Unix-время (сек) последнего безопасного выхода из Claude Desktop/CLI. */
   last_safe_logout_at?: number | null;
+  /** Состояние «Чистой комнаты» (v3). */
+  clean_room?: CleanRoomState;
+  /** Настройки локального «Бункера данных» (v3). */
+  bunker?: BunkerSettings;
+  /** Чек-лист самооценки риска Persona (v3). */
+  persona_self_check?: PersonaSelfCheck;
+  /** Пройден ли 5-шаговый онбординг v3.0. */
+  onboarding_v3_done?: boolean;
+  /** Видел ли пользователь экран «Что нового в v3.0». */
+  whats_new_v3_seen?: boolean;
+  /** Закрытые контекстные подсказки (HintCard). */
+  dismissed_hints?: string[];
 }
 
 /** Состояние синхронизации системного часового пояса ОС (`os_tz::OsTzSyncStatus`). */

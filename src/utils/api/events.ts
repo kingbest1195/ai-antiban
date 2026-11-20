@@ -91,3 +91,10 @@ export async function onSysproxyAdminAuthRequired(
   if (!isTauri()) return () => {};
   return await tauriListen<string>("sysproxy://admin-auth-required", handler);
 }
+
+export async function onInterceptorResolved(
+  handler: () => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  return await tauriListen<unknown>("interceptor://resolved", () => handler());
+}

@@ -49,7 +49,6 @@ pub struct Found<'a> {
     pub is_empty_object: bool,
 }
 
-
 mod doc;
 mod parser;
 
@@ -146,7 +145,6 @@ fn split_bom(text: &str) -> (&str, &str) {
 pub fn is_blank(text: &str) -> bool {
     split_bom(text).1.trim().is_empty()
 }
-
 
 #[cfg(test)]
 mod tests;

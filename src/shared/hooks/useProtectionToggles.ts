@@ -4,6 +4,7 @@ import {
   disableCliProtection,
   enableCliProtection,
   getNetworkKillswitchStatus,
+  getSysproxyStatus,
   toggleNetworkKillswitch,
   toggleSysproxy,
   toggleSysproxyPrivileged,
@@ -82,6 +83,7 @@ interface Options {
 export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showToast, startupPending = false }: Options) {
   const [cliProtected, setCliProtected] = useState<boolean>(false);
   const [killswitchFrozen, setKillswitchFrozen] = useState<boolean>(false);
+  const [togglingSysproxy, setTogglingSysproxy] = useState<boolean>(false);
   const [adminAuthMessage, setAdminAuthMessage] = useState<string | null>(null);
   const [retryingAdminAuth, setRetryingAdminAuth] = useState<boolean>(false);
 
@@ -101,6 +103,19 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
     }
   }, []);
 
+  const syncProtectionStatus = useCallback(async () => {
+    try {
+      const [sysActive, cliActive] = await Promise.all([
+        getSysproxyStatus(),
+        checkCliProtectionStatus(),
+      ]);
+      setSysproxyActive(sysActive);
+      setCliProtected(cliActive);
+    } catch {
+      // ignore transient status read failures
+    }
+  }, [setSysproxyActive]);
+
   // Статус защиты CLI читаем, когда фоновый запуск закончен: раньше защита ещё не включена, ответ был бы ложным «выключено».
   useEffect(() => {
     if (startupPending) return;
@@ -108,19 +123,21 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
   }, [startupPending, syncCliProtectionStatus]);
 
   const handleToggleSysproxy = useCallback(async () => {
+    if (startupPending || togglingSysproxy) return;
+    setTogglingSysproxy(true);
     try {
       const next = !sysproxyActive;
       const res = await toggleSysproxy(next);
       setSysproxyActive(res);
       setAdminAuthMessage(null);
-      await syncCliProtectionStatus();
+      await syncProtectionStatus();
       showToast(res ? t.guard.onTitle : t.guard.offTitle, res ? t.guard.onText : t.guard.offText, res ? "success" : "info");
     } catch (err: any) {
+      await syncProtectionStatus();
       const deferredMsg = parseTempDnsDeferredError(err);
       if (deferredMsg !== null) {
         setSysproxyActive(false);
         setAdminAuthMessage(null);
-        await syncCliProtectionStatus();
         showToast(t.guard.offTitle, deferredMsg, "info");
         return;
       }
@@ -131,21 +148,25 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
       } else {
         showToast(t.guard.error, err?.message || String(err), "error");
       }
+    } finally {
+      setTogglingSysproxy(false);
     }
-  }, [sysproxyActive, setSysproxyActive, showToast, syncCliProtectionStatus]);
+  }, [startupPending, togglingSysproxy, sysproxyActive, setSysproxyActive, showToast, syncProtectionStatus]);
 
   const enableSysproxyPrivileged = useCallback(async () => {
     setRetryingAdminAuth(true);
+    setTogglingSysproxy(true);
     try {
       const res = await toggleSysproxyPrivileged();
       setSysproxyActive(res);
-      await syncCliProtectionStatus();
+      await syncProtectionStatus();
       if (res) {
         setAdminAuthMessage(null);
         showToast(t.guard.onTitle, t.guard.onText, "success");
       }
       return res;
     } catch (err: any) {
+      await syncProtectionStatus();
       const adminMsg = parseAdminAuthError(err);
       const msg = adminMsg ?? (err?.message || String(err));
       if (adminMsg !== null) setAdminAuthMessage(adminMsg);
@@ -153,8 +174,9 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
       return false;
     } finally {
       setRetryingAdminAuth(false);
+      setTogglingSysproxy(false);
     }
-  }, [setSysproxyActive, showToast, syncCliProtectionStatus]);
+  }, [setSysproxyActive, showToast, syncProtectionStatus]);
 
   const handleToggleCliProtection = useCallback(async (options?: CliToggleOptions) => {
     // Switch.onChange может передать своё значение, поэтому смотрим строго на флаг.
@@ -184,13 +206,15 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
   const protection = useMemo<ProtectionActions>(
     () => ({
       enableSysproxy: async () => {
+        setTogglingSysproxy(true);
         try {
           const res = await toggleSysproxy(true);
           setSysproxyActive(res);
           setAdminAuthMessage(null);
-          await syncCliProtectionStatus();
+          await syncProtectionStatus();
           return res;
         } catch (err: any) {
+          await syncProtectionStatus();
           const adminMsg = parseAdminAuthError(err);
           if (adminMsg !== null) {
             setAdminAuthMessage(adminMsg);
@@ -199,26 +223,31 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
             showToast(t.guard.error, err?.message || String(err), "error");
           }
           return false;
+        } finally {
+          setTogglingSysproxy(false);
         }
       },
       enableSysproxyPrivileged,
       disableSysproxy: async () => {
+        setTogglingSysproxy(true);
         try {
           const res = await toggleSysproxy(false);
           setSysproxyActive(res);
           setAdminAuthMessage(null);
-          await syncCliProtectionStatus();
+          await syncProtectionStatus();
           return !res;
         } catch (err: any) {
+          await syncProtectionStatus();
           const deferredMsg = parseTempDnsDeferredError(err);
           if (deferredMsg !== null) {
             setSysproxyActive(false);
             setAdminAuthMessage(null);
-            await syncCliProtectionStatus();
             return { deferred: deferredMsg };
           }
           showToast(t.guard.error, err?.message || String(err), "error");
           return false;
+        } finally {
+          setTogglingSysproxy(false);
         }
       },
       enableCli: async () => {
@@ -266,7 +295,9 @@ export function useProtectionToggles({ sysproxyActive, setSysproxyActive, showTo
   return {
     cliProtected,
     killswitchFrozen,
+    togglingSysproxy,
     setKillswitchFrozen,
+    syncProtectionStatus,
     handleToggleSysproxy,
     handleToggleCliProtection,
     protection,

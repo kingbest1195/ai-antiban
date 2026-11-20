@@ -80,11 +80,15 @@ fn parses_tasklist_for_claude_exe() {
     assert!(parse_tasklist_has_claude(
         "\"claude.exe\",\"1234\",\"Console\",\"1\",\"120,000 K\"\r\n"
     ));
-    assert!(parse_tasklist_has_claude("\"Claude.exe\",\"99\",\"Services\",\"0\",\"10 K\""));
+    assert!(parse_tasklist_has_claude(
+        "\"Claude.exe\",\"99\",\"Services\",\"0\",\"10 K\""
+    ));
     assert!(!parse_tasklist_has_claude(
         "INFO: No tasks are running which match the specified criteria.\r\n"
     ));
-    assert!(!parse_tasklist_has_claude("\"chrome.exe\",\"555\",\"Console\",\"1\",\"50 K\""));
+    assert!(!parse_tasklist_has_claude(
+        "\"chrome.exe\",\"555\",\"Console\",\"1\",\"50 K\""
+    ));
 }
 
 #[test]
@@ -175,10 +179,7 @@ fn encodes_task_xml_as_utf16_le_with_bom() {
 #[test]
 fn parses_install_cli_args_and_error_file_roundtrip() {
     assert_eq!(parse_install_cli_args(&[]), None);
-    assert_eq!(
-        parse_install_cli_args(&["--cleanup".to_string()]),
-        None
-    );
+    assert_eq!(parse_install_cli_args(&["--cleanup".to_string()]), None);
     assert_eq!(
         parse_install_cli_args(&[INSTALL_COWORK_GUARD_ARG.to_string()]),
         Some(None)
@@ -208,7 +209,10 @@ fn parses_install_cli_args_and_error_file_roundtrip() {
     let temp = tempfile::tempdir().unwrap();
     let err_path = temp.path().join("err.txt");
     assert_eq!(read_install_error_file(&err_path), None);
-    write_install_error_file(Some(&err_path), "schtasks.exe /Create failed (code=Some(1))");
+    write_install_error_file(
+        Some(&err_path),
+        "schtasks.exe /Create failed (code=Some(1))",
+    );
     assert_eq!(
         read_install_error_file(&err_path).as_deref(),
         Some("schtasks.exe /Create failed (code=Some(1))")

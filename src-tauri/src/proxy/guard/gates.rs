@@ -9,7 +9,8 @@ use crate::auditor::geo_matrix::ProviderId;
 use crate::state::AppState;
 
 use super::types::{
-    Gate, GuardPauseStatus, Inner, NetworkGuard, PauseMode, Pending, compute_local_route_fingerprint,
+    Gate, GuardPauseStatus, Inner, NetworkGuard, PauseMode, Pending,
+    compute_local_route_fingerprint,
 };
 
 impl NetworkGuard {
@@ -368,5 +369,4 @@ impl NetworkGuard {
     pub async fn has_baseline(&self) -> bool {
         self.inner.lock().await.baseline.is_some()
     }
-
 }

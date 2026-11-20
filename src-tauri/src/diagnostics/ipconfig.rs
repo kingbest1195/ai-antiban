@@ -113,8 +113,7 @@ pub fn parse_windows_ipconfig_snapshot(output: &str) -> Vec<String> {
                 if !val.is_empty() {
                     adapter.description = Some(val.to_string());
                 }
-            } else if key.contains("dns")
-                && (key.contains("server") || key.contains("сервер"))
+            } else if key.contains("dns") && (key.contains("server") || key.contains("сервер"))
             {
                 in_dns_servers = true;
                 if let Some(ip) = extract_ip_token(val)

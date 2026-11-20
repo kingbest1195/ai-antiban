@@ -30,7 +30,10 @@ async fn reconcile_active_profile_clears_stale_anthropic_pin_even_when_route_mat
     .await;
     let st1 = app_state.get_data().await;
     assert!(!st1.pinned_ips.contains_key(state::PROVIDER_ANTHROPIC));
-    assert_eq!(st1.pinned_ips.get("default").map(String::as_str), Some("2.2.2.2"));
+    assert_eq!(
+        st1.pinned_ips.get("default").map(String::as_str),
+        Some("2.2.2.2")
+    );
 
     // Active profile sets bound_ip while route still matches -> anthropic pin updated cleanly.
     reconcile_active_profile_binding_async(
@@ -50,5 +53,8 @@ async fn reconcile_active_profile_clears_stale_anthropic_pin_even_when_route_mat
             .map(String::as_str),
         Some("1.2.3.4")
     );
-    assert_eq!(st2.pinned_ips.get("default").map(String::as_str), Some("2.2.2.2"));
+    assert_eq!(
+        st2.pinned_ips.get("default").map(String::as_str),
+        Some("2.2.2.2")
+    );
 }

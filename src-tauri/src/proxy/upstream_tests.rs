@@ -1,9 +1,9 @@
 use super::*;
+use crate::routing::{Entry, EntryProto};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use crate::routing::{Entry, EntryProto};
 
 #[test]
 fn test_parse_socks5_url_direct() {
