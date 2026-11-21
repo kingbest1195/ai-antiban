@@ -45,12 +45,13 @@ impl AuditProtectionContext {
         }
     }
 
-    /// Returns `true` only when Preconditions 1 & 2 hold simultaneously:
-    /// `(route_usable) && (sysproxy_active || cli_or_sandbox_protection_active) && !os_pac_deferred`.
+    /// Returns `true` when Precondition 1 holds AND either CLI/sandbox/browser-PAC protection
+    /// is active (which applies regardless of `os_pac_deferred`) OR OS PAC is active and not deferred:
+    /// `route_usable && (cli_or_sandbox_protection_active || (sysproxy_active && !os_pac_deferred))`.
     pub fn zastava_dns_isolated(self) -> bool {
         self.route_usable
-            && (self.sysproxy_active || self.cli_or_sandbox_protection_active)
-            && !self.os_pac_deferred
+            && (self.cli_or_sandbox_protection_active
+                || (self.sysproxy_active && !self.os_pac_deferred))
     }
 }
 
@@ -362,3 +363,7 @@ pub fn evaluate_dns_listing(
         ),
     )
 }
+
+#[cfg(test)]
+#[path = "leaks_dns_tests.rs"]
+mod tests;

@@ -1,3 +1,4 @@
+import { InfoTip } from "../../ui";
 import { useMascotPause } from "./useMascotPause";
 import "./mascot.css";
 
@@ -7,6 +8,7 @@ export interface RadarLayerItem {
   id: string;
   label: string;
   status: RadarLayerStatus;
+  tip?: string;
 }
 
 export interface CleanRoomRadarAnimProps {
@@ -14,18 +16,26 @@ export interface CleanRoomRadarAnimProps {
   scanning?: boolean;
   /** Индекс активного слоя (0..3) при пошаговом сканировании. */
   activeLayerIndex?: number;
-  /** 4 слоя аудита (по умолчанию Браузеры, Desktop/MSIX, IP/DNS, TZ/Locale). */
+  /** 4 слоя аудита (по умолчанию Браузеры, Приложения ИИ, IP и DNS, Время и язык). */
   layers?: RadarLayerItem[];
   paused?: boolean;
   className?: string;
 }
 
-const DEFAULT_LAYERS: RadarLayerItem[] = [
-  { id: "browsers", label: "Браузеры", status: "pending" },
-  { id: "desktop", label: "Desktop / MSIX", status: "pending" },
-  { id: "network", label: "IP / DNS", status: "pending" },
-  { id: "os_tz", label: "TZ / Locale", status: "pending" },
-];
+export function isMacPlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const plat = `${navigator.platform ?? ""} ${navigator.userAgent ?? ""}`.toLowerCase();
+  return plat.includes("mac");
+}
+
+function buildDefaultLayers(): RadarLayerItem[] {
+  return [
+    { id: "browsers", label: "Браузеры", status: "pending" },
+    { id: "desktop", label: isMacPlatform() ? "Приложения ИИ" : "Приложения ИИ и Store", status: "pending" },
+    { id: "network", label: "IP и DNS", status: "pending" },
+    { id: "os_tz", label: "Время и язык", status: "pending" },
+  ];
+}
 
 /**
  * Анимация 3: пошаговый 4-слойный радар «Чистой комнаты».
@@ -34,10 +44,11 @@ const DEFAULT_LAYERS: RadarLayerItem[] = [
 export function CleanRoomRadarAnim({
   scanning = false,
   activeLayerIndex,
-  layers = DEFAULT_LAYERS,
+  layers,
   paused = false,
   className,
 }: CleanRoomRadarAnimProps) {
+  const resolvedLayers = layers ?? buildDefaultLayers();
   const { paused: autoPaused } = useMascotPause(paused);
   const rootClass = [
     "zs-anim-radar",
@@ -66,7 +77,7 @@ export function CleanRoomRadarAnim({
       </svg>
 
       <div className="zs-anim-radar__layers">
-        {layers.slice(0, 4).map((layer, idx) => {
+        {resolvedLayers.slice(0, 4).map((layer, idx) => {
           const isActive = activeLayerIndex === idx || (scanning && layer.status === "scanning");
           const statusClass =
             layer.status === "ok"
@@ -82,9 +93,11 @@ export function CleanRoomRadarAnim({
             <div
               key={layer.id}
               className={`zs-anim-radar__layer zs-anim-radar__layer--${idx + 1} ${statusClass}`.trim()}
+              title={layer.tip}
             >
               <span className="zs-anim-radar__dot" aria-hidden="true" />
               <span>{layer.label}</span>
+              {layer.tip && <InfoTip title={layer.label} text={layer.tip} />}
             </div>
           );
         })}

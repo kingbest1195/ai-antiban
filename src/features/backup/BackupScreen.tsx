@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import type { ClaudeBackup, ShowToast } from "../../shared/hooks";
 import type { PersonaRiskFixTarget, RoutesSnapshot } from "../../types";
-import { HintCard, Section } from "../../ui";
+import { HintCard } from "../../ui";
 import { BunkerCard, PersonaRiskCard } from "../bunker";
 import { CooldownBanner } from "../overview/CooldownBanner";
 import { SosScreen } from "../sos";
 import type { SosBranchId } from "../sos";
-import { ArchiveSection } from "./ArchiveSection";
 import { CacheSection } from "./CacheSection";
 import { ProfilesSection } from "./ProfilesSection";
 import "./backup.css";
@@ -15,6 +14,7 @@ export interface BackupScreenProps {
   backup: ClaudeBackup;
   currentIp: string;
   currentCountry: string;
+  hideIpMode?: boolean;
   activeUpstreamKey?: string | null;
   routesSnapshot?: RoutesSnapshot | null;
   profileRefreshTrigger?: number;
@@ -35,13 +35,12 @@ export interface BackupScreenProps {
   onToast: ShowToast;
 }
 
-const DESKTOP_PROFILES_SECTION_TITLE = "Профили Claude Desktop и безопасный выход";
-
-/** Экран «Аккаунты, Бункер и SOS»: риск Persona, Бункер данных, SOS-дерево и профили Claude Desktop. */
+/** Экран «Аккаунты, Бункер и SOS»: риск KYC и блокировки Claude, Бункер данных, SOS-дерево и профили Claude Desktop. */
 export function BackupScreen({
   backup,
   currentIp,
   currentCountry,
+  hideIpMode = false,
   activeUpstreamKey,
   routesSnapshot,
   profileRefreshTrigger,
@@ -81,13 +80,13 @@ export function BackupScreen({
 
       <HintCard
         hintId="backup_intro"
-        title="Антифрод-гигиена, локальный Бункер и экстренная помощь"
-        body="Проверяйте индекс риска Persona перед оплатой, сохраняйте историю диалогов в бесплатный локальный Бункер и держите профили Claude раздельно."
+        body="Проверяйте риск KYC и блокировки Claude перед оплатой, сохраняйте бэкап истории в Бункер и держите профили раздельно."
         dismissedHints={localDismissed}
         onDismiss={handleDismiss}
       />
 
       <PersonaRiskCard
+        ctaVariant="secondary"
         onToast={onToast}
         onFixTarget={onPersonaFixTarget}
         onNavigateToCleanRoom={onNavigateToCleanRoom}
@@ -97,13 +96,14 @@ export function BackupScreen({
       />
 
       <div id="bunker-section">
-        <BunkerCard onToast={onToast} refreshTrigger={bunkerRefreshTrigger} />
+        <BunkerCard backup={backup} onToast={onToast} refreshTrigger={bunkerRefreshTrigger} />
       </div>
 
       <SosScreen
         initialBranch={initialSosBranch}
         navKey={sosNavKey}
         currentCountry={currentCountry}
+        embedded
         dismissedHints={localDismissed}
         onDismissHint={handleDismiss}
         onNavigateToCleanRoom={onNavigateToCleanRoom}
@@ -112,25 +112,22 @@ export function BackupScreen({
         onToast={onToast}
       />
 
-      <Section title={DESKTOP_PROFILES_SECTION_TITLE}>
-        <div id="claude-profiles-section" className="zs-stack">
-          <ProfilesSection
-            currentIp={currentIp}
-            currentCountry={currentCountry}
-            activeUpstreamKey={activeUpstreamKey}
-            routesSnapshot={routesSnapshot}
-            refreshTrigger={profileRefreshTrigger}
-            onRoutesUpdated={onRoutesUpdated}
-            onProfileSwitched={onProfileSwitched}
-            onToast={onToast}
-          />
-          <div id="claude-cache-section">
-            <CacheSection backup={backup} />
-          </div>
+      <div id="claude-profiles-section" className="zs-stack">
+        <ProfilesSection
+          currentIp={currentIp}
+          currentCountry={currentCountry}
+          hideIpMode={hideIpMode}
+          activeUpstreamKey={activeUpstreamKey}
+          routesSnapshot={routesSnapshot}
+          refreshTrigger={profileRefreshTrigger}
+          onRoutesUpdated={onRoutesUpdated}
+          onProfileSwitched={onProfileSwitched}
+          onToast={onToast}
+        />
+        <div id="claude-cache-section">
+          <CacheSection backup={backup} />
         </div>
-      </Section>
-
-      <ArchiveSection backup={backup} onToast={onToast} />
+      </div>
     </div>
   );
 }

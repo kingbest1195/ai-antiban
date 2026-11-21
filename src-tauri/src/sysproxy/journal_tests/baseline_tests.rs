@@ -136,6 +136,7 @@ fn http_and_https_upstreams_are_kept_apart() {
         ChainState {
             http: http.clone(),
             https: https.clone(),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j = open(&fs).unwrap();
@@ -150,10 +151,18 @@ fn http_and_https_upstreams_are_kept_apart() {
             enabled: Some(false),
             ..https.clone()
         },
+        socks: ProxyEndpoint::default(),
     };
     j.apply(&p, &res, Value::Chain(off)).unwrap();
     j.restore_all(&p);
-    assert_eq!(p.chain_of(&wifi()), ChainState { http, https });
+    assert_eq!(
+        p.chain_of(&wifi()),
+        ChainState {
+            http,
+            https,
+            socks: ProxyEndpoint::default(),
+        }
+    );
 }
 
 // --- repeated enable -------------------------------------------------------------------

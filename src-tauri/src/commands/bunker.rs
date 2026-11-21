@@ -12,7 +12,8 @@ use crate::bunker::web_helper::convert_web_export_to;
 use crate::bunker::{
     BunkerBackupResult, BunkerSettingsPatch, BunkerSnapshotMeta, BunkerStatus,
     WebExportConvertResult, allocate_timestamped_dir, bunker_snapshots_dir, bunker_web_exports_dir,
-    generate_bunker_restore_prompt_in, get_bunker_status_in, run_bunker_backup_in,
+    clear_bunker_snapshots_in, generate_bunker_restore_prompt_in, get_bunker_status_in,
+    run_bunker_backup_in,
 };
 use crate::state::BunkerSettings;
 
@@ -42,6 +43,7 @@ pub async fn get_bunker_status(
 #[tauri::command]
 pub async fn update_bunker_settings(
     settings: BunkerSettingsPatch,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppContext>,
 ) -> Result<BunkerSettings, String> {
     let updated = {
@@ -55,9 +57,30 @@ pub async fn update_bunker_settings(
         if let Some(retention) = settings.retention_count {
             w.bunker.retention_count = retention.max(1);
         }
+        if let Some(max_mb) = settings.max_total_mb {
+            w.bunker.max_total_mb = max_mb.max(50);
+        }
         w.bunker.clone()
     };
     state.save_async().await.map_err(|e| e.to_string())?;
+
+    if settings.retention_count.is_some() || settings.max_total_mb.is_some() {
+        let data_dir = resolve_data_dir(&app)?;
+        let retention_count = updated.retention_count;
+        let max_total_bytes = updated.max_total_mb.saturating_mul(1024 * 1024);
+        let _ = tokio::task::spawn_blocking(move || {
+            let snapshots_dir = bunker_snapshots_dir(&data_dir);
+            let exports_dir = bunker_web_exports_dir(&data_dir);
+            let _ = crate::bunker::retention::prune_old_snapshots(
+                &snapshots_dir,
+                retention_count,
+                max_total_bytes,
+            );
+            let _ = prune_old_web_exports(&exports_dir, retention_count, max_total_bytes);
+        })
+        .await;
+    }
+
     Ok(updated)
 }
 
@@ -142,6 +165,22 @@ pub fn convert_web_export_in(
     output_dir: Option<&Path>,
     retention_count: usize,
 ) -> Result<WebExportConvertResult, String> {
+    convert_web_export_in_with_quota(
+        app_data_dir,
+        source_path,
+        output_dir,
+        retention_count,
+        500 * 1024 * 1024,
+    )
+}
+
+pub fn convert_web_export_in_with_quota(
+    app_data_dir: &Path,
+    source_path: &Path,
+    output_dir: Option<&Path>,
+    retention_count: usize,
+    max_total_bytes: u64,
+) -> Result<WebExportConvertResult, String> {
     if let Some(custom_dir) = output_dir {
         return convert_web_export_to(source_path, custom_dir);
     }
@@ -151,7 +190,7 @@ pub fn convert_web_export_in(
     if res.is_err() {
         let _ = std::fs::remove_dir_all(&target_dir);
     } else {
-        let _ = prune_old_web_exports(&exports_root, retention_count);
+        let _ = prune_old_web_exports(&exports_root, retention_count, max_total_bytes);
     }
     res
 }
@@ -168,18 +207,21 @@ pub async fn convert_web_export(
         return Err("Укажите путь к файлу conversations.json или export.zip.".to_string());
     }
     let data_dir = resolve_data_dir(&app)?;
-    let retention_count = state.get_data().await.bunker.retention_count;
+    let bunker_cfg = state.get_data().await.bunker;
+    let retention_count = bunker_cfg.retention_count;
+    let max_total_bytes = bunker_cfg.max_total_mb.saturating_mul(1024 * 1024);
     let custom_out = output_dir
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
 
     tokio::task::spawn_blocking(move || {
-        convert_web_export_in(
+        convert_web_export_in_with_quota(
             &data_dir,
             PathBuf::from(&clean_source).as_path(),
             custom_out.as_deref(),
             retention_count,
+            max_total_bytes,
         )
     })
     .await
@@ -193,4 +235,39 @@ pub async fn generate_bunker_restore_prompt(app: tauri::AppHandle) -> Result<Str
     tokio::task::spawn_blocking(move || generate_bunker_restore_prompt_in(&data_dir, &home_dir))
         .await
         .map_err(|e| format!("Generate restore prompt task failed: {e}"))
+}
+
+#[tauri::command]
+pub async fn clear_bunker_snapshots(
+    keep_latest: Option<bool>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppContext>,
+) -> Result<BunkerStatus, String> {
+    let data_dir = resolve_data_dir(&app)?;
+    let home_dir = resolve_home_dir()?;
+    let settings = state.get_data().await.bunker;
+    let keep = keep_latest.unwrap_or(true);
+    let mut status = tokio::task::spawn_blocking(move || {
+        clear_bunker_snapshots_in(&data_dir, &home_dir, &settings, keep)
+    })
+    .await
+    .map_err(|e| format!("Clear Bunker snapshots task failed: {e}"))??;
+
+    if status.snapshots_count == 0 {
+        let mut w = state.write().await;
+        w.bunker.last_backup_at = None;
+        w.bunker.last_backup_size_bytes = None;
+        status.settings = w.bunker.clone();
+        drop(w);
+        state.save_async().await.map_err(|e| e.to_string())?;
+    } else if let Some(latest) = &status.latest_snapshot {
+        let mut w = state.write().await;
+        w.bunker.last_backup_at = Some(latest.created_at);
+        w.bunker.last_backup_size_bytes = Some(latest.total_bytes);
+        status.settings = w.bunker.clone();
+        drop(w);
+        state.save_async().await.map_err(|e| e.to_string())?;
+    }
+
+    Ok(status)
 }

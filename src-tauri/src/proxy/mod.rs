@@ -30,7 +30,20 @@ pub use upstream::{connect_via_upstream, parse_upstream_key};
 struct AliasHandle {
     port: u16,
     route_id: Option<String>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+}
+
+async fn stop_alias_handle(handle: AliasHandle) {
+    let _ = handle.stop_tx.send(true);
+    let mut task = handle.task;
+    if tokio::time::timeout(std::time::Duration::from_millis(100), &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+    }
+    crate::core::net_safety::unregister_alias_port(handle.port);
 }
 
 #[derive(Clone)]
@@ -88,6 +101,18 @@ impl ProxyManager {
         profile_id: &str,
         bound_route_id: Option<String>,
     ) -> Result<u16, String> {
+        self.ensure_profile_alias_preferred(profile_id, bound_route_id, None)
+            .await
+    }
+
+    /// Ensures a loopback alias listener is running for `profile_id` bound to `bound_route_id`,
+    /// preferring `preferred_port` (or the previously bound alias port on route rebind) if free.
+    pub async fn ensure_profile_alias_preferred(
+        &self,
+        profile_id: &str,
+        bound_route_id: Option<String>,
+        preferred_port: Option<u16>,
+    ) -> Result<u16, String> {
         let mut guard = self.aliases.lock().await;
         if let Some(existing) = guard.get(profile_id)
             && existing.route_id == bound_route_id
@@ -96,16 +121,22 @@ impl ProxyManager {
             return Ok(existing.port);
         }
 
+        let mut desired_port = preferred_port;
         if let Some(old) = guard.remove(profile_id) {
-            old.task.abort();
-            crate::core::net_safety::unregister_alias_port(old.port);
+            if desired_port.is_none() {
+                desired_port = Some(old.port);
+            }
+            stop_alias_handle(old).await;
         }
 
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let alias_srv = Arc::new(
             self.server
-                .bind_alias(bound_route_id.clone())
+                .bind_alias_on(bound_route_id.clone(), desired_port, Some(stop_rx))
                 .await
-                .map_err(|e| format!("Failed to bind Clean Room alias listener: {e}"))?,
+                .map_err(|e| {
+                    format!("Не удалось запустить локальный прокси-алиас песочницы: {e}")
+                })?,
         );
         let port = alias_srv.bound_addr.port();
         let srv_for_task = Arc::clone(&alias_srv);
@@ -118,6 +149,7 @@ impl ProxyManager {
             AliasHandle {
                 port,
                 route_id: bound_route_id,
+                stop_tx,
                 task,
             },
         );
@@ -128,8 +160,7 @@ impl ProxyManager {
     pub async fn stop_profile_alias(&self, profile_id: &str) {
         let mut guard = self.aliases.lock().await;
         if let Some(old) = guard.remove(profile_id) {
-            old.task.abort();
-            crate::core::net_safety::unregister_alias_port(old.port);
+            stop_alias_handle(old).await;
         }
     }
 
@@ -143,8 +174,7 @@ impl ProxyManager {
             .collect();
         for profile_id in matching {
             if let Some(old) = guard.remove(&profile_id) {
-                old.task.abort();
-                crate::core::net_safety::unregister_alias_port(old.port);
+                stop_alias_handle(old).await;
             }
         }
     }

@@ -186,6 +186,27 @@ pub async fn check_ipv6_leak_with_route(
         );
     };
 
+    let is_country = ipv6_loc.len() == 2
+        && ipv6_loc.bytes().all(|b| b.is_ascii_uppercase())
+        && !matches!(ipv6_loc.as_str(), "XX" | "ZZ");
+
+    // When AI traffic is isolated via Zastava Key over TCP CONNECT, system IPv6 belongs
+    // to the user's normal ISP/VPN rather than leaking the Zastava key tunnel — even if the
+    // ISP is in a sanctioned country (dual-stack RU/BY with VPN OFF + Zastava Key ON).
+    if via_zastava_key && (global_blocked.contains(&ipv6_loc) || !ipv4_country.trim().is_empty()) {
+        let same_country = is_country
+            && !ipv4_country.trim().is_empty()
+            && ipv6_loc == ipv4_country.trim().to_uppercase();
+        if !same_country {
+            return CheckResult::ok(
+                "IPV6_KEY_TCP_ISOLATED",
+                format!(
+                    "Трафик AI изолирован через ВПН Заставы ({ipv4_country}) по TCP CONNECT; системный IPv6 выходит напрямую ({ipv6_loc}) — утечки реального IP нет."
+                ),
+            );
+        }
+    }
+
     if global_blocked.contains(&ipv6_loc) {
         return CheckResult::critical(
             "IPV6_LEAK_SANCTIONED_CRITICAL",
@@ -196,9 +217,6 @@ pub async fn check_ipv6_leak_with_route(
         );
     }
 
-    let is_country = ipv6_loc.len() == 2
-        && ipv6_loc.bytes().all(|b| b.is_ascii_uppercase())
-        && !matches!(ipv6_loc.as_str(), "XX" | "ZZ");
     if !is_country || ipv4_country.trim().is_empty() {
         return unknown(
             "IPV6_PROBE_NO_COUNTRY",
@@ -215,14 +233,6 @@ pub async fn check_ipv6_leak_with_route(
     }
 
     if ipv6_loc != ipv4_country.trim().to_uppercase() {
-        if via_zastava_key {
-            return CheckResult::ok(
-                "IPV6_KEY_TCP_ISOLATED",
-                format!(
-                    "Трафик AI изолирован через ВПН Заставы ({ipv4_country}) по TCP CONNECT; системный IPv6 выходит через VPN ({ipv6_loc}) — утечки реального IP нет."
-                ),
-            );
-        }
         return CheckResult::warning(
             "IPV6_LEAK_MISMATCH",
             format!(

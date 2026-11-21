@@ -84,8 +84,8 @@ export const toast = {
     promptCopied: "Промпт скопирован",
     promptCopiedText: "Вставьте его в Antigravity, Cursor, Windsurf или новый Claude.",
     promptError: "Не удалось скопировать промпт",
-    cacheCleaned: (client: string) => `Кэш ${client} сброшен`,
+    cacheCleaned: (client: string) => `Хвосты ${client} очищены`,
     cacheCleanedText: (files: number, mb: string) => `Удалено файлов: ${files} (${mb} МБ). Cookies и антифрод-реестры очищены.`,
-    cacheError: "Не удалось сбросить кэш",
+    cacheError: "Не удалось очистить хвосты",
   },
 } as const;

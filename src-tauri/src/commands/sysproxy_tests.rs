@@ -278,6 +278,7 @@ fn diagnostic_bundle_serializes_routes_and_checks_without_secrets_or_ips() {
         unknown_count: 0,
         applicable_count: 1,
         incomplete: false,
+        gateway_latency_ms: None,
     };
 
     let mut reports = HashMap::new();

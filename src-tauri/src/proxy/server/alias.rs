@@ -23,7 +23,7 @@ use super::responses::{
 use super::tunnel::pump;
 use super::{
     PLAIN_HTTP_IDLE_TIMEOUT_SECS, ProxyServer, ROUTE_ENTRY_TIMEOUT_SECS, TunnelPolicy,
-    UPSTREAM_CONNECT_TIMEOUT_SECS,
+    UPSTREAM_CONNECT_TIMEOUT_SECS, wait_optional_stop,
 };
 
 impl ProxyServer {
@@ -66,6 +66,7 @@ impl ProxyServer {
 
         let provider = provider_opt.unwrap_or(ProviderId::Anthropic);
         let mut routing_rx = self.state.subscribe_routing();
+        let mut stop_rx = self.alias_stop_rx.clone();
         let selection = match self.resolve_alias_selection().await {
             Ok(sel) => sel,
             Err((reason, route_id)) => {
@@ -77,13 +78,14 @@ impl ProxyServer {
 
         match selection {
             RouteSelection::Route(r) => {
-                let chained = self.transit.chained_proxy(self.bound_addr.port());
+                let gw_port = self.main_gateway_port();
+                let chained = self.transit.chained_proxy(gw_port);
                 let mut target = match connect_via_route_with_chained(
                     &r,
                     host,
                     port,
                     Duration::from_secs(ROUTE_ENTRY_TIMEOUT_SECS),
-                    self.bound_addr.port(),
+                    gw_port,
                     chained.as_deref(),
                 )
                 .await
@@ -128,6 +130,9 @@ impl ProxyServer {
                     _ = wait_alias_route_stale(&self.state, &r, &mut routing_rx) => {
                         Err(alias_route_changed())
                     }
+                    _ = wait_optional_stop(&mut stop_rx) => {
+                        Err(alias_route_changed())
+                    }
                 }
             }
             RouteSelection::Direct => {
@@ -139,7 +144,7 @@ impl ProxyServer {
                     )
                     .await;
                 }
-                let tcp = match self.connect_alias_direct(host, port).await {
+                let mut target = match self.connect_alias_direct(host, port).await {
                     Ok(s) => s,
                     Err(e) => {
                         let msg = format!("Failed to connect to target {host}:{port}: {e}");
@@ -151,16 +156,19 @@ impl ProxyServer {
                     .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     .await?;
                 client.flush().await?;
-                let mut target = UpstreamStream::Plain(tcp);
-                pump(
-                    client,
-                    &mut target,
-                    &self.guard,
-                    TunnelPolicy::FollowGate,
-                    provider_opt,
-                    None,
-                )
-                .await
+                tokio::select! {
+                    res = pump(
+                        client,
+                        &mut target,
+                        &self.guard,
+                        TunnelPolicy::FollowGate,
+                        provider_opt,
+                        None,
+                    ) => res,
+                    _ = wait_optional_stop(&mut stop_rx) => {
+                        Err(alias_route_changed())
+                    }
+                }
             }
             RouteSelection::Missing(id) => {
                 self.refuse_route_down(
@@ -200,6 +208,7 @@ impl ProxyServer {
             return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
         }
         let mut routing_rx = self.state.subscribe_routing();
+        let mut stop_rx = self.alias_stop_rx.clone();
 
         let selection = match self.resolve_alias_selection().await {
             Ok(sel) => sel,
@@ -217,13 +226,14 @@ impl ProxyServer {
 
         let (mut target, route_snapshot) = match selection {
             RouteSelection::Route(r) => {
-                let chained = self.transit.chained_proxy(self.bound_addr.port());
+                let gw_port = self.main_gateway_port();
+                let chained = self.transit.chained_proxy(gw_port);
                 match connect_via_route_with_chained(
                     &r,
                     &req.host,
                     req.port,
                     Duration::from_secs(ROUTE_ENTRY_TIMEOUT_SECS),
-                    self.bound_addr.port(),
+                    gw_port,
                     chained.as_deref(),
                 )
                 .await
@@ -254,7 +264,7 @@ impl ProxyServer {
                     .await;
                 }
                 match self.connect_alias_direct(&req.host, req.port).await {
-                    Ok(s) => (UpstreamStream::Plain(s), None),
+                    Ok(s) => (s, None),
                     Err(e) => {
                         let msg =
                             format!("Failed to connect to target {}:{}: {e}", req.host, req.port);
@@ -293,6 +303,9 @@ impl ProxyServer {
                     _ = wait_optional_alias_route_stale(&self.state, route_snapshot.as_ref(), &mut routing_rx) => {
                         Err(alias_route_changed())
                     }
+                    _ = wait_optional_stop(&mut stop_rx) => {
+                        Err(alias_route_changed())
+                    }
                 }
             }
             UpstreamStream::Tls(tls) => {
@@ -309,6 +322,9 @@ impl ProxyServer {
                     _ = wait_optional_alias_route_stale(&self.state, route_snapshot.as_ref(), &mut routing_rx) => {
                         Err(alias_route_changed())
                     }
+                    _ = wait_optional_stop(&mut stop_rx) => {
+                        Err(alias_route_changed())
+                    }
                 }
             }
         };
@@ -319,11 +335,16 @@ impl ProxyServer {
         }
     }
 
+    fn main_gateway_port(&self) -> u16 {
+        let gw = self.auditor.resolver.gateway_port();
+        if gw != 0 { gw } else { self.bound_addr.port() }
+    }
+
     async fn connect_alias_direct(
         &self,
         host: &str,
         port: u16,
-    ) -> Result<TcpStream, std::io::Error> {
+    ) -> Result<UpstreamStream, std::io::Error> {
         if let Some(redirect_addr) = self.upstream_redirect {
             self.direct_connects.fetch_add(1, Ordering::SeqCst);
             tokio::time::timeout(
@@ -338,8 +359,10 @@ impl ProxyServer {
                 )
             })
             .and_then(|r| r)
+            .map(UpstreamStream::Plain)
         } else {
-            self.connect_direct(host, port).await
+            self.connect_transit_with_port(host, port, self.main_gateway_port())
+                .await
         }
     }
 }

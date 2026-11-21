@@ -32,6 +32,7 @@ interface AddKeyFormProps {
   error: string | null;
   connecting: boolean;
   onAddKey: () => void;
+  suppressPrimaryCta?: boolean;
 }
 
 function AddKeyForm({
@@ -42,6 +43,7 @@ function AddKeyForm({
   error,
   connecting,
   onAddKey,
+  suppressPrimaryCta = false,
 }: AddKeyFormProps) {
   return (
     <div className="zs-stack gap-3">
@@ -72,7 +74,7 @@ function AddKeyForm({
           </Button>
         }
       />
-      <Button variant="primary" block onClick={() => openZastavaBot()}>
+      <Button variant={suppressPrimaryCta ? "secondary" : "primary"} block onClick={() => openZastavaBot()}>
         {copy.key.get}
       </Button>
     </div>
@@ -101,6 +103,7 @@ interface RouteListSectionProps {
   onRemoveRoute: (routeId: string) => void;
   onLegacyToggle: () => void;
   onLegacyDisconnect: () => void;
+  suppressPrimaryCta?: boolean;
 }
 
 export function RouteListSection({
@@ -125,6 +128,7 @@ export function RouteListSection({
   onRemoveRoute,
   onLegacyToggle,
   onLegacyDisconnect,
+  suppressPrimaryCta = false,
 }: RouteListSectionProps) {
   const hasRoutes = routes.length > 0;
   const isLegacyConfigured = Boolean(upstream);
@@ -213,7 +217,7 @@ export function RouteListSection({
                     {showRenew && (
                       <Button
                         size="sm"
-                        variant={expiryUrgency === "critical" || isExpired ? "primary" : "secondary"}
+                        variant={!suppressPrimaryCta && (expiryUrgency === "critical" || isExpired) ? "primary" : "secondary"}
                         onClick={() => openZastavaBot(r.id)}
                       >
                         {copy.key.renew}
@@ -242,6 +246,7 @@ export function RouteListSection({
               error={error}
               connecting={connecting}
               onAddKey={onAddKey}
+              suppressPrimaryCta={suppressPrimaryCta}
             />
           </div>
         </>
@@ -289,6 +294,7 @@ export function RouteListSection({
           error={error}
           connecting={connecting}
           onAddKey={onAddKey}
+          suppressPrimaryCta={suppressPrimaryCta}
         />
       )}
     </Card>

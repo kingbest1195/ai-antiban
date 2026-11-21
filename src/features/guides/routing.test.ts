@@ -1,10 +1,28 @@
 import { createElement } from "react";
+import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../ui/Steps", async () => {
+  const actual = await vi.importActual<typeof import("../../ui/Steps")>("../../ui/Steps");
+  return {
+    ...actual,
+    Steps: ({ items }: { items: Array<{ title: ReactNode; text?: ReactNode; body?: ReactNode }> }) =>
+      createElement(
+        "ol",
+        { className: "zs-steps" },
+        items.map((item, idx) =>
+          createElement("li", { key: idx }, item.title, item.text, item.body),
+        ),
+      ),
+  };
+});
+
 import { guides as copy } from "../../shared/copy/ru";
 import { GuideContext } from "./context";
 import { GuidesScreen } from "./GuidesScreen";
 import { PaymentGuide } from "./PaymentGuide";
+import { VIRTUAL_CARD_PROVIDERS } from "./providers";
 import { resolveGuide } from "./routing";
 
 describe("resolveGuide (Bug #2 routing)", () => {
@@ -66,5 +84,30 @@ describe("OsGuide geo DNS card & PaymentGuide quick-entry", () => {
     expect(html).toContain(copy.payment.openPaymentTools);
     expect(html).toContain(copy.payment.pitchText);
     expect(copy.payment.pitchText).not.toContain("во вкладке «Биллинг»");
+    expect(VIRTUAL_CARD_PROVIDERS.map((p) => p.description).join("\n")).not.toContain("«Биллинг»");
+  });
+
+  it("GuidesScreen (VpsGuide) маскирует IPv4 и IPv6 currentIp при hideIpMode=true", () => {
+    const html = renderToStaticMarkup(
+      createElement(GuidesScreen, {
+        initialGuide: "01-personal-vpn-amnezia",
+        currentIp: "185.212.102.40",
+        currentCountry: "NL",
+        hideIpMode: true,
+      }),
+    );
+    expect(html).toContain("•••.•••.•••.40");
+    expect(html).not.toContain("185.212.102.40");
+
+    const htmlV6 = renderToStaticMarkup(
+      createElement(GuidesScreen, {
+        initialGuide: "01-personal-vpn-amnezia",
+        currentIp: "2001:db8:85a3::7334",
+        currentCountry: "DE",
+        hideIpMode: true,
+      }),
+    );
+    expect(htmlV6).toContain("••••:••••:…:7334");
+    expect(htmlV6).not.toContain("2001:db8:85a3::7334");
   });
 });

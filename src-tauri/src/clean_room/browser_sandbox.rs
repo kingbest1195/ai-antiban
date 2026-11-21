@@ -1,17 +1,23 @@
-//! Hardened Chromium sandbox launcher, fail-closed `Preferences` writer, and stale-port
-//! process lifecycle manager.
+//! Hardened Chromium sandbox launcher and stale-port process lifecycle manager.
 
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use serde_json::{Map, Value, json};
-
 use super::CleanProfileId;
 use super::LaunchCleanBrowserResult;
+pub use super::sandbox_prefs::{
+    SANDBOX_META_FILENAME, SandboxMeta, accept_languages_for_country,
+    cleanup_stale_singleton_files, ensure_private_dir, read_sandbox_meta,
+    write_fail_closed_preferences, write_fail_closed_preferences_with_country,
+    write_first_run_sentinel, write_sandbox_meta,
+};
+pub use super::sandbox_proc::{
+    find_sandbox_pids_for_profile, is_sandbox_browser_cmdline, parse_ps_pids_for_profile,
+    terminate_all_sandboxes, terminate_all_sandboxes_on_exit, terminate_sandbox_for_profile,
+    terminate_sandbox_pid,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningSandboxProcess {
@@ -70,6 +76,14 @@ impl SandboxProcessRegistry {
             None
         }
     }
+
+    pub fn drain_all(&self) -> Vec<(String, RunningSandboxProcess)> {
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect()
+    }
 }
 
 pub fn clean_profile_dir(app_data_dir: &Path, profile_id: &CleanProfileId) -> PathBuf {
@@ -78,84 +92,7 @@ pub fn clean_profile_dir(app_data_dir: &Path, profile_id: &CleanProfileId) -> Pa
         .join(profile_id.as_str())
 }
 
-pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(dir)
-        .map_err(|e| format!("Failed to create directory {}: {e}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o700);
-        fs::set_permissions(dir, perms)
-            .map_err(|e| format!("Failed to set 0700 on {}: {e}", dir.display()))?;
-    }
-    Ok(())
-}
-
-/// Atomically writes `<profile_dir>/Default/Preferences` with fail-closed proxy & DoH=off
-/// settings so even a manual relaunch outside Zastava cannot leak traffic `DIRECT`.
-pub fn write_fail_closed_preferences(
-    profile_dir: &Path,
-    alias_port: u16,
-) -> Result<PathBuf, String> {
-    if alias_port == 0 {
-        return Err("Alias port must be non-zero for fail-closed Preferences".to_string());
-    }
-    ensure_private_dir(profile_dir)?;
-    let default_dir = profile_dir.join("Default");
-    ensure_private_dir(&default_dir)?;
-
-    let prefs_path = default_dir.join("Preferences");
-    let mut root = match fs::read_to_string(&prefs_path) {
-        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
-            Ok(Value::Object(map)) => map,
-            _ => Map::new(),
-        },
-        Err(_) => Map::new(),
-    };
-
-    root.insert(
-        "proxy".to_string(),
-        json!({
-            "mode": "fixed_servers",
-            "server": format!("http://127.0.0.1:{alias_port}")
-        }),
-    );
-    root.insert(
-        "dns_over_https".to_string(),
-        json!({
-            "mode": "off"
-        }),
-    );
-
-    let serialized = serde_json::to_string_pretty(&Value::Object(root))
-        .map_err(|e| format!("Failed to serialize Chromium Preferences: {e}"))?;
-
-    let tmp_path = default_dir.join(format!("Preferences.tmp.{}", std::process::id()));
-    {
-        let mut f = fs::File::create(&tmp_path).map_err(|e| {
-            format!(
-                "Failed to create temp Preferences {}: {e}",
-                tmp_path.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
-        }
-        f.write_all(serialized.as_bytes())
-            .map_err(|e| format!("Failed to write temp Preferences: {e}"))?;
-        f.sync_all()
-            .map_err(|e| format!("Failed to sync temp Preferences: {e}"))?;
-    }
-    fs::rename(&tmp_path, &prefs_path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        format!("Failed to commit Preferences {}: {e}", prefs_path.display())
-    })?;
-    Ok(prefs_path)
-}
-
-/// Builds the mandatory hardened Chromium launch flags.
+/// Builds the mandatory hardened Chromium launch flags without overriding browser UI language.
 /// Explicitly omits `--disable-features=WebRtcHideLocalIpsWithMdns` so mDNS local-IP hiding
 /// remains enabled.
 pub fn build_hardened_chromium_args(
@@ -163,21 +100,45 @@ pub fn build_hardened_chromium_args(
     alias_port: u16,
     target_url: Option<&str>,
 ) -> Vec<String> {
+    build_hardened_chromium_args_for_engine(profile_dir, alias_port, target_url, "chrome")
+}
+
+/// Builds hardened Chromium launch flags tailored to `browser_engine` (suppressing Edge FRE
+/// without clobbering `DnsOverHttps`).
+pub fn build_hardened_chromium_args_for_engine(
+    profile_dir: &Path,
+    alias_port: u16,
+    target_url: Option<&str>,
+    browser_engine: &str,
+) -> Vec<String> {
+    let disabled_features = if browser_engine.eq_ignore_ascii_case("edge") {
+        "--disable-features=DnsOverHttps,msEdgeFRE".to_string()
+    } else {
+        "--disable-features=DnsOverHttps".to_string()
+    };
+
     let mut args = vec![
         format!("--user-data-dir={}", profile_dir.display()),
         format!("--proxy-server=http://127.0.0.1:{alias_port}"),
         "--proxy-bypass-list=127.0.0.1;[::1]".to_string(),
         "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1".to_string(),
         "--disable-quic".to_string(),
-        "--disable-features=DnsOverHttps".to_string(),
+        disabled_features,
         "--disable-background-networking".to_string(),
+        "--disable-component-update".to_string(),
+        "--simulate-outdated-no-au=Tue, 31 Dec 2099 23:59:59 GMT".to_string(),
+        "--no-service-autorun".to_string(),
         "--no-pings".to_string(),
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string(),
-        "--lang=en-US".to_string(),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
         "--disable-sync".to_string(),
     ];
+
+    #[cfg(target_os = "macos")]
+    args.push("--use-mock-keychain".to_string());
+    #[cfg(target_os = "linux")]
+    args.push("--password-store=basic".to_string());
 
     if let Some(url) = target_url.map(str::trim).filter(|u| !u.is_empty())
         && (url.starts_with("https://") || url.starts_with("http://"))
@@ -187,29 +148,9 @@ pub fn build_hardened_chromium_args(
     args
 }
 
-/// Terminates a previously launched sandbox browser PID if OS effects are enabled.
-pub fn terminate_sandbox_pid(pid: u32) {
-    if pid == 0 || !crate::sysproxy::os_effects_enabled() {
-        return;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = crate::sysproxy::silent_command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status();
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
-/// Prepares the sandbox directory + fail-closed `Preferences`, handles stale-port restart,
-/// and spawns the isolated Chromium process when `os_effects_enabled()` is `true`.
+/// Prepares the sandbox directory + fail-closed `Preferences`, terminates any stale
+/// sandbox browser processes first, and spawns the isolated Chromium process when
+/// `os_effects_enabled()` is `true`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_hardened_sandbox(
     registry: &SandboxProcessRegistry,
@@ -221,14 +162,46 @@ pub fn launch_hardened_sandbox(
     target_url: Option<&str>,
     tz_for_spawn: Option<&str>,
 ) -> Result<LaunchCleanBrowserResult, String> {
+    launch_hardened_sandbox_with_country(
+        registry,
+        app_data_dir,
+        profile_id,
+        browser_engine,
+        executable_path,
+        alias_port,
+        target_url,
+        tz_for_spawn,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn launch_hardened_sandbox_with_country(
+    registry: &SandboxProcessRegistry,
+    app_data_dir: &Path,
+    profile_id: &CleanProfileId,
+    browser_engine: &str,
+    executable_path: &str,
+    alias_port: u16,
+    target_url: Option<&str>,
+    tz_for_spawn: Option<&str>,
+    exit_country: Option<&str>,
+) -> Result<LaunchCleanBrowserResult, String> {
     let profile_dir = clean_profile_dir(app_data_dir, profile_id);
-    write_fail_closed_preferences(&profile_dir, alias_port)?;
+    // 1. FIRST: find & terminate ALL live sandbox browser processes for this profile_dir
+    //    (registry + .zastava-sandbox.json + live OS cmdline scan) and wait up to 1500ms.
+    terminate_sandbox_for_profile(registry, &profile_dir, profile_id.as_str());
+    // 2. SECOND: remove stale SingletonLock / SingletonSocket / SingletonCookie.
+    cleanup_stale_singleton_files(&profile_dir);
+    // 3. THIRD: write fail-closed Preferences after exiting browser can no longer overwrite them.
+    write_fail_closed_preferences_with_country(&profile_dir, alias_port, exit_country)?;
 
-    if let Some(old) = registry.take_if_stale_port(profile_id.as_str(), alias_port) {
-        terminate_sandbox_pid(old.pid);
-    }
-
-    let args = build_hardened_chromium_args(&profile_dir, alias_port, target_url);
+    let args = build_hardened_chromium_args_for_engine(
+        &profile_dir,
+        alias_port,
+        target_url,
+        browser_engine,
+    );
     let clean_url = target_url
         .map(str::trim)
         .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
@@ -236,9 +209,9 @@ pub fn launch_hardened_sandbox(
 
     let pid = if crate::sysproxy::os_effects_enabled() {
         let mut cmd = build_browser_command(executable_path, &args, tz_for_spawn);
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to launch {browser_engine} ({executable_path}): {e}"))?;
+        let child = cmd.spawn().map_err(|e| {
+            format!("Не удалось запустить браузер {browser_engine} ({executable_path}): {e}")
+        })?;
         let child_pid = child.id();
         registry.record(
             profile_id.as_str(),
@@ -248,8 +221,16 @@ pub fn launch_hardened_sandbox(
                 browser_engine: browser_engine.to_string(),
             },
         );
+        let _ = write_sandbox_meta(
+            &profile_dir,
+            SandboxMeta {
+                pid: child_pid,
+                alias_port,
+            },
+        );
         Some(child_pid)
     } else {
+        let _ = write_sandbox_meta(&profile_dir, SandboxMeta { pid: 0, alias_port });
         None
     };
 
@@ -283,4 +264,34 @@ fn build_browser_command(
         cmd.env("TZ", tz);
     }
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_pid_verifier_rejects_reused_or_personal_browser_pids() {
+        let profile_dir = Path::new("/tmp/zastava-clean/clean-profiles/cr-test-1");
+        let matching_cmd = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/zastava-clean/clean-profiles/cr-test-1 --disable-quic";
+        assert!(is_sandbox_browser_cmdline(matching_cmd, profile_dir));
+
+        // Reused PID running an unrelated system/CLI process must NOT be killed.
+        assert!(!is_sandbox_browser_cmdline(
+            "/usr/sbin/syslogd",
+            profile_dir
+        ));
+        assert!(!is_sandbox_browser_cmdline(
+            "cat /tmp/zastava-clean/clean-profiles/cr-test-1/Preferences",
+            profile_dir
+        ));
+
+        // Reused PID running user's personal Chrome profile must NOT be killed.
+        let personal_chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/alice/Library/Application Support/Google/Chrome";
+        assert!(!is_sandbox_browser_cmdline(personal_chrome, profile_dir));
+
+        // Empty profile_dir or empty cmdline must never match.
+        assert!(!is_sandbox_browser_cmdline(matching_cmd, Path::new("")));
+        assert!(!is_sandbox_browser_cmdline("", profile_dir));
+    }
 }

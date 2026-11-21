@@ -134,10 +134,13 @@ pub fn resolve_browser_executable_from(
     }
     if !normalized.is_empty() {
         return Err(format!(
-            "Requested browser engine '{normalized}' is not installed or unavailable"
+            "Выбранный браузер «{normalized}» не установлен или недоступен."
         ));
     }
-    Err("No supported Chromium browser (Chrome, Edge, Brave) was found".to_string())
+    Err(
+        "На компьютере не найден ни один поддерживаемый браузер (Chrome, Edge или Brave)."
+            .to_string(),
+    )
 }
 
 fn find_windows_browser<E, R, F>(

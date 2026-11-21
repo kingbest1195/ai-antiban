@@ -46,6 +46,15 @@ fn validates_task_xml_security_and_triggers() {
     // Reject missing BootTrigger
     let logon_only = good_xml.replace("BootTrigger", "LogonTrigger");
     assert!(!is_task_xml_healthy(&logon_only));
+
+    // Accept <UserId>SYSTEM</UserId> and localized Russian NT AUTHORITY\СИСТЕМА
+    let system_short = good_xml.replace("<UserId>S-1-5-18</UserId>", "<UserId>SYSTEM</UserId>");
+    assert!(is_task_xml_healthy(&system_short));
+    let system_ru = good_xml.replace(
+        "<UserId>S-1-5-18</UserId>",
+        "<UserId>NT AUTHORITY\\СИСТЕМА</UserId>",
+    );
+    assert!(is_task_xml_healthy(&system_ru));
 }
 
 #[test]
@@ -217,4 +226,46 @@ fn parses_install_cli_args_and_error_file_roundtrip() {
         read_install_error_file(&err_path).as_deref(),
         Some("schtasks.exe /Create failed (code=Some(1))")
     );
+}
+
+#[test]
+fn decodes_utf16_le_without_bom_and_classifies_schtasks_errors() {
+    let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+    let no_bom_xml: Vec<u8> = xml.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    assert_eq!(decode_windows_cmd_text(&no_bom_xml), xml.trim());
+
+    let ru_msg = "Ошибка: Отказано в доступе.";
+    let no_bom_ru: Vec<u8> = ru_msg
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    assert_eq!(decode_windows_cmd_text(&no_bom_ru), ru_msg);
+
+    // Valid UTF-8 Russian text must NOT be misdecoded as UTF-16 LE
+    let utf8_ru = "Фоновая служба Claude работает нормально";
+    assert_eq!(decode_windows_cmd_text(utf8_ru.as_bytes()), utf8_ru);
+
+    assert_eq!(
+        classify_schtasks_query_error("ERROR: Access is denied.", ""),
+        SchtasksQueryError::AccessDenied
+    );
+    assert_eq!(
+        classify_schtasks_query_error("ОШИБКА: Отказано в доступе.", ""),
+        SchtasksQueryError::AccessDenied
+    );
+    assert_eq!(
+        classify_schtasks_query_error("ERROR: The system cannot find the file specified.", ""),
+        SchtasksQueryError::NotFound
+    );
+    assert!(is_task_list_healthy(
+        "Имя задачи: \\Zastava\\CoworkVMServiceManualGuard\nВыполнить задачу: powershell.exe"
+    ));
+    assert!(!is_task_list_healthy(
+        "TaskName: \\Zastava\\CoworkVMServiceManualGuard\nTask To Run: %LOCALAPPDATA%\\Zastava\\zastava.exe"
+    ));
+
+    let (_, summary_ok) = build_windows_summary(true, Some(3), false, true, true);
+    let (_, summary_auto) = build_windows_summary(true, Some(2), true, true, true);
+    assert!(!summary_ok.contains("Start="));
+    assert!(!summary_auto.contains("Start="));
 }

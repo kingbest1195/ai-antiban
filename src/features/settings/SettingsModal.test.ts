@@ -57,4 +57,33 @@ describe("SettingsModal: мониторинг сервисов и сохранё
     expect(html).toContain(`aria-label="${copy.trustedExceptions.remove("Claude", "185.220.101.5")}"`);
     expect(html).toContain(`aria-label="${copy.trustedExceptions.remove("ChatGPT", "95.165.10.22")}"`);
   });
+
+  it("маскирует IPv4 и IPv6 в сохранённых исключениях при hideIpMode=true и сворачивает Tier 2 по умолчанию", () => {
+    const html = renderToStaticMarkup(
+      createElement(SettingsModal, {
+        open: true,
+        onClose: vi.fn(),
+        autoUpdateEnabled: true,
+        onToggleAutoUpdate: vi.fn(async () => {}),
+        hideIpMode: true,
+        disabledProviders: [],
+        trustedExceptions: {
+          anthropic: ["185.220.101.5"],
+          openai: ["2001:db8:85a3::7334"],
+        },
+      }),
+    );
+
+    expect(html).toContain("•••.•••.•••.5");
+    expect(html).not.toContain("185.220.101.5");
+    expect(html).toContain("••••:••••:…:7334");
+    expect(html).not.toContain("2001:db8:85a3::7334");
+    expect(html).toContain(copy.advanced.title);
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain('class="zs-xrow__body"');
+    expect(html).not.toContain(copy.privacy.networkTitle);
+    expect(html).not.toContain("split tunneling");
+    expect(html).not.toContain("Start = 2");
+    expect(html).not.toContain("--minimized");
+  });
 });

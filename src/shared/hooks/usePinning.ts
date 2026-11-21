@@ -9,6 +9,7 @@ import {
   verifyAndUnblockProvider,
 } from "../../utils/api";
 import { writeClipboard } from "../lib/clipboard";
+import { formatIp } from "../lib/format";
 import { common, providers, toast as t } from "../copy/ru";
 import type { ShowToast } from "./useToasts";
 
@@ -18,10 +19,11 @@ interface Options {
   runFullAudit: (force?: boolean, silentError?: boolean) => Promise<void>;
   showToast: ShowToast;
   currentIp: string;
+  hideIpMode?: boolean;
 }
 
 /** Закрепление IP, строгий режим, копирование IP и ручное снятие блока с ИИ-сервисов. */
-export function usePinning({ state, refreshState, runFullAudit, showToast, currentIp }: Options) {
+export function usePinning({ state, refreshState, runFullAudit, showToast, currentIp, hideIpMode = false }: Options) {
   const [copiedIp, setCopiedIp] = useState<boolean>(false);
   const copiedTimer = useRef<number | undefined>(undefined);
 
@@ -35,23 +37,23 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
       return;
     }
     setCopiedIp(true);
-    showToast(t.ipCopied, currentIp, "success");
+    showToast(t.ipCopied, formatIp(currentIp, hideIpMode), "success");
     window.clearTimeout(copiedTimer.current);
     copiedTimer.current = window.setTimeout(() => setCopiedIp(false), 2000);
-  }, [currentIp, showToast]);
+  }, [currentIp, hideIpMode, showToast]);
 
   const handlePinIp = useCallback(
     async (ip: string, provider?: ProviderId) => {
       try {
         await pinCurrentIp(ip, provider);
         await refreshState();
-        showToast(t.pinned, t.pinnedText(ip), "success");
+        showToast(t.pinned, t.pinnedText(formatIp(ip, hideIpMode)), "success");
         runFullAudit(false);
       } catch (err: any) {
         showToast(t.pinError, err?.message || String(err), "error");
       }
     },
-    [refreshState, runFullAudit, showToast],
+    [hideIpMode, refreshState, runFullAudit, showToast],
   );
 
   const handleUnpinIp = useCallback(

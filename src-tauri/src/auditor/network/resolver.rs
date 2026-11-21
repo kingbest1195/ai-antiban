@@ -1,6 +1,7 @@
 //! Telemetry cache, request coalescing, and direct/route resolution entrypoints.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::Duration;
@@ -303,13 +304,39 @@ impl NetworkResolver {
         route: Option<&Route>,
     ) -> Result<NetworkTelemetry, String> {
         let key: CacheKey = route.map(|r| r.id.clone());
-        let fp = route.map(route_fingerprint);
+        let chained = if route.is_none() {
+            let gw = self.gateway_port();
+            crate::sysproxy::get_chained_proxy()
+                .filter(|cp| !crate::sysproxy::is_gateway_host_port(cp, (gw > 0).then_some(gw)))
+        } else {
+            None
+        };
+        let fp = match route {
+            Some(r) => Some(route_fingerprint(r)),
+            None => Some(direct_chained_fingerprint(chained.as_deref())),
+        };
         self.resolve_cached_or_fetch(key, fp, force_refresh, || async {
             match route {
-                None => self.cascade_query(&self.client).await,
+                None => {
+                    if let Some(cp) = chained.as_deref()
+                        && let Some(c) = super::exit_probe::build_chained_probe_client(
+                            cp,
+                            Duration::from_millis(super::REQUEST_TIMEOUT_MS),
+                        )
+                    {
+                        return self.cascade_query(&c).await;
+                    }
+                    self.cascade_query(&self.client).await
+                }
                 Some(r) => self.cascade_via_route(r).await,
             }
         })
         .await
     }
+}
+
+fn direct_chained_fingerprint(chained: Option<&str>) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    chained.hash(&mut h);
+    h.finish()
 }

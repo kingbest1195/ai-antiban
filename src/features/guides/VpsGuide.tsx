@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Badge, Banner, Button, Card, Mono, Row, Rows, Segmented, Steps } from "../../ui";
 import { common, guides as copy } from "../../shared/copy/ru";
+import { formatIp } from "../../shared/lib/format";
 import { openExternal } from "../../utils/opener";
 import { CopyBlock } from "./CopyBlock";
 import {
@@ -61,7 +62,8 @@ export function VpsGuide({ method, onMethodChange }: VpsGuideProps) {
 }
 
 function AmneziaMethod({ onMethodChange }: { onMethodChange: (method: VpsMethod) => void }) {
-  const { currentIp } = useGuide();
+  const { currentIp, hideIpMode } = useGuide();
+  const displayIp = formatIp(currentIp, hideIpMode);
   const t = copy.vps.amnezia;
   return (
     <>
@@ -109,7 +111,7 @@ function AmneziaMethod({ onMethodChange }: { onMethodChange: (method: VpsMethod)
             },
             {
               title: t.step3Title,
-              text: <Rich text={t.step3Text(currentIp)} />,
+              text: <Rich text={t.step3Text(displayIp)} />,
               body: <PinButton />,
             },
           ]}
@@ -132,7 +134,8 @@ function AmneziaMethod({ onMethodChange }: { onMethodChange: (method: VpsMethod)
 }
 
 function VlessMethod() {
-  const { currentIp } = useGuide();
+  const { currentIp, hideIpMode } = useGuide();
+  const displayIp = formatIp(currentIp, hideIpMode);
   const t = copy.vps.vless;
   return (
     <Card title={t.title}>
@@ -164,7 +167,7 @@ function VlessMethod() {
           },
           {
             title: t.step3Title,
-            text: <Rich text={t.step3Text(currentIp)} />,
+            text: <Rich text={t.step3Text(displayIp)} />,
             body: <PinButton />,
           },
         ]}
@@ -174,7 +177,8 @@ function VlessMethod() {
 }
 
 function CascadeMethod() {
-  const { currentIp } = useGuide();
+  const { currentIp, hideIpMode } = useGuide();
+  const displayIp = formatIp(currentIp, hideIpMode);
   const t = copy.vps.cascade;
   const [way, setWay] = useState<1 | 2 | 3>(1);
 
@@ -218,7 +222,7 @@ function CascadeMethod() {
           },
           {
             title: t.step3Title,
-            text: <Rich text={t.step3Text(currentIp)} />,
+            text: <Rich text={t.step3Text(displayIp)} />,
             body: <PinButton />,
           },
         ]}

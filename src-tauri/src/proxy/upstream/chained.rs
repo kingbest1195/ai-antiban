@@ -32,23 +32,41 @@ impl std::fmt::Display for ChainedError {
     }
 }
 
-/// Splits the chained proxy string (`host:port`, no scheme, no credentials) into an entry.
+/// Splits a chained proxy URL or `host:port` (supporting `http://`, `socks5://`, `socks5h://`)
+/// into an [`Entry`].
 fn chained_entry(chained: &str) -> io::Result<Entry> {
     let bad = || io::Error::new(io::ErrorKind::InvalidInput, "invalid chained proxy address");
-    let (host, port) = chained.trim().rsplit_once(':').ok_or_else(bad)?;
+    let raw = chained.trim();
+    let lower = raw.to_ascii_lowercase();
+    let (proto, addr) = if let Some(rest) = lower
+        .strip_prefix("socks5h://")
+        .or_else(|| lower.strip_prefix("socks5://"))
+    {
+        (EntryProto::Socks5, &raw[raw.len() - rest.len()..])
+    } else if let Some(rest) = lower.strip_prefix("http://") {
+        (EntryProto::Http, &raw[raw.len() - rest.len()..])
+    } else {
+        (EntryProto::Http, raw)
+    };
+    let (host, port) = addr.trim().rsplit_once(':').ok_or_else(bad)?;
     let port: u16 = port.parse().map_err(|_| bad())?;
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
     if host.is_empty() || port == 0 {
         return Err(bad());
     }
     Ok(Entry {
-        proto: EntryProto::Http,
+        proto,
         host: host.to_string(),
         port,
         username: None,
         password: None,
         sni: None,
     })
+}
+
+/// Returns `true` when `chained` uses the `socks5://` / `socks5h://` scheme.
+pub fn is_socks5_chained(chained: &str) -> bool {
+    chained_entry(chained).is_ok_and(|e| e.proto == EntryProto::Socks5)
 }
 
 /// Plain TCP connection to the chained HTTP proxy (the user's own proxy: loopback / private
@@ -67,7 +85,7 @@ pub async fn connect_chained_tcp(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "chained proxy connect timed out"))?
 }
 
-/// `CONNECT target` through the chained HTTP proxy.
+/// `CONNECT target` (HTTP CONNECT or SOCKS5 CONNECT) through the chained proxy.
 pub async fn connect_via_chained_proxy(
     chained: &str,
     target_host: &str,
@@ -80,6 +98,12 @@ pub async fn connect_via_chained_proxy(
         let mut s = tcp_connect_with_timeout(&entry, true, gateway_port, timeout)
             .await
             .map_err(ChainedError::Unreachable)?;
+        if entry.proto == EntryProto::Socks5 {
+            socks5_handshake(&mut s, &entry, target_host, target_port)
+                .await
+                .map_err(ChainedError::Unreachable)?;
+            return Ok(UpstreamStream::Plain(s));
+        }
         let (code, _line) = http_connect_exchange(&mut s, &entry, target_host, target_port)
             .await
             .map_err(ChainedError::Unreachable)?;

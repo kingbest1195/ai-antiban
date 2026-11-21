@@ -26,7 +26,9 @@ import {
   runCleanRoomAudit,
   startCleanProfileWarmup,
   syncOsTimezone,
+  untaintCleanRoomIp,
   updateBunkerSettings,
+  updateCleanProfileRoute,
   updateCleanProfileStep,
   updatePersonaSelfCheck,
 } from "../api";
@@ -104,6 +106,11 @@ describe("v3 Clean Room API & mocks", () => {
     expect(step2.launchpad_step).toBe(2);
     expect(step2.completed_checklist).toEqual(["foreign_email", "real_sim"]);
 
+    const rebound = await updateCleanProfileRoute(created.id, null);
+    expect(rebound.bound_route_id).toBeNull();
+    const reboundBack = await updateCleanProfileRoute(created.id, "route-us-2");
+    expect(reboundBack.bound_route_id).toBe("route-us-2");
+
     const audit = await runCleanRoomAudit(created.id);
     expect(audit.ready_to_launch).toBe(true);
     expect(audit.critical_count).toBe(0);
@@ -127,6 +134,20 @@ describe("v3 Clean Room API & mocks", () => {
     const afterDelete = await deleteCleanProfile(created.id);
     expect(afterDelete.profiles).toHaveLength(0);
     expect(afterDelete.active_profile_id).toBeNull();
+  });
+
+  it("deleteCleanProfile не помечает IP без явного taintExitIp=true, а untaintCleanRoomIp снимает отметку", async () => {
+    const tmp = await createCleanProfile({ label: "Tmp", provider: "anthropic", browser_engine: "chrome" });
+    await launchCleanBrowser(tmp.id);
+    const cleanDel = await deleteCleanProfile(tmp.id, false);
+    expect(cleanDel.tainted_ips["185.212.102.40"]).toBeUndefined();
+
+    const tmp2 = await createCleanProfile({ label: "Tmp2", provider: "anthropic", browser_engine: "chrome" });
+    await launchCleanBrowser(tmp2.id);
+    const taintedDel = await deleteCleanProfile(tmp2.id, true);
+    expect(taintedDel.tainted_ips["185.212.102.40"]).toBeTypeOf("number");
+    const afterUntaint = await untaintCleanRoomIp("185.212.102.40");
+    expect(afterUntaint.tainted_ips["185.212.102.40"]).toBeUndefined();
   });
 
   it("блокирует запуск песочницы при tainted IP, RU IP или ручном Kill-Switch", async () => {

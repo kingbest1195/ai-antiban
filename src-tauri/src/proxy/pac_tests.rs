@@ -98,6 +98,27 @@ fn local_direct_rule_is_the_same_with_and_without_a_chained_proxy() {
 }
 
 #[test]
+fn pac_fallback_preserves_socks5_and_strips_http_scheme() {
+    let socks = pac_for(Some("socks5://127.0.0.1:10808"));
+    assert!(
+        socks.contains("return \"SOCKS5 127.0.0.1:10808; DIRECT\";"),
+        "{socks}"
+    );
+
+    let socks_h = pac_for(Some("socks5h://127.0.0.1:10808"));
+    assert!(
+        socks_h.contains("return \"SOCKS5 127.0.0.1:10808; DIRECT\";"),
+        "{socks_h}"
+    );
+
+    let http = pac_for(Some("http://127.0.0.1:10809"));
+    assert!(
+        http.contains("return \"PROXY 127.0.0.1:10809; DIRECT\";"),
+        "{http}"
+    );
+}
+
+#[test]
 fn gemini_domains_match_across_matrix_and_pac_defaults() {
     let matrix = ProviderMatrix::load_bundled().unwrap();
     let matrix_gemini = &matrix.providers["gemini"].domains;

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { StepItem } from "../../ui";
 import type { AppStateData } from "../../types";
 import { setWarmupTimer } from "../../utils/api";
-import { Badge, Banner, Button, Card, Progress, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
+import { Badge, Button, Card, Progress, Row, Rows, Section, Stat, Stats, Steps } from "../../ui";
 import { subscription } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
 
@@ -129,15 +129,17 @@ export function Warmup({
           <div className="subs-timer">
             <p className="zs-t-heading">{copy.idleTitle}</p>
             <p className="zs-t-body subs-lead">{copy.idleText}</p>
-            <Button variant="primary" icon="pulse" onClick={start}>
+            <Button variant="secondary" icon="pulse" onClick={start}>
               {copy.start}
             </Button>
           </div>
         )}
         {disclaimer && (
-          <Banner tone="info" icon="info" title="Честно о прогреве 96 часов">
-            {disclaimer}
-          </Banner>
+          <div className="subs-note">
+            <p className="zs-t-caption" style={{ margin: 0 }}>
+              <strong>Честно о прогреве 96 часов:</strong> {disclaimer}
+            </p>
+          </div>
         )}
       </Card>
 

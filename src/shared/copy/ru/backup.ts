@@ -31,33 +31,33 @@ export const backup = {
     loading: "Ищем данные Claude…",
   },
   cache: {
-    section: "Сброс кэша",
-    title: "Кэш и метки устройства",
-    text: "Удаляет только локальные cookies, кэш сессий и локальный идентификатор устройства deviceId (ant-device-registry.json). Серверный Org ID и статус биллинга хранятся у провайдера и с диска не сбрасываются. Приложение попросит войти заново.",
+    section: "Очистка хвостов",
+    title: "Хвосты и метки устройства",
+    text: "Удаляет только локальные файлы входа (cookies), кэш сессий и локальный идентификатор устройства. Серверный ID организации и статус оплаты хранятся у провайдера и с диска не сбрасываются. Приложение попросит войти заново.",
     claude: "Claude Desktop",
     chatgpt: "ChatGPT Desktop",
-    clean: "Сбросить кэш",
-    cleaning: "Сбрасываем…",
-    confirmTitle: (client: string) => `Сбросить кэш ${client}?`,
+    clean: "Очистить хвосты",
+    cleaning: "Очищаем…",
+    confirmTitle: (client: string) => `Очистить хвосты ${client}?`,
     confirmText:
-      "Будут удалены локальные cookies, кэш сессий и локальный deviceId (ant-device-registry.json); серверный Org ID при этом не меняется. Это нельзя отменить, придётся войти заново.",
-    confirmAction: "Сбросить кэш",
+      "Будут удалены локальные файлы входа, кэш сессий и локальный идентификатор устройства; серверный ID организации при этом не меняется. Это нельзя отменить, придётся войти заново.",
+    confirmAction: "Очистить хвосты",
     notFoundTitle: (client: string) => `Данные ${client} не найдены`,
     notFoundText: (client: string) =>
-      `Папка локальных данных ${client} не обнаружена — кэш, cookies и deviceId уже отсутствуют.`,
-    alreadyCleanTitle: (client: string) => `Кэш ${client} уже чист`,
+      `Папка локальных данных ${client} не обнаружена — хвосты, cookies и идентификатор устройства уже отсутствуют.`,
+    alreadyCleanTitle: (client: string) => `Хвосты ${client} уже очищены`,
     alreadyCleanText: (client: string) =>
-      `Новых локальных cookies, сессий и записей deviceId для ${client} не найдено.`,
+      `Новых локальных cookies, сессий и записей устройства для ${client} не найдено.`,
     lockedTitle: (client: string) => `${client} всё ещё открыт`,
     lockedText: (client: string, lockedTargets: string[], removedCount: number) => {
       const preview = lockedTargets.slice(0, 3).join(", ");
       const tail = lockedTargets.length > 3 ? ` и ещё ${lockedTargets.length - 3}` : "";
       const removedNote = removedCount > 0 ? ` Остальных файлов удалено: ${removedCount}.` : "";
-      return `Не удалось очистить занятые файлы (${preview}${tail}) — закройте ${client} полностью и повторите сброс.${removedNote}`;
+      return `Не удалось очистить занятые файлы (${preview}${tail}) — закройте ${client} полностью и повторите очистку.${removedNote}`;
     },
   },
   profiles: {
-    section: "Профили Claude",
+    section: "Профили Claude Desktop",
     title: "Отдельные аккаунты",
     text: "У каждого профиля свои сессии, идентификатор устройства и кэш. Блокировка одного аккаунта не затрагивает остальные.",
     create: "Создать профиль",
@@ -86,7 +86,7 @@ export const backup = {
     safeLogoutBusy: "Выполняем безопасный выход…",
     safeLogoutModalTitle: "Безопасный выход из Claude",
     safeLogoutModalText:
-      "Закроет Claude Desktop и фоновые процессы, очистит только cookies и хранилище сессий (сохранив deviceId и настройки MCP) и запустит 4-часовой таймер смены IP/VPN. Также выйдите из claude.ai во всех браузерах перед сменой сети.",
+      "Закроет Claude Desktop и фоновые процессы, очистит только cookies и хранилище сессий (сохранив идентификатор устройства и настройки инструментов) и запустит 4-часовой таймер смены IP/VPN. Также выйдите из claude.ai во всех браузерах перед сменой сети.",
     safeLogoutModalConfirm: "Выйти и запустить таймер",
   },
   create: {

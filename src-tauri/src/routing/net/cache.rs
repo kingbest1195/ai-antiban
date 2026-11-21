@@ -72,9 +72,18 @@ impl EntryDnsCache {
         }
         ready
     }
+    pub(super) fn clear(&self) {
+        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+    }
 }
 
 pub(super) fn global_entry_dns_cache() -> &'static EntryDnsCache {
     static CACHE: OnceLock<EntryDnsCache> = OnceLock::new();
     CACHE.get_or_init(EntryDnsCache::default)
+}
+
+/// Clears the global entry DNS cache (called on VPN/network/upstream-proxy switches).
+pub fn clear_entry_dns_cache() {
+    global_entry_dns_cache().clear();
 }

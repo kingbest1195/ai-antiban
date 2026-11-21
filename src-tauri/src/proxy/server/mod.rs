@@ -98,6 +98,7 @@ pub struct ProxyServer {
     hold_ttl: Duration,
     is_alias: bool,
     alias_route_id: Option<String>,
+    alias_stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl Drop for ProxyServer {
@@ -146,6 +147,7 @@ impl ProxyServer {
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
             is_alias: false,
             alias_route_id: None,
+            alias_stop_rx: None,
         })
     }
 
@@ -179,6 +181,7 @@ impl ProxyServer {
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
             is_alias: false,
             alias_route_id: None,
+            alias_stop_rx: None,
         })
     }
 
@@ -195,11 +198,21 @@ impl ProxyServer {
         self
     }
 
-    /// Binds a dedicated loopback alias listener (`127.0.0.1:0`) for a Clean Room profile,
-    /// sharing `guard`, `state`, `auditor`, and `coverage`, and registering the alias port
-    /// in Layer-0 `net_safety` for anti-SSRF protection.
-    pub async fn bind_alias(&self, bound_route_id: Option<String>) -> Result<Self, std::io::Error> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+    /// Binds a dedicated loopback alias listener for a Clean Room profile, preferring
+    /// `preferred_port` (if given and free) and falling back to an ephemeral port (`127.0.0.1:0`).
+    pub async fn bind_alias_on(
+        &self,
+        bound_route_id: Option<String>,
+        preferred_port: Option<u16>,
+        alias_stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Result<Self, std::io::Error> {
+        let listener = match preferred_port.filter(|&p| p != 0) {
+            Some(port) => match TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(l) => l,
+                Err(_) => TcpListener::bind("127.0.0.1:0").await?,
+            },
+            None => TcpListener::bind("127.0.0.1:0").await?,
+        };
         let bound_addr = listener.local_addr()?;
         crate::core::net_safety::register_alias_port(bound_addr.port());
         Ok(Self {
@@ -219,7 +232,12 @@ impl ProxyServer {
             hold_ttl: self.hold_ttl,
             is_alias: true,
             alias_route_id: bound_route_id,
+            alias_stop_rx,
         })
+    }
+
+    pub async fn bind_alias(&self, bound_route_id: Option<String>) -> Result<Self, std::io::Error> {
+        self.bind_alias_on(bound_route_id, None, None).await
     }
 
     /// Number of direct (non-routed) outbound connections attempted, including the test redirect.
@@ -229,8 +247,13 @@ impl ProxyServer {
 
     /// Runs the proxy accept loop in the background.
     pub async fn run(self: Arc<Self>) {
+        let mut stop_rx = self.alias_stop_rx.clone();
         loop {
-            match self.listener.accept().await {
+            let accept_res = tokio::select! {
+                res = self.listener.accept() => res,
+                _ = wait_optional_stop(&mut stop_rx) => return,
+            };
+            match accept_res {
                 Ok((stream, client_addr)) => {
                     let permit = match Arc::clone(&self.conn_limiter).try_acquire_owned() {
                         Ok(p) => p,
@@ -319,6 +342,21 @@ impl ProxyServer {
         // 4. Generic HTTP health / info response: only for requests to the gateway itself
         // (origin-form `GET /` and the like).
         send_gateway_info(&mut client).await
+    }
+}
+
+async fn wait_optional_stop(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    let Some(rx) = rx.as_mut() else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
     }
 }
 

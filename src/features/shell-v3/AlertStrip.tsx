@@ -90,20 +90,39 @@ export function AlertStrip({
       render: () => (
         <Banner
           tone="warn"
-          title="Требуется защита службы CoworkVMService"
+          title="Требуется защита фоновой службы Claude"
           action={
             <Button
               size="sm"
               variant="secondary"
               disabled={coworkGuard.repairing}
-              onClick={() => void coworkGuard.repair()}
+              onClick={() => {
+                void coworkGuard.repair().then((updated) => {
+                  if (!updated) {
+                    overview.onToast?.(
+                      "Не удалось защитить фоновую службу Claude",
+                      "Запрос прав администратора отменён или планировщик вернул ошибку. Попробуйте снова или проверьте настройки.",
+                      "error",
+                    );
+                  }
+                });
+              }}
             >
               {coworkGuard.repairing ? "Чиним…" : "Починить в 1 клик"}
             </Button>
           }
         >
-          {coworkGuard.status?.summary ||
-            "Служба CoworkVMService может запускаться в обход прокси. Нажмите «Починить в 1 клик»."}
+          <>
+            <span>
+              {coworkGuard.status?.summary ||
+                "Фоновая служба Claude на Windows (CoworkVMService) может запускаться в обход прокси. Нажмите «Починить в 1 клик»."}
+            </span>
+            {coworkGuard.error && (
+              <p className="zs-v3-alert-error" role="alert">
+                {coworkGuard.error}
+              </p>
+            )}
+          </>
         </Banner>
       ),
     });
@@ -143,14 +162,14 @@ export function AlertStrip({
               : copy.banner.expiringKey.titleSoon
           }
           action={
-            <>
-              <Button size="sm" variant="primary" onClick={() => openZastavaBot(expiringRoute.id)}>
+            <div className="zs-banner__actions">
+              <Button size="sm" variant="secondary" onClick={() => openZastavaBot(expiringRoute.id)}>
                 {copy.banner.expiringKey.renew}
-              </Button>{" "}
+              </Button>
               <Button size="sm" variant="quiet" onClick={() => onPushRoute({ page: "connect" })}>
                 {copy.banner.expiringKey.openConnect}
               </Button>
-            </>
+            </div>
           }
         >
           {copy.banner.expiringKey.text(

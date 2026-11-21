@@ -125,13 +125,14 @@ describe("Функциональные анимации Заставы", () => {
     expect(html).toContain("0.04 мс");
   });
 
-  it("CleanRoomRadarAnim рендерит 4 слоя аудита", () => {
+  it("CleanRoomRadarAnim рендерит 4 локализованных слоя аудита (без MSIX на macOS)", () => {
     const html = renderToStaticMarkup(createElement(CleanRoomRadarAnim, { scanning: true, activeLayerIndex: 1 }));
     expect(html).toContain("zs-anim-radar--scanning");
     expect(html).toContain("Браузеры");
-    expect(html).toContain("Desktop / MSIX");
-    expect(html).toContain("IP / DNS");
-    expect(html).toContain("TZ / Locale");
+    expect(html).toContain("Приложения ИИ");
+    expect(html).toContain("IP и DNS");
+    expect(html).toContain("Время и язык");
+    expect(html).not.toContain("MSIX");
   });
 
   it("SmartScreenGuide рендерит 2 кадра для Windows и macOS и поддерживает сворачивание", () => {

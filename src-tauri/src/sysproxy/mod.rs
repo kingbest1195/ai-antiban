@@ -55,13 +55,17 @@ mod parsing;
 mod state;
 
 pub use orchestrator::{
-    enable_sysproxy, enable_sysproxy_privileged, is_sysproxy_active, reapply_browser_policies,
-    recover_ownership_on_start, refresh_if_services_changed, run_cleanup_cli, set_data_dir,
+    enable_sysproxy, enable_sysproxy_privileged, is_browser_pac_policy_active, is_os_pac_deferred,
+    is_sysproxy_active, reapply_browser_policies, recover_ownership_on_start,
+    refresh_if_services_changed, run_cleanup_cli, set_data_dir,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub use parsing::{
     get_chained_proxy, is_gateway_host_port, is_gateway_target, parse_gateway_port_from_pac_url,
-    parse_networksetup_webproxy_output, parse_reg_dword, parse_reg_sz, parse_windows_proxy_server,
-    set_chained_proxy,
+    parse_networksetup_webproxy_output, parse_reg_dword, parse_reg_sz,
+    parse_windows_proxy_override, parse_windows_proxy_server, set_chained_proxy,
+    windows_proxy_override_bypasses_all,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use state::force_os_dry_run;

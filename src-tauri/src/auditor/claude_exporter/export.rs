@@ -10,42 +10,33 @@ use super::{
     get_home_dir,
 };
 
-/// Helper that copies a file if it exists, creating parent folders.
+use crate::core::sanitize::{
+    copy_private_dir_filtered, copy_private_file, copy_sanitized_json_file, is_excluded_secret_name,
+};
+
+/// Helper that copies a file safely if it exists and is not an excluded secret file,
+/// redacting sensitive fields in `.json` files.
 fn copy_if_exists(src: &Path, dst: &Path) -> Option<u64> {
-    if src.is_file() {
-        if let Some(parent) = dst.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if fs::copy(src, dst).is_ok() {
-            return fs::metadata(dst).ok().map(|m| m.len());
-        }
+    if !src.is_file() {
+        return None;
     }
-    None
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if is_excluded_secret_name(&name) {
+        return None;
+    }
+    if name.ends_with(".json") {
+        copy_sanitized_json_file(src, dst).ok()
+    } else {
+        copy_private_file(src, dst).ok()
+    }
 }
 
-/// Recursively copies a directory tree.
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<(usize, u64)> {
-    fs::create_dir_all(dst)?;
-    let mut files = 0;
-    let mut bytes = 0;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if ty.is_dir() {
-            let (f, b) = copy_dir_all(&from, &to)?;
-            files += f;
-            bytes += b;
-        } else if ty.is_file() {
-            fs::copy(&from, &to)?;
-            if let Ok(meta) = fs::metadata(&to) {
-                bytes += meta.len();
-            }
-            files += 1;
-        }
-    }
-    Ok((files, bytes))
+/// Recursively copies a directory tree with secret filtering and JSON redaction.
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<(usize, u64), String> {
+    copy_private_dir_filtered(src, dst)
 }
 
 /// Generates the INDEX_SUMMARY.md map for the export package.

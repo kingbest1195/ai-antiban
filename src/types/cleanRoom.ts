@@ -39,6 +39,7 @@ export interface CleanRoomAuditReport {
   exit_timezone: string | null;
   ip_is_tainted: boolean;
   os_tz_matches_exit: boolean;
+  requires_os_sync?: boolean;
   findings: CleanRoomFinding[];
   critical_count: number;
   warning_count: number;

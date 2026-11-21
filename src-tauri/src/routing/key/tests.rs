@@ -222,3 +222,87 @@ fn test_plus_in_password_is_not_a_space() {
     assert_eq!(r.entries[0].password.as_deref(), Some("a+b c%zz"));
     assert_eq!(r.label, "A+B C");
 }
+
+#[test]
+fn parses_commercial_host_port_user_pass_and_schemeless_formats() {
+    let r1 = parse_route_key("socks5://proxy.example.com:10000:demo_user:demo_pass", 0).unwrap();
+    assert_eq!(r1.entries[0].proto, EntryProto::Socks5);
+    assert_eq!(r1.entries[0].host, "proxy.example.com");
+    assert_eq!(r1.entries[0].port, 10000);
+    assert_eq!(r1.entries[0].username.as_deref(), Some("demo_user"));
+    assert_eq!(r1.entries[0].password.as_deref(), Some("demo_pass"));
+
+    // Scheme-less defaults to socks5://
+    let r2 = parse_route_key("proxy.example.com:10000:demo_user:demo_pass", 0).unwrap();
+    assert_eq!(r2.entries[0].proto, EntryProto::Socks5);
+    assert_eq!(r2.entries[0].host, "proxy.example.com");
+    assert_eq!(r2.entries[0].port, 10000);
+    assert_eq!(r2.entries[0].username.as_deref(), Some("demo_user"));
+    assert_eq!(r2.entries[0].password.as_deref(), Some("demo_pass"));
+
+    // Colons inside password in host:port:user:pass
+    let r3 = parse_route_key("http://proxy.example.com:8080:demo_user:pa:ss:123", 0).unwrap();
+    assert_eq!(r3.entries[0].proto, EntryProto::Http);
+    assert_eq!(r3.entries[0].password.as_deref(), Some("pa:ss:123"));
+
+    // host:port@user:pass
+    let r4 = parse_route_key("socks5://proxy.example.com:10000@demo_user:demo_pass", 0).unwrap();
+    assert_eq!(r4.entries[0].host, "proxy.example.com");
+    assert_eq!(r4.entries[0].port, 10000);
+    assert_eq!(r4.entries[0].username.as_deref(), Some("demo_user"));
+    assert_eq!(r4.entries[0].password.as_deref(), Some("demo_pass"));
+
+    // Unencoded @ and # inside password in user:pass@host:port
+    let r5 = parse_route_key("socks5://demo_user:p@ss#1@proxy.example.com:1080#Work", 0).unwrap();
+    assert_eq!(r5.entries[0].host, "proxy.example.com");
+    assert_eq!(r5.entries[0].port, 1080);
+    assert_eq!(r5.entries[0].username.as_deref(), Some("demo_user"));
+    assert_eq!(r5.entries[0].password.as_deref(), Some("p@ss#1"));
+    assert_eq!(r5.label, "Work");
+
+    // IPv6 host:port:user:pass
+    let r6 = parse_route_key("socks5://[::1]:1080:demo_user:demo_pass", 0).unwrap();
+    assert_eq!(r6.entries[0].host, "::1");
+    assert_eq!(r6.entries[0].port, 1080);
+    assert_eq!(r6.entries[0].username.as_deref(), Some("demo_user"));
+    assert_eq!(r6.entries[0].password.as_deref(), Some("demo_pass"));
+
+    // Bare host:port
+    let r7 = parse_route_key("127.0.0.1:1080", 0).unwrap();
+    assert_eq!(r7.entries[0].proto, EntryProto::Socks5);
+    assert_eq!(r7.entries[0].host, "127.0.0.1");
+    assert_eq!(r7.entries[0].port, 1080);
+    assert!(r7.entries[0].username.is_none());
+}
+
+#[test]
+fn invalid_proxy_errors_are_russian_and_never_leak_credentials() {
+    let err =
+        parse_route_key("socks5://demo_user:SecretPass99@169.254.169.254:1080", 0).unwrap_err();
+    assert!(!err.contains("SecretPass99"), "{err}");
+    assert!(
+        err.chars()
+            .any(|c| ('а'..='я').contains(&c) || ('А'..='Я').contains(&c)),
+        "{err}"
+    );
+
+    let bad = parse_route_key(
+        "socks5://proxy.example.com:notaport:demo_user:SecretPass99",
+        0,
+    )
+    .unwrap_err();
+    assert!(!bad.contains("SecretPass99"), "{bad}");
+    assert!(bad.contains("Примеры:"), "{bad}");
+}
+
+#[test]
+fn accepts_uppercase_zastava_scheme_and_preserves_trailing_slash_in_password() {
+    let payload = r#"{"v":2,"entry":[{"proto":"socks5","host":"185.1.1.1","port":1080,"username":"UserA","password":"PassWord/"}]}"#;
+    let upper = format!("ZASTAVA://{}", URL_SAFE_NO_PAD.encode(payload.as_bytes()));
+    let route = parse_route_key(&upper, 0).unwrap();
+    assert_eq!(route.entries[0].username.as_deref(), Some("UserA"));
+    assert_eq!(route.entries[0].password.as_deref(), Some("PassWord/"));
+
+    let slash_pass = parse_route_key("socks5://proxy.example.com:1080:demo_user:paSs/", 0).unwrap();
+    assert_eq!(slash_pass.entries[0].password.as_deref(), Some("paSs/"));
+}

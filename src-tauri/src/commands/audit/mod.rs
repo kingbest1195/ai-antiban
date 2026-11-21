@@ -32,7 +32,8 @@ fn read_os_pac_deferred() -> bool {
 pub(crate) async fn read_runtime_protection_flags() -> auditor::AuditProtectionFlags {
     tokio::task::spawn_blocking(|| auditor::AuditProtectionFlags {
         sysproxy_active: crate::sysproxy::is_sysproxy_active(),
-        cli_or_sandbox_protection_active: crate::sysproxy::is_cli_protection_enabled(),
+        cli_or_sandbox_protection_active: crate::sysproxy::is_cli_protection_enabled()
+            || crate::sysproxy::is_browser_pac_policy_active(),
         os_pac_deferred: read_os_pac_deferred(),
     })
     .await

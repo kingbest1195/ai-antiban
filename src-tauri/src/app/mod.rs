@@ -211,14 +211,16 @@ pub fn run() {
             commands::deeplink::take_pending_deep_link,
             commands::clean_room::run_clean_room_audit,
             commands::clean_room::discover_clean_browsers,
-            commands::clean_room::list_clean_profiles,
-            commands::clean_room::create_clean_profile,
-            commands::clean_room::update_clean_profile_step,
-            commands::clean_room::start_clean_profile_warmup,
-            commands::clean_room::launch_clean_browser,
-            commands::clean_room::mark_clean_profile_tainted,
-            commands::clean_room::delete_clean_profile,
+            commands::clean_room::profiles::list_clean_profiles,
+            commands::clean_room::profiles::create_clean_profile,
+            commands::clean_room::profiles::update_clean_profile_step,
+            commands::clean_room::profiles::update_clean_profile_route,
+            commands::clean_room::profiles::start_clean_profile_warmup,
+            commands::clean_room::profiles::launch_clean_browser,
+            commands::clean_room::profiles::mark_clean_profile_tainted,
+            commands::clean_room::profiles::delete_clean_profile,
             commands::clean_room::mark_ip_tainted,
+            commands::clean_room::untaint_clean_room_ip,
             commands::state_v3::complete_onboarding_v3,
             commands::state_v3::mark_whats_new_v3_seen,
             commands::state_v3::dismiss_hint,
@@ -227,6 +229,7 @@ pub fn run() {
             commands::bunker::update_bunker_settings,
             commands::bunker::run_bunker_backup_now,
             commands::bunker::list_bunker_snapshots,
+            commands::bunker::clear_bunker_snapshots,
             commands::bunker::open_bunker_folder,
             commands::bunker::convert_web_export,
             commands::bunker::generate_bunker_restore_prompt,
@@ -243,7 +246,19 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                static SANDBOX_SHUTDOWN_DONE: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
                 startup::note_shutdown(app_handle);
+                if !SANDBOX_SHUTDOWN_DONE.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    && let Some(sandbox_registry) = app_handle
+                        .try_state::<crate::clean_room::browser_sandbox::SandboxProcessRegistry>()
+                {
+                    let data_dir = app_handle.path().app_data_dir().ok();
+                    crate::clean_room::browser_sandbox::terminate_all_sandboxes_on_exit(
+                        &sandbox_registry,
+                        data_dir.as_deref(),
+                    );
+                }
                 // Cmd+Q / closing the last window / external OS exit: run shutdown cleanup only if
                 // it has not already executed via the async tray-quit or updater flows.
                 if let Some(report) = sysproxy::cleanup_on_shutdown_once(Some(app_handle), "quit") {

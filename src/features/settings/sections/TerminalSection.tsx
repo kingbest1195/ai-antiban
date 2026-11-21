@@ -82,7 +82,7 @@ export function TerminalSection({
             ) : (
               <Button
                 size="sm"
-                variant="primary"
+                variant="secondary"
                 disabled={osTzLoading}
                 onClick={() => void onSyncOsTimezone()}
               >

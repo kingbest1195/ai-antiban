@@ -19,7 +19,7 @@ pub(super) async fn killswitch_engaged(rx: &mut tokio::sync::watch::Receiver<boo
 pub(super) fn killswitch_stopped() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::ConnectionAborted,
-        "connection stopped by the manual kill-switch",
+        "Соединение остановлено ручной блокировкой сети",
     )
 }
 
@@ -52,7 +52,7 @@ pub(super) async fn send_status(
     reason: &str,
 ) -> Result<(), std::io::Error> {
     let resp = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
         reason.len(),
     );
     client.write_all(resp.as_bytes()).await?;
@@ -64,7 +64,7 @@ pub(super) async fn send_bad_gateway(
     reason: &str,
 ) -> Result<(), std::io::Error> {
     let resp = format!(
-        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         reason.len(),
         reason
     );
@@ -74,9 +74,9 @@ pub(super) async fn send_bad_gateway(
 
 pub(super) async fn send_routing_changed(client: &mut TcpStream) -> Result<(), std::io::Error> {
     let reason =
-        "Zastava routing for this service changed while the connection was being set up: retry.";
+        "Маршрут Заставы для этого сервиса изменился во время подключения — повторите запрос.";
     let resp = format!(
-        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         reason.len(),
         reason
     );
@@ -101,7 +101,7 @@ pub(super) async fn send_forbidden(
     reason: &str,
 ) -> Result<(), std::io::Error> {
     let resp = format!(
-        "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         reason.len(),
         reason
     );

@@ -140,7 +140,7 @@ export function HomeHub({
                     type="button"
                     className={`zs-v3-persona-pill zs-v3-persona-pill--${personaPill.tone}`}
                     onClick={() => onPushRoute({ page: "backup" })}
-                    title="Открыть Индекс риска Persona и Бункер"
+                    title="Открыть риск KYC и блокировки Claude и Бункер"
                   >
                     {personaPill.label}
                   </button>

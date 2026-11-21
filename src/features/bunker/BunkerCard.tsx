@@ -4,7 +4,7 @@ import {
   Banner,
   Button,
   Card,
-  Mono,
+  ExpandRow,
   Row,
   Rows,
   Section,
@@ -15,10 +15,11 @@ import {
   Switch,
 } from "../../ui";
 import { bunkerCopy as copy } from "../../shared/copy/ru/bunker";
-import type { ShowToast } from "../../shared/hooks";
+import type { ClaudeBackup, ShowToast } from "../../shared/hooks";
 import { writeClipboard } from "../../shared/lib/clipboard";
 import { formatNumber } from "../../shared/lib/format";
 import {
+  clearBunkerSnapshots,
   generateBunkerRestorePrompt,
   getBunkerStatus,
   listBunkerSnapshots,
@@ -31,40 +32,48 @@ import { WebExportHelper } from "./WebExportHelper";
 import "./bunker.css";
 
 export interface BunkerCardProps {
+  backup?: ClaudeBackup;
   onToast?: ShowToast;
   /** Внешний триггер перезагрузки (например, после экстренного бэкапа из SOS). */
   refreshTrigger?: number;
+  /** Начальное состояние (для SSR/тестов). */
+  initialStatus?: BunkerStatus;
 }
 
 export function formatBytesCompact(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 МБ";
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} КБ`;
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} ГБ`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
 export function formatSnapshotTime(tsSec: number | null | undefined): string {
   if (!tsSec || !Number.isFinite(tsSec)) return copy.status.never;
   try {
-    return new Date(tsSec * 1000).toLocaleString("ru-RU", {
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return new Date(tsSec * 1000)
+      .toLocaleString("ru-RU", {
+        day: "2-digit",
+        month: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+      .replace(", ", " ");
   } catch {
     return String(tsSec);
   }
 }
 
-/** Локальный «Бункер данных»: расписание, ротация, 1-click снапшот, RESTORE_PROMPT.md и WebExportHelper. */
-export function BunkerCard({ onToast, refreshTrigger }: BunkerCardProps) {
-  const [status, setStatus] = useState<BunkerStatus | null>(null);
+/** Локальный «Бункер данных»: расписание, ротация, 1-click копия, промпт переноса и веб-экспорт. */
+export function BunkerCard({ backup, onToast, refreshTrigger, initialStatus }: BunkerCardProps) {
+  const [status, setStatus] = useState<BunkerStatus | null>(initialStatus ?? null);
   const [snapshots, setSnapshots] = useState<BunkerSnapshotMeta[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialStatus);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [backingUp, setBackingUp] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [showWebHelper, setShowWebHelper] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -118,6 +127,33 @@ export function BunkerCard({ onToast, refreshTrigger }: BunkerCardProps) {
     }
   };
 
+  const handleMaxTotalMbChange = async (value: string) => {
+    const maxMb = Number(value);
+    if (!Number.isFinite(maxMb) || maxMb <= 0) return;
+    try {
+      const updated = await updateBunkerSettings({ max_total_mb: maxMb });
+      setStatus((prev) => (prev ? { ...prev, settings: updated } : prev));
+    } catch (err) {
+      onToast?.(copy.toasts.settingsErrTitle, err instanceof Error ? err.message : String(err), "error");
+    }
+  };
+
+  const handleClearSnapshots = async () => {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      const nextStatus = await clearBunkerSnapshots();
+      setStatus(nextStatus);
+      const nextSnapshots = await listBunkerSnapshots();
+      setSnapshots(nextSnapshots);
+      onToast?.(copy.toasts.clearedTitle, copy.toasts.clearedText, "success");
+    } catch (err) {
+      onToast?.(copy.toasts.clearErrTitle, err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setClearing(false);
+    }
+  };
+
   const handleBackupNow = async () => {
     if (backingUp) return;
     setBackingUp(true);
@@ -157,8 +193,6 @@ export function BunkerCard({ onToast, refreshTrigger }: BunkerCardProps) {
     }
   };
 
-  const showEmbeddedWebHelper = Boolean(status && !status.has_any_local_data) || showWebHelper;
-
   return (
     <Section title={copy.section}>
       <Card
@@ -188,22 +222,21 @@ export function BunkerCard({ onToast, refreshTrigger }: BunkerCardProps) {
           </Banner>
         ) : status ? (
           <>
-            <Stats>
+            <Stats className="zs-bunker__stats">
               <Stat value={formatNumber(status.snapshots_count)} label={copy.status.snapshots} />
-              <Stat value={formatBytesCompact(status.total_snapshots_bytes)} label={copy.status.totalSize} />
               <Stat
-                value={formatSnapshotTime(status.settings.last_backup_at)}
+                value={formatBytesCompact(status.total_snapshots_bytes)}
+                label={copy.status.totalSizeQuota(status.settings.max_total_mb ?? 500)}
+              />
+              <Stat
+                value={
+                  status.settings.last_backup_at
+                    ? formatSnapshotTime(status.settings.last_backup_at)
+                    : copy.status.neverShort
+                }
                 label={copy.status.lastBackup}
               />
             </Stats>
-
-            <Rows className="zs-bunker__block">
-              <Row
-                icon="folder"
-                title={copy.status.folder}
-                sub={<Mono>{status.bunker_dir}</Mono>}
-              />
-            </Rows>
 
             <div className="zs-bunker__controls">
               <Switch
@@ -226,6 +259,20 @@ export function BunkerCard({ onToast, refreshTrigger }: BunkerCardProps) {
                   options={[...copy.controls.retentionOptions]}
                   onChange={(e) => void handleRetentionChange(e.target.value)}
                 />
+                <Select
+                  label={copy.controls.maxTotalMbLabel}
+                  value={String(status.settings.max_total_mb ?? 500)}
+                  options={[...copy.controls.maxTotalMbOptions]}
+                  onChange={(e) => void handleMaxTotalMbChange(e.target.value)}
+                />
+                <Button
+                  variant="secondary"
+                  block
+                  disabled={clearing || snapshots.length === 0}
+                  onClick={() => void handleClearSnapshots()}
+                >
+                  {clearing ? copy.actions.clearingOld : copy.actions.clearOld}
+                </Button>
               </div>
             </div>
 
@@ -239,49 +286,86 @@ export function BunkerCard({ onToast, refreshTrigger }: BunkerCardProps) {
               >
                 {backingUp ? copy.actions.backingUp : copy.actions.backupNow}
               </Button>
-              <div className="zs-bunker__row-actions">
+              <div className="zs-bunker__two-col">
                 <Button size="sm" icon="folder" onClick={() => void handleOpenFolder()}>
                   {copy.actions.openFolder}
                 </Button>
-                <Button
-                  size="sm"
-                  icon={copiedPrompt ? "check" : "copy"}
-                  onClick={() => void handleCopyPrompt()}
-                >
-                  {copiedPrompt ? copy.actions.copiedPrompt : copy.actions.copyPrompt}
-                </Button>
-                {status.has_any_local_data && (
+                {backup ? (
                   <Button
                     size="sm"
-                    variant="quiet"
-                    onClick={() => setShowWebHelper((v) => !v)}
+                    icon="download"
+                    title={copy.actions.saveZipTitle}
+                    disabled={backup.claudeExporting}
+                    onClick={() => void backup.handleExportClaude()}
                   >
-                    {showWebHelper ? copy.actions.toggleWebHelperHide : copy.actions.toggleWebHelperShow}
+                    {backup.claudeExporting ? copy.actions.savingZip : copy.actions.saveZip}
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    icon={copiedPrompt ? "check" : "copy"}
+                    onClick={() => void handleCopyPrompt()}
+                  >
+                    {copiedPrompt ? copy.actions.copiedPromptBtn : copy.actions.copyPromptBtn}
                   </Button>
                 )}
               </div>
             </div>
 
-            {status.sources.length > 0 && (
-              <div className="zs-bunker__block">
-                <p className="zs-t-caption zs-bunker__section-label">{copy.sourcesTitle}</p>
-                <Rows>
-                  {status.sources.map((src) => (
-                    <Row
-                      key={src.kind}
-                      icon={src.available ? "check" : "folder"}
-                      title={src.label}
-                      sub={src.path_hint ? <Mono>{src.path_hint}</Mono> : undefined}
-                      trail={
-                        <Badge tone={src.available ? "ok" : "neutral"}>
-                          {src.available ? copy.sourceAvailable : copy.sourceMissing}
-                        </Badge>
-                      }
-                    />
-                  ))}
-                </Rows>
-              </div>
-            )}
+            <div className="zs-bunker__prompt-box zs-bunker__block">
+              <p className="zs-bunker__prompt-title">{copy.actions.promptBoxTitle}</p>
+              <p className="zs-bunker__prompt-sub">{copy.actions.copyPromptSub}</p>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={copiedPrompt ? "check" : "copy"}
+                className="zs-bunker__prompt-btn"
+                onClick={() => void handleCopyPrompt()}
+              >
+                {copiedPrompt ? copy.actions.copiedPromptBtn : copy.actions.copyPromptBtn}
+              </Button>
+            </div>
+
+            <Rows className="zs-bunker__block">
+              {status.has_any_local_data && (
+                <ExpandRow
+                  icon="globe"
+                  title={copy.actions.toggleWebHelperShow}
+                  sub={copy.actions.webExportSub}
+                  open={showWebHelper}
+                  onToggle={() => setShowWebHelper((v) => !v)}
+                >
+                  <WebExportHelper ctaVariant="secondary" onConverted={() => void loadAll()} onToast={onToast} />
+                </ExpandRow>
+              )}
+              {status.sources.length > 0 && (
+                <ExpandRow
+                  icon="folder"
+                  title={copy.sourcesSummaryTitle(
+                    status.sources.filter((s) => s.available).length,
+                    status.sources.length,
+                  )}
+                  sub={copy.sourcesSummarySub}
+                  open={sourcesOpen}
+                  onToggle={() => setSourcesOpen((v) => !v)}
+                >
+                  <Rows>
+                    {status.sources.map((src) => (
+                      <Row
+                        key={src.kind}
+                        icon={src.available ? "check" : "folder"}
+                        title={src.label}
+                        trail={
+                          <span className="zs-bunker__source-status">
+                            {src.available ? copy.sourceAvailable : copy.sourceMissing}
+                          </span>
+                        }
+                      />
+                    ))}
+                  </Rows>
+                </ExpandRow>
+              )}
+            </Rows>
 
             <div className="zs-bunker__block">
               <p className="zs-t-caption zs-bunker__section-label">{copy.historyTitle}</p>
@@ -306,9 +390,9 @@ export function BunkerCard({ onToast, refreshTrigger }: BunkerCardProps) {
               )}
             </div>
 
-            {showEmbeddedWebHelper && (
+            {!status.has_any_local_data && (
               <div className="zs-bunker__block">
-                <WebExportHelper onConverted={() => void loadAll()} onToast={onToast} />
+                <WebExportHelper ctaVariant="secondary" onConverted={() => void loadAll()} onToast={onToast} />
               </div>
             )}
           </>

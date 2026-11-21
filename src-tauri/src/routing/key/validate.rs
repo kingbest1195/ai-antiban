@@ -14,7 +14,7 @@ use crate::proxy::server::{is_forbidden_ip, is_internal_hostname};
 pub(super) fn decode_base64_flexible(input: &str) -> Result<Vec<u8>, String> {
     let clean = input.trim().trim_matches('"');
     if clean.is_empty() {
-        return Err("Empty base64 payload".to_string());
+        return Err("Пустое содержимое base64 в ключе".to_string());
     }
     for engine in [&URL_SAFE_NO_PAD, &URL_SAFE, &STANDARD, &STANDARD_NO_PAD] {
         if let Ok(bytes) = engine.decode(clean) {
@@ -30,19 +30,19 @@ pub(super) fn decode_base64_flexible(input: &str) -> Result<Vec<u8>, String> {
             }
         }
     }
-    Err("Could not decode base64 with standard or URL-safe encoding".to_string())
+    Err("Не удалось декодировать base64-строку ключа".to_string())
 }
 
 /// serde errors can quote offending values (possibly a password), so only the position is kept.
 pub(super) fn json_error(e: &serde_json::Error) -> String {
     let kind = match e.classify() {
-        serde_json::error::Category::Io => "I/O error",
-        serde_json::error::Category::Syntax => "syntax error",
-        serde_json::error::Category::Data => "missing or mistyped field",
-        serde_json::error::Category::Eof => "unexpected end of data",
+        serde_json::error::Category::Io => "ошибка ввода-вывода",
+        serde_json::error::Category::Syntax => "синтаксическая ошибка",
+        serde_json::error::Category::Data => "отсутствующее или неверное поле",
+        serde_json::error::Category::Eof => "неожиданный конец данных",
     };
     format!(
-        "Invalid key JSON: {kind} at line {}, column {}",
+        "Некорректный JSON ключа: {kind} (строка {}, столбец {})",
         e.line(),
         e.column()
     )
@@ -60,11 +60,13 @@ pub(super) fn clean_label(label: Option<String>, fallback: &str) -> Result<Strin
         None => Ok(fallback.chars().take(MAX_LABEL_LEN).collect()),
         Some(l) => {
             if has_control(&l) {
-                return Err("Key label contains control characters".to_string());
+                return Err(
+                    "Название маршрута содержит недопустимые управляющие символы".to_string(),
+                );
             }
             if l.chars().count() > MAX_LABEL_LEN {
                 return Err(format!(
-                    "Key label is longer than {MAX_LABEL_LEN} characters"
+                    "Название маршрута длиннее {MAX_LABEL_LEN} символов"
                 ));
             }
             Ok(l)
@@ -74,27 +76,37 @@ pub(super) fn clean_label(label: Option<String>, fallback: &str) -> Result<Strin
 
 pub(super) fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > MAX_ID_LEN {
-        return Err(format!("Key id must be 1..={MAX_ID_LEN} characters"));
+        return Err(format!(
+            "Идентификатор ключа должен быть длиной 1..={MAX_ID_LEN} символов"
+        ));
     }
     if !id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err("Key id may contain only latin letters, digits, '-' and '_'".to_string());
+        return Err(
+            "Идентификатор ключа может содержать только латинские буквы, цифры, '-' и '_'"
+                .to_string(),
+        );
     }
     Ok(())
 }
 
 fn validate_domain(h: &str) -> Result<(), String> {
     if h.len() > MAX_HOST_LEN {
-        return Err("Entry host is too long".to_string());
+        return Err("Имя хоста прокси слишком длинное".to_string());
     }
     if is_internal_hostname(h) {
-        return Err("Entry host must be a public domain, not a local/internal name".to_string());
+        return Err(
+            "Хост прокси должен быть публичным доменом, а не локальным или внутренним именем"
+                .to_string(),
+        );
     }
     let labels: Vec<&str> = h.split('.').collect();
     if labels.len() < 2 {
-        return Err("Entry host must be a fully qualified domain or a public IP".to_string());
+        return Err(
+            "Хост прокси должен быть полным доменом (FQDN) или публичным IP-адресом".to_string(),
+        );
     }
     for label in labels {
         if label.is_empty()
@@ -103,12 +115,12 @@ fn validate_domain(h: &str) -> Result<(), String> {
             || label.ends_with('-')
             || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         {
-            return Err("Entry host is not a valid domain name".to_string());
+            return Err("Некорректное доменное имя сервера прокси".to_string());
         }
         // `127.1`, `2130706433`, `0x7f.1`: resolvers read these as IPv4 literals, so a text check
         // for "public host" is meaningless. (The resolved address is verified at connect time too.)
         if is_numeric_or_hex_label(label) {
-            return Err("Entry host must not contain numeric or hex labels: use a plain domain or a dotted IP".to_string());
+            return Err("Хост прокси не должен содержать числовых или hex-меток: укажите обычный домен или IP-адрес".to_string());
         }
     }
     Ok(())
@@ -134,15 +146,15 @@ fn validate_host(raw: &str, allow_local: bool) -> Result<String, String> {
         .trim_end_matches('.')
         .to_ascii_lowercase();
     if h.is_empty() {
-        return Err("Entry host cannot be empty".to_string());
+        return Err("Хост прокси не может быть пустым".to_string());
     }
     if let Ok(ip) = h.parse::<IpAddr>() {
         if is_forbidden_ip(&ip) && !(allow_local && is_user_local_ip(&ip)) {
             return Err(if allow_local {
-                "Entry host must be a public or local-network IP (link-local, metadata and reserved ranges are rejected)"
+                "Хост прокси должен быть публичным или локальным IP-адресом (служебные, link-local и metadata-диапазоны запрещены)"
                     .to_string()
             } else {
-                "Entry host must be a public IP (loopback, private and reserved ranges are rejected)"
+                "Хост прокси должен быть публичным IP-адресом (локальные и зарезервированные диапазоны запрещены)"
                     .to_string()
             });
         }
@@ -163,14 +175,21 @@ fn validate_cred(
     let Some(v) = value.filter(|v| !v.is_empty()) else {
         return Ok(None);
     };
+    let what_ru = if what == "username" {
+        "Логин"
+    } else {
+        "Пароль"
+    };
     if v.len() > MAX_CRED_LEN {
-        return Err(format!("Entry {what} is longer than {MAX_CRED_LEN} bytes"));
+        return Err(format!("{what_ru} длиннее {MAX_CRED_LEN} байт"));
     }
     if has_control(&v) {
-        return Err(format!("Entry {what} contains control characters"));
+        return Err(format!(
+            "{what_ru} содержит недопустимые управляющие символы"
+        ));
     }
     if what == "username" && proto != EntryProto::Socks5 && v.contains(':') {
-        return Err("Entry username must not contain ':' for HTTP(S) entries".to_string());
+        return Err("Логин для HTTP(S)-прокси не должен содержать символ ':'".to_string());
     }
     Ok(Some(v))
 }
@@ -186,7 +205,7 @@ pub(super) fn build_entry(
 ) -> Result<Entry, String> {
     let host = validate_host(host, allow_local)?;
     if port == 0 {
-        return Err("Entry port cannot be 0".to_string());
+        return Err("Порт прокси не может быть равен 0".to_string());
     }
     // A local proxy is fine, the gateway itself (a loop) is not.
     let loopback_ip = if host == "localhost" {
@@ -198,12 +217,12 @@ pub(super) fn build_entry(
         .map(|ip| is_gateway_loop(&ip, port, 0))
         .unwrap_or(false)
     {
-        return Err("Entry host:port is the Zastava gateway itself".to_string());
+        return Err("Указанный адрес совпадает с локальным шлюзом самой Заставы".to_string());
     }
     let username = validate_cred(username, "username", proto)?;
     let password = validate_cred(password, "password", proto)?;
     if password.is_some() && username.is_none() {
-        return Err("Entry password is set without a username".to_string());
+        return Err("Указан пароль прокси без имени пользователя (логина)".to_string());
     }
     let sni = match sni
         .map(|s| s.trim().trim_end_matches('.').to_ascii_lowercase())
@@ -212,13 +231,16 @@ pub(super) fn build_entry(
         None => None,
         Some(s) => {
             if proto != EntryProto::Https {
-                return Err("Entry 'sni' is only allowed for https entries".to_string());
+                return Err("Параметр 'sni' поддерживается только для HTTPS-прокси".to_string());
             }
             if s.parse::<IpAddr>().is_ok() {
-                return Err("Entry 'sni' must be a domain name".to_string());
+                return Err(
+                    "Параметр 'sni' должен быть доменным именем, а не IP-адресом".to_string(),
+                );
             }
-            validate_domain(&s)
-                .map_err(|_| "Entry 'sni' is not a valid public domain name".to_string())?;
+            validate_domain(&s).map_err(|_| {
+                "Параметр 'sni' не является корректным публичным доменом".to_string()
+            })?;
             Some(s)
         }
     };

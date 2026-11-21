@@ -1,7 +1,11 @@
+use super::super::journal::{Journal, Resource};
+use super::super::parsing::{format_proxy_url, is_local_proxy_reachable};
 use super::super::platform::{
     ChainState, Platform, PlatformError, ProxyEndpoint, ServiceId, ServiceKind, classify_services,
 };
-use super::super::{is_gateway_target, parse_gateway_port_from_pac_url, set_chained_proxy};
+use super::super::{
+    is_gateway_target, os_effects_enabled, parse_gateway_port_from_pac_url, set_chained_proxy,
+};
 use super::{
     HealGuard, MSG_ADMIN_AUTH_REQUIRED, MSG_KIND_UNKNOWN, MSG_ONLY_VPN, vpn_untouched_line,
 };
@@ -34,10 +38,10 @@ enum Detect {
     Incompatible,
 }
 
-fn endpoint_target(ep: &ProxyEndpoint, gateway_port: Option<u16>) -> Option<(String, u16)> {
-    if ep.enabled != Some(true) {
-        return None;
-    }
+fn endpoint_target_any_state(
+    ep: &ProxyEndpoint,
+    gateway_port: Option<u16>,
+) -> Option<(String, u16)> {
     let server = ep.server.as_deref().filter(|s| !s.is_empty())?;
     let port = ep.port.filter(|p| *p > 0)?;
     if is_gateway_target(server, port, gateway_port) {
@@ -46,18 +50,30 @@ fn endpoint_target(ep: &ProxyEndpoint, gateway_port: Option<u16>) -> Option<(Str
     Some((server.to_string(), port))
 }
 
-/// Looks at the explicit HTTP / HTTPS proxy of one service. Different HTTP and HTTPS upstreams
-/// are never flattened into one: they are refused. So is an upstream that needs credentials.
+fn endpoint_target(ep: &ProxyEndpoint, gateway_port: Option<u16>) -> Option<(String, u16)> {
+    if ep.enabled != Some(true) {
+        return None;
+    }
+    endpoint_target_any_state(ep, gateway_port)
+}
+
+/// Looks at the explicit HTTP / HTTPS / SOCKS proxy of one service. Different HTTP and HTTPS
+/// upstreams are never flattened into one: they are refused. So is an upstream that needs
+/// credentials. When only SOCKS is enabled (`-getsocksfirewallproxy`), preserves `socks5://`.
 fn detect_upstream(chain: &ChainState, gateway_port: Option<u16>) -> Detect {
     let http = endpoint_target(&chain.http, gateway_port);
     let https = endpoint_target(&chain.https, gateway_port);
-    let target = match (&http, &https) {
-        (None, None) => return Detect::None,
-        (Some(a), Some(b)) if a != b => return Detect::Incompatible,
-        (Some(a), _) | (_, Some(a)) => a.clone(),
+    let socks = endpoint_target(&chain.socks, gateway_port);
+
+    let (scheme, target) = match (&http, &https, &socks) {
+        (None, None, None) => return Detect::None,
+        (Some(a), Some(b), _) if a != b => return Detect::Incompatible,
+        (Some(a), _, _) | (_, Some(a), _) => ("http", a.clone()),
+        (None, None, Some(s)) => ("socks5", s.clone()),
     };
     let needs_login = (http.is_some() && chain.http.authenticated == Some(true))
-        || (https.is_some() && chain.https.authenticated == Some(true));
+        || (https.is_some() && chain.https.authenticated == Some(true))
+        || (socks.is_some() && chain.socks.authenticated == Some(true));
     if needs_login {
         return Detect::Incompatible;
     }
@@ -68,10 +84,70 @@ fn detect_upstream(chain: &ChainState, gateway_port: Option<u16>) -> Detect {
     if https.is_some() {
         off.https.enabled = Some(false);
     }
+    if socks.is_some() {
+        off.socks.enabled = Some(false);
+    }
     Detect::Found(Upstream {
-        target: format!("{}:{}", target.0, target.1),
+        target: format_proxy_url(scheme, &target.0, target.1),
         chain_off: off,
     })
+}
+
+/// Reconstructs the chained proxy target when Zastava already turned off the service's explicit
+/// proxy in an earlier pass (`Resource::Chain` is in the journal) and checks whether a local
+/// loopback proxy is still listening.
+fn detect_journaled_upstream(chain: &ChainState, gateway_port: Option<u16>) -> Option<String> {
+    let target = endpoint_target_any_state(&chain.http, gateway_port)
+        .or_else(|| endpoint_target_any_state(&chain.https, gateway_port))
+        .map(|(h, p)| format_proxy_url("http", &h, p))
+        .or_else(|| {
+            endpoint_target_any_state(&chain.socks, gateway_port)
+                .map(|(h, p)| format_proxy_url("socks5", &h, p))
+        })?;
+    if os_effects_enabled() && !is_local_proxy_reachable(&target) {
+        return None;
+    }
+    Some(target)
+}
+
+/// Read-only inspection of physical services when OS PAC writes are deferred (`os_pac_deferred`),
+/// keeping `chained_proxy` accurate as external proxies appear or disappear.
+fn inspect_chained_readonly(
+    p: &dyn Platform,
+    physical: &[ServiceId],
+    gateway_port: Option<u16>,
+    journal: Option<&Journal>,
+) -> Option<String> {
+    let mut chosen: Option<String> = None;
+    let mut journaled: Option<String> = None;
+    for svc in physical {
+        let Ok(chain) = p.get_chain(svc) else {
+            continue;
+        };
+        match detect_upstream(&chain, gateway_port) {
+            Detect::Found(u) => {
+                if chosen.is_none() {
+                    chosen = Some(u.target);
+                }
+            }
+            Detect::None => {
+                if journaled.is_none()
+                    && journal.is_some_and(|j| {
+                        j.entry(&Resource::Chain {
+                            service: svc.clone(),
+                        })
+                        .is_some()
+                    })
+                {
+                    journaled = detect_journaled_upstream(&chain, gateway_port);
+                }
+            }
+            Detect::Incompatible => return None,
+        }
+    }
+    let resolved = chosen.or(journaled);
+    set_chained_proxy(resolved.clone());
+    resolved
 }
 
 pub(super) struct Plan {
@@ -99,6 +175,8 @@ pub(super) struct PlannedPac {
     pub(super) unreadable: usize,
     pub(super) chain_admin_auth: bool,
     pub(super) os_pac_deferred: bool,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) upstream_proxy: Option<String>,
 }
 
 fn split_services_by_kind(
@@ -128,7 +206,9 @@ pub(super) fn plan_physical_pac(
     p: &dyn Platform,
     pac_url: &str,
     heal: Option<(&HealGuard, Instant)>,
+    journal: Option<&Journal>,
 ) -> Result<PlannedPac, String> {
+    let gateway_port = parse_gateway_port_from_pac_url(pac_url);
     let defer_reason = match p.temp_dns_overrides() {
         Ok(false) => None,
         Ok(true) => Some("temp_dns_overrides=true".to_string()),
@@ -136,14 +216,16 @@ pub(super) fn plan_physical_pac(
     };
     if let Some(reason) = defer_reason {
         crate::diagnostics::record("sysproxy:macos", &format!("os PAC skipped: {reason}"));
-        let vpn_untouched = p
+        let (physical, vpn_untouched) = p
             .list_services()
             .ok()
             .map(|all| {
                 let enabled: Vec<ServiceId> = all.into_iter().filter(|s| s.enabled).collect();
-                split_services_by_kind(p, &enabled).1
+                let (phys, vpn, _) = split_services_by_kind(p, &enabled);
+                (phys, vpn)
             })
             .unwrap_or_default();
+        let upstream_proxy = inspect_chained_readonly(p, &physical, gateway_port, journal);
         note_untouched_vpn(&vpn_untouched);
         return Ok(PlannedPac {
             plans: Vec::new(),
@@ -151,6 +233,7 @@ pub(super) fn plan_physical_pac(
             unreadable: 0,
             chain_admin_auth: false,
             os_pac_deferred: true,
+            upstream_proxy,
         });
     }
     let enabled: Vec<ServiceId> = p
@@ -180,7 +263,7 @@ pub(super) fn plan_physical_pac(
         }
         .to_string());
     }
-    if let Some((guard, _)) = heal {
+    if let Some((guard, now)) = heal {
         let mut fingerprint: Vec<String> = services
             .iter()
             .map(|s| format!("svc:{}", s.key()))
@@ -189,14 +272,14 @@ pub(super) fn plan_physical_pac(
             fingerprint.push(format!("vpn:{name}"));
         }
         guard.network(fingerprint);
-        services.retain(|s| !guard.is_suspended(&s.key()));
+        services.retain(|s| !guard.is_suspended_at(&s.key(), now));
     }
-    let gateway_port = parse_gateway_port_from_pac_url(pac_url);
 
     // Phase 1: read and validate everything. Nothing is written yet.
     let mut plans: Vec<Plan> = Vec::new();
     let mut unreadable = 0usize;
     let mut chain_admin_auth = false;
+    let mut journaled_fallback: Option<String> = None;
     for svc in services {
         let chain = match p.get_chain(&svc) {
             Ok(c) => c,
@@ -213,7 +296,19 @@ pub(super) fn plan_physical_pac(
             }
         };
         let upstream = match detect_upstream(&chain, gateway_port) {
-            Detect::None => None,
+            Detect::None => {
+                if journaled_fallback.is_none()
+                    && journal.is_some_and(|j| {
+                        j.entry(&Resource::Chain {
+                            service: svc.clone(),
+                        })
+                        .is_some()
+                    })
+                {
+                    journaled_fallback = detect_journaled_upstream(&chain, gateway_port);
+                }
+                None
+            }
             Detect::Found(u) => Some(u),
             Detect::Incompatible => {
                 crate::diagnostics::record(
@@ -241,16 +336,16 @@ pub(super) fn plan_physical_pac(
         }
         return Err("Не удалось прочитать настройки сетевых служб.".to_string());
     }
-    // The PAC served by the gateway must chain through the upstream before it is switched off.
-    // Without a new finding the in-memory value stays: the explicit proxy is already off.
-    if let Some(target) = chosen {
-        set_chained_proxy(Some(target.to_string()));
-    }
+    // Always sync `chained_proxy`: set the newly discovered upstream, keep a still-alive
+    // journaled upstream, or explicitly clear to `None` when no upstream proxy exists.
+    let resolved_chained = chosen.map(str::to_string).or(journaled_fallback);
+    set_chained_proxy(resolved_chained.clone());
     Ok(PlannedPac {
         plans,
         vpn_untouched,
         unreadable,
         chain_admin_auth,
         os_pac_deferred: false,
+        upstream_proxy: resolved_chained,
     })
 }

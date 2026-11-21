@@ -153,7 +153,10 @@ export function ConnectScreen({
         "success",
       );
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = /invalid proxy url|invalid port|relative url|parse error|empty host/i.test(raw)
+        ? copy.key.invalidKeyFormat
+        : raw;
       setError(msg);
       onToast(copy.key.toast.connectError, msg, "error");
     } finally {
@@ -385,8 +388,7 @@ export function ConnectScreen({
     <>
       <HintCard
         hintId="connect_intro"
-        title="Отдельные маршруты для каждого ИИ-сервиса"
-        body="Подключите ключ Заставы или свой сервер (VPS), чтобы направлять Claude, ChatGPT и Gemini через чистые и независимые адреса."
+        body="Подключите ключ Заставы или свой сервер (VPS) — отдельные маршруты для каждого ИИ."
         dismissedHints={localDismissed}
         onDismiss={(id) => { setLocalDismissed((p) => (p.includes(id) ? p : [...p, id])); void onDismissHint?.(id); }}
       />
@@ -469,6 +471,7 @@ export function ConnectScreen({
           onRemoveRoute={handleRemoveRoute}
           onLegacyToggle={handleLegacyToggle}
           onLegacyDisconnect={handleLegacyDisconnect}
+          suppressPrimaryCta={layout === "sales"}
         />
       )}
 

@@ -43,6 +43,7 @@ export interface BunkerSettings {
   auto_backup_enabled: boolean;
   interval_hours: number;
   retention_count: number;
+  max_total_mb?: number;
   last_backup_at: number | null;
   last_backup_size_bytes: number | null;
 }

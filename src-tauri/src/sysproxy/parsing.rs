@@ -43,9 +43,29 @@ pub fn is_gateway_target(server: &str, port: u16, gateway_port: Option<u16>) -> 
     false
 }
 
-/// Helper that checks `host:port` string against gateway loop.
+/// Strips a known proxy URL scheme (`http://`, `https://`, `socks5h://`, `socks5://`, `socks://`),
+/// returning `(normalized_scheme, host_port)`.
+pub(crate) fn strip_proxy_scheme(raw: &str) -> (Option<&'static str>, &str) {
+    let t = raw.trim();
+    let lower = t.to_ascii_lowercase();
+    for (prefix, scheme) in [
+        ("socks5h://", "socks5h"),
+        ("socks5://", "socks5"),
+        ("socks://", "socks5"),
+        ("https://", "https"),
+        ("http://", "http"),
+    ] {
+        if lower.starts_with(prefix) {
+            return (Some(scheme), &t[prefix.len()..]);
+        }
+    }
+    (None, t)
+}
+
+/// Helper that checks `host:port` (or `scheme://host:port`) string against gateway loop.
 pub fn is_gateway_host_port(host_port: &str, gateway_port: Option<u16>) -> bool {
-    let trimmed = host_port.trim();
+    let (_, rest) = strip_proxy_scheme(host_port);
+    let trimmed = rest.trim().trim_end_matches('/');
     if let Some((host, port_str)) = trimmed.rsplit_once(':') {
         match port_str.parse::<u16>() {
             Ok(port) => is_gateway_target(host, port, gateway_port),
@@ -90,8 +110,20 @@ pub fn parse_networksetup_webproxy_output(output: &str) -> Option<(String, u16)>
     }
 }
 
-/// Parses Windows registry ProxyServer value into a `host:port` string.
-/// Supports both plain format "127.0.0.1:10808" and protocol format "http=127.0.0.1:10808;https=127.0.0.1:10808".
+/// Formats a normalized proxy URL (`scheme://host:port` or `scheme://[ipv6]:port`).
+pub(crate) fn format_proxy_url(scheme: &str, host: &str, port: u16) -> String {
+    let clean_host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if clean_host.contains(':') {
+        format!("{scheme}://[{clean_host}]:{port}")
+    } else {
+        format!("{scheme}://{clean_host}:{port}")
+    }
+}
+
+/// Parses Windows registry `ProxyServer` value into a scheme-preserved proxy URL (`http://host:port`
+/// or `socks5://host:port`).
+/// Supports both plain format `"127.0.0.1:10808"` and protocol format
+/// `"http=127.0.0.1:10809;https=127.0.0.1:10809"` / `"socks=127.0.0.1:10808"`.
 /// Returns `None` if the proxy points to Zastava's gateway (loop prevention) or is invalid.
 pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Option<String> {
     let raw = raw.trim();
@@ -99,17 +131,22 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
         return None;
     }
 
-    let candidate = if raw.contains('=') {
+    let (proto_hint, target) = if raw.contains('=') {
         let parts: Vec<&str> = raw
             .split(';')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
-        let find_proto = |proto: &str| -> Option<&str> {
+        let find_proto = |proto: &str| -> Option<(&'static str, &str)> {
             parts.iter().find_map(|p| {
                 let (k, v) = p.split_once('=')?;
                 if k.trim().eq_ignore_ascii_case(proto) {
-                    Some(v.trim())
+                    let scheme = if proto.eq_ignore_ascii_case("socks") {
+                        "socks5"
+                    } else {
+                        "http"
+                    };
+                    Some((scheme, v.trim()))
                 } else {
                     None
                 }
@@ -120,45 +157,96 @@ pub fn parse_windows_proxy_server(raw: &str, gateway_port: Option<u16>) -> Optio
             .or_else(|| find_proto("http"))
             .or_else(|| find_proto("socks"))
             .or_else(|| {
-                parts
-                    .first()
-                    .and_then(|p| p.split_once('=').map(|(_, v)| v.trim()).or(Some(p)))
-            })
+                parts.first().map(|p| {
+                    p.split_once('=')
+                        .map(|(k, v)| {
+                            let scheme = if k.trim().to_ascii_lowercase().starts_with("socks") {
+                                "socks5"
+                            } else {
+                                "http"
+                            };
+                            (scheme, v.trim())
+                        })
+                        .unwrap_or(("http", *p))
+                })
+            })?
     } else {
-        Some(raw)
+        ("http", raw)
     };
 
-    let target = candidate?.trim();
+    let target = target.trim();
     if target.is_empty() {
         return None;
     }
 
-    let clean_target = target
-        .strip_prefix("http://")
-        .or_else(|| target.strip_prefix("https://"))
-        .or_else(|| target.strip_prefix("socks://"))
-        .unwrap_or(target);
+    let (explicit_scheme, clean_target) = strip_proxy_scheme(target);
+    let scheme = match explicit_scheme {
+        Some("socks5h") => "socks5h",
+        Some("socks5") => "socks5",
+        Some("http" | "https") => "http",
+        _ => proto_hint,
+    };
 
-    let (host, port_str) = clean_target.rsplit_once(':')?;
+    let (host, port_str) = clean_target.trim_end_matches('/').rsplit_once(':')?;
     let port = port_str.parse::<u16>().ok()?;
     if port == 0 {
         return None;
     }
 
-    let clean_host = host
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_string();
+    let clean_host = host.trim().trim_start_matches('[').trim_end_matches(']');
     if clean_host.is_empty() {
         return None;
     }
 
-    if is_gateway_target(&clean_host, port, gateway_port) {
+    if is_gateway_target(clean_host, port, gateway_port) {
         return None;
     }
 
-    Some(format!("{clean_host}:{port}"))
+    Some(format_proxy_url(scheme, clean_host, port))
+}
+
+/// Parses Windows registry `ProxyOverride` (`;` separated entries).
+pub fn parse_windows_proxy_override(raw: &str) -> Vec<String> {
+    raw.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// True when Windows `ProxyOverride` has a catch-all `*` rule that bypasses the explicit proxy
+/// for every destination.
+pub fn windows_proxy_override_bypasses_all(raw: Option<&str>) -> bool {
+    raw.is_some_and(|r| {
+        parse_windows_proxy_override(r)
+            .iter()
+            .any(|entry| entry == "*")
+    })
+}
+
+/// Checks whether a loopback chained proxy port is accepting TCP connections (fast 150ms probe).
+/// Non-loopback targets are assumed reachable here so OS detection does not stall on remote IPs.
+pub(crate) fn is_local_proxy_reachable(proxy: &str) -> bool {
+    let (_, rest) = strip_proxy_scheme(proxy);
+    let trimmed = rest.trim().trim_end_matches('/');
+    let Some((host, port_str)) = trimmed.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(port) = port_str.parse::<u16>() else {
+        return false;
+    };
+    let clean_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    let loopback_ip: std::net::IpAddr = match clean_host.as_str() {
+        "127.0.0.1" | "localhost" => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        "::1" => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        _ => return true,
+    };
+    let addr = std::net::SocketAddr::new(loopback_ip, port);
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(150)).is_ok()
 }
 
 /// Parses a REG_DWORD integer value from Windows `reg query` output.

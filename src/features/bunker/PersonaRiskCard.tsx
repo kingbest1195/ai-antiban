@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Banner, Button, Card, InfoTip, Row, Rows, Section, Skeleton, Switch } from "../../ui";
+import { Badge, Banner, Button, Card, Icon, InfoTip, Section, Skeleton, Switch, cx } from "../../ui";
 import type { Tone } from "../../ui";
 import { bunkerCopy as copy } from "../../shared/copy/ru/bunker";
 import type { ShowToast } from "../../shared/hooks";
@@ -14,6 +14,7 @@ import type {
 import "./bunker.css";
 
 export interface PersonaRiskCardProps {
+  ctaVariant?: "primary" | "secondary";
   onToast?: ShowToast;
   /** Навигация по 1-click fix кнопкам или High-risk CTA в Чистую комнату. */
   onFixTarget?: (target: PersonaRiskFixTarget) => void;
@@ -35,6 +36,7 @@ export function personaLevelLabel(level: PersonaRiskLevel): string {
 
 /** Проактивный «Индекс риска Persona» (0..100): технические факторы + 4 тумблера самооценки. */
 export function PersonaRiskCard({
+  ctaVariant = "primary",
   onToast,
   onFixTarget,
   onNavigateToCleanRoom,
@@ -125,7 +127,7 @@ export function PersonaRiskCard({
                 <div className="zs-bunker__row-actions">
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={ctaVariant}
                     icon="shield"
                     disabled={backingUp}
                     onClick={() => void handleEmergencyBackup()}
@@ -151,16 +153,26 @@ export function PersonaRiskCard({
               {activeFactors.length === 0 ? (
                 <p className="zs-t-caption zs-bunker__subtitle">{t.noActiveFactors}</p>
               ) : (
-                <Rows>
+                <ul className="zs-bunker__factors">
                   {activeFactors.map((factor) => (
-                    <Row
-                      key={factor.id}
-                      icon="alert"
-                      tone={factor.weight >= 35 ? "danger" : "warn"}
-                      title={`${factor.label} (+${factor.weight})`}
-                      sub={factor.detail}
-                      trail={
-                        factor.fix_target && onFixTarget ? (
+                    <li key={factor.id} className="zs-bunker__factor">
+                      <div className="zs-bunker__factor-head">
+                        <span
+                          className={cx(
+                            "zs-row__icon",
+                            factor.weight >= 35 ? "zs-row__icon--danger" : "zs-row__icon--warn",
+                          )}
+                          aria-hidden="true"
+                        >
+                          <Icon name="alert" />
+                        </span>
+                        <div className="zs-bunker__factor-body">
+                          <p className="zs-bunker__factor-title">{`${factor.label} (+${factor.weight})`}</p>
+                          <p className="zs-bunker__factor-detail">{factor.detail}</p>
+                        </div>
+                      </div>
+                      {factor.fix_target && onFixTarget && (
+                        <div className="zs-bunker__factor-action">
                           <Button
                             size="sm"
                             variant="secondary"
@@ -168,11 +180,11 @@ export function PersonaRiskCard({
                           >
                             {t.fixButtonLabels[factor.fix_target] ?? factor.fix_target}
                           </Button>
-                        ) : undefined
-                      }
-                    />
+                        </div>
+                      )}
+                    </li>
                   ))}
-                </Rows>
+                </ul>
               )}
             </div>
 

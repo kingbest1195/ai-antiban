@@ -31,8 +31,8 @@ export function AddressCard({ onToast }: AddressCardProps) {
         <span className="zs-field-row">
           <span>{copy.aside}</span>
           <InfoTip
-            title="Stripe AVS и 0% US Tax"
-            text="Пять штатов США (DE, OR, NH, MT, AK) не взимают налог с продаж на цифровые подписки. Для карт с US BIN это снижает риск отказа при проверке индекса (AVS) и экономит +8–10%."
+            title="Проверка адреса Stripe (AVS) и 0% налог США"
+            text="Пять штатов США (DE, OR, NH, MT, AK) не взимают налог с продаж на цифровые подписки. Для карт США это снижает риск отказа при проверке индекса (AVS) и экономит +8–10%."
           />
         </span>
       }

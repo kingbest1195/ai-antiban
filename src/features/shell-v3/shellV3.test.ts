@@ -184,6 +184,43 @@ describe("AlertStrip", () => {
     );
     expect(html).toContain("ещё 2");
   });
+
+  it("показывает ошибку coworkGuard.error и человеческое имя службы при сбое ремонта", () => {
+    const html = renderToStaticMarkup(
+      createElement(AlertStrip, {
+        view: makeBaseView(),
+        overview: makeBaseOverview(),
+        coworkGuard: {
+          status: {
+            platform: "windows",
+            supported: true,
+            service_present: true,
+            service_running: true,
+            start_type: 2,
+            task_installed: false,
+            task_healthy: false,
+            needs_repair: true,
+            detected_ai_apps: [],
+            summary: "Задача планировщика отсутствует",
+          },
+          needsRepair: true,
+          repairing: false,
+          error: "Запрос прав администратора отменён",
+          repair: vi.fn(async () => null),
+          refresh: vi.fn(async () => null),
+        },
+        ipChangeCooldownUntil: null,
+        routeUnavailableBanner: null,
+        onPushRoute: vi.fn(),
+        onDismissRouteUnavailable: vi.fn(),
+        onRefreshRoutes: vi.fn(async () => {}),
+        onRefreshState: vi.fn(async () => {}),
+        onAuditRefresh: vi.fn(),
+      }),
+    );
+    expect(html).toContain("Требуется защита фоновой службы Claude");
+    expect(html).toContain("Запрос прав администратора отменён");
+  });
 });
 
 describe("WhatsNewSheet visibility", () => {
@@ -289,6 +326,21 @@ describe("HomeHub & HeaderBar & NotificationStack", () => {
     );
     expect(headerHtml).toContain("42 мс");
 
+    const slowHeaderHtml = renderToStaticMarkup(
+      createElement(HeaderBar, {
+        pingMs: 4252,
+        refreshing: false,
+        onRescan: vi.fn(),
+        hideIpMode: false,
+        onToggleHideIp: vi.fn(),
+        updateInfo: null,
+        onOpenUpdate: vi.fn(),
+        menuItems: [],
+      }),
+    );
+    expect(slowHeaderHtml).toContain("4,3 с");
+    expect(slowHeaderHtml).not.toContain("4252 мс");
+
     const notesHtml = renderToStaticMarkup(
       createElement(NotificationStack, {
         toasts: [{ id: "1", tone: "danger", title: "Ошибка", description: "Детали ошибки" }],
@@ -309,5 +361,40 @@ describe("HomeHub & HeaderBar & NotificationStack", () => {
       }),
     );
     expect(html.match(/<li class="zs-row/g)?.length).toBe(5);
+  });
+
+  it("AlertStrip (photo_349): использует понятный русский заголовок без CoworkVMService в заголовке и показывает coworkGuard.error", () => {
+    const onToast = vi.fn();
+    const repair = vi.fn(async () => null);
+    const overview = { ...makeBaseOverview(), onToast };
+    const view = { ...makeBaseView(), model: { ...makeBaseView().model, banner: null } };
+
+    const html = renderToStaticMarkup(
+      createElement(AlertStrip, {
+        view,
+        overview,
+        coworkGuard: {
+          status: null,
+          needsRepair: true,
+          repairing: false,
+          error: "Доступ запрещён (отменено UAC)",
+          repair,
+          refresh: vi.fn(async () => null),
+        },
+        ipChangeCooldownUntil: null,
+        routeUnavailableBanner: null,
+        routesSnapshot: null,
+        onPushRoute: vi.fn(),
+        onDismissRouteUnavailable: vi.fn(),
+        onRefreshRoutes: vi.fn(async () => {}),
+        onRefreshState: vi.fn(async () => {}),
+        onAuditRefresh: vi.fn(),
+      }),
+    );
+
+    expect(html).toContain("Требуется защита фоновой службы Claude");
+    expect(html).not.toContain("Требуется защита службы CoworkVMService");
+    expect(html).toContain("Доступ запрещён (отменено UAC)");
+    expect(html).toContain('role="alert"');
   });
 });

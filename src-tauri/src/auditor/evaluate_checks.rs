@@ -200,3 +200,50 @@ pub(super) async fn run_udp_stun_check(
     })
     .await
 }
+
+/// When `via_zastava_key` is active and the key exit itself (`geo`, `travel`, `ipv6`, `claude_exit`)
+/// is verified healthy, external-list reachability failures on `dnsbl` or `tor` (e.g. RU ISP blocks
+/// on `dns.google` / `check.torproject.org`) are marked `NotApplicable` so they do not downgrade
+/// a verified Zastava Key setup to `incomplete` / 94. Listed/Tor/sanctioned verdicts are untouched.
+#[allow(clippy::too_many_arguments)]
+pub fn reconcile_key_exit_external_lists(
+    via_zastava_key: bool,
+    route_usable: bool,
+    geo: &CheckResult,
+    travel: &CheckResult,
+    ipv6: &CheckResult,
+    claude_exit: &CheckResult,
+    dnsbl: &mut CheckResult,
+    asn: &mut CheckResult,
+) {
+    if !via_zastava_key || !route_usable {
+        return;
+    }
+    let key_exit_clean = !geo.status.is_critical()
+        && !geo.is_unknown()
+        && !travel.status.is_critical()
+        && (!travel.is_unknown() || travel.is_not_applicable())
+        && !ipv6.status.is_critical()
+        && !ipv6.status.is_warning()
+        && !ipv6.is_unknown()
+        && !claude_exit.status.is_critical()
+        && !claude_exit.status.is_warning()
+        && (!claude_exit.is_unknown() || claude_exit.is_not_applicable());
+    if !key_exit_clean {
+        return;
+    }
+    if dnsbl.is_unknown() && !dnsbl.is_not_applicable() {
+        *dnsbl = CheckResult::unknown(
+            "DNSBL_UNREACHABLE_KEY_OK",
+            "Списки DNSBL недоступны напрямую из-за ограничений сети; выходной узел ключа Заставы проверен и исправен.",
+            crate::auditor::UnknownReason::NotApplicable,
+        );
+    }
+    if asn.is_unknown() && asn.code == "TOR_LIST_UNAVAILABLE" {
+        *asn = CheckResult::unknown(
+            "TOR_LIST_UNAVAILABLE",
+            "Список выходных узлов Tor временно недоступен; провайдер выходного узла ключа Заставы проверен.",
+            crate::auditor::UnknownReason::NotApplicable,
+        );
+    }
+}

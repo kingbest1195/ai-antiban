@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 pub const DEFAULT_BUNKER_INTERVAL_HOURS: u32 = 24;
 pub const DEFAULT_BUNKER_RETENTION_COUNT: usize = 7;
+pub const DEFAULT_BUNKER_MAX_TOTAL_MB: u64 = 500;
 
 fn default_true() -> bool {
     true
@@ -16,6 +17,10 @@ fn default_bunker_interval_hours() -> u32 {
 
 fn default_bunker_retention() -> usize {
     DEFAULT_BUNKER_RETENTION_COUNT
+}
+
+fn default_bunker_max_mb() -> u64 {
+    DEFAULT_BUNKER_MAX_TOTAL_MB
 }
 
 fn default_launchpad_step() -> u8 {
@@ -80,6 +85,8 @@ pub struct BunkerSettings {
     pub interval_hours: u32,
     #[serde(default = "default_bunker_retention")]
     pub retention_count: usize,
+    #[serde(default = "default_bunker_max_mb")]
+    pub max_total_mb: u64,
     #[serde(default)]
     pub last_backup_at: Option<u64>,
     #[serde(default)]
@@ -92,6 +99,7 @@ impl Default for BunkerSettings {
             auto_backup_enabled: true,
             interval_hours: DEFAULT_BUNKER_INTERVAL_HOURS,
             retention_count: DEFAULT_BUNKER_RETENTION_COUNT,
+            max_total_mb: DEFAULT_BUNKER_MAX_TOTAL_MB,
             last_backup_at: None,
             last_backup_size_bytes: None,
         }

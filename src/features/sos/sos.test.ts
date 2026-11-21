@@ -17,23 +17,25 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
     setMockScenario("clean");
   });
 
-  it("Branch 1A (RU-only): строгий красный STOP + 3-шаговый Протокол выживания (Бункер + отмена + BYOK/OpenRouter)", () => {
+  it("Branch 1A (RU-only): спокойное предупреждение + 3-шаговый Протокол выживания (Бункер + отмена + BYOK/OpenRouter)", () => {
     const html = renderToStaticMarkup(
       createElement(PersonaBranch, { initialChoice: "ru_only", onToast: vi.fn() }),
     );
-    expect(html).toContain("STOP — НЕ ЗАГРУЖАЙТЕ ДОКУМЕНТЫ РФ/РБ И НЕ ИСПОЛЬЗУЙТЕ ПОДДЕЛКИ");
+    expect(html).toContain("Не загружайте документы РФ/РБ и не используйте подделки");
+    expect(html).not.toContain("STOP — НЕ ЗАГРУЖАЙТЕ");
     expect(html).toContain("~60 секунд");
-    expect(html).toContain("Создать экстренный бэкап сейчас");
+    expect(html).toContain("Создать копию сейчас");
     expect(html).toContain("reportaproblem.apple.com");
     expect(html).toContain("OpenRouter");
-    expect(html).toContain("Скопировать RESTORE_PROMPT.md");
+    expect(html).toContain("Скопировать промпт переноса");
+    expect(html).toContain("zs-seg");
   });
 
   it("Branch 1B (ВНЖ / иностранный паспорт): 4-пунктовый Pre-Flight чек-лист согласования реальных данных", () => {
     const html = renderToStaticMarkup(
       createElement(PersonaBranch, { initialChoice: "foreign_legal", onToast: vi.fn() }),
     );
-    expect(html).toContain("Pre-Flight чек-лист для легального ВНЖ / иностранного паспорта");
+    expect(html).toContain("Чек-лист перед проверкой для легального ВНЖ / иностранного паспорта");
     expect(html).toContain("1. Страна выходного IP Заставы строго совпадает со страной документа");
     expect(html).toContain("2. Часовой пояс ОС и браузера совпадает со страной документа");
     expect(html).toContain("3. Имя и фамилия в биллинге карты совпадают с документом");
@@ -43,7 +45,7 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
   it("Branch 2 (SMS): предупреждение о VoIP-пулах и рекомендации по физической SIM/eSIM", () => {
     const html = renderToStaticMarkup(createElement(SmsBranch));
     expect(html).toContain("Не приходит SMS или номер отклонён");
-    expect(html).toContain("VoIP");
+    expect(html).toContain("интернет-телефония");
     expect(html).toContain("физическую SIM-карту или легальную eSIM");
   });
 
@@ -61,7 +63,7 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
       createElement(BannedBranch, { onToast: vi.fn(), onNavigateToCleanRoom: vi.fn() }),
     );
     expect(html).toContain("Account disabled / Organization suspended");
-    expect(html).toContain("Перейти в Чистую комнату (Шаг 1)");
+    expect(html).toContain("Открыть Чистую комнату");
 
     const onNavigate = vi.fn();
     const onToast = vi.fn();
@@ -83,7 +85,7 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
         onToast: vi.fn(),
       }),
     );
-    expect(html).toContain("Быстрое дерево решений без воды");
+    expect(html).toContain("Выберите вашу ситуацию ниже");
     expect(html).toContain("Persona (KYC)");
     expect(html).toContain("SMS на номер");
     expect(html).toContain("Ошибка оплаты");

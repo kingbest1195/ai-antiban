@@ -11,10 +11,13 @@ describe("formatIp и maskIpsInText: режим скрытия IP для скр�
     expect(formatIp(null, true)).toBe("--");
   });
 
-  it("маскирует IPv6 и произвольные IPv4 внутри строк отчёта", () => {
+  it("маскирует IPv6 и произвольные IPv4/IPv6 внутри строк отчёта", () => {
     expect(formatIp("2001:db8::1", true)).toBe("••••:••••:…:1");
     expect(maskIpsInText("IP изменился с 10.0.0.1 на 185.212.102.40.", true)).toBe(
       "IP изменился с •••.•••.•••.1 на •••.•••.•••.40.",
+    );
+    expect(maskIpsInText("IPv6 2001:db8::1 обнаружен в 14:03:27", true)).toBe(
+      "IPv6 ••••:••••:…:1 обнаружен в 14:03:27",
     );
     expect(maskIpsInText("IP 10.0.0.1", false)).toBe("IP 10.0.0.1");
   });

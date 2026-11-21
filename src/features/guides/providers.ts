@@ -40,7 +40,7 @@ export const VIRTUAL_CARD_PROVIDERS: VirtualCardProvider[] = [
     tier: "Выпуск карт в Telegram за 2 минуты (3D Secure)",
     url: "https://telegram.me/WantToPayBot?start=w17851188--ERIEX",
     description:
-      "Удобный бот для выпуска виртуальных карт US / EU / HK с поддержкой 3D Secure. Проверяйте BIN во вкладке «Биллинг».",
+      "Удобный бот для выпуска виртуальных карт US / EU / HK с поддержкой 3D Secure. Проверяйте первые цифры карты в разделе «Чистая комната → Оплата и прогрев».",
   },
   {
     id: "epn",

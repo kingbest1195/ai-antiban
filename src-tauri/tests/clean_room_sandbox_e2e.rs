@@ -292,6 +292,7 @@ fn readiness_gate_fail_closed_preferences_and_path_traversal_guard() {
         unknown_count: 0,
         applicable_count: 1,
         incomplete: false,
+        gateway_latency_ms: None,
     };
 
     let clean_audit = run_clean_room_audit_with(

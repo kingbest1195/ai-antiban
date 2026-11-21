@@ -31,6 +31,7 @@ fn clean_report(ip: &str, ip_type: IpType, asn_code: &str, pinned_code: &str) ->
         unknown_count: 0,
         applicable_count: 14,
         incomplete: false,
+        gateway_latency_ms: None,
     }
 }
 

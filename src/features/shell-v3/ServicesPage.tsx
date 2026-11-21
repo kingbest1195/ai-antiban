@@ -58,8 +58,7 @@ export function ServicesPage({
     <>
       <HintCard
         hintId="services_intro"
-        title="Состояние ИИ-сервисов и защита на этом устройстве"
-        body="Здесь видно, какие нейросети защищены, что уже идёт через Заставу (браузеры, приложения, IDE и терминал) и какие приложения требуют настройки."
+        body="Статус защиты нейросетей, браузеров, редакторов и терминала на этом устройстве."
         dismissedHints={localDismissed}
         onDismiss={handleDismiss}
       />

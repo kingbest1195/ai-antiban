@@ -171,7 +171,9 @@ fn fifo_retention_keeps_seven_newest_snapshots() {
         meta.created_at = 1_700_000_000 + i as u64;
         retention::write_snapshot_meta(snap_dir, &meta).unwrap();
         // Re-prune with updated timestamps
-        let pruned = retention::prune_old_snapshots(&bunker_snapshots_dir(&app_data), 7).unwrap();
+        let pruned =
+            retention::prune_old_snapshots(&bunker_snapshots_dir(&app_data), 7, 500 * 1024 * 1024)
+                .unwrap();
         total_pruned += pruned + res.pruned_snapshots;
         created_ids.push(meta.id);
     }
@@ -341,7 +343,7 @@ fn web_exports_enforce_bounded_fifo_retention() {
         fs::write(dir.join("RESTORE_PROMPT.md"), format!("export {idx}")).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
     }
-    let pruned = retention::prune_old_web_exports(&web_root, 3).unwrap();
+    let pruned = retention::prune_old_web_exports(&web_root, 3, 500 * 1024 * 1024).unwrap();
     assert_eq!(pruned, 2);
     let remaining: Vec<_> = fs::read_dir(&web_root)
         .unwrap()
@@ -349,4 +351,98 @@ fn web_exports_enforce_bounded_fifo_retention() {
         .filter(|e| e.path().is_dir())
         .collect();
     assert_eq!(remaining.len(), 3);
+}
+
+#[test]
+fn bunker_quota_prunes_oldest_while_keeping_newest_one_and_cleans_tmp_staging() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_data = tmp.path().join("app");
+    let snaps_dir = bunker_snapshots_dir(&app_data);
+    fs::create_dir_all(&snaps_dir).unwrap();
+
+    // Leftover .tmp- staging dir must be ignored by list_snapshots and removed on prune.
+    let leftover_tmp = snaps_dir.join(".tmp-2026-01-01_000000");
+    fs::create_dir_all(&leftover_tmp).unwrap();
+    fs::write(leftover_tmp.join("partial.txt"), b"partial").unwrap();
+
+    for (idx, name) in ["snap-1", "snap-2", "snap-3"].iter().enumerate() {
+        let dir = snaps_dir.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("payload.bin"), vec![b'x'; 2048]).unwrap();
+        let meta = BunkerSnapshotMeta {
+            id: (*name).to_string(),
+            created_at: 1_700_000_000 + idx as u64,
+            snapshot_dir: dir.to_string_lossy().to_string(),
+            total_bytes: 2048,
+            files_count: 1,
+            sources: vec!["claude_code".to_string()],
+            has_restore_prompt: false,
+            trigger: "manual".to_string(),
+        };
+        retention::write_snapshot_meta(&dir, &meta).unwrap();
+    }
+
+    assert_eq!(retention::list_snapshots(&snaps_dir).len(), 3);
+    // Byte quota = 2500 bytes (smaller than 2 snapshots, so only newest 1 survives).
+    let pruned = retention::prune_old_snapshots(&snaps_dir, 7, 2500).unwrap();
+    assert_eq!(pruned, 2);
+    assert!(!leftover_tmp.exists());
+    let remaining = retention::list_snapshots(&snaps_dir);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, "snap-3");
+}
+
+#[test]
+fn clear_bunker_snapshots_in_clears_snapshots_and_returns_updated_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_data = tmp.path().join("app");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(home.join(".claude").join("CLAUDE.md"), "# notes").unwrap();
+    let settings = BunkerSettings::default();
+
+    run_bunker_backup_in(&app_data, &home, &settings, "manual", None).unwrap();
+    let status = clear_bunker_snapshots_in(&app_data, &home, &settings, false).unwrap();
+    assert_eq!(status.snapshots_count, 0);
+    assert_eq!(status.total_snapshots_bytes, 0);
+}
+
+#[test]
+fn legacy_desktop_export_sanitizes_secrets_and_skips_credentials() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let desktop = tmp.path().join("desktop");
+    let claude = home.join(".claude");
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&desktop).unwrap();
+
+    fs::write(
+        claude.join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"sk-ant-secret-token-1234567890"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        claude.join("settings.json"),
+        r#"{"apiKey":"sk-ant-api03-12345678901234567890","theme":"dark"}"#,
+    )
+    .unwrap();
+    fs::write(
+        home.join(".claude.json"),
+        r#"{"oauthAccount":{"email":"u@example.com"},"oauthToken":"tok-secret"}"#,
+    )
+    .unwrap();
+
+    let res =
+        crate::auditor::claude_exporter::export_claude_dir_to(&claude, &home, &desktop).unwrap();
+    let out_dir = Path::new(&res.export_dir_path);
+    assert!(!out_dir.join(".credentials.json").exists());
+
+    let settings_out = fs::read_to_string(out_dir.join("settings.json")).unwrap();
+    assert!(!settings_out.contains("sk-ant-api03"));
+    assert!(settings_out.contains("[REDACTED]"));
+
+    let cli_out =
+        fs::read_to_string(out_dir.join("configs").join("claude_cli_config.json")).unwrap();
+    assert!(!cli_out.contains("tok-secret"));
+    assert!(cli_out.contains("[REDACTED]"));
 }

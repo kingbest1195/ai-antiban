@@ -369,7 +369,9 @@ fn enable_with_mode(
     } else {
         enable_system_proxy(j, p, pac_url, false)?
     };
-    let _ = browser_policies::apply_browser_policies_with_pac(j, p, Some(pac_url));
+    let policy_rep = browser_policies::apply_browser_policies_with_pac(j, p, Some(pac_url));
+    st.set_os_pac_deferred(report.os_pac_deferred);
+    st.set_browser_pac_policy_active(policy_rep.pac_policy_active);
     mark_active(st, pac_url);
     Ok(report)
 }
@@ -404,7 +406,11 @@ pub(super) fn refresh_with(
     let Some(pac) = st.last_pac_url() else {
         return Ok(EnableReport::default());
     };
-    enable_system_proxy(j, p, &pac, true)
+    let report = enable_system_proxy(j, p, &pac, true)?;
+    let policy_rep = browser_policies::apply_browser_policies_with_pac(j, p, Some(&pac));
+    st.set_os_pac_deferred(report.os_pac_deferred);
+    st.set_browser_pac_policy_active(policy_rep.pac_policy_active);
+    Ok(report)
 }
 
 /// Switch-off pass, run inside the `OS_OPS` lock: the flag goes down BEFORE anything is restored,
@@ -416,11 +422,15 @@ pub(crate) fn restore_pass(
     restore: impl FnOnce(&mut journal::Journal, &dyn platform::Platform) -> journal::RecoveryReport,
 ) -> journal::RecoveryReport {
     st.set_sys_proxy_active(false);
+    st.set_os_pac_deferred(false);
+    st.set_browser_pac_policy_active(false);
     restore(j, p)
 }
 
 /// Self-heal bookkeeping of the macOS PAC (which service something else keeps rewriting).
 static HEAL: macos::HealGuard = macos::HealGuard::new();
+/// Self-heal bookkeeping of Windows WinINet (`AutoConfigURL` / `ProxyEnable` overrides).
+static WIN_HEAL: macos::HealGuard = macos::HealGuard::new();
 
 fn enable_system_proxy(
     j: &mut journal::Journal,
@@ -436,7 +446,13 @@ fn enable_system_proxy(
             macos::enable_pac(j, p, pac_url)
         }
     } else if cfg!(target_os = "windows") {
-        windows::enable_inet(j, p, pac_url)
+        if self_heal {
+            let heal = Some((&WIN_HEAL, std::time::Instant::now()));
+            windows::enable_inet_with_heal(j, p, pac_url, heal)
+        } else {
+            WIN_HEAL.reset();
+            windows::enable_inet(j, p, pac_url)
+        }
     } else {
         Ok(EnableReport::default())
     }
@@ -445,6 +461,16 @@ fn enable_system_proxy(
 /// Returns whether systemic PAC proxy is currently active.
 pub fn is_sysproxy_active() -> bool {
     state().sys_proxy_active()
+}
+
+/// Returns whether OS PAC writes were deferred due to temporary VPN DNS (`os_pac_deferred`).
+pub fn is_os_pac_deferred() -> bool {
+    state().os_pac_deferred()
+}
+
+/// Returns whether Chromium managed PAC policies are active for the current session.
+pub fn is_browser_pac_policy_active() -> bool {
+    state().browser_pac_policy_active()
 }
 
 /// Re-applies the PAC configuration when a new network service appeared (e.g. a VPN client

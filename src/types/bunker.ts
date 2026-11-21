@@ -62,4 +62,5 @@ export interface BunkerSettingsPatch {
   auto_backup_enabled?: boolean;
   interval_hours?: number;
   retention_count?: number;
+  max_total_mb?: number;
 }

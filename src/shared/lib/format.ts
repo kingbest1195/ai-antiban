@@ -55,10 +55,21 @@ export function formatIp(ip: string | null | undefined, hideIpMode = false): str
   return "•••.•••.•••.•••";
 }
 
-/** Маскирует все IPv4-адреса внутри произвольной строки, если включён `hideIpMode`. */
+/** Маскирует все IPv4- и IPv6-адреса внутри произвольной строки, если включён `hideIpMode`. */
 export function maskIpsInText(text: string, hideIpMode = false): string {
   if (!text || !hideIpMode) return text;
-  return text.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.(\d{1,3})\b/g, "•••.•••.•••.$1");
+  const maskedV4 = text.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.(\d{1,3})\b/g, "•••.•••.•••.$1");
+  // Маскируем IPv6 (с `::` или >= 3 двоеточиями с hex-группами, не затрагивая время вроде 14:03:27).
+  return maskedV4.replace(
+    /\[?([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{1,4}\]?/g,
+    (match) => {
+      if (/^\d{1,2}:\d{2}:\d{2}$/.test(match)) return match;
+      const clean = match.replace(/^\[|\]$/g, "");
+      if (!clean.includes("::") && clean.split(":").length < 4) return match;
+      const last = clean.split(":").pop() || "••••";
+      return match.startsWith("[") ? `[••••:••••:…:${last}]` : `••••:••••:…:${last}`;
+    },
+  );
 }
 
 /** Возвращает закреплённый IP для конкретного провайдера.

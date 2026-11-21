@@ -53,6 +53,7 @@ pub(crate) fn sample_report(provider: ProviderId) -> RiskReport {
         unknown_count: 0,
         applicable_count: 13,
         incomplete: false,
+        gateway_latency_ms: None,
     }
 }
 

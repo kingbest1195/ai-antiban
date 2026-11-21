@@ -311,13 +311,19 @@ fn route_via_zastava_key_allows_foreign_vpn_udp_or_blocked_udp_but_warns_on_ru()
     assert_eq!(routed_blocked.status, CheckStatus::Ok);
     assert_eq!(routed_blocked.code, "UDP_KEY_TCP_PROTECTED");
 
-    // Sanctioned UDP country (e.g. RU) still produces Warning even with Zastava key.
+    // A2: Sanctioned UDP country (e.g. RU) with Zastava key ON -> Ok("UDP_STUN_KEY_ISOLATED"),
+    // whereas Direct mode (via_zastava_key == false) keeps Warning("UDP_STUN_MISMATCH").
     let ru_answers = [(&SERVERS[0], ServerAnswer::Addr(Ipv4Addr::new(5, 8, 8, 8)))];
     let routed_ru = evaluate_udp_stun_for_route(&ru_answers, "136.244.114.42", true, Some("RU"));
-    assert_eq!(routed_ru.status, CheckStatus::Warning);
-    assert_eq!(routed_ru.code, "UDP_STUN_MISMATCH");
+    assert_eq!(routed_ru.status, CheckStatus::Ok);
+    assert_eq!(routed_ru.code, "UDP_STUN_KEY_ISOLATED");
+    assert!(routed_ru.message.contains("песочницу или VPN"));
+
+    let direct_ru = evaluate_udp_stun_for_route(&ru_answers, "136.244.114.42", false, Some("RU"));
+    assert_eq!(direct_ru.status, CheckStatus::Warning);
+    assert_eq!(direct_ru.code, "UDP_STUN_MISMATCH");
     assert_eq!(
-        routed_ru.guide_ref.as_deref(),
+        direct_ru.guide_ref.as_deref(),
         Some(crate::auditor::geo_matrix::GUIDE_OS_NETWORK)
     );
 }

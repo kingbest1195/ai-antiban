@@ -142,7 +142,7 @@ export function CheckRow({
             item.result.code !== "DNS_WHOAMI_FAKE_IP" && <p className="zs-check__label">{copy.dnsHelp.mutedNote}</p>}
           {item.result.measured_via && (
             <p className="zs-check__label">
-              {copy.measuredViaLabel} <Mono>{item.result.measured_via}</Mono>
+              {copy.measuredViaLabel} <Mono>{maskIpsInText(item.result.measured_via, hideIpMode)}</Mono>
             </p>
           )}
         </div>

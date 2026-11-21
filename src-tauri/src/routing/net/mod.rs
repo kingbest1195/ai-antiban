@@ -8,6 +8,8 @@
 
 mod cache;
 mod dns;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 #[cfg(test)]
 mod tests;
@@ -23,6 +25,7 @@ use crate::core::net_safety::{
     DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_alias_port, is_forbidden_ip,
     is_tun_fake_ip,
 };
+pub use cache::clear_entry_dns_cache;
 use cache::{EntryCacheKey, EntryDnsCache, global_entry_dns_cache};
 use dns::parallel_fallback_resolve_addrs;
 
@@ -445,6 +448,10 @@ pub async fn resolve_entry_checked(
     allow_local: bool,
     gateway_port: u16,
 ) -> io::Result<Vec<SocketAddr>> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(res) = test_support::check_test_dns_override(entry, allow_local, gateway_port) {
+        return res;
+    }
     resolve_entry_checked_with(
         entry,
         allow_local,

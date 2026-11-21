@@ -16,6 +16,7 @@ export interface CardCheckProps {
   country?: string;
   /** Явный код страны выхода (алиас для встраивания в «Чистую комнату»). */
   exitCountry?: string;
+  ctaVariant?: "primary" | "secondary";
   onToast?: ShowToast;
   onNavigateToPaymentGuide?: () => void;
 }
@@ -28,7 +29,13 @@ function verdictTone(status: BinAuditResult["status"]): BannerTone {
 }
 
 /** Проверка BIN: поле и кнопка, вердикт словом (Banner нужного тона) и детали строками. */
-export function CardCheck({ country, exitCountry, onToast, onNavigateToPaymentGuide }: CardCheckProps) {
+export function CardCheck({
+  country,
+  exitCountry,
+  ctaVariant = "primary",
+  onToast,
+  onNavigateToPaymentGuide,
+}: CardCheckProps) {
   const resolvedCountry =
     exitCountry && exitCountry !== "--"
       ? exitCountry
@@ -118,7 +125,7 @@ export function CardCheck({ country, exitCountry, onToast, onNavigateToPaymentGu
             help={binInput ? copy.help(detectBrand(binInput)) : copy.helpEmpty}
             error={error ?? undefined}
             action={
-              <Button type="submit" variant="primary" disabled={loading || binInput.length < 6}>
+              <Button type="submit" variant={ctaVariant} disabled={loading || binInput.length < 6}>
                 {loading ? copy.checking : copy.check}
               </Button>
             }

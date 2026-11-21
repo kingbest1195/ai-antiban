@@ -6,10 +6,12 @@ import type { EnrichedPayload, InterceptionAction, RiskInterceptPayload } from "
 import {
   MOCK_ALERT_DETECTED_EVENT,
   MOCK_ALERT_ENRICHED_EVENT,
+  fetchAppState,
   pauseUntilNetworkChange,
   resolveInterception,
   takePendingAlert,
 } from "../../utils/api";
+import { formatIp, maskIpsInText } from "../../shared/lib/format";
 import { Button, Dialog, Skeleton } from "../../ui";
 import {
   alertReducer,
@@ -28,6 +30,7 @@ import "./alert.css";
 
 export interface AlertWindowProps {
   initialPayload?: RiskInterceptPayload;
+  hideIpMode?: boolean;
   onResolved?: (action?: InterceptionAction) => void;
 }
 
@@ -35,7 +38,7 @@ export interface AlertWindowProps {
  * Диалог обрыва VPN (окно Tauri alert-popup и оверлей в браузере).
  * Клавиши совпадают с кнопками: 1 или Esc — держать на паузе до смены сети, 2 — разрешить принудительно.
  */
-export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
+export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onResolved }: AlertWindowProps) {
   const [state, dispatch] = useReducer(
     alertReducer,
     initialPayload,
@@ -46,9 +49,25 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
   const [demoFeedback, setDemoFeedback] = useState<string | null>(null);
   const [allowError, setAllowError] = useState<string | null>(null);
   const [confirmForce, setConfirmForce] = useState<boolean>(false);
+  const [stateHideIpMode, setStateHideIpMode] = useState<boolean | null>(null);
 
   const { payload } = state;
   const generation = state.generation;
+  // Пока fetchAppState() не вернул настройку, маскируем IP по умолчанию, чтобы не было вспышки сырого IP.
+  const effectiveHideIpMode = propHideIpMode ?? stateHideIpMode ?? true;
+
+  useEffect(() => {
+    if (propHideIpMode !== undefined) return;
+    let cancelled = false;
+    fetchAppState()
+      .then((appState) => {
+        if (!cancelled) setStateHideIpMode(Boolean(appState.hide_ip_mode));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [propHideIpMode, generation]);
 
   useEffect(() => {
     let unlistenFns: Array<() => void> = [];
@@ -196,9 +215,11 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
   const detecting = isDetecting(state);
   const failed = isFailed(state);
   const highRisk = isHighRiskAlert(payload);
-  const previousIp = network_change?.old_ip;
+  const previousIpRaw = network_change?.old_ip;
   const previousCountry = formatCountryWithCode(network_change?.old_country) || copy.unknownCountry;
-  const currentIp = network_change?.new_ip || report?.telemetry?.ip || copy.unknownIp;
+  const currentIpRaw = network_change?.new_ip || report?.telemetry?.ip;
+  const currentIp = currentIpRaw ? formatIp(currentIpRaw, effectiveHideIpMode) : copy.unknownIp;
+  const previousIp = previousIpRaw ? formatIp(previousIpRaw, effectiveHideIpMode) : null;
   const currentCountryCode = network_change?.new_country || report?.telemetry?.country_code || null;
   const service = providerCopy[payload.provider]?.name ?? payload.provider;
 
@@ -221,7 +242,8 @@ export function AlertWindow({ initialPayload, onResolved }: AlertWindowProps) {
   const incomplete = !detecting && !failed && Boolean(report?.incomplete);
   const base = failed ? copy.failedText : detecting ? `${reason} ${copy.detectingHint}` : reason;
   const textBody = incomplete ? `${base} ${copy.textIncomplete}` : base;
-  const gateReason = !failed && payload.gate_reason?.trim() ? payload.gate_reason.trim() : null;
+  const gateReasonRaw = !failed && payload.gate_reason?.trim() ? payload.gate_reason.trim() : null;
+  const gateReason = gateReasonRaw ? maskIpsInText(gateReasonRaw, effectiveHideIpMode) : null;
   const text: ReactNode =
     demoFeedback ??
     allowError ??
@@ -305,10 +327,10 @@ export function AlertWindowPage() {
 }
 
 /** Оверлей поверх страницы для превью в браузере (без Tauri). */
-export function AlertOverlay({ initialPayload, onResolved }: AlertWindowProps) {
+export function AlertOverlay({ initialPayload, hideIpMode, onResolved }: AlertWindowProps) {
   return (
     <div className="zs-root zs-alert-overlay">
-      <AlertWindow initialPayload={initialPayload} onResolved={onResolved} />
+      <AlertWindow initialPayload={initialPayload} hideIpMode={hideIpMode} onResolved={onResolved} />
     </div>
   );
 }

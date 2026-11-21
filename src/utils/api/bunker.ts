@@ -8,6 +8,7 @@ import type {
 } from "../../types";
 import { isTauri, tauriInvoke } from "./client";
 import {
+  mockClearBunkerSnapshots,
   mockConvertWebExport,
   mockGenerateBunkerRestorePrompt,
   mockGetBunkerStatus,
@@ -75,10 +76,18 @@ export async function convertWebExport(
   return mockConvertWebExport(sourcePath, outputDir);
 }
 
-/** Сгенерировать актуальный текст `RESTORE_PROMPT.md` для быстрого переноса контекста (Claude Code + Cursor + MCP). */
+/** Сгенерировать актуальный текст промпта переноса для быстрого восстановления контекста (Claude Code + Cursor + MCP). */
 export async function generateBunkerRestorePrompt(): Promise<string> {
   if (isTauri()) {
     return await tauriInvoke<string>("generate_bunker_restore_prompt");
   }
   return mockGenerateBunkerRestorePrompt();
+}
+
+/** Удалить старые снапшоты Бункера и освободить место на диске. */
+export async function clearBunkerSnapshots(keepLatest = true): Promise<BunkerStatus> {
+  if (isTauri()) {
+    return await tauriInvoke<BunkerStatus>("clear_bunker_snapshots", { keepLatest });
+  }
+  return mockClearBunkerSnapshots();
 }

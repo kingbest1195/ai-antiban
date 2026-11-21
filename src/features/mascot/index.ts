@@ -6,7 +6,7 @@ export { SplitRoutingAnim } from "./SplitRoutingAnim";
 export type { SplitRoutingAnimProps } from "./SplitRoutingAnim";
 export { KillSwitchAnim } from "./KillSwitchAnim";
 export type { KillSwitchAnimProps } from "./KillSwitchAnim";
-export { CleanRoomRadarAnim } from "./CleanRoomRadarAnim";
+export { CleanRoomRadarAnim, isMacPlatform } from "./CleanRoomRadarAnim";
 export type { CleanRoomRadarAnimProps, RadarLayerItem, RadarLayerStatus } from "./CleanRoomRadarAnim";
 export { SmartScreenGuide } from "./SmartScreenGuide";
 export type { GuidePlatform, SmartScreenGuideProps } from "./SmartScreenGuide";

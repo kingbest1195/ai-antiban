@@ -133,7 +133,11 @@ fn e2e_bunker_backup_sanitization_and_7_snapshot_fifo_rotation() {
         let mut meta = res.snapshot.clone();
         meta.created_at = 1_750_000_000 + i;
         write_snapshot_meta(snap_dir, &meta).unwrap();
-        let _ = prune_old_snapshots(&bunker_snapshots_dir(&app_data), settings.retention_count);
+        let _ = prune_old_snapshots(
+            &bunker_snapshots_dir(&app_data),
+            settings.retention_count,
+            settings.max_total_mb.saturating_mul(1024 * 1024),
+        );
 
         if i == 8 {
             assert!(res.exported_copy_dir.is_some());
@@ -282,6 +286,7 @@ fn e2e_persona_risk_index_and_tray_gray_state_transitions() {
         unknown_count: 0,
         applicable_count: 14,
         incomplete: false,
+        gateway_latency_ms: None,
     };
 
     // Unpinned Hosting (+15) + sysproxy off (+15) = 30 (medium)

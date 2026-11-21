@@ -55,17 +55,18 @@ fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::Clie
         EntryProto::Https => url_host(entry.tls_server_name()),
         _ => url_host(&addr.ip().to_string()),
     };
-    let mut proxy_url = url::Url::parse(&format!("{scheme}://{url_name}:{}", entry.port))
+    let mut proxy_url = url::Url::parse(&format!("{scheme}://{url_name}:{}", addr.port()))
         .map_err(|_| "Invalid entry address for the audit client".to_string())?;
 
     if entry.proto == EntryProto::Socks5 {
-        // reqwest takes SOCKS credentials from the URL userinfo only.
+        // reqwest takes SOCKS credentials from the URL userinfo only, and requires
+        // `url.password().is_some()` (even `Some("")`) or it silently drops SOCKS5 auth.
         if let Some(u) = entry.username.as_deref() {
             proxy_url
                 .set_username(u)
                 .map_err(|_| "Invalid entry username".to_string())?;
             proxy_url
-                .set_password(entry.password.as_deref())
+                .set_password(Some(entry.password.as_deref().unwrap_or("")))
                 .map_err(|_| "Invalid entry password".to_string())?;
         }
     }
@@ -100,6 +101,17 @@ pub async fn build_entry_client(
     allow_local: bool,
     gateway_port: u16,
 ) -> Result<reqwest::Client, String> {
+    if let Some(cp) = crate::sysproxy::get_chained_proxy().filter(|cp| {
+        !crate::sysproxy::is_gateway_host_port(cp, (gateway_port > 0).then_some(gateway_port))
+    }) && (entry.proto != EntryProto::Https
+        || entry.tls_server_name().parse::<IpAddr>().is_err())
+        && let Some(relay_addr) =
+            super::entry_relay::spawn_entry_relay(entry, &cp, allow_local, gateway_port).await?
+    {
+        return entry_client_builder(entry, relay_addr)?
+            .build()
+            .map_err(|e| format!("Failed to build chained audit client: {e}"));
+    }
     let addr = checked_entry_addr(entry, allow_local, gateway_port).await?;
     entry_client_builder(entry, addr)?
         .build()
@@ -185,6 +197,17 @@ struct FreeIpApiResponse {
 }
 
 impl NetworkResolver {
+    pub(crate) async fn client_for_route(&self, route: &Route) -> Option<reqwest::Client> {
+        let allow_local = route.allows_local_entries();
+        let gateway_port = self.gateway_port();
+        for entry in &route.entries {
+            if let Ok(client) = build_entry_client(entry, allow_local, gateway_port).await {
+                return Some(client);
+            }
+        }
+        None
+    }
+
     pub(super) async fn cascade_via_route(
         &self,
         route: &Route,

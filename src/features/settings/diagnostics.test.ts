@@ -28,7 +28,8 @@ describe("Диагностика, предпросмотр изменений и
   });
 
   it("строки диагностики в настройках соответствуют спецификации", () => {
-    expect(copy.diagnostics.exportAction).toBe("Скопировать отчёт диагностики (без ключей и IP)");
+    expect(copy.diagnostics.exportAction).toBe("Скопировать отчёт диагностики");
+    expect(copy.diagnostics.exportHint).toBe("Без ключей, токенов и IP-адресов");
     expect(copy.diagnostics.exportToast).toBe("Диагностический отчёт скопирован (секреты и IP скрыты)");
     expect(copy.diagnostics.previewTitle).toBe("Что Застава настраивает в системе");
     expect(copy.diagnostics.reversibleBadge).toBe("Обратимо при выходе");

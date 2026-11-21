@@ -310,6 +310,7 @@ fn report_allowed_for_state_allows_yellow_and_trusted_exceptions_without_blockin
         unknown_count: 0,
         applicable_count: 14,
         incomplete: false,
+        gateway_latency_ms: None,
     };
     let st = AppStateData::default();
     assert!(crate::proxy::guard::report_allowed_for_state(

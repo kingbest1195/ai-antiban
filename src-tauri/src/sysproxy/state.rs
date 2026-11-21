@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub(crate) struct SysState {
     sys_proxy_active: AtomicBool,
     cli_protection_active: AtomicBool,
+    os_pac_deferred: AtomicBool,
+    browser_pac_policy_active: AtomicBool,
     last_pac_url: Mutex<Option<String>>,
     chained_proxy: Mutex<Option<String>>,
     /// Proxy address (`http://127.0.0.1:<port>`, port) written into the CLI / IDE files, `None`
@@ -27,6 +29,8 @@ impl SysState {
         Self {
             sys_proxy_active: AtomicBool::new(false),
             cli_protection_active: AtomicBool::new(false),
+            os_pac_deferred: AtomicBool::new(false),
+            browser_pac_policy_active: AtomicBool::new(false),
             last_pac_url: Mutex::new(None),
             chained_proxy: Mutex::new(None),
             cli_proxy: Mutex::new(None),
@@ -86,6 +90,23 @@ impl SysState {
         self.cli_protection_active.store(on, Ordering::SeqCst);
     }
 
+    pub(crate) fn os_pac_deferred(&self) -> bool {
+        self.os_pac_deferred.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_os_pac_deferred(&self, deferred: bool) {
+        self.os_pac_deferred.store(deferred, Ordering::SeqCst);
+    }
+
+    pub(crate) fn browser_pac_policy_active(&self) -> bool {
+        self.browser_pac_policy_active.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_browser_pac_policy_active(&self, active: bool) {
+        self.browser_pac_policy_active
+            .store(active, Ordering::SeqCst);
+    }
+
     pub(crate) fn last_pac_url(&self) -> Option<String> {
         self.last_pac_url.lock().ok().and_then(|g| g.clone())
     }
@@ -114,8 +135,11 @@ impl SysState {
         {
             return;
         }
-        if let Ok(mut g) = self.chained_proxy.lock() {
+        if let Ok(mut g) = self.chained_proxy.lock()
+            && *g != proxy
+        {
             *g = proxy;
+            crate::routing::net::clear_entry_dns_cache();
         }
     }
 
@@ -124,6 +148,8 @@ impl SysState {
     pub(crate) fn reset(&self) {
         self.set_sys_proxy_active(false);
         self.set_cli_protection_active(false);
+        self.set_os_pac_deferred(false);
+        self.set_browser_pac_policy_active(false);
         self.set_cli_proxy(None);
         self.set_cli_tz(None);
         self.set_last_pac_url(None);

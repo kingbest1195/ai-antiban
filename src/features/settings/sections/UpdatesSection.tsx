@@ -166,7 +166,7 @@ export function UpdatesSection({
                       <div className="zs-settings__rollback-actions">
                         <Button
                           size="sm"
-                          variant="primary"
+                          variant="secondary"
                           disabled={installingUpdate}
                           onClick={() => {
                             if (!onInstallRollback) return;

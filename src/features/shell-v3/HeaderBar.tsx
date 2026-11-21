@@ -16,16 +16,25 @@ export function menuWithout(items: MenuEntry[], ids: readonly string[] = []): Me
   });
 }
 
-/** Кликабельный индикатор времени последней проверки сети в шапке. */
+/** Форматирует задержку для компактного индикатора в шапке (`42 мс`, при `>= 1000` — `1,2 с`). */
+export function formatPingLabel(ms: number): string {
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(1).replace(".", ",")} с`;
+  }
+  return `${Math.round(ms)} мс`;
+}
+
+/** Кликабельный индикатор отклика шлюза и последней проверки сети в шапке. */
 export function PingBadge({ ms, refreshing, onRescan }: { ms: number | null; refreshing: boolean; onRescan: () => void }) {
   if (ms == null && !refreshing) return null;
+  const formatted = ms != null ? formatPingLabel(ms) : null;
   return (
     <Tip
-      title="Время проверки сети"
+      title="Отклик шлюза и проверка"
       text={
         <>
-          {ms != null ? `Последняя полная проверка сети заняла ${ms} мс. ` : ""}
-          Это время аудита IP и рисков, а не скорость интернета. Нажмите, чтобы проверить заново.
+          {formatted ? `Последний замер: ${formatted}. ` : ""}
+          Показывает отклик активного ключа или время проверки сети, а не общую скорость интернета. Нажмите, чтобы проверить заново.
         </>
       }
     >
@@ -37,7 +46,7 @@ export function PingBadge({ ms, refreshing, onRescan }: { ms: number | null; ref
         aria-label="Проверить сеть заново"
       >
         {refreshing ? <Spinner size={12} /> : <Icon name="pulse" size={12} />}
-        {ms != null ? `${ms} мс` : "…"}
+        {formatted ?? "…"}
       </button>
     </Tip>
   );

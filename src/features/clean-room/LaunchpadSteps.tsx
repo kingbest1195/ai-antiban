@@ -25,7 +25,6 @@ export interface LaunchpadStepsProps {
   onNavigateToGuide?: (guideRef: string) => void;
   onProfilesChanged?: () => Promise<unknown> | void;
   onStateUpdated?: () => Promise<unknown> | void;
-  onRequestCreateProfile?: () => void;
   toast?: ShowToast;
 }
 
@@ -55,7 +54,6 @@ export function LaunchpadSteps({
   onNavigateToGuide,
   onProfilesChanged,
   onStateUpdated,
-  onRequestCreateProfile,
   toast,
 }: LaunchpadStepsProps) {
   const [step, setStep] = useState<number>(() =>
@@ -81,8 +79,18 @@ export function LaunchpadSteps({
     }
   }, [activeProfile, initialStep]);
 
+  const blockReason = activeProfile
+    ? resolveSandboxBlockReason(activeProfile, readyToLaunch, manualKillswitch)
+    : readyToLaunch
+      ? copy.launchpad.step1.checkProfileFail
+      : copy.sandbox.profileCard.blockedReasonAudit;
+
+  const canLaunchStep2 = Boolean(activeProfile) && blockReason === null;
+  const signupUrl = providerSignupUrl(activeProfile?.provider, customUrl);
+
   const persistStep = async (nextStep: number, nextChecklist: string[]) => {
     const clamped = clampStep(nextStep);
+    if (clamped > 1 && !canLaunchStep2) return;
     setStep(clamped);
     setChecklist(nextChecklist);
     if (!activeProfile) return;
@@ -100,15 +108,6 @@ export function LaunchpadSteps({
       : [...checklist, id];
     void persistStep(step, next);
   };
-
-  const blockReason = activeProfile
-    ? resolveSandboxBlockReason(activeProfile, readyToLaunch, manualKillswitch)
-    : readyToLaunch
-      ? copy.launchpad.step1.checkProfileFail
-      : copy.sandbox.profileCard.blockedReasonAudit;
-
-  const canLaunchStep2 = Boolean(activeProfile) && blockReason === null;
-  const signupUrl = providerSignupUrl(activeProfile?.provider, customUrl);
 
   const handleLaunchSignup = async () => {
     if (!activeProfile || !canLaunchStep2 || launching) return;
@@ -145,18 +144,26 @@ export function LaunchpadSteps({
       }
     >
       <div className="cr-step-nav" role="tablist" aria-label={copy.launchpad.title}>
-        {copy.launchpad.stepLabels.map((s) => (
-          <button
-            key={s.step}
-            type="button"
-            role="tab"
-            aria-selected={step === s.step}
-            className="cr-step-tab"
-            onClick={() => void persistStep(s.step, checklist)}
-          >
-            {s.short}
-          </button>
-        ))}
+        {copy.launchpad.stepLabels.map((s) => {
+          const tabDisabled = s.step > 1 && !canLaunchStep2;
+          return (
+            <button
+              key={s.step}
+              type="button"
+              role="tab"
+              aria-selected={step === s.step}
+              disabled={tabDisabled}
+              aria-disabled={tabDisabled ? "true" : undefined}
+              title={tabDisabled ? copy.launchpad.step1.gateHint : undefined}
+              className="cr-step-tab"
+              onClick={() => {
+                if (!tabDisabled) void persistStep(s.step, checklist);
+              }}
+            >
+              {s.short}
+            </button>
+          );
+        })}
       </div>
 
       {!activeProfile && <p className="zs-t-caption cr-lead">{copy.launchpad.noProfileNote}</p>}
@@ -181,13 +188,6 @@ export function LaunchpadSteps({
                   ? copy.launchpad.step1.checkProfileOk(activeProfile.label)
                   : copy.launchpad.step1.checkProfileFail
               }
-              trail={
-                !activeProfile && onRequestCreateProfile ? (
-                  <Button size="sm" onClick={onRequestCreateProfile}>
-                    {copy.sandbox.createBtn}
-                  </Button>
-                ) : undefined
-              }
             />
             <Row
               icon="key"
@@ -199,7 +199,19 @@ export function LaunchpadSteps({
               }
             />
           </Rows>
-          <Button variant="primary" icon="arrow" onClick={() => void persistStep(2, checklist)}>
+          {!canLaunchStep2 && (
+            <p className="zs-t-caption cr-lead" style={{ marginBottom: 0 }}>
+              {copy.launchpad.step1.gateHint}
+            </p>
+          )}
+          <Button
+            variant="secondary"
+            icon="arrow"
+            disabled={!canLaunchStep2}
+            aria-disabled={!canLaunchStep2 ? "true" : undefined}
+            title={!canLaunchStep2 ? copy.launchpad.step1.gateHint : undefined}
+            onClick={() => void persistStep(2, checklist)}
+          >
             {copy.launchpad.step1.nextBtn}
           </Button>
         </div>
@@ -222,7 +234,7 @@ export function LaunchpadSteps({
           {blockReason && <p className="cr-blocked-reason">{blockReason}</p>}
           <div className="cr-row-inline">
             <Button
-              variant="primary"
+              variant="secondary"
               icon="shield"
               disabled={!canLaunchStep2 || launching}
               aria-disabled={!canLaunchStep2 ? "true" : undefined}
@@ -252,7 +264,14 @@ export function LaunchpadSteps({
               ))}
             </ul>
           </div>
-          <Button variant="secondary" icon="arrow" onClick={() => void persistStep(3, checklist)}>
+          <Button
+            variant="secondary"
+            icon="arrow"
+            disabled={!canLaunchStep2}
+            aria-disabled={!canLaunchStep2 ? "true" : undefined}
+            title={!canLaunchStep2 ? copy.launchpad.step1.gateHint : undefined}
+            onClick={() => void persistStep(3, checklist)}
+          >
             {copy.launchpad.step2.nextBtn}
           </Button>
         </div>

@@ -330,7 +330,11 @@ impl Platform for FakePlatform {
         let mut s = self.st.lock().unwrap();
         let tear = std::mem::take(&mut s.tear_chain);
         let cur = s.chain.entry(svc.key()).or_default();
-        let sides = [(&mut cur.http, &chain.http), (&mut cur.https, &chain.https)];
+        let sides = [
+            (&mut cur.http, &chain.http),
+            (&mut cur.https, &chain.https),
+            (&mut cur.socks, &chain.socks),
+        ];
         for (n, (dst, src)) in sides.into_iter().enumerate() {
             if tear && n == 1 {
                 break; // only the HTTP side landed

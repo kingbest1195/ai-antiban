@@ -31,9 +31,8 @@ export function ConnectSalesCards({
   return (
     <>
       <Card
-        className="zs-sale zs-sale--key"
         title={copy.key.title}
-        aside={<Badge tone="ok">{PROMO_COPY.keyPriceLabel}</Badge>}
+        aside={<Badge tone="neutral">{PROMO_COPY.keyPriceLabel}</Badge>}
       >
         <p className="zs-t-body mb-2 text-ink-2">{copy.key.text}</p>
         <ul className="zs-sale__list">
@@ -68,7 +67,7 @@ export function ConnectSalesCards({
         </div>
       </Card>
 
-      <Card className="zs-sale" title={copy.vpn.title}>
+      <Card title={copy.vpn.title}>
         <p className="zs-t-body mb-2 text-ink-2">{copy.vpn.text}</p>
         <ul className="zs-sale__list">
           {PROMO_COPY.salesServerBenefits.map((item) => (

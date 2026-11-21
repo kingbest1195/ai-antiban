@@ -1,7 +1,7 @@
 import { Banner, Button, Segmented, Stat, Stats } from "../ui";
 import { overview as overviewCopy, shell as copy } from "../shared/copy/ru";
 import { formatCountryWithCode } from "../shared/lib/country";
-import { formatIp, formatNumber } from "../shared/lib/format";
+import { formatIp, formatNumber, maskIpsInText } from "../shared/lib/format";
 import { isTauri } from "../utils/api/client";
 import { buildPendingChecks, progressOf } from "../features/checks/checksModel";
 import type { OverviewScreenProps } from "../features/overview/OverviewScreen";
@@ -223,7 +223,7 @@ export function AppShell() {
               <>
                 {payload.gate_reason && (
                   <strong className="zs-intercept-reason">
-                    {copy.intercept.gateReasonLabel} {payload.gate_reason}{" "}
+                    {copy.intercept.gateReasonLabel} {maskIpsInText(payload.gate_reason, hideIpMode)}{" "}
                   </strong>
                 )}
                 {payload.network_change?.new_country === "RU"
@@ -269,6 +269,7 @@ export function AppShell() {
             state={gw.state}
             report={gw.activeReport}
             routesSnapshot={gw.routesSnapshot}
+            hideIpMode={hideIpMode}
             initialTab={nav.currentRoute.cleanRoomTab}
             initialStep={nav.currentRoute.cleanRoomStep}
             navKey={nav.cleanRoomNavKey}
@@ -286,6 +287,7 @@ export function AppShell() {
             backup={backup}
             currentIp={gw.currentIp}
             currentCountry={gw.currentCountry}
+            hideIpMode={hideIpMode}
             activeUpstreamKey={gw.state?.upstream_proxy?.raw_key}
             routesSnapshot={gw.routesSnapshot}
             profileRefreshTrigger={profileRefreshKey}
@@ -384,6 +386,7 @@ export function AppShell() {
               initialGuide={nav.guideTarget}
               navKey={nav.guideNavKey}
               currentIp={gw.currentIp}
+              hideIpMode={hideIpMode}
               currentCountry={
                 gw.currentCountry && gw.currentCountry !== "--"
                   ? gw.currentCountry

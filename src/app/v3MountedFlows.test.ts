@@ -331,7 +331,21 @@ describe("Mounted v3 Navigation & Lifecycle Flows", () => {
 
   it("P1 #5: LaunchpadSteps switches to step 1 when initialStep=1 & navKey bump arrive while mounted on step 3", async () => {
     const baseProps = {
-      activeProfile: null,
+      activeProfile: {
+        id: "p1",
+        label: "Claude",
+        provider: "anthropic" as const,
+        browser_engine: "chrome" as const,
+        status: "ready" as const,
+        bound_route_id: "r1",
+        launchpad_step: 1,
+        completed_checklist: [],
+        created_at: 1,
+        last_exit_ip: null,
+        last_exit_country: null,
+        last_opened_at: null,
+        warmup_started_at: null,
+      },
       exitCountry: "NL",
       readyToLaunch: true,
       manualKillswitch: false,

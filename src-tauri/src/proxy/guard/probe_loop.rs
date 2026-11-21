@@ -97,11 +97,21 @@ impl NetworkGuard {
                     guard.check_route_and_tick(env).await;
                     #[cfg(not(test))]
                     if n.is_multiple_of(20) {
-                        let _ = tokio::task::spawn_blocking(|| {
+                        let flags = tokio::task::spawn_blocking(|| {
                             crate::sysproxy::refresh_if_services_changed();
                             crate::sysproxy::reconcile_browser_pac_prefs(None);
+                            crate::auditor::AuditProtectionFlags {
+                                sysproxy_active: crate::sysproxy::is_sysproxy_active(),
+                                cli_or_sandbox_protection_active:
+                                    crate::sysproxy::is_cli_protection_enabled()
+                                        || crate::sysproxy::is_browser_pac_policy_active(),
+                                os_pac_deferred: crate::sysproxy::is_os_pac_deferred(),
+                            }
                         })
                         .await;
+                        if let Ok(flags) = flags {
+                            env.auditor.set_protection_flags(flags);
+                        }
                     }
                 }
                 #[cfg(not(test))]
@@ -133,13 +143,19 @@ impl NetworkGuard {
         }
     }
 
-    /// Fetches the current egress IP (Cloudflare trace, falls back to ipify).
+    /// Fetches the current egress IP (Cloudflare trace, falls back to ipify),
+    /// honoring an active external `chained_proxy` when configured.
     async fn probe_ip(&self) -> Option<String> {
-        if let Ok(resp) = self
-            .client
-            .get("https://1.1.1.1/cdn-cgi/trace")
-            .send()
-            .await
+        let proxied = crate::sysproxy::get_chained_proxy().and_then(|cp| {
+            let proxy = reqwest::Proxy::all(&cp).ok()?;
+            reqwest::Client::builder()
+                .proxy(proxy)
+                .timeout(Duration::from_secs(5))
+                .build()
+                .ok()
+        });
+        let client = proxied.as_ref().unwrap_or(&self.client);
+        if let Ok(resp) = client.get("https://1.1.1.1/cdn-cgi/trace").send().await
             && let Ok(text) = resp.text().await
         {
             for line in text.lines() {
@@ -151,7 +167,7 @@ impl NetworkGuard {
                 }
             }
         }
-        if let Ok(resp) = self.client.get("https://api.ipify.org").send().await
+        if let Ok(resp) = client.get("https://api.ipify.org").send().await
             && let Ok(text) = resp.text().await
         {
             let val = text.trim();
@@ -182,6 +198,15 @@ impl NetworkGuard {
             .await;
         let dirty = std::mem::take(&mut inner.route_dirty);
         let dirty_since = inner.dirty_since.take();
+
+        if inner
+            .last_route_fp
+            .as_ref()
+            .is_some_and(|old| *old != current_fp)
+        {
+            crate::routing::net::clear_entry_dns_cache();
+            crate::proxy::transit::invalidate_all_dns_caches();
+        }
 
         // A provider that just lost its route or re-enabled monitoring must be re-checked.
         let gained_unrouted = inner
@@ -271,7 +296,9 @@ impl NetworkGuard {
     /// probe may have travelled over the old route, so it must never open the gate: the gate is
     /// kept closed and the next tick (fingerprint differs / `route_dirty`) handles the change.
     pub(super) fn probe_is_stale(&self, inner: &Inner, planned_fp: &str) -> bool {
-        let stale = inner.route_dirty || compute_local_route_fingerprint(None) != planned_fp;
+        let chained = crate::sysproxy::get_chained_proxy();
+        let stale =
+            inner.route_dirty || compute_local_route_fingerprint(chained.as_deref()) != planned_fp;
         if stale && self.gate() == Gate::Open {
             self.set_gate(Gate::Pending);
         }
@@ -281,9 +308,10 @@ impl NetworkGuard {
     pub(super) async fn check_route_and_tick(self: &Arc<Self>, env: &Env) {
         self.register_self_weak();
         let _tick = self.tick_lock.lock().await;
-        // Routes do not take part in the fingerprint: routed traffic has a fixed exit and is not
-        // governed by the gate, and the probe below measures the direct egress only.
-        let current_fp = compute_local_route_fingerprint(None);
+        // Include external system proxy (`chained_proxy`) so switching Clash/v2rayN/Happ
+        // triggers immediate re-audit and DNS cache invalidation even if local IP is unchanged.
+        let chained = crate::sysproxy::get_chained_proxy();
+        let current_fp = compute_local_route_fingerprint(chained.as_deref());
         let st_data = env.state.get_data().await;
         let enabled_unrouted = st_data.enabled_unrouted_providers();
         if !self.is_manual_killswitch() {
@@ -302,6 +330,8 @@ impl NetworkGuard {
         {
             TickPlan::Done => {}
             TickPlan::ProbeChanged(t0, planned_fp) => {
+                crate::routing::net::clear_entry_dns_cache();
+                crate::proxy::transit::invalidate_all_dns_caches();
                 let already_blocked = self.currently_blocked_set(&st_data);
                 self.freeze_providers_pending(&st_data, &enabled_unrouted, &already_blocked);
                 // 2. Probe external IP (no lock held: other tasks keep working meanwhile)

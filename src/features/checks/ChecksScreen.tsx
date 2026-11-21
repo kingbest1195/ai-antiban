@@ -199,8 +199,7 @@ export function ChecksScreen({
     <div className="zs-stack">
       <HintCard
         hintId="checks_intro"
-        title="14 проверок сети и окружения перед работой"
-        body="Сначала исправьте пункты с высоким приоритетом (страна, IPv6, DNS, часовой пояс) — это снижает риск проверок и блокировок аккаунта."
+        body="14 проверок сети и окружения: сначала исправьте страну, IPv6, DNS и часовой пояс."
         dismissedHints={localDismissed}
         onDismiss={handleDismissHint}
       />

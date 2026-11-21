@@ -14,6 +14,7 @@ export interface SosScreenProps {
   initialBranch?: SosBranchId;
   navKey?: number;
   currentCountry?: string;
+  embedded?: boolean;
   dismissedHints?: readonly string[];
   onDismissHint?: (hintId: string) => void;
   onNavigateToCleanRoom?: (step?: number) => void;
@@ -22,11 +23,12 @@ export interface SosScreenProps {
   onToast?: ShowToast;
 }
 
-/** Интерактивное дерево решений «🚨 SOS / Верификация» из 4 веток. */
+/** Интерактивное дерево решений «SOS / Верификация» из 4 веток. */
 export function SosScreen({
   initialBranch = "persona",
   navKey,
   currentCountry,
+  embedded = false,
   dismissedHints,
   onDismissHint,
   onNavigateToCleanRoom,
@@ -43,10 +45,9 @@ export function SosScreen({
   return (
     <Section title={copy.section}>
       <div className="zs-stack">
-        {onDismissHint && (
+        {!embedded && onDismissHint && (
           <HintCard
             hintId="sos_intro"
-            title={copy.hint.title}
             body={copy.hint.body}
             dismissedHints={dismissedHints}
             onDismiss={onDismissHint}
@@ -62,7 +63,11 @@ export function SosScreen({
         />
 
         <TabPanel idPrefix="sos" id="persona" selected={branch === "persona"}>
-          <PersonaBranch onToast={onToast} onBackupCreated={onBackupCreated} />
+          <PersonaBranch
+            ctaVariant={embedded ? "secondary" : "primary"}
+            onToast={onToast}
+            onBackupCreated={onBackupCreated}
+          />
         </TabPanel>
 
         <TabPanel idPrefix="sos" id="sms" selected={branch === "sms"}>
@@ -72,6 +77,7 @@ export function SosScreen({
         <TabPanel idPrefix="sos" id="payment" selected={branch === "payment"}>
           <PaymentBranch
             currentCountry={currentCountry}
+            ctaVariant={embedded ? "secondary" : "primary"}
             onToast={onToast}
             onNavigateToPaymentGuide={onNavigateToPaymentGuide}
           />
@@ -79,6 +85,7 @@ export function SosScreen({
 
         <TabPanel idPrefix="sos" id="banned" selected={branch === "banned"}>
           <BannedBranch
+            ctaVariant={embedded ? "secondary" : "primary"}
             onToast={onToast}
             onNavigateToCleanRoom={onNavigateToCleanRoom}
           />

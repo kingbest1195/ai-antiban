@@ -1,142 +1,26 @@
-//! Tauri commands for Clean Room audit, browser discovery, sandbox lifecycle, and tainted IP tracking.
+//! Clean Room profile CRUD, route rebinding, sandbox browser launch, and tainted IP controls.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use tauri::Manager;
-
-use super::AppContext;
+use super::super::AppContext;
+use super::{
+    is_direct_route_arg, normalize_alias_route_id, resolve_data_dir, run_clean_room_audit_with_env,
+};
 use crate::auditor::Auditor;
 use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::network::current_timestamp;
-use crate::auditor::profile_switcher::list_claude_profiles;
-use crate::clean_room::browser_discovery::{
-    discover_clean_browsers as discover_browsers_impl, resolve_browser_executable,
-};
+use crate::clean_room::browser_discovery::resolve_browser_executable;
 use crate::clean_room::browser_sandbox::{
-    SandboxProcessRegistry, clean_profile_dir, launch_hardened_sandbox, terminate_sandbox_pid,
+    SandboxProcessRegistry, clean_profile_dir, launch_hardened_sandbox_with_country,
+    read_sandbox_meta, terminate_sandbox_for_profile,
 };
-use crate::clean_room::detector::{
-    DetectorEnv, DetectorInput, RealDetectorEnv, run_clean_room_audit_with,
-};
+use crate::clean_room::detector::{DetectorEnv, RealDetectorEnv};
 use crate::clean_room::tz_guard::resolve_target_tz_for_spawn;
 use crate::clean_room::{
     CleanProfileId, CleanProfileStatus, CleanRoomAuditReport, CleanRoomProfile, CleanRoomState,
-    CreateCleanProfileInput, DetectedBrowser, LaunchCleanBrowserResult,
+    CreateCleanProfileInput, LaunchCleanBrowserResult,
 };
 use crate::proxy::ProxyManager;
-use crate::routing::{DIRECT_ROUTE_ID, RouteSelection};
-use crate::state::AppStateData;
-
-fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to resolve app data dir: {e}"))
-}
-
-pub fn normalize_alias_route_id(bound_route_id: Option<&str>) -> Option<String> {
-    let route_id = bound_route_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DIRECT_ROUTE_ID);
-    Some(route_id.to_string())
-}
-
-pub fn resolve_audit_provider(provider: Option<&str>) -> ProviderId {
-    provider
-        .and_then(|raw| {
-            let trimmed = raw.trim();
-            if trimmed.eq_ignore_ascii_case("custom") {
-                None
-            } else {
-                ProviderId::from_id(trimmed)
-            }
-        })
-        .unwrap_or(ProviderId::Anthropic)
-}
-
-fn route_selection_for_clean_profile(
-    data: &AppStateData,
-    bound_route_id: Option<&str>,
-) -> RouteSelection {
-    match bound_route_id {
-        Some(id) if id == DIRECT_ROUTE_ID => RouteSelection::Direct,
-        Some(id) => match data.routes.iter().find(|r| r.id == id) {
-            Some(r) => RouteSelection::Route(r.clone()),
-            None => RouteSelection::Missing(id.to_string()),
-        },
-        None => RouteSelection::Direct,
-    }
-}
-
-pub async fn run_clean_room_audit_with_env<E: DetectorEnv>(
-    env: &E,
-    data_dir: &Path,
-    state: &AppContext,
-    auditor: &Auditor,
-    profile_id: Option<&str>,
-) -> Result<CleanRoomAuditReport, String> {
-    let data = state.get_data().await;
-    let profile = profile_id.and_then(|pid| data.clean_room.profiles.iter().find(|p| p.id == pid));
-
-    let provider = resolve_audit_provider(profile.map(|p| p.provider.as_str()));
-    let selection =
-        route_selection_for_clean_profile(&data, profile.and_then(|p| p.bound_route_id.as_deref()));
-
-    let protection = crate::commands::audit::read_runtime_protection_flags().await;
-    let (risk_report, audit_error) = match auditor
-        .evaluate_all_with_selection_protection(provider, state, &selection, false, protection)
-        .await
-    {
-        Ok(report) => (Some(report), None),
-        Err(err) => (None, Some(err)),
-    };
-
-    let os_tz = crate::os_tz::get_os_timezone_sync_status(data_dir)
-        .ok()
-        .and_then(|s| s.current_os_tz);
-    let claude_profiles = list_claude_profiles(None)
-        .map(|r| r.profiles)
-        .unwrap_or_default();
-
-    Ok(run_clean_room_audit_with(
-        env,
-        &DetectorInput {
-            target_provider: provider,
-            target_profile_id: profile_id,
-            risk_report: risk_report.as_ref(),
-            audit_error: audit_error.as_deref(),
-            state_data: &data,
-            claude_profiles: &claude_profiles,
-            os_tz: os_tz.as_deref(),
-            now_secs: current_timestamp(),
-        },
-    ))
-}
-
-async fn run_audit_internal(
-    app: &tauri::AppHandle,
-    state: &AppContext,
-    auditor: &Auditor,
-    profile_id: Option<&str>,
-) -> Result<CleanRoomAuditReport, String> {
-    let data_dir = resolve_data_dir(app)?;
-    run_clean_room_audit_with_env(&RealDetectorEnv, &data_dir, state, auditor, profile_id).await
-}
-
-#[tauri::command]
-pub async fn run_clean_room_audit(
-    profile_id: Option<String>,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppContext>,
-    auditor: tauri::State<'_, Auditor>,
-) -> Result<CleanRoomAuditReport, String> {
-    run_audit_internal(&app, &state, &auditor, profile_id.as_deref()).await
-}
-
-#[tauri::command]
-pub async fn discover_clean_browsers() -> Result<Vec<DetectedBrowser>, String> {
-    Ok(discover_browsers_impl())
-}
 
 #[tauri::command]
 pub async fn list_clean_profiles(
@@ -151,7 +35,7 @@ pub async fn create_clean_profile_in(
 ) -> Result<CleanRoomProfile, String> {
     let label = input.label.trim().to_string();
     if label.is_empty() {
-        return Err("Profile label cannot be empty".to_string());
+        return Err("Название профиля не может быть пустым.".to_string());
     }
     let trimmed_provider = input.provider.trim();
     let provider = if trimmed_provider.eq_ignore_ascii_case("custom") {
@@ -159,7 +43,7 @@ pub async fn create_clean_profile_in(
     } else {
         ProviderId::from_id(trimmed_provider)
             .map(|p| p.as_str().to_string())
-            .ok_or_else(|| format!("Unknown provider: {}", input.provider))?
+            .ok_or_else(|| format!("Неизвестный ИИ-провайдер: {}", input.provider))?
     };
 
     let raw_id = format!("cr-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
@@ -170,7 +54,10 @@ pub async fn create_clean_profile_in(
         label,
         provider,
         browser_engine: input.browser_engine.trim().to_ascii_lowercase(),
-        bound_route_id: input.bound_route_id.filter(|s| !s.trim().is_empty()),
+        bound_route_id: input
+            .bound_route_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !is_direct_route_arg(s)),
         last_exit_ip: None,
         last_exit_country: None,
         status: CleanProfileStatus::Active,
@@ -214,7 +101,7 @@ pub async fn update_clean_profile_step(
             .profiles
             .iter_mut()
             .find(|p| p.id == id.as_str())
-            .ok_or_else(|| format!("Clean Room profile not found: {}", id.as_str()))?;
+            .ok_or_else(|| format!("Профиль «Чистой комнаты» не найден: {}", id.as_str()))?;
         profile.launchpad_step = clamped_step;
         if let Some(list) = completed_checklist {
             profile.completed_checklist = list;
@@ -223,6 +110,100 @@ pub async fn update_clean_profile_step(
     };
     state.save_async().await.map_err(|e| e.to_string())?;
     Ok(updated)
+}
+
+pub async fn update_clean_profile_route_in(
+    profile_id: &str,
+    route_id: Option<&str>,
+    state: &AppContext,
+    proxy_mgr: &ProxyManager,
+) -> Result<CleanRoomProfile, String> {
+    let id = CleanProfileId::parse(profile_id)?;
+    let clean_route_id = route_id
+        .map(str::trim)
+        .filter(|s| !is_direct_route_arg(s))
+        .map(str::to_string);
+
+    let updated = {
+        let mut w = state.write().await;
+        if let Some(ref rid) = clean_route_id
+            && !w.routes.iter().any(|r| r.id == *rid)
+        {
+            return Err(format!("Выбранный маршрут «{rid}» не найден."));
+        }
+        let profile = w
+            .clean_room
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == id.as_str())
+            .ok_or_else(|| format!("Профиль «Чистой комнаты» не найден: {}", id.as_str()))?;
+        profile.bound_route_id = clean_route_id.clone();
+        profile.clone()
+    };
+
+    state.save_async().await.map_err(|e| e.to_string())?;
+    if proxy_mgr
+        .get_profile_alias_port(id.as_str())
+        .await
+        .is_some()
+    {
+        let normalized_route_id = normalize_alias_route_id(clean_route_id.as_deref());
+        proxy_mgr
+            .ensure_profile_alias(id.as_str(), normalized_route_id)
+            .await?;
+    }
+    Ok(updated)
+}
+
+pub async fn update_clean_profile_route_with_sandbox(
+    profile_id: &str,
+    route_id: Option<&str>,
+    data_dir: Option<&Path>,
+    state: &AppContext,
+    proxy_mgr: &ProxyManager,
+    sandbox_registry: &SandboxProcessRegistry,
+) -> Result<CleanRoomProfile, String> {
+    let updated = update_clean_profile_route_in(profile_id, route_id, state, proxy_mgr).await?;
+    if let Some(new_port) = proxy_mgr.get_profile_alias_port(updated.id.as_str()).await {
+        let profile_dir = data_dir
+            .map(|d| d.join("clean-profiles").join(&updated.id))
+            .unwrap_or_default();
+        let saved_port = if !profile_dir.as_os_str().is_empty() {
+            read_sandbox_meta(&profile_dir).map(|m| m.alias_port)
+        } else {
+            None
+        };
+        let tracked_port = sandbox_registry
+            .get(updated.id.as_str())
+            .map(|p| p.alias_port);
+        let stale_port = saved_port.is_some_and(|p| p != new_port)
+            || tracked_port.is_some_and(|p| p != new_port);
+        if stale_port {
+            terminate_sandbox_for_profile(sandbox_registry, &profile_dir, updated.id.as_str());
+        }
+    }
+    Ok(updated)
+}
+
+#[tauri::command]
+pub async fn update_clean_profile_route(
+    profile_id: String,
+    route_id: Option<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppContext>,
+    proxy_mgr: tauri::State<'_, ProxyManager>,
+    sandbox_registry: tauri::State<'_, SandboxProcessRegistry>,
+) -> Result<CleanRoomProfile, String> {
+    let data_dir = resolve_data_dir(&app).ok();
+    update_clean_profile_route_with_sandbox(
+        &profile_id,
+        route_id.as_deref(),
+        data_dir.as_deref(),
+        &state,
+        &proxy_mgr,
+        &sandbox_registry,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -239,7 +220,7 @@ pub async fn start_clean_profile_warmup(
             .profiles
             .iter_mut()
             .find(|p| p.id == id.as_str())
-            .ok_or_else(|| format!("Clean Room profile not found: {}", id.as_str()))?;
+            .ok_or_else(|| format!("Профиль «Чистой комнаты» не найден: {}", id.as_str()))?;
         let started_at = profile.warmup_started_at.unwrap_or(now);
         profile.warmup_started_at = Some(started_at);
         if profile.status == CleanProfileStatus::Active {
@@ -264,7 +245,7 @@ pub async fn prepare_clean_browser_launch_with_env<E: DetectorEnv>(
     let id = CleanProfileId::parse(profile_id)?;
     let data = state.get_data().await;
     if data.manual_killswitch {
-        return Err("Manual kill-switch is active: Clean Room launch is blocked".to_string());
+        return Err("Включена ручная блокировка сети: запуск песочницы остановлен.".to_string());
     }
     let profile = data
         .clean_room
@@ -272,11 +253,11 @@ pub async fn prepare_clean_browser_launch_with_env<E: DetectorEnv>(
         .iter()
         .find(|p| p.id == id.as_str())
         .cloned()
-        .ok_or_else(|| format!("Clean Room profile not found: {}", id.as_str()))?;
+        .ok_or_else(|| format!("Профиль «Чистой комнаты» не найден: {}", id.as_str()))?;
 
     if profile.status == CleanProfileStatus::Tainted {
         return Err(format!(
-            "Clean Room profile '{}' is tainted and permanently locked",
+            "Профиль «{}» отмечен после блокировки и заблокирован для запуска.",
             profile.label
         ));
     }
@@ -285,14 +266,16 @@ pub async fn prepare_clean_browser_launch_with_env<E: DetectorEnv>(
         run_clean_room_audit_with_env(env, data_dir, state, auditor, Some(id.as_str())).await?;
     if !audit.ready_to_launch {
         return Err(format!(
-            "Hard Readiness Gate blocked launch ({} critical findings)",
+            "Запуск песочницы заблокирован проверкой безопасности (критических замечаний: {}).",
             audit.critical_count
         ));
     }
 
     let normalized_route_id = normalize_alias_route_id(profile.bound_route_id.as_deref());
+    let profile_dir = clean_profile_dir(data_dir, &id);
+    let preferred_port = read_sandbox_meta(&profile_dir).map(|m| m.alias_port);
     let alias_port = proxy_mgr
-        .ensure_profile_alias(id.as_str(), normalized_route_id)
+        .ensure_profile_alias_preferred(id.as_str(), normalized_route_id, preferred_port)
         .await?;
     Ok((id, profile, audit, alias_port))
 }
@@ -321,7 +304,7 @@ pub async fn launch_clean_browser(
     let tz_for_spawn =
         resolve_target_tz_for_spawn(cfg!(target_os = "macos"), audit.exit_timezone.as_deref());
 
-    let result = launch_hardened_sandbox(
+    let result = launch_hardened_sandbox_with_country(
         &sandbox_registry,
         &data_dir,
         &id,
@@ -330,6 +313,7 @@ pub async fn launch_clean_browser(
         alias_port,
         target_url.as_deref(),
         tz_for_spawn.as_deref(),
+        audit.exit_country.as_deref(),
     )?;
 
     let now = current_timestamp();
@@ -359,6 +343,7 @@ pub async fn launch_clean_browser(
 pub async fn mark_clean_profile_tainted(
     profile_id: String,
     reason: Option<String>,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppContext>,
     proxy_mgr: tauri::State<'_, ProxyManager>,
     sandbox_registry: tauri::State<'_, SandboxProcessRegistry>,
@@ -372,7 +357,7 @@ pub async fn mark_clean_profile_tainted(
             .profiles
             .iter()
             .position(|p| p.id == id.as_str())
-            .ok_or_else(|| format!("Clean Room profile not found: {}", id.as_str()))?;
+            .ok_or_else(|| format!("Профиль «Чистой комнаты» не найден: {}", id.as_str()))?;
         w.clean_room.profiles[idx].status = CleanProfileStatus::Tainted;
         if let Some(ip) = w.clean_room.profiles[idx].last_exit_ip.clone() {
             w.clean_room.tainted_ips.insert(ip, now);
@@ -386,23 +371,27 @@ pub async fn mark_clean_profile_tainted(
         );
     }
     proxy_mgr.stop_profile_alias(id.as_str()).await;
-    if let Some(proc_info) = sandbox_registry.remove(id.as_str()) {
-        terminate_sandbox_pid(proc_info.pid);
+    if let Ok(data_dir) = resolve_data_dir(&app) {
+        let profile_dir = clean_profile_dir(&data_dir, &id);
+        terminate_sandbox_for_profile(&sandbox_registry, &profile_dir, id.as_str());
+    } else {
+        terminate_sandbox_for_profile(&sandbox_registry, Path::new(""), id.as_str());
     }
     state.save_async().await.map_err(|e| e.to_string())?;
     Ok(updated)
 }
 
-#[tauri::command]
-pub async fn delete_clean_profile(
-    profile_id: String,
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppContext>,
-    proxy_mgr: tauri::State<'_, ProxyManager>,
-    sandbox_registry: tauri::State<'_, SandboxProcessRegistry>,
+pub async fn delete_clean_profile_in(
+    profile_id: &str,
+    taint_exit_ip: Option<bool>,
+    data_dir: Option<&Path>,
+    state: &AppContext,
+    proxy_mgr: &ProxyManager,
+    sandbox_registry: &SandboxProcessRegistry,
 ) -> Result<CleanRoomState, String> {
-    let id = CleanProfileId::parse(&profile_id)?;
+    let id = CleanProfileId::parse(profile_id)?;
     let now = current_timestamp();
+    let should_taint = taint_exit_ip == Some(true);
     let new_state = {
         let mut w = state.write().await;
         let Some(pos) = w
@@ -411,10 +400,13 @@ pub async fn delete_clean_profile(
             .iter()
             .position(|p| p.id == id.as_str())
         else {
-            return Err(format!("Clean Room profile not found: {}", id.as_str()));
+            return Err(format!(
+                "Профиль «Чистой комнаты» не найден: {}",
+                id.as_str()
+            ));
         };
         let removed = w.clean_room.profiles.remove(pos);
-        if let Some(ip) = removed.last_exit_ip {
+        if should_taint && let Some(ip) = removed.last_exit_ip {
             w.clean_room.tainted_ips.insert(ip, now);
         }
         if w.clean_room.active_profile_id.as_deref() == Some(id.as_str()) {
@@ -424,38 +416,38 @@ pub async fn delete_clean_profile(
     };
 
     proxy_mgr.stop_profile_alias(id.as_str()).await;
-    if let Some(proc_info) = sandbox_registry.remove(id.as_str()) {
-        terminate_sandbox_pid(proc_info.pid);
-    }
-    if let Ok(data_dir) = resolve_data_dir(&app) {
-        let dir = clean_profile_dir(&data_dir, &id);
+    if let Some(dir_root) = data_dir {
+        let dir = clean_profile_dir(dir_root, &id);
+        terminate_sandbox_for_profile(sandbox_registry, &dir, id.as_str());
         if dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
         }
+    } else {
+        terminate_sandbox_for_profile(sandbox_registry, Path::new(""), id.as_str());
     }
     state.save_async().await.map_err(|e| e.to_string())?;
     Ok(new_state)
 }
 
 #[tauri::command]
-pub async fn mark_ip_tainted(
-    ip: Option<String>,
+pub async fn delete_clean_profile(
+    profile_id: String,
+    taint_exit_ip: Option<bool>,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppContext>,
-    auditor: tauri::State<'_, Auditor>,
+    proxy_mgr: tauri::State<'_, ProxyManager>,
+    sandbox_registry: tauri::State<'_, SandboxProcessRegistry>,
 ) -> Result<CleanRoomState, String> {
-    let target_ip = match ip.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
-        Some(explicit) => explicit,
-        None => {
-            let telemetry = auditor.resolver.resolve(false).await?;
-            telemetry.ip
-        }
-    };
-    let now = current_timestamp();
-    let new_state = {
-        let mut w = state.write().await;
-        w.clean_room.tainted_ips.insert(target_ip, now);
-        w.clean_room.clone()
-    };
-    state.save_async().await.map_err(|e| e.to_string())?;
-    Ok(new_state)
+    let data_dir = resolve_data_dir(&app).ok();
+    delete_clean_profile_in(
+        &profile_id,
+        taint_exit_ip,
+        data_dir.as_deref(),
+        &state,
+        &proxy_mgr,
+        &sandbox_registry,
+    )
+    .await
 }
+
+pub use super::{mark_ip_tainted, untaint_clean_room_ip, untaint_clean_room_ip_in};

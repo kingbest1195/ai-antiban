@@ -194,6 +194,7 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
   it("AlertWindow показывает Было → Стало при смене IP и fallback без old_ip", () => {
     const withOld = renderToStaticMarkup(
       createElement(AlertWindow, {
+        hideIpMode: false,
         initialPayload: {
           ...detecting(),
           phase: "ready",
@@ -211,6 +212,7 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
 
     const withoutOld = renderToStaticMarkup(
       createElement(AlertWindow, {
+        hideIpMode: false,
         initialPayload: {
           ...detecting(),
           scope: "provider",
@@ -266,5 +268,71 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
     expect(html).toContain("zs-alert-reason");
     expect(html).toContain("Адрес выхода сменился на RU");
     expect(html).toContain("Пауза до смены сети");
+  });
+
+  it("маскирует currentIp, previousIp и gate_reason при hideIpMode=true", () => {
+    const html = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        hideIpMode: true,
+        initialPayload: {
+          ...detecting(),
+          phase: "ready",
+          gate_reason: "IP сменился на 185.220.101.5",
+          network_change: { old_ip: "185.212.102.40", old_country: "NL", new_ip: "185.220.101.5", new_country: "TR" },
+        },
+      }),
+    );
+
+    expect(html).not.toContain("185.212.102.40");
+    expect(html).not.toContain("185.220.101.5");
+    expect(html).toContain("•••.•••.•••.40");
+    expect(html).toContain("•••.•••.•••.5");
+  });
+
+  it("маскирует IPv6 в currentIp, previousIp и gate_reason при hideIpMode=true", () => {
+    const html = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        hideIpMode: true,
+        initialPayload: {
+          ...detecting(),
+          phase: "ready",
+          gate_reason: "Обнаружен IPv6 2001:db8:85a3::7334",
+          network_change: {
+            old_ip: "2a01:4f8:c0c::1",
+            old_country: "NL",
+            new_ip: "2001:db8:85a3::7334",
+            new_country: "DE",
+          },
+        },
+      }),
+    );
+
+    expect(html).not.toContain("2a01:4f8:c0c::1");
+    expect(html).not.toContain("2001:db8:85a3::7334");
+    expect(html).toContain("••••:••••:…:1");
+    expect(html).toContain("••••:••••:…:7334");
+  });
+
+  it("P2: при hideIpMode === undefined (холодный старт alert-popup) маскирует IP до ответа fetchAppState", () => {
+    const html = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        initialPayload: {
+          ...detecting(),
+          phase: "ready",
+          gate_reason: "IP сменился на 185.220.101.5",
+          network_change: {
+            old_ip: "185.212.102.40",
+            old_country: "NL",
+            new_ip: "185.220.101.5",
+            new_country: "TR",
+          },
+        },
+      }),
+    );
+
+    expect(html).not.toContain("185.212.102.40");
+    expect(html).not.toContain("185.220.101.5");
+    expect(html).toContain("•••.•••.•••.40");
+    expect(html).toContain("•••.•••.•••.5");
   });
 });

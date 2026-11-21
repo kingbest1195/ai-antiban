@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FakeClock {
@@ -404,6 +405,16 @@ async fn transit_anti_ssrf_overrides_fake_ip_and_forbidden_ip_with_public_dns() 
     .await
     .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+    // 5. Forbidden non-FakeIP from BOTH system and public DNS is rejected (not cached).
+    let err2 = resolve_transit_ips_with(
+        "api.example.com",
+        async { Ok(vec![ip("127.0.0.1")]) },
+        async { Ok(vec![ip("10.0.0.1")]) },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err2.kind(), io::ErrorKind::PermissionDenied);
 }
 
 #[test]

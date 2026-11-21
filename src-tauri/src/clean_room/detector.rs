@@ -67,8 +67,8 @@ pub fn run_clean_room_audit_with<E: DetectorEnv>(
         findings.push(CleanRoomFinding {
             id: "manual_killswitch_active".to_string(),
             category: "network_leak".to_string(),
-            title: "Manual kill-switch is active".to_string(),
-            detail: "Disable the manual kill-switch before launching an isolated browser."
+            title: "Включена ручная блокировка сети".to_string(),
+            detail: "Выключите ручную блокировку сети перед запуском изолированного окна браузера."
                 .to_string(),
             severity: TraceSeverity::Critical,
             path_hint: None,
@@ -111,9 +111,9 @@ fn check_browser_traces<E: DetectorEnv>(env: &E, findings: &mut Vec<CleanRoomFin
         findings.push(CleanRoomFinding {
             id: "personal_browsers_present".to_string(),
             category: "browser".to_string(),
-            title: "Personal browser profiles detected".to_string(),
+            title: "Обнаружены обычные браузеры".to_string(),
             detail: format!(
-                "Detected existing profiles ({}). Use Zastava's isolated sandbox window instead of your personal browser.",
+                "На компьютере найдены профили ({}). Для нового аккаунта используйте изолированное окно «Чистой комнаты» вместо личного браузера.",
                 found.join(", ")
             ),
             severity: TraceSeverity::Warning,
@@ -146,8 +146,8 @@ fn check_desktop_app_traces<E: DetectorEnv>(
         findings.push(CleanRoomFinding {
             id: "claude_desktop_traces".to_string(),
             category: "desktop_traces".to_string(),
-            title: "Claude Desktop session/device traces found".to_string(),
-            detail: "Cookies, Local Storage, or device registry files exist in Claude Desktop data directory.".to_string(),
+            title: "Найдены следы прошлой сессии в приложении Claude".to_string(),
+            detail: "В папке приложения Claude Desktop сохранились куки, локальное хранилище или идентификатор устройства.".to_string(),
             severity,
             path_hint: Some(mask_path_hint(&claude_hits[0])),
             fix_action: Some(CleanRoomFixAction::CleanAppCache {
@@ -174,8 +174,8 @@ fn check_desktop_app_traces<E: DetectorEnv>(
         findings.push(CleanRoomFinding {
             id: "chatgpt_desktop_traces".to_string(),
             category: "desktop_traces".to_string(),
-            title: "ChatGPT Desktop session traces found".to_string(),
-            detail: "Cookies or Local Storage files exist in ChatGPT Desktop data directory."
+            title: "Найдены следы прошлой сессии в приложении ChatGPT".to_string(),
+            detail: "В папке приложения ChatGPT Desktop сохранились куки или локальное хранилище."
                 .to_string(),
             severity,
             path_hint: Some(mask_path_hint(&chatgpt_hits[0])),
@@ -195,8 +195,10 @@ fn check_cursor_traces<E: DetectorEnv>(env: &E, findings: &mut Vec<CleanRoomFind
         findings.push(CleanRoomFinding {
             id: "cursor_ide_present".to_string(),
             category: "desktop_traces".to_string(),
-            title: "Cursor IDE profile directory detected".to_string(),
-            detail: "Close or re-authenticate Cursor before switching AI accounts.".to_string(),
+            title: "Обнаружен профиль редактора Cursor".to_string(),
+            detail:
+                "Закройте Cursor или повторно войдите в нужный аккаунт перед сменой профиля ИИ."
+                    .to_string(),
             severity: TraceSeverity::Warning,
             path_hint: Some(mask_path_hint(&dir)),
             fix_action: Some(CleanRoomFixAction::CloseRunningApp {
@@ -231,8 +233,9 @@ fn check_running_processes<E: DetectorEnv>(
         findings.push(CleanRoomFinding {
             id: format!("running_app_{}", lower.replace(".exe", "")),
             category: "desktop_traces".to_string(),
-            title: format!("{proc_name} is currently running"),
-            detail: "Running desktop clients hold file locks and active sessions.".to_string(),
+            title: format!("Сейчас запущено приложение {proc_name}"),
+            detail: "Открытое приложение удерживает блокировку файлов и активную сессию."
+                .to_string(),
             severity,
             path_hint: None,
             fix_action: Some(CleanRoomFixAction::CloseRunningApp {
@@ -256,8 +259,10 @@ fn check_ip_collision(
         findings.push(CleanRoomFinding {
             id: "exit_ip_tainted".to_string(),
             category: "ip_collision".to_string(),
-            title: "Current exit IP is marked tainted".to_string(),
-            detail: format!("Exit IP {ip} was previously flagged for a ban or Persona trigger."),
+            title: "Выходной IP помечен после блокировки".to_string(),
+            detail: format!(
+                "Адрес {ip} ранее был отмечен после бана или проверки личности. Смените ключ или снимите отметку, если это ошибка."
+            ),
             severity: TraceSeverity::Critical,
             path_hint: None,
             fix_action: Some(CleanRoomFixAction::SwitchRouteOrVpn),
@@ -285,8 +290,10 @@ fn check_ip_collision(
         findings.push(CleanRoomFinding {
             id: "ip_used_by_other_profile".to_string(),
             category: "ip_collision".to_string(),
-            title: "Exit IP collided with another profile (30d)".to_string(),
-            detail: format!("Exit IP {ip} was used by another profile within the last 30 days."),
+            title: "Этот IP уже использовался другим аккаунтом".to_string(),
+            detail: format!(
+                "Адрес {ip} применялся в другом профиле за последние 30 дней. Для нового аккаунта используйте отдельный адрес."
+            ),
             severity: TraceSeverity::Critical,
             path_hint: None,
             fix_action: Some(CleanRoomFixAction::SwitchRouteOrVpn),
@@ -295,8 +302,8 @@ fn check_ip_collision(
         findings.push(CleanRoomFinding {
             id: "ip_seen_in_history".to_string(),
             category: "ip_collision".to_string(),
-            title: "Exit IP was previously used in session history (30d)".to_string(),
-            detail: format!("Exit IP {ip} appears in ip_history within the last 30 days."),
+            title: "Этот IP уже встречался в истории подключений".to_string(),
+            detail: format!("Адрес {ip} зафиксирован в истории подключений за последние 30 дней."),
             severity: TraceSeverity::Warning,
             path_hint: None,
             fix_action: Some(CleanRoomFixAction::SwitchRouteOrVpn),
@@ -328,11 +335,15 @@ fn check_network_and_os_hygiene(
         };
         add_if_critical(
             "geo_sanctioned",
-            "Exit IP geo is blocked or sanctioned",
+            "Регион выходного IP не поддерживается ИИ-провайдером",
             &r.geo_result,
         );
-        add_if_critical("ipv6_leak", "IPv6 leak detected", &r.ipv6_result);
-        add_if_critical("dnsbl_red", "Exit IP is listed on DNSBL", &r.dnsbl_result);
+        add_if_critical("ipv6_leak", "Обнаружена утечка IPv6", &r.ipv6_result);
+        add_if_critical(
+            "dnsbl_red",
+            "Выходной IP попал в списки блокировки",
+            &r.dnsbl_result,
+        );
         for c in &r.checks {
             let lower = c.code.to_ascii_lowercase();
             if c.status == CheckStatus::Critical
@@ -341,7 +352,7 @@ fn check_network_and_os_hygiene(
                 findings.push(CleanRoomFinding {
                     id: format!("net_check_{lower}"),
                     category: "network_leak".to_string(),
-                    title: format!("Network hygiene check failed ({})", c.code),
+                    title: format!("Нарушена защита сети ({})", c.code),
                     detail: c.message.clone(),
                     severity: TraceSeverity::Critical,
                     path_hint: None,
@@ -353,14 +364,15 @@ fn check_network_and_os_hygiene(
         let detail = audit_error
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|s| format!("Network audit could not verify exit IP or route hygiene: {s}"))
+            .map(|s| format!("Проверка маршрута не завершилась: {s}"))
             .unwrap_or_else(|| {
-                "Network audit could not verify exit IP or route hygiene; launching is blocked until a clean exit is verified.".to_string()
+                "Проверка сети не смогла подтвердить чистый выходной IP; запуск заблокирован до успешной проверки маршрута."
+                    .to_string()
             });
         findings.push(CleanRoomFinding {
             id: "network_audit_failed".to_string(),
             category: "network_leak".to_string(),
-            title: "Network audit unavailable or bound route unreachable".to_string(),
+            title: "Не удалось проверить выходной IP или выбранный маршрут".to_string(),
             detail,
             severity: TraceSeverity::Critical,
             path_hint: None,
@@ -376,10 +388,10 @@ fn check_network_and_os_hygiene(
         findings.push(CleanRoomFinding {
             id: "windows_os_tz_mismatch".to_string(),
             category: "os_tz_locale".to_string(),
-            title: "Windows OS timezone does not match exit IP".to_string(),
-            detail: "Chromium on Windows ignores TZ env and reads OS timezone directly."
+            title: "Часовой пояс Windows отличается от региона выхода".to_string(),
+            detail: "Браузер на Windows берёт часовой пояс из настроек системы. Запуск песочницы не заблокирован, но для нового аккаунта лучше синхронизировать время Windows в 1 клик."
                 .to_string(),
-            severity: TraceSeverity::Critical,
+            severity: TraceSeverity::Warning,
             path_hint: None,
             fix_action: Some(CleanRoomFixAction::SyncOsTimezone { target_iana }),
         });

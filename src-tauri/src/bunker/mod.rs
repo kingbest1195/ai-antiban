@@ -92,6 +92,8 @@ pub struct BunkerSettingsPatch {
     pub interval_hours: Option<u32>,
     #[serde(default)]
     pub retention_count: Option<usize>,
+    #[serde(default)]
+    pub max_total_mb: Option<u64>,
 }
 
 pub fn bunker_snapshots_dir(app_data_dir: &Path) -> PathBuf {
@@ -173,8 +175,9 @@ pub fn get_bunker_status_in(
     }
 }
 
-/// Creates a sanitized snapshot at `<app_data_dir>/bunker/snapshots/<YYYY-MM-DD_HHMMSS>/`,
-/// writes `RESTORE_PROMPT.md`, enforces FIFO retention, and optionally copies to `destination_dir`.
+/// Creates a sanitized snapshot at `<app_data_dir>/bunker/snapshots/<YYYY-MM-DD_HHMMSS>/`
+/// via atomic `.tmp-<id>` staging, writes `RESTORE_PROMPT.md`, enforces FIFO + byte-quota
+/// retention, and optionally copies to `destination_dir`.
 pub fn run_bunker_backup_in(
     app_data_dir: &Path,
     home_dir: &Path,
@@ -183,62 +186,34 @@ pub fn run_bunker_backup_in(
     destination_dir: Option<&Path>,
 ) -> Result<BunkerBackupResult, String> {
     let snapshots_dir = bunker_snapshots_dir(app_data_dir);
-    let (snapshot_id, snapshot_dir) = allocate_snapshot_dir(&snapshots_dir)?;
+    retention::cleanup_stale_staging_dirs(&snapshots_dir);
+    let (snapshot_id, staging_dir, final_dir) = allocate_staged_snapshot_dir(&snapshots_dir)?;
 
-    let claude_dir = home_dir.join(".claude");
-    let mut files_count = 0usize;
-    let mut total_bytes = 0u64;
-    let mut sources = Vec::new();
-
-    let (cc_files, cc_bytes) = copy_claude_code_sources(&claude_dir, home_dir, &snapshot_dir)?;
-    if cc_files > 0 {
-        sources.push("claude_code".to_string());
-        files_count += cc_files;
-        total_bytes += cc_bytes;
-    }
-
-    if let Some(desktop_cfg) = get_claude_desktop_config_path(home_dir) {
-        let dst = snapshot_dir
-            .join("configs")
-            .join("claude_desktop_config.json");
-        let bytes = copy_sanitized_json_file(&desktop_cfg, &dst)?;
-        sources.push("claude_desktop".to_string());
-        files_count += 1;
-        total_bytes += bytes;
-    }
-
-    let (cur_files, cur_bytes, _cur_mcps) =
-        export_cursor_to(home_dir, &claude_dir, &snapshot_dir.join("cursor"))?;
-    if cur_files > 0 {
-        sources.push("cursor".to_string());
-        files_count += cur_files;
-        total_bytes += cur_bytes;
-    }
-
-    let prompt_text = build_restore_prompt_md(home_dir, &claude_dir, Some(&snapshot_dir));
-    let restore_prompt_path = snapshot_dir.join("RESTORE_PROMPT.md");
-    write_private_file(&restore_prompt_path, prompt_text.as_bytes())?;
-    files_count += 1;
-    total_bytes += prompt_text.len() as u64;
-
-    let meta = BunkerSnapshotMeta {
-        id: snapshot_id.clone(),
-        created_at: current_timestamp(),
-        snapshot_dir: snapshot_dir.to_string_lossy().to_string(),
-        total_bytes,
-        files_count,
-        sources,
-        has_restore_prompt: true,
-        trigger: trigger.to_string(),
+    let res = populate_snapshot_staging(&staging_dir, &final_dir, &snapshot_id, home_dir, trigger);
+    let (meta, restore_prompt_path) = match res {
+        Ok(ok) => ok,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(err);
+        }
     };
-    write_snapshot_meta(&snapshot_dir, &meta)?;
 
-    let pruned_snapshots = prune_old_snapshots(&snapshots_dir, settings.retention_count)?;
+    if let Err(err) = fs::rename(&staging_dir, &final_dir) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(format!(
+            "Failed to finalize Bunker snapshot {}: {err}",
+            final_dir.display()
+        ));
+    }
+
+    let max_bytes = settings.max_total_mb.saturating_mul(1024 * 1024);
+    let pruned_snapshots =
+        prune_old_snapshots(&snapshots_dir, settings.retention_count, max_bytes)?;
 
     let exported_copy_dir = match destination_dir {
         Some(dest) => {
             let copy_target = dest.join(format!("Zastava_Bunker_{snapshot_id}"));
-            copy_private_dir_filtered(&snapshot_dir, &copy_target)?;
+            copy_private_dir_filtered(&final_dir, &copy_target)?;
             Some(copy_target.to_string_lossy().to_string())
         }
         None => None,
@@ -250,6 +225,87 @@ pub fn run_bunker_backup_in(
         exported_copy_dir,
         pruned_snapshots,
     })
+}
+
+fn populate_snapshot_staging(
+    staging_dir: &Path,
+    final_dir: &Path,
+    snapshot_id: &str,
+    home_dir: &Path,
+    trigger: &str,
+) -> Result<(BunkerSnapshotMeta, PathBuf), String> {
+    let claude_dir = home_dir.join(".claude");
+    let mut files_count = 0usize;
+    let mut total_bytes = 0u64;
+    let mut sources = Vec::new();
+
+    let (cc_files, cc_bytes) = copy_claude_code_sources(&claude_dir, home_dir, staging_dir)?;
+    if cc_files > 0 {
+        sources.push("claude_code".to_string());
+        files_count += cc_files;
+        total_bytes += cc_bytes;
+    }
+
+    if let Some(desktop_cfg) = get_claude_desktop_config_path(home_dir) {
+        let dst = staging_dir
+            .join("configs")
+            .join("claude_desktop_config.json");
+        let bytes = copy_sanitized_json_file(&desktop_cfg, &dst)?;
+        sources.push("claude_desktop".to_string());
+        files_count += 1;
+        total_bytes += bytes;
+    }
+
+    let (cur_files, cur_bytes, _cur_mcps) =
+        export_cursor_to(home_dir, &claude_dir, &staging_dir.join("cursor"))?;
+    if cur_files > 0 {
+        sources.push("cursor".to_string());
+        files_count += cur_files;
+        total_bytes += cur_bytes;
+    }
+
+    let prompt_text = build_restore_prompt_md(home_dir, &claude_dir, Some(staging_dir));
+    write_private_file(
+        &staging_dir.join("RESTORE_PROMPT.md"),
+        prompt_text.as_bytes(),
+    )?;
+    files_count += 1;
+    total_bytes += prompt_text.len() as u64;
+
+    let meta = BunkerSnapshotMeta {
+        id: snapshot_id.to_string(),
+        created_at: current_timestamp(),
+        snapshot_dir: final_dir.to_string_lossy().to_string(),
+        total_bytes,
+        files_count,
+        sources,
+        has_restore_prompt: true,
+        trigger: trigger.to_string(),
+    };
+    write_snapshot_meta(staging_dir, &meta)?;
+    Ok((meta, final_dir.join("RESTORE_PROMPT.md")))
+}
+
+/// Clears Bunker snapshots safely (keeping newest 1 when `keep_latest` is `true`, or all
+/// when `false`) and removes leftover `.tmp-*` staging directories.
+pub fn clear_bunker_snapshots_in(
+    app_data_dir: &Path,
+    home_dir: &Path,
+    settings: &BunkerSettings,
+    keep_latest: bool,
+) -> Result<BunkerStatus, String> {
+    let snapshots_dir = bunker_snapshots_dir(app_data_dir);
+    retention::cleanup_stale_staging_dirs(&snapshots_dir);
+    let snapshots = list_snapshots(&snapshots_dir);
+    let skip = usize::from(keep_latest);
+    for old in snapshots.into_iter().skip(skip) {
+        let dir = Path::new(&old.snapshot_dir);
+        if dir.is_dir() {
+            fs::remove_dir_all(dir)
+                .map_err(|e| format!("Failed to remove snapshot {}: {e}", dir.display()))?;
+        }
+    }
+    Ok(get_bunker_status_in(app_data_dir, home_dir, settings))
 }
 
 /// Generates an up-to-date `RESTORE_PROMPT.md` string covering Claude Code, MCP, and Cursor IDE.
@@ -291,8 +347,42 @@ pub fn allocate_timestamped_dir(parent_dir: &Path) -> Result<(String, PathBuf), 
     Err("Failed to allocate unique Bunker snapshot directory".to_string())
 }
 
+#[cfg(test)]
 fn allocate_snapshot_dir(snapshots_dir: &Path) -> Result<(String, PathBuf), String> {
     allocate_timestamped_dir(snapshots_dir)
+}
+
+fn allocate_staged_snapshot_dir(
+    snapshots_dir: &Path,
+) -> Result<(String, PathBuf, PathBuf), String> {
+    ensure_private_dir(snapshots_dir)?;
+    let base = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+    for idx in 0..=999u32 {
+        let id = if idx == 0 {
+            base.clone()
+        } else {
+            format!("{base}_{idx:02}")
+        };
+        let final_dir = snapshots_dir.join(&id);
+        if final_dir.exists() {
+            continue;
+        }
+        let staging_dir = snapshots_dir.join(format!(".tmp-{id}"));
+        match fs::create_dir(&staging_dir) {
+            Ok(()) => {
+                ensure_private_dir(&staging_dir)?;
+                return Ok((id, staging_dir, final_dir));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to allocate Bunker staging directory {}: {e}",
+                    staging_dir.display()
+                ));
+            }
+        }
+    }
+    Err("Failed to allocate unique Bunker snapshot directory".to_string())
 }
 
 fn copy_claude_code_sources(

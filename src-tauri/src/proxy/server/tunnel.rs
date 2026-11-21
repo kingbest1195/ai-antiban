@@ -33,15 +33,26 @@ impl ProxyServer {
         self.transit.connect_direct(host, port).await
     }
 
-    /// Outbound connection for a transit (non-AI) CONNECT: through the chained proxy when there is
-    /// one, with a single fallback to a direct connection if the proxy cannot be reached (not if
-    /// it answers with an error status).
-    async fn connect_transit(
+    /// Outbound connection for transit or direct-mode traffic: through the chained proxy when
+    /// there is one, with a single fallback to a direct connection if the proxy cannot be reached
+    /// (not if it answers with an error status).
+    pub(super) async fn connect_transit(
         &self,
         host: &str,
         port: u16,
     ) -> Result<UpstreamStream, std::io::Error> {
-        let gateway_port = self.bound_addr.port();
+        self.connect_transit_with_port(host, port, self.bound_addr.port())
+            .await
+    }
+
+    /// Same as [`Self::connect_transit`], but uses an explicit `gateway_port` for self-loop
+    /// filtering (used by per-profile alias listeners so they exclude the main gateway port).
+    pub(super) async fn connect_transit_with_port(
+        &self,
+        host: &str,
+        port: u16,
+        gateway_port: u16,
+    ) -> Result<UpstreamStream, std::io::Error> {
         if let Some(cp) = self.transit.chained_proxy(gateway_port) {
             match connect_via_chained_proxy(
                 &cp,
@@ -227,11 +238,12 @@ impl ProxyServer {
                 )
             })
             .and_then(|r| r)
+            .map(UpstreamStream::Plain)
         } else {
-            self.connect_direct(host, port).await
+            self.connect_transit(host, port).await
         };
 
-        let target_stream = match connect_res {
+        let mut target = match connect_res {
             Ok(s) => s,
             Err(e) => {
                 let err_msg = format!("Failed to connect to target {host}:{port}: {e}");
@@ -250,7 +262,6 @@ impl ProxyServer {
             .await?;
         client.flush().await?;
 
-        let mut target = UpstreamStream::Plain(target_stream);
         pump(
             client,
             &mut target,

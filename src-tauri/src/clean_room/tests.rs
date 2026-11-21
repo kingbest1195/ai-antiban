@@ -2,13 +2,15 @@ use super::browser_discovery::{
     DiscoveryPlatform, discover_browsers_with, resolve_browser_executable_from,
 };
 use super::browser_sandbox::{
-    RunningSandboxProcess, SandboxProcessRegistry, build_hardened_chromium_args,
-    launch_hardened_sandbox, write_fail_closed_preferences,
+    RunningSandboxProcess, SandboxMeta, SandboxProcessRegistry, accept_languages_for_country,
+    build_hardened_chromium_args, build_hardened_chromium_args_for_engine, launch_hardened_sandbox,
+    read_sandbox_meta, write_fail_closed_preferences, write_fail_closed_preferences_with_country,
+    write_sandbox_meta,
 };
 use super::detector::{DetectorEnv, DetectorInput, run_clean_room_audit_with};
 use super::detector_env::parse_windows_running_ai_processes;
 use super::tz_guard::{evaluate_tz_guard, resolve_target_tz_for_spawn};
-use super::{CleanProfileId, CleanRoomFixAction};
+use super::{CleanProfileId, CleanRoomFixAction, TraceSeverity};
 use crate::auditor::geo_matrix::{CheckResult, CheckStatus, ProviderId};
 use crate::auditor::network::NetworkTelemetry;
 use crate::auditor::{OverallStatus, RiskReport};
@@ -91,6 +93,7 @@ fn sample_report(ip: &str, country: &str, tz: Option<&str>) -> RiskReport {
         unknown_count: 0,
         applicable_count: 1,
         incomplete: false,
+        gateway_latency_ms: None,
     }
 }
 
@@ -154,14 +157,36 @@ fn hardened_args_and_fail_closed_preferences() {
     let profile_id = CleanProfileId::parse("clean-1").unwrap();
     let profile_dir = tmp.path().join("clean-profiles").join(profile_id.as_str());
 
-    let prefs_path = write_fail_closed_preferences(&profile_dir, 45123).unwrap();
+    let prefs_path =
+        write_fail_closed_preferences_with_country(&profile_dir, 45123, Some("DE")).unwrap();
     let prefs_raw = std::fs::read_to_string(&prefs_path).unwrap();
     let prefs: serde_json::Value = serde_json::from_str(&prefs_raw).unwrap();
     assert_eq!(prefs["proxy"]["mode"], "fixed_servers");
     assert_eq!(prefs["proxy"]["server"], "http://127.0.0.1:45123");
     assert_eq!(prefs["dns_over_https"]["mode"], "off");
+    assert_eq!(prefs["intl"]["accept_languages"], "de-DE,de,en");
+    assert_eq!(
+        prefs["webrtc"]["ip_handling_policy"],
+        "disable_non_proxied_udp"
+    );
+    assert_eq!(prefs["webrtc"]["multiple_routes_enabled"], false);
+    assert_eq!(prefs["signin"]["allowed"], false);
+    assert_eq!(prefs["sync"]["requested"], false);
+    assert_eq!(prefs["browser"]["has_seen_welcome_page"], true);
+    assert_eq!(prefs["browser"]["edge_first_run_complete"], true);
+    assert!(
+        profile_dir.join("First Run").is_file(),
+        "First Run sentinel must be created"
+    );
+    assert_eq!(accept_languages_for_country(Some("GB")), "en-GB,en");
+    assert_eq!(accept_languages_for_country(None), "en-US,en");
+    assert!(write_fail_closed_preferences(&profile_dir, 45123).is_ok());
 
     let args = build_hardened_chromium_args(&profile_dir, 45123, Some("https://claude.ai"));
+    assert!(
+        !args.iter().any(|a| a.starts_with("--lang=")),
+        "must NOT force English UI via --lang=en-US"
+    );
     assert!(
         args.iter()
             .any(|a| a == "--proxy-server=http://127.0.0.1:45123")
@@ -186,6 +211,13 @@ fn hardened_args_and_fail_closed_preferences() {
             .iter()
             .any(|a| a.contains("WebRtcHideLocalIpsWithMdns")),
         "must NEVER disable WebRtcHideLocalIpsWithMdns"
+    );
+
+    let edge_args = build_hardened_chromium_args_for_engine(&profile_dir, 45123, None, "edge");
+    assert!(
+        edge_args
+            .iter()
+            .any(|a| a == "--disable-features=DnsOverHttps,msEdgeFRE")
     );
 }
 
@@ -394,4 +426,183 @@ fn windows_detector_ignores_claude_code_cli_and_flags_desktop() {
             "claude.exe".to_string(),
         ]
     );
+}
+
+#[test]
+fn windows_tz_mismatch_is_warning_and_persisted_meta_recovers_stale_singleton() {
+    let env = FakeDetectorEnv {
+        existing: HashSet::new(),
+        running: vec![],
+        browsers: vec![],
+        claude_dirs: vec![],
+        chatgpt_dirs: vec![],
+        cursor_dirs: vec![],
+        windows: true,
+    };
+    let state = AppStateData::default();
+    let report = sample_report("198.51.100.44", "US", Some("America/New_York"));
+    let audit = run_clean_room_audit_with(
+        &env,
+        &DetectorInput {
+            target_provider: ProviderId::Anthropic,
+            target_profile_id: None,
+            risk_report: Some(&report),
+            audit_error: None,
+            state_data: &state,
+            claude_profiles: &[],
+            os_tz: Some("Europe/Moscow"),
+            now_secs: 1_700_000_100,
+        },
+    );
+    assert!(
+        audit.ready_to_launch,
+        "A1: Windows TZ mismatch must not hard-block sandbox launch"
+    );
+    let tz_finding = audit
+        .findings
+        .iter()
+        .find(|f| f.id == "windows_os_tz_mismatch")
+        .expect("windows_os_tz_mismatch finding");
+    assert_eq!(tz_finding.severity, TraceSeverity::Warning);
+    assert!(!tz_finding.title.is_ascii());
+
+    // Persisted .zastava-sandbox.json recovery cleans stale SingletonLock when port changed
+    let tmp = tempfile::tempdir().unwrap();
+    let pid_id = CleanProfileId::parse("p-restart").unwrap();
+    let profile_dir = tmp.path().join("clean-profiles").join(pid_id.as_str());
+    write_sandbox_meta(
+        &profile_dir,
+        SandboxMeta {
+            pid: 4242,
+            alias_port: 40001,
+        },
+    )
+    .unwrap();
+    std::fs::write(profile_dir.join("SingletonLock"), b"stale").unwrap();
+
+    let registry = SandboxProcessRegistry::new();
+    let res = launch_hardened_sandbox(
+        &registry,
+        tmp.path(),
+        &pid_id,
+        "chrome",
+        "/nonexistent/chrome",
+        40009,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(res.alias_port, 40009);
+    assert!(!profile_dir.join("SingletonLock").exists());
+    assert_eq!(
+        read_sandbox_meta(&profile_dir).map(|m| m.alias_port),
+        Some(40009)
+    );
+}
+
+#[test]
+fn parse_ps_pids_for_profile_finds_only_matching_sandbox_browser_pids() {
+    use super::browser_sandbox::parse_ps_pids_for_profile;
+
+    let profile_dir = Path::new("/tmp/zastava-test/clean-profiles/cr-gemini3");
+    let ps_out = format!(
+        "  101 /sbin/launchd\n\
+         {} /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/zastava-test/clean-profiles/cr-gemini3\n\
+         42001 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/zastava-test/clean-profiles/cr-gemini3 --proxy-server=http://127.0.0.1:41000\n\
+         42002 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/alice/Library/Application Support/Google/Chrome\n\
+         42003 /bin/cat /tmp/zastava-test/clean-profiles/cr-gemini3/Default/Preferences\n\
+         42004 /Applications/Brave Browser.app/Contents/MacOS/Brave Browser --user-data-dir=/tmp/zastava-test/clean-profiles/cr-gemini3\n",
+        std::process::id()
+    );
+    let pids = parse_ps_pids_for_profile(&ps_out, profile_dir);
+    assert_eq!(pids, vec![42001, 42004]);
+}
+
+#[test]
+fn sandbox_args_suppress_chromium_self_updater_and_keychain_prompts() {
+    let profile_dir = Path::new("/tmp/zastava-test/clean-profiles/cr-updater");
+    let args = build_hardened_chromium_args(profile_dir, 43210, Some("https://claude.ai"));
+    assert!(args.iter().any(|a| a == "--disable-component-update"));
+    assert!(args.iter().any(|a| a == "--disable-background-networking"));
+    assert!(
+        args.iter()
+            .any(|a| a.starts_with("--simulate-outdated-no-au="))
+    );
+    assert!(args.iter().any(|a| a == "--no-service-autorun"));
+    #[cfg(target_os = "macos")]
+    assert!(args.iter().any(|a| a == "--use-mock-keychain"));
+    #[cfg(target_os = "linux")]
+    assert!(args.iter().any(|a| a == "--password-store=basic"));
+}
+
+#[test]
+fn is_sandbox_browser_cmdline_enforces_exact_user_data_dir_boundary() {
+    use super::sandbox_proc::is_sandbox_browser_cmdline;
+    let profile_abc = Path::new("/tmp/zastava-clean/clean-profiles/cr-abc");
+
+    assert!(is_sandbox_browser_cmdline(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/zastava-clean/clean-profiles/cr-abc --disable-quic",
+        profile_abc
+    ));
+    assert!(is_sandbox_browser_cmdline(
+        "\"/usr/bin/chromium\" --user-data-dir=\"/tmp/zastava-clean/clean-profiles/cr-abc\" --no-first-run",
+        profile_abc
+    ));
+    assert!(is_sandbox_browser_cmdline(
+        "chromium --user-data-dir=/tmp/zastava-clean/clean-profiles/cr-abc/",
+        profile_abc
+    ));
+
+    // Prefix collision (`.../cr-abc` vs `.../cr-abcdef`) MUST NOT match!
+    assert!(!is_sandbox_browser_cmdline(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/zastava-clean/clean-profiles/cr-abcdef --disable-quic",
+        profile_abc
+    ));
+    assert!(!is_sandbox_browser_cmdline(
+        "\"/usr/bin/chromium\" --user-data-dir=\"/tmp/zastava-clean/clean-profiles/cr-abcdef\"",
+        profile_abc
+    ));
+
+    // Unrelated command containing path without `--user-data-dir=` MUST NOT match.
+    assert!(!is_sandbox_browser_cmdline(
+        "chromium /tmp/zastava-clean/clean-profiles/cr-abc",
+        profile_abc
+    ));
+}
+
+#[test]
+fn launch_cleans_all_singleton_artifacts_and_writes_new_port_preferences() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pid_id = CleanProfileId::parse("cr-singleton-v300").unwrap();
+    let profile_dir = super::browser_sandbox::clean_profile_dir(tmp.path(), &pid_id);
+    std::fs::create_dir_all(profile_dir.join("Default")).unwrap();
+    // Simulate legacy v3.0.0 profile: NO .zastava-sandbox.json, stale Singleton* + old Preferences
+    std::fs::write(profile_dir.join("SingletonLock"), b"old-lock").unwrap();
+    std::fs::write(profile_dir.join("SingletonSocket"), b"old-sock").unwrap();
+    std::fs::write(profile_dir.join("SingletonCookie"), b"old-cookie").unwrap();
+    std::fs::write(
+        profile_dir.join("Default").join("Preferences"),
+        br#"{"proxy":{"mode":"fixed_servers","server":"127.0.0.1:11111"}}"#,
+    )
+    .unwrap();
+
+    let registry = SandboxProcessRegistry::new();
+    launch_hardened_sandbox(
+        &registry,
+        tmp.path(),
+        &pid_id,
+        "chrome",
+        "/nonexistent/chrome",
+        44444,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(!profile_dir.join("SingletonLock").exists());
+    assert!(!profile_dir.join("SingletonSocket").exists());
+    assert!(!profile_dir.join("SingletonCookie").exists());
+    let prefs = std::fs::read_to_string(profile_dir.join("Default").join("Preferences")).unwrap();
+    assert!(prefs.contains("127.0.0.1:44444"));
+    assert!(!prefs.contains("11111"));
 }

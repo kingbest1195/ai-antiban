@@ -119,11 +119,13 @@ impl fmt::Debug for ProxyEndpoint {
     }
 }
 
-/// Explicit HTTP and HTTPS upstream of a service; kept apart, never merged into one.
+/// Explicit HTTP, HTTPS, and SOCKS upstream of a service; kept apart, never merged into one.
 #[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct ChainState {
     pub http: ProxyEndpoint,
     pub https: ProxyEndpoint,
+    #[serde(default)]
+    pub socks: ProxyEndpoint,
 }
 
 /// What a network service is, for the one rule that matters here: Zastava writes proxy settings

@@ -48,6 +48,7 @@ fn verify_unblock_decision_respects_killswitch_geo_and_critical_checks() {
         unknown_count: 0,
         applicable_count: 14,
         incomplete: false,
+        gateway_latency_ms: None,
     };
 
     let base_state = state::AppStateData::default();
@@ -278,6 +279,7 @@ fn finalize_audit_report_applies_pinned_travel_grace_to_critical_and_warning() {
             unknown_count: 0,
             applicable_count: 3,
             incomplete: false,
+            gateway_latency_ms: None,
         }
     };
 

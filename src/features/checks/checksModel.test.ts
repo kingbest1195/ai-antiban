@@ -138,7 +138,7 @@ describe("buildChecks", () => {
     expect(item.cls).toBe("warn");
     expect(item.result.measured_via).toBe("claude.ai (203.0.113.55)");
     expect(item.advice).toBe(copy.advice.claude_exit.warn);
-    expect(item.help?.why).toContain("split tunneling");
+    expect(item.help?.why).toContain("выборочной маршрутизации");
     expect(item.help?.steps.some((s) => s.includes("zastava"))).toBe(true);
     expect(item.help?.canOpenNetworkSettings).toBe(false);
   });

@@ -395,11 +395,22 @@ fn is_provider_domain_url(url: &str) -> bool {
         })
 }
 
-fn build_chained_probe_client(chained: &str, timeout: Duration) -> Option<reqwest::Client> {
-    let proxy_url = if chained.contains("://") {
-        chained.to_string()
+pub(super) fn build_chained_probe_client(
+    chained: &str,
+    timeout: Duration,
+) -> Option<reqwest::Client> {
+    let trimmed = chained.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let proxy_url = if let Some(rest) = trimmed.strip_prefix("socks5://") {
+        format!("socks5h://{rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("socks://") {
+        format!("socks5h://{rest}")
+    } else if trimmed.contains("://") {
+        trimmed.to_string()
     } else {
-        format!("http://{chained}")
+        format!("http://{trimmed}")
     };
     let proxy = reqwest::Proxy::all(&proxy_url).ok()?;
     reqwest::Client::builder()

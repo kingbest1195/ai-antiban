@@ -332,6 +332,12 @@
   background: var(--bg-3);
   color: var(--ink);
 }
+.zs-v3-alert-error {
+  margin: var(--space-2) 0 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--danger-text);
+}
 
 /* 5 разделов (~220px) */
 .zs-v3-sections {

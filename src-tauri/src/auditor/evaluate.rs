@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use super::cache::{DNSBL_TTL, IPV6_TTL, OS_TTL, cached_check};
 use super::evaluate_checks::{
-    CHECK_LIMIT_IO, CHECK_LIMIT_LOCAL, resolver_view, run_dns_resolver_check, run_locale_check,
-    run_timezone_check, run_udp_stun_check, tracked,
+    CHECK_LIMIT_IO, CHECK_LIMIT_LOCAL, reconcile_key_exit_external_lists, resolver_view,
+    run_dns_resolver_check, run_locale_check, run_timezone_check, run_udp_stun_check, tracked,
 };
 use super::probes::whoami;
 use super::run_check::{blocking_check, run_check};
@@ -35,9 +35,11 @@ impl Auditor {
         if force_refresh_telemetry {
             self.resolver.check_cache().os.clear().await;
         }
+        let tel_started = std::time::Instant::now();
         let telemetry = self
             .resolve_for_selection(provider, state, selection, force_refresh_telemetry)
             .await?;
+        let tel_elapsed_ms = tel_started.elapsed().as_millis() as u64;
         if let Some(sink) = &sink {
             sink(AuditProgress::Telemetry {
                 telemetry: telemetry.clone(),
@@ -54,9 +56,16 @@ impl Auditor {
             RouteSelection::Route(r) => Some(r),
             _ => None,
         };
-        let via_zastava_key = bound_route.is_some();
         let route_usable =
             bound_route.is_some_and(|r| r.check_usable(network::current_timestamp()).is_ok());
+        let via_zastava_key = bound_route.is_some() && route_usable;
+        let route_client = if !self.use_env_probe_for_direct
+            && let Some(r) = bound_route
+        {
+            self.resolver.client_for_route(r).await
+        } else {
+            None
+        };
         let dns_protection = AuditProtectionContext::from_flags(route_usable, protection_flags);
         let route_label = bound_route.map(|r| r.label.clone());
 
@@ -146,6 +155,8 @@ impl Auditor {
                 let doh_dns = if self.use_env_probe_for_direct {
                     Some(Arc::new(dnsbl::DohDns::with_probe(env.probe.clone()))
                         as Arc<dyn seams::DnsLookup>)
+                } else if let Some(client) = route_client.clone() {
+                    Some(Arc::new(dnsbl::DohDns::with_client(client)) as Arc<dyn seams::DnsLookup>)
                 } else {
                     dnsbl::DohDns::real()
                         .ok()
@@ -168,14 +179,19 @@ impl Auditor {
             &sink,
             4,
             run_check("Address Reputation", CHECK_LIMIT_IO, {
-                let (cache, asns, tel, env) = (
+                let (cache, asns, tel, tor_probe) = (
                     cache.clone(),
                     dangerous_asns.clone(),
                     telemetry.clone(),
-                    env.clone(),
+                    match route_client.clone() {
+                        Some(client) => {
+                            Arc::new(seams::ClientIpProbe(client)) as Arc<dyn seams::IpProbe>
+                        }
+                        None => env.probe.clone(),
+                    },
                 );
                 async move {
-                    let tor = lookup_tor(&cache.tor, &*env.probe, &tel.ip).await;
+                    let tor = lookup_tor(&cache.tor, &*tor_probe, &tel.ip).await;
                     evaluate_ip_reputation(
                         &ExitIdentity {
                             ip: &tel.ip,
@@ -311,6 +327,7 @@ impl Auditor {
         );
 
         // Real AI provider exit verification (index 13, 14th check).
+        let exit_latency_ms = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
         let claude_exit = tracked(
             &sink,
             13,
@@ -323,8 +340,10 @@ impl Auditor {
                 let tel = telemetry.clone();
                 let matrix = matrix.clone();
                 let probe = self.use_env_probe_for_direct.then(|| env.probe.clone());
+                let latency_slot = exit_latency_ms.clone();
                 async move {
-                    resolver
+                    let started = std::time::Instant::now();
+                    let res = resolver
                         .probe_provider_exit_with_probe(
                             provider,
                             bound_route.as_ref(),
@@ -332,7 +351,14 @@ impl Auditor {
                             &matrix,
                             probe.as_deref(),
                         )
-                        .await
+                        .await;
+                    if !res.is_unknown() {
+                        latency_slot.store(
+                            started.elapsed().as_millis() as u64,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    res
                 }
             }),
         );
@@ -341,8 +367,8 @@ impl Auditor {
             geo_result,
             pinning_result,
             travel_result,
-            dnsbl_result,
-            asn_result,
+            mut dnsbl_result,
+            mut asn_result,
             ipv6_result,
             dns_result,
             timezone_result,
@@ -368,6 +394,20 @@ impl Auditor {
             udp_stun,
             claude_exit
         );
+        reconcile_key_exit_external_lists(
+            via_zastava_key,
+            route_usable,
+            &geo_result,
+            &travel_result,
+            &ipv6_result,
+            &claude_exit_result,
+            &mut dnsbl_result,
+            &mut asn_result,
+        );
+        let measured_exit_ms = match exit_latency_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            u64::MAX => force_refresh_telemetry.then_some(tel_elapsed_ms),
+            ms => Some(ms),
+        };
         let dnsbl_clean_count = dnsbl_label
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -412,6 +452,7 @@ impl Auditor {
             unknown_count: verdict.unknown_count,
             applicable_count: verdict.applicable_count,
             incomplete: verdict.incomplete,
+            gateway_latency_ms: measured_exit_ms,
         })
     }
 }

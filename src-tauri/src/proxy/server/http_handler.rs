@@ -10,7 +10,9 @@ use crate::proxy::http_forward::{
     split_authority,
 };
 use crate::proxy::pac::generate_pac_script;
-use crate::proxy::upstream::connect_chained_tcp;
+use crate::proxy::upstream::{
+    UpstreamStream, connect_chained_tcp, connect_via_chained_proxy, is_socks5_chained,
+};
 
 use super::responses::{
     KILLSWITCH_MESSAGE, is_absolute_http_target, is_peer_gone, killswitch_engaged,
@@ -196,21 +198,28 @@ impl ProxyServer {
             .await
     }
 
-    /// Connects to the chained proxy and sends the absolute-form request head. `None` when there
-    /// is no chained proxy or it cannot be reached (the caller then goes direct, once).
+    /// Connects to the chained proxy and sends the request head (`Absolute` for HTTP proxy,
+    /// `Origin` inside a SOCKS5 tunnel for SOCKS5 proxy). `None` when there is no chained proxy
+    /// or it cannot be reached (the caller then goes direct, once).
     async fn open_chained_plain(&self, req: &ParsedRequest) -> Option<TcpStream> {
         if self.upstream_redirect.is_some() {
             return None;
         }
         let gateway_port = self.bound_addr.port();
         let cp = self.transit.chained_proxy(gateway_port)?;
-        let mut s = connect_chained_tcp(
-            &cp,
-            Duration::from_secs(CHAINED_CONNECT_TIMEOUT_SECS),
-            gateway_port,
-        )
-        .await
-        .ok()?;
+        let timeout = Duration::from_secs(CHAINED_CONNECT_TIMEOUT_SECS);
+        if is_socks5_chained(&cp) {
+            let Ok(UpstreamStream::Plain(mut s)) =
+                connect_via_chained_proxy(&cp, &req.host, req.port, timeout, gateway_port).await
+            else {
+                return None;
+            };
+            s.write_all(&req.build_head(RequestForm::Origin))
+                .await
+                .ok()?;
+            return Some(s);
+        }
+        let mut s = connect_chained_tcp(&cp, timeout, gateway_port).await.ok()?;
         s.write_all(&req.build_head(RequestForm::Absolute))
             .await
             .ok()?;

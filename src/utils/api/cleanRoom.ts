@@ -17,20 +17,26 @@ import {
   mockMarkIpTainted,
   mockRunCleanRoomAudit,
   mockStartCleanProfileWarmup,
+  mockUntaintCleanRoomIp,
+  mockUpdateCleanProfileRoute,
   mockUpdateCleanProfileStep,
 } from "./mocks/cleanRoom";
 
 // Переиспользуем существующие команды системного TZ из sysproxy.ts без дублирования invoke-обёрток.
 export { getOsTimezoneSyncStatus as getOsTzStatus } from "./sysproxy";
 
-/** Запустить pre-flight аудит «Чистой комнаты» (read-only детектор хвостов и утечек). */
-export async function runCleanRoomAudit(profileId?: string): Promise<CleanRoomAuditReport> {
+/** Запустить pre-flight аудит «Чистой комнаты» (проверка следов и маршрута без чтения секретов). */
+export async function runCleanRoomAudit(
+  profileId?: string | null,
+  routeId?: string | null,
+): Promise<CleanRoomAuditReport> {
   if (isTauri()) {
     return await tauriInvoke<CleanRoomAuditReport>("run_clean_room_audit", {
       profileId: profileId ?? null,
+      routeId: routeId ?? null,
     });
   }
-  return mockRunCleanRoomAudit(profileId);
+  return mockRunCleanRoomAudit(profileId ?? undefined, routeId ?? undefined);
 }
 
 /** Найти установленные поддерживаемые движки Chromium (Chrome / Edge / Brave). */
@@ -111,12 +117,32 @@ export async function markCleanProfileTainted(
   return mockMarkCleanProfileTainted(profileId, reason);
 }
 
-/** Удалить изолированный профиль и его каталог данных. */
-export async function deleteCleanProfile(profileId: string): Promise<CleanRoomState> {
+/** Обновить привязанный маршрут профиля «Чистой комнаты». */
+export async function updateCleanProfileRoute(
+  profileId: string,
+  routeId: string | null,
+): Promise<CleanRoomProfile> {
   if (isTauri()) {
-    return await tauriInvoke<CleanRoomState>("delete_clean_profile", { profileId });
+    return await tauriInvoke<CleanRoomProfile>("update_clean_profile_route", {
+      profileId,
+      routeId,
+    });
   }
-  return mockDeleteCleanProfile(profileId);
+  return mockUpdateCleanProfileRoute(profileId, routeId);
+}
+
+/** Удалить изолированный профиль и его каталог данных (с явной опцией пометки IP). */
+export async function deleteCleanProfile(
+  profileId: string,
+  taintExitIp = false,
+): Promise<CleanRoomState> {
+  if (isTauri()) {
+    return await tauriInvoke<CleanRoomState>("delete_clean_profile", {
+      profileId,
+      taintExitIp,
+    });
+  }
+  return mockDeleteCleanProfile(profileId, taintExitIp);
 }
 
 /** Пометить указанный (или текущий) выходной IP как скомпрометированный. */
@@ -125,4 +151,12 @@ export async function markIpTainted(ip?: string): Promise<CleanRoomState> {
     return await tauriInvoke<CleanRoomState>("mark_ip_tainted", { ip: ip ?? null });
   }
   return mockMarkIpTainted(ip);
+}
+
+/** Снять отметку о компрометации (tainted) с указанного IP-адреса. */
+export async function untaintCleanRoomIp(ip: string): Promise<CleanRoomState> {
+  if (isTauri()) {
+    return await tauriInvoke<CleanRoomState>("untaint_clean_room_ip", { ip });
+  }
+  return mockUntaintCleanRoomIp(ip);
 }

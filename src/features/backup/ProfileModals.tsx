@@ -4,6 +4,7 @@ import { Banner, Button, ConfirmModal, Field, Modal, Row, Rows, Select, Switch }
 import type { SelectOption } from "../../ui";
 import { backup as copy, common as commonCopy } from "../../shared/copy/ru";
 import { formatRouteBadgeLabel, formatRouteOptionLabel, hasCountryMention } from "../../shared/lib/country";
+import { formatIp, maskIpsInText } from "../../shared/lib/format";
 import { decodeZastavaKeyPreview } from "../../shared/lib/zastavaKey";
 import { KEY_OPTION_NEW, KEY_OPTION_NONE } from "./profileModel";
 
@@ -14,6 +15,7 @@ interface ProfileModalsProps {
   routes: RouteView[];
   ipKnown: boolean;
   currentIp: string;
+  hideIpMode?: boolean;
   createOpen: boolean;
   creating: boolean;
   newName: string;
@@ -48,6 +50,7 @@ export function ProfileModals({
   routes,
   ipKnown,
   currentIp,
+  hideIpMode = false,
   createOpen,
   creating,
   newName,
@@ -123,7 +126,7 @@ export function ProfileModals({
                 createKeyChoice !== KEY_OPTION_NONE
                   ? "Отключено: профиль работает через выделенный ключ Заставы"
                   : ipKnown
-                    ? copy.create.bindIpOn(currentIp)
+                    ? copy.create.bindIpOn(formatIp(currentIp, hideIpMode))
                     : copy.create.bindIpNone
               }
               trail={
@@ -199,7 +202,7 @@ export function ProfileModals({
                   label: formatRouteOptionLabel({
                     label: r.label,
                     country: r.country,
-                    ipOrHost: r.exit_ip,
+                    ipOrHost: r.exit_ip ? formatIp(r.exit_ip, hideIpMode) : null,
                   }),
                 })),
                 { value: KEY_OPTION_NEW, label: copy.bindKeyModal.newOption },
@@ -221,7 +224,9 @@ export function ProfileModals({
                 if (!preview) return null;
                 const countryPart =
                   preview.country && !hasCountryMention(preview.label, preview.country) ? preview.country : null;
-                const parts = [preview.label, countryPart, preview.exit_ip, preview.entrySummary].filter(Boolean);
+                const maskedExitIp = preview.exit_ip ? formatIp(preview.exit_ip, hideIpMode) : null;
+                const maskedEntry = preview.entrySummary ? maskIpsInText(preview.entrySummary, hideIpMode) : null;
+                const parts = [preview.label, countryPart, maskedExitIp, maskedEntry].filter(Boolean);
                 return parts.length > 0 ? (
                   <Banner tone="info" title={copy.bindKeyModal.previewLabel}>
                     {parts.join(" · ")}

@@ -27,7 +27,7 @@ describe("bunker feature: BunkerCard, WebExportHelper & PersonaRiskCard", () => 
   it("BunkerCard рендерит заголовок, скелетон загрузки и контролы без ошибок", () => {
     const html = renderToStaticMarkup(createElement(BunkerCard, { onToast: vi.fn() }));
     expect(html).toContain("Бесплатный локальный Бункер");
-    expect(html).toContain("Автоматические локальные снапшоты");
+    expect(html).toContain("Автоматические локальные копии");
   });
 
   it("API Бункера: getBunkerStatus, updateBunkerSettings, runBunkerBackupNow, generateBunkerRestorePrompt", async () => {
@@ -94,7 +94,7 @@ describe("bunker feature: BunkerCard, WebExportHelper & PersonaRiskCard", () => 
         onNavigateToCleanRoom: vi.fn(),
       }),
     );
-    expect(html).toContain("Риск проверки Persona и бана");
+    expect(html).toContain("Риск KYC и блокировки Claude");
     expect(formatBytesCompact(2_097_152)).toBe("2.0 МБ");
     const fresh = await getPersonaRiskReport();
     expect(fresh.self_check.bought_or_grey_account).toBe(true);

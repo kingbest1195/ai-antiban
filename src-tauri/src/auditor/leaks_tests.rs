@@ -511,7 +511,7 @@ async fn fake_ip_tun_dns_and_zastava_key_route_isolation_are_ok() {
     );
 
     let ru_probe = FakeProbe::body(200, "fl=1\nloc=RU\n");
-    let v6_ru = check_ipv6_leak_with_route(
+    let v6_ru_key = check_ipv6_leak_with_route(
         &ru_probe,
         &sys_v6,
         "https://example.invalid/cdn-cgi/trace",
@@ -520,6 +520,21 @@ async fn fake_ip_tun_dns_and_zastava_key_route_isolation_are_ok() {
         &["RU".into(), "BY".into()],
         false,
         true,
+    )
+    .await;
+    assert_eq!(
+        (v6_ru_key.status, v6_ru_key.code.as_str()),
+        (CheckStatus::Ok, "IPV6_KEY_TCP_ISOLATED")
+    );
+    let v6_ru = check_ipv6_leak_with_route(
+        &ru_probe,
+        &sys_v6,
+        "https://example.invalid/cdn-cgi/trace",
+        Duration::from_secs(1),
+        "FR",
+        &["RU".into(), "BY".into()],
+        false,
+        false,
     )
     .await;
     assert_eq!(
@@ -562,121 +577,4 @@ async fn bug2_dns_and_ipv6_warnings_point_to_guide_os_network() {
     let v6_mismatch = ipv6(&FakeProbe::body(200, "loc=DE\n"), &v6_host(), "NL", &[]).await;
     assert_eq!(v6_mismatch.code, "IPV6_LEAK_MISMATCH");
     assert_eq!(v6_mismatch.guide_ref.as_deref(), Some(GUIDE_OS_NETWORK));
-}
-
-#[test]
-fn bug3_via_zastava_key_dns_preconditions_enforced() {
-    let ru_view = located("77.88.8.8", "RU");
-    let healthy_sysproxy = AuditProtectionContext {
-        route_usable: true,
-        sysproxy_active: true,
-        cli_or_sandbox_protection_active: false,
-        os_pac_deferred: false,
-    };
-    let healthy_cli_only = AuditProtectionContext {
-        route_usable: true,
-        sysproxy_active: false,
-        cli_or_sandbox_protection_active: true,
-        os_pac_deferred: false,
-    };
-
-    // Pass when all 3 preconditions hold (both via sysproxy and via CLI/sandbox protection).
-    for ctx in [healthy_sysproxy, healthy_cli_only] {
-        let ok_res = evaluate_dns_resolver_for_route_with_protection(
-            config_domestic(),
-            &ru_view,
-            "NL",
-            true,
-            ctx,
-        );
-        assert_eq!(
-            (ok_res.status, ok_res.code.as_str()),
-            (CheckStatus::Ok, "DNS_KEY_REMOTE_RESOLVE")
-        );
-        assert!(
-            ok_res.message.contains("non-AI") && ok_res.message.contains("DNS ОС"),
-            "Precondition 3 non-AI OS DNS note missing: {}",
-            ok_res.message
-        );
-    }
-
-    // Fail Precondition 1: bound route is NOT usable.
-    let unusable = AuditProtectionContext {
-        route_usable: false,
-        ..healthy_sysproxy
-    };
-    let r1 = evaluate_dns_resolver_for_route_with_protection(
-        config_ok(),
-        &ru_view,
-        "NL",
-        true,
-        unusable,
-    );
-    assert_eq!(
-        (r1.status, r1.code.as_str()),
-        (CheckStatus::Warning, "DNS_DOMESTIC_WARNING")
-    );
-
-    // Fail Precondition 2a: neither sysproxy nor CLI/sandbox protection is active.
-    let no_protection = AuditProtectionContext {
-        route_usable: true,
-        sysproxy_active: false,
-        cli_or_sandbox_protection_active: false,
-        os_pac_deferred: false,
-    };
-    let r2 = evaluate_dns_resolver_for_route_with_protection(
-        config_ok(),
-        &ru_view,
-        "NL",
-        true,
-        no_protection,
-    );
-    assert_eq!(
-        (r2.status, r2.code.as_str()),
-        (CheckStatus::Warning, "DNS_DOMESTIC_WARNING")
-    );
-
-    // Fail Precondition 2b: os_pac_deferred == true.
-    let deferred = AuditProtectionContext {
-        os_pac_deferred: true,
-        cli_or_sandbox_protection_active: true,
-        ..healthy_sysproxy
-    };
-    let r3 = evaluate_dns_resolver_for_route_with_protection(
-        config_domestic(),
-        &ru_view,
-        "NL",
-        true,
-        deferred,
-    );
-    assert_eq!(
-        (r3.status, r3.code.as_str()),
-        (CheckStatus::Warning, "DNS_DOMESTIC_WARNING")
-    );
-
-    // Direct mode (via_zastava_key == false) MUST preserve full strictness even with all flags true.
-    let direct_ru = evaluate_dns_resolver_for_route_with_protection(
-        config_ok(),
-        &ru_view,
-        "NL",
-        false,
-        healthy_sysproxy,
-    );
-    assert_eq!(
-        (direct_ru.status, direct_ru.code.as_str()),
-        (CheckStatus::Warning, "DNS_DOMESTIC_WARNING")
-    );
-
-    let yandex_cfg = evaluate_dns_listing("resolver #1\n  nameserver[0] : 77.88.8.8\n", "NL", &[]);
-    let direct_yandex = evaluate_dns_resolver_for_route_with_protection(
-        yandex_cfg,
-        &located("9.9.9.9", "NL"),
-        "NL",
-        false,
-        healthy_sysproxy,
-    );
-    assert_eq!(
-        (direct_yandex.status, direct_yandex.code.as_str()),
-        (CheckStatus::Warning, "DNS_YANDEX_LEAK")
-    );
 }

@@ -331,3 +331,77 @@ describe("LaunchpadSteps — Шаги 2, 3 и 4", () => {
     });
   });
 });
+
+describe("v3.0.1 Clean Room UX: дедупликация tainted-IP, спокойная заметка браузера, hideIpMode и gating шага 1", () => {
+  it("дедуплицирует exit_ip_tainted при ip_is_tainted=true, скрывает IP при hideIpMode=true и показывает спокойную справку для личного браузера", () => {
+    const audit = makeAudit({
+      exit_ip: "45.32.11.22",
+      ip_is_tainted: true,
+      critical_count: 1,
+      ready_to_launch: false,
+      findings: [
+        {
+          id: "exit_ip_tainted",
+          category: "ip_collision",
+          title: "Выходной IP отмечен как проблемный",
+          detail: "Адрес 45.32.11.22 ранее отмечен.",
+          severity: "critical",
+          path_hint: null,
+          fix_action: { kind: "switch_route_or_vpn" },
+        },
+        {
+          id: "personal_browser_profiles",
+          category: "browser",
+          title: "На компьютере установлен обычный браузер",
+          detail: "Обнаружен Chrome.",
+          severity: "warning",
+          path_hint: null,
+          fix_action: { kind: "acknowledge_sandbox_isolation" },
+        },
+      ],
+    });
+
+    const html = renderToStaticMarkup(
+      createElement(CleanRoomScreen, {
+        state: makeState({
+          clean_room: {
+            profiles: [makeProfile({ last_exit_ip: "45.80.10.20" })],
+            active_profile_id: "cr-1",
+            tainted_ips: { "45.32.11.22": 1_760_000_000 },
+          },
+        }),
+        hideIpMode: true,
+        initialAudit: audit,
+        initialBrowsers: AVAILABLE_BROWSERS,
+      }),
+    );
+
+    expect(html).toContain(copy.audit.taintedBannerTitle);
+    expect(html).toContain(copy.audit.untaintBtn);
+    expect(html).not.toContain("cr-finding--critical");
+    expect(html).toContain("cr-finding--info");
+    expect(html).toContain(copy.audit.personalBrowserNote);
+    expect(html).not.toContain("45.32.11.22");
+    expect(html).not.toContain("45.80.10.20");
+    expect(html).toContain("•••.•••.•••.22");
+    expect(html).toContain("•••.•••.•••.20");
+    expect(html).toContain(copy.audit.honestyNote);
+  });
+
+  it("блокирует «Перейти к шагу 2» без профиля или при провале аудита и убирает дубль «Создать профиль» в шаге 1", () => {
+    const html = renderToStaticMarkup(
+      createElement(CleanRoomScreen, {
+        state: makeState({
+          clean_room: { profiles: [], active_profile_id: null, tainted_ips: {} },
+        }),
+        initialAudit: makeAudit(),
+        initialBrowsers: AVAILABLE_BROWSERS,
+      }),
+    );
+
+    expect(html).toContain(copy.launchpad.step1.gateHint);
+    expect(html).toContain(`disabled=""`);
+    expect(html).not.toContain("READY · Можно запускать");
+    expect(html).not.toContain("Launchpad нового аккаунта");
+  });
+});

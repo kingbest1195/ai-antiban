@@ -7,12 +7,20 @@
 .zs-settings__list li{display:flex;gap:var(--space-2)}
 .zs-settings__list li::before{content:"";flex:none;width:6px;height:6px;margin-top:6px;border-radius:var(--radius-pill);background:var(--ink-3)}
 .zs-settings__sub{margin:var(--space-4) 0 var(--space-1);font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
-.zs-settings__form{margin:var(--space-3) 0 0}
+.zs-settings__form{margin:var(--space-3) 0 0;display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center;min-width:0}
+.zs-settings__form>.zs-field{flex:1 1 100%}
+.zs-settings__badges{margin:var(--space-2) 0 0;display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}
 .zs-settings__rows{margin-top:var(--space-2)}
+.zs-settings__preview-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:var(--space-2)}
+.zs-settings__preview-item{display:flex;flex-direction:column;gap:var(--space-1);padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-1);border:1px solid var(--line);min-width:0}
+.zs-settings__preview-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);flex-wrap:wrap}
+.zs-settings__preview-title{margin:0;font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
+.zs-settings__preview-desc{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.zs-settings__preview-detail{margin:0;font-size:12px;line-height:16px;color:var(--ink-3);overflow-wrap:anywhere;word-break:break-word}
 .zs-settings__empty{margin:var(--space-2) 0 0;font-size:13px;line-height:18px;color:var(--ink-3)}
 .zs-settings__result{margin-top:var(--space-3)}
 .zs-settings__danger{margin-top:var(--space-3)}
 .zs-settings__source{margin:var(--space-3) 0 0}
 .zs-settings__rollback-title{display:inline-flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
-.zs-settings__rollback-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1)}
+.zs-settings__rollback-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
 .zs-settings__exc-actions{margin-top:var(--space-2);display:flex;justify-content:flex-end}

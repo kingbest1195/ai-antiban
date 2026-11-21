@@ -68,16 +68,17 @@ export function useAppShellController() {
     showToast,
     startupPending: gw.startupPending,
   });
+  const hideIpMode = gw.state?.hide_ip_mode ?? hideIpPref;
   const pinning = usePinning({
     state: gw.state,
     refreshState,
     runFullAudit,
     showToast,
     currentIp: gw.currentIp,
+    hideIpMode,
   });
   const tz = useTimezoneSync({ activeReport: gw.activeReport, runFullAudit, showToast });
   const updater = useUpdater({ showToast, setAutoUpdateEnabled: gw.setAutoUpdateEnabled });
-  const hideIpMode = gw.state?.hide_ip_mode ?? hideIpPref;
   const intercept = useInterception({
     runFullAudit,
     showToast,

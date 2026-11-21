@@ -4,5 +4,6 @@
 pub mod net_safety;
 pub mod redact;
 pub mod sanctions;
+pub mod sanitize;
 pub mod shutdown;
 pub mod timing;

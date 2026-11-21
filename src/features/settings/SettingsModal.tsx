@@ -23,6 +23,7 @@ export interface SettingsModalProps {
   onClose: () => void;
   autoUpdateEnabled: boolean;
   onToggleAutoUpdate: (enabled: boolean) => Promise<void>;
+  hideIpMode?: boolean;
   interceptionBehavior?: InterceptionBehavior;
   popupPosition?: PopupPosition;
   customAiDomains?: string[];
@@ -50,6 +51,7 @@ export function SettingsModal({
   onClose,
   autoUpdateEnabled,
   onToggleAutoUpdate,
+  hideIpMode = false,
   interceptionBehavior: propBehavior,
   popupPosition: propPosition,
   customAiDomains: propCustomDomains,
@@ -74,6 +76,7 @@ export function SettingsModal({
     open,
     autoUpdateEnabled,
     onToggleAutoUpdate,
+    hideIpMode,
     propBehavior,
     propPosition,
     propCustomDomains,
@@ -123,6 +126,7 @@ export function SettingsModal({
             monitoringBusy={ctrl.monitoringBusy}
             exceptionEntries={ctrl.exceptionEntries}
             exceptionsBusy={ctrl.exceptionsBusy}
+            hideIpMode={hideIpMode}
             customDomains={ctrl.customDomains}
             newDomainInput={ctrl.newDomainInput}
             domainBusy={ctrl.domainBusy}
@@ -158,6 +162,7 @@ export function SettingsModal({
           />
 
           <SystemGuardSection
+            autoUpdateEnabled={autoUpdateEnabled}
             coworkStatus={ctrl.coworkStatus}
             coworkBusy={ctrl.coworkBusy}
             onInstallCoworkGuard={ctrl.handleInstallCoworkGuard}

@@ -10,6 +10,7 @@ import {
 import "./sos.css";
 
 export interface BannedBranchProps {
+  ctaVariant?: "primary" | "secondary";
   onToast?: ShowToast;
   onNavigateToCleanRoom?: (step?: number) => void;
 }
@@ -36,7 +37,11 @@ export async function executeBannedCleanRoomJump(
 }
 
 /** Ветка 4 SOS: Account disabled / Organization suspended — разбор причин и 1-click переход в Чистую комнату. */
-export function BannedBranch({ onToast, onNavigateToCleanRoom }: BannedBranchProps) {
+export function BannedBranch({
+  ctaVariant = "primary",
+  onToast,
+  onNavigateToCleanRoom,
+}: BannedBranchProps) {
   const t = copy.banned;
   const [jumping, setJumping] = useState(false);
 
@@ -59,9 +64,10 @@ export function BannedBranch({ onToast, onNavigateToCleanRoom }: BannedBranchPro
         ))}
       </ul>
 
-      <Banner tone="danger" icon="alert" title={t.cleanRoomWarning} className="zs-sos__block">
+      <Banner tone="danger" icon="alert" title={t.cleanRoomWarning} className="zs-sos__block" />
+      <div className="zs-sos__block">
         <Button
-          variant="primary"
+          variant={ctaVariant}
           block
           icon="arrow"
           disabled={jumping}
@@ -69,7 +75,7 @@ export function BannedBranch({ onToast, onNavigateToCleanRoom }: BannedBranchPro
         >
           {jumping ? t.jumpingBtn : t.jumpCleanRoomBtn}
         </Button>
-      </Banner>
+      </div>
     </Card>
   );
 }

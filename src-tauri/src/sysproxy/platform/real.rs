@@ -185,9 +185,15 @@ impl Platform for RealPlatform {
         let name = self.current_name(svc, "get_chain")?;
         let web = run_stdout("networksetup", &["-getwebproxy", &name], "get_chain")?;
         let sec = run_stdout("networksetup", &["-getsecurewebproxy", &name], "get_chain")?;
+        let socks = run_stdout(
+            "networksetup",
+            &["-getsocksfirewallproxy", &name],
+            "get_chain",
+        )?;
         Ok(ChainState {
             http: parse_webproxy(&web),
             https: parse_webproxy(&sec),
+            socks: parse_webproxy(&socks),
         })
     }
 
@@ -209,6 +215,12 @@ impl Platform for RealPlatform {
                 "-setsecurewebproxy",
                 "-getsecurewebproxy",
                 "-setsecurewebproxystate",
+            ),
+            (
+                &chain.socks,
+                "-setsocksfirewallproxy",
+                "-getsocksfirewallproxy",
+                "-setsocksfirewallproxystate",
             ),
         ] {
             if let (Some(host), Some(port)) = (&ep.server, ep.port) {

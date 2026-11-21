@@ -4,12 +4,19 @@
 //! Everything that touches the outside world (resolver, dialer, clock, chained-proxy lookup) is
 //! injectable, so the tests run on local sockets and virtual time only.
 
-use std::collections::HashMap;
+#[path = "transit_dns.rs"]
+mod transit_dns;
+
+pub use transit_dns::{
+    ClockFn, DNS_CACHE_CAPACITY, DNS_LOOKUP_TIMEOUT, DNS_NEGATIVE_TTL, DNS_POSITIVE_TTL, DnsCache,
+    ResolveFn, ResolveFuture, invalidate_all_dns_caches,
+};
+
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
@@ -17,176 +24,14 @@ use tokio::task::JoinSet;
 
 use crate::proxy::server::{is_forbidden_ip, is_tun_fake_ip};
 
-/// How long a successful lookup is served from the cache.
-pub const DNS_POSITIVE_TTL: Duration = Duration::from_secs(60);
-/// How long a failed lookup is remembered (short: a flapping resolver must recover quickly).
-pub const DNS_NEGATIVE_TTL: Duration = Duration::from_secs(5);
-/// Maximum number of cached hosts; the least recently used one is evicted.
-pub const DNS_CACHE_CAPACITY: usize = 512;
-/// A single name lookup is abandoned after this long.
-pub const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Delay before the next candidate address is tried (RFC 8305 "Connection Attempt Delay").
 pub const HAPPY_EYEBALLS_STEP: Duration = Duration::from_millis(250);
 /// Upper bound for the whole connection race.
 pub const CONNECT_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub type ResolveFuture = Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send>>;
-pub type ResolveFn = Arc<dyn Fn(String) -> ResolveFuture + Send + Sync>;
 pub type DialFuture = Pin<Box<dyn Future<Output = io::Result<TcpStream>> + Send>>;
 pub type DialFn = Arc<dyn Fn(SocketAddr) -> DialFuture + Send + Sync>;
-pub type ClockFn = Arc<dyn Fn() -> Instant + Send + Sync>;
 pub type ChainedFn = Arc<dyn Fn() -> Option<String> + Send + Sync>;
-
-fn normalize_host(host: &str) -> String {
-    host.trim().trim_end_matches('.').to_ascii_lowercase()
-}
-
-#[derive(Clone)]
-enum Outcome {
-    Addrs(Arc<[IpAddr]>),
-    Failed(io::ErrorKind, String),
-}
-
-struct CacheEntry {
-    outcome: Outcome,
-    expires: Instant,
-    used: u64,
-}
-
-#[derive(Default)]
-struct CacheInner {
-    map: HashMap<String, CacheEntry>,
-    tick: u64,
-}
-
-/// Name -> addresses cache. The lock is held only for the map access, never across a lookup.
-pub struct DnsCache {
-    inner: Mutex<CacheInner>,
-    clock: ClockFn,
-    resolver: ResolveFn,
-    positive_ttl: Duration,
-    negative_ttl: Duration,
-    capacity: usize,
-}
-
-impl DnsCache {
-    pub fn new(resolver: ResolveFn, clock: ClockFn) -> Self {
-        Self::with_limits(
-            resolver,
-            clock,
-            DNS_POSITIVE_TTL,
-            DNS_NEGATIVE_TTL,
-            DNS_CACHE_CAPACITY,
-        )
-    }
-
-    pub fn with_limits(
-        resolver: ResolveFn,
-        clock: ClockFn,
-        positive_ttl: Duration,
-        negative_ttl: Duration,
-        capacity: usize,
-    ) -> Self {
-        Self {
-            inner: Mutex::new(CacheInner::default()),
-            clock,
-            resolver,
-            positive_ttl,
-            negative_ttl,
-            capacity: capacity.max(1),
-        }
-    }
-
-    /// Number of cached entries (positive and negative).
-    pub fn len(&self) -> usize {
-        self.lock().map.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, CacheInner> {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    fn lookup(&self, key: &str) -> Option<Outcome> {
-        let now = (self.clock)();
-        let mut g = self.lock();
-        g.tick += 1;
-        let tick = g.tick;
-        match g.map.get_mut(key) {
-            Some(e) if e.expires > now => {
-                e.used = tick;
-                Some(e.outcome.clone())
-            }
-            Some(_) => {
-                g.map.remove(key);
-                None
-            }
-            None => None,
-        }
-    }
-
-    fn store(&self, key: String, outcome: Outcome) {
-        let now = (self.clock)();
-        let ttl = match outcome {
-            Outcome::Addrs(_) => self.positive_ttl,
-            Outcome::Failed(..) => self.negative_ttl,
-        };
-        let mut g = self.lock();
-        g.tick += 1;
-        let tick = g.tick;
-        if !g.map.contains_key(&key) && g.map.len() >= self.capacity {
-            // Expired entries go first, then the least recently used one.
-            g.map.retain(|_, e| e.expires > now);
-            if g.map.len() >= self.capacity
-                && let Some(oldest) = g
-                    .map
-                    .iter()
-                    .min_by_key(|(_, e)| e.used)
-                    .map(|(k, _)| k.clone())
-            {
-                g.map.remove(&oldest);
-            }
-        }
-        g.map.insert(
-            key,
-            CacheEntry {
-                outcome,
-                expires: now + ttl,
-                used: tick,
-            },
-        );
-    }
-
-    /// Addresses of `host` (cached). A failed lookup is cached for a few seconds as well.
-    pub async fn resolve(&self, host: &str) -> io::Result<Arc<[IpAddr]>> {
-        let key = normalize_host(host);
-        if let Some(hit) = self.lookup(&key) {
-            return outcome_to_result(hit);
-        }
-        let fresh =
-            match tokio::time::timeout(DNS_LOOKUP_TIMEOUT, (self.resolver)(key.clone())).await {
-                Ok(Ok(ips)) if !ips.is_empty() => Outcome::Addrs(Arc::from(ips)),
-                Ok(Ok(_)) => Outcome::Failed(
-                    io::ErrorKind::NotFound,
-                    "no valid upstream addresses resolved".into(),
-                ),
-                Ok(Err(e)) => Outcome::Failed(e.kind(), e.to_string()),
-                Err(_) => Outcome::Failed(io::ErrorKind::TimedOut, "DNS lookup timeout".into()),
-            };
-        self.store(key, fresh.clone());
-        outcome_to_result(fresh)
-    }
-}
-
-fn outcome_to_result(o: Outcome) -> io::Result<Arc<[IpAddr]>> {
-    match o {
-        Outcome::Addrs(a) => Ok(a),
-        Outcome::Failed(kind, msg) => Err(io::Error::new(kind, msg)),
-    }
-}
 
 /// RFC 8305 section 4: IPv6 first, then the families alternate; duplicates are dropped and the
 /// order inside a family is kept.
@@ -365,7 +210,12 @@ where
             if rejected_sys_ip.is_none() && pub_ips.iter().all(is_tun_fake_ip) {
                 return Ok(pub_ips);
             }
-            Ok(fake_candidate.unwrap_or(pub_ips))
+            fake_candidate.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("SSRF Protection: public DNS returned forbidden ip for {host}"),
+                )
+            })
         }
         _ if rejected_sys_ip.is_none() => fake_candidate.ok_or_else(|| {
             sys_err.unwrap_or_else(|| {

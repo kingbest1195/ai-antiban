@@ -175,6 +175,7 @@ fn two_sided(http_on: bool, https_on: bool) -> ChainState {
     ChainState {
         http: upstream("h1", 1080, http_on),
         https: upstream("h2", 2080, https_on),
+        socks: ProxyEndpoint::default(),
     }
 }
 
@@ -257,6 +258,7 @@ fn a_mix_with_a_value_nobody_wrote_is_external_even_while_a_write_is_in_flight()
         ChainState {
             http: upstream("elsewhere", 9, true),
             https: upstream("h2", 2080, true),
+            socks: ProxyEndpoint::default(),
         },
     );
     let r = recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
@@ -446,6 +448,7 @@ fn debug_of_a_value_never_shows_it() {
         Value::Chain(ChainState {
             http: upstream(secret, 1, true),
             https: upstream(secret, 2, true),
+            socks: ProxyEndpoint::default(),
         }),
         Value::Reg(Some(RegValue::sz(secret))),
     ];

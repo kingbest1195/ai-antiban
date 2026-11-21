@@ -242,7 +242,7 @@ export interface InfoTipProps {
   className?: string;
 }
 
-/** Значок «!» с пояснением при наведении, фокусе и клике/тапе; прижимается к границам окна. */
+/** Значок «i» с пояснением при наведении, фокусе и клике/тапе; прижимается к границам окна. */
 export function InfoTip({
   title,
   text,
@@ -271,7 +271,7 @@ export function InfoTip({
         aria-expanded={expanded}
         aria-controls={expanded ? tipId : undefined}
       >
-        !
+        i
       </button>
     </Tip>
   );

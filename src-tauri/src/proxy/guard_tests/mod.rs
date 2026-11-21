@@ -111,6 +111,7 @@ fn test_report(provider: ProviderId, status: OverallStatus, ip: &str, cc: &str) 
         unknown_count: 0,
         applicable_count: 14,
         incomplete: false,
+        gateway_latency_ms: None,
     }
 }
 

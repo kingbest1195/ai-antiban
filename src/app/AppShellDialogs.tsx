@@ -53,6 +53,7 @@ export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
     updater,
     intercept,
     version,
+    hideIpMode,
     whatsNewBusy,
     handleConfirmDeepLink,
     handleCancelDeepLink,
@@ -71,6 +72,7 @@ export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
         onClose={() => setSettingsOpen(false)}
         autoUpdateEnabled={gw.autoUpdateEnabled}
         onToggleAutoUpdate={updater.handleToggleAutoUpdate}
+        hideIpMode={hideIpMode}
         interceptionBehavior={gw.state?.interception_behavior}
         popupPosition={gw.state?.popup_position}
         customAiDomains={gw.state?.custom_ai_domains}
@@ -114,6 +116,7 @@ export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
       <EventsModal open={eventsOpen} onClose={() => setEventsOpen(false)} stats={stats.gatewayStats} />
       <DeepLinkModal
         deepLinkKey={pendingDeepLinkKey}
+        hideIpMode={hideIpMode}
         onClose={handleCancelDeepLink}
         onConfirm={handleConfirmDeepLink}
         submitting={submittingDeepLink}
@@ -152,6 +155,7 @@ export function AppShellDialogs({ ctrl }: AppShellDialogsProps) {
       {!isTauri() && (browserSimulation || payload) && (
         <AlertOverlay
           initialPayload={payload ?? undefined}
+          hideIpMode={hideIpMode}
           onResolved={() => {
             const hadPayload = Boolean(payload);
             setBrowserSimulation(false);

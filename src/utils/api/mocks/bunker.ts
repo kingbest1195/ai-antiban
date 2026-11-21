@@ -19,9 +19,13 @@ function ensureBunkerSettings(): BunkerSettings {
       auto_backup_enabled: true,
       interval_hours: 24,
       retention_count: 7,
+      max_total_mb: 500,
       last_backup_at: null,
       last_backup_size_bytes: null,
     };
+  }
+  if (mockState.bunker.max_total_mb === undefined) {
+    mockState.bunker.max_total_mb = 500;
   }
   return mockState.bunker;
 }
@@ -107,7 +111,15 @@ export function mockUpdateBunkerSettings(patch: BunkerSettingsPatch): BunkerSett
   if (patch.retention_count !== undefined) {
     current.retention_count = Math.max(1, Math.trunc(patch.retention_count));
   }
+  if (patch.max_total_mb !== undefined) {
+    current.max_total_mb = Math.max(50, Math.trunc(patch.max_total_mb));
+  }
   return { ...current };
+}
+
+export function mockClearBunkerSnapshots(): BunkerStatus {
+  mockSnapshots = mockSnapshots.length > 1 ? mockSnapshots.slice(0, 1) : [];
+  return mockGetBunkerStatus();
 }
 
 export function mockRunBunkerBackupNow(destinationDir?: string): BunkerBackupResult {

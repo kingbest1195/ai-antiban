@@ -13,7 +13,7 @@ import {
   listCleanProfiles,
   startCleanProfileWarmup,
 } from "../../utils/api";
-import { Banner, Segmented, HintCard } from "../../ui";
+import { Segmented, HintCard } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
 import { CooldownBanner } from "../overview/CooldownBanner";
@@ -32,6 +32,7 @@ export interface CleanRoomScreenProps {
   state?: AppStateData | null;
   report?: RiskReport | null;
   routesSnapshot?: RoutesSnapshot | null;
+  hideIpMode?: boolean;
   onNavigateToGuide?: (guideRef: string) => void;
   onNavigateToConnect?: () => void;
   onStateUpdated?: () => Promise<unknown> | void;
@@ -57,6 +58,7 @@ export function CleanRoomScreen({
   state,
   report,
   routesSnapshot: externalRoutes,
+  hideIpMode = false,
   onNavigateToGuide,
   onNavigateToConnect,
   onStateUpdated,
@@ -196,7 +198,6 @@ export function CleanRoomScreen({
 
       <HintCard
         hintId={copy.hint.id}
-        title={copy.hint.title}
         body={copy.hint.body}
         dismissedHints={localDismissed}
         onDismiss={(id) => void handleDismissHint(id)}
@@ -216,9 +217,15 @@ export function CleanRoomScreen({
         <div className="cr-stack">
           <PreFlightAuditCard
             activeProfileId={activeProfile?.id ?? null}
+            activeProfileRouteId={activeProfile?.bound_route_id ?? null}
+            routes={routesSnap?.routes ?? []}
+            defaultRouteId={state?.default_route_id ?? routesSnap?.default_route_id ?? null}
+            taintedIps={cleanState.tainted_ips}
+            hideIpMode={hideIpMode}
             manualKillswitch={manualKillswitch}
             audit={initialAudit !== undefined ? auditReport : undefined}
             onAuditUpdated={setAuditReport}
+            onTaintedStateUpdated={refreshCleanProfiles}
             onNavigateToConnect={onNavigateToConnect}
             onAcknowledgeIsolation={() => setCreateTrigger((n) => n + 1)}
             onStateUpdated={onStateUpdated}
@@ -229,6 +236,8 @@ export function CleanRoomScreen({
             profiles={cleanState.profiles}
             activeProfileId={activeProfile?.id ?? null}
             routes={routesSnap?.routes ?? []}
+            taintedIps={cleanState.tainted_ips}
+            hideIpMode={hideIpMode}
             readyToLaunch={readyToLaunch}
             manualKillswitch={manualKillswitch}
             initialBrowsers={initialBrowsers}
@@ -249,15 +258,12 @@ export function CleanRoomScreen({
             onNavigateToGuide={onNavigateToGuide}
             onProfilesChanged={() => refreshCleanProfiles()}
             onStateUpdated={onStateUpdated}
-            onRequestCreateProfile={() => setCreateTrigger((n) => n + 1)}
             toast={toast}
           />
         </div>
       ) : (
         <div className="cr-stack">
-          <Banner tone="info" icon="info" title={copy.tabs.payment}>
-            {copy.paymentQuickNote}
-          </Banner>
+          <p className="zs-t-body cr-lead">{copy.paymentQuickNote}</p>
 
           <CardCheck
             exitCountry={exitCountry}

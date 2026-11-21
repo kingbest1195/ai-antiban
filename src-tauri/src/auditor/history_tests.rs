@@ -222,6 +222,7 @@ fn apply_pinned_travel_grace_turns_pinned_travel_red_green_without_hiding_real_r
         unknown_count: 0,
         applicable_count: 4,
         incomplete: false,
+        gateway_latency_ms: None,
     };
 
     // Unpinned stays Red.

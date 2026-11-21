@@ -1,11 +1,11 @@
 <div align="center">
   <img src="public/icon.png" alt="Застава Logo" width="88" height="88" />
 
-  # Застава (`Zastava`) v3.0.0
+  # Застава (`Zastava`) v3.0.1
 
   **Первый open-source рабочий кокпит для безопасной работы с Claude, ChatGPT, Cursor, Antigravity, Gemini и CLI-агентами.** Перехватывает обрыв VPN за `0.04 мс` до отправки запроса, изолирует браузерные сессии в **«Чистой комнате»** без split-IP утечек, автоматически спасает контекст в **локальном Бункере** и оценивает риск до оплаты и **SOS-верификации**.
 
-  [![Скачать Застава v3.0.0](https://img.shields.io/github/v/release/kingbest1195/ai-antiban?style=for-the-badge&color=10b981&label=%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C%20%D0%97%D0%B0%D1%81%D1%82%D0%B0%D0%B2%D1%83%20v3.0.0)](https://github.com/kingbest1195/ai-antiban/releases/latest)
+  [![Скачать Застава v3.0.1](https://img.shields.io/github/v/release/kingbest1195/ai-antiban?style=for-the-badge&color=10b981&label=%D0%A1%D0%BA%D0%B0%D1%87%D0%B0%D1%82%D1%8C%20%D0%97%D0%B0%D1%81%D1%82%D0%B0%D0%B2%D1%83%20v3.0.1)](https://github.com/kingbest1195/ai-antiban/releases/latest)
   [![Платформы](https://img.shields.io/badge/macOS%20(Apple%20Silicon%20%2B%20Intel)%20%7C%20Windows%2010%2F11-18181b?style=for-the-badge)](#установка)
   [![Приватность](https://img.shields.io/badge/Zero--MITM-0f172a?style=for-the-badge)](#приватность-и-безопасность)
   [![Лицензия MIT](https://img.shields.io/badge/Open%20Source-MIT-334155?style=for-the-badge)](LICENSE)
@@ -24,21 +24,21 @@
 ---
 
 <p align="center">
-  <img src="docs/screenshots/v3/01-home.png" alt="Застава v3.0.0 — Главный хаб 460x660" width="32%" />
-  <img src="docs/screenshots/v3/03-clean-room.png" alt="Застава v3.0.0 — Чистая комната" width="32%" />
-  <img src="docs/screenshots/v3/05-bunker-sos.png" alt="Застава v3.0.0 — Бункер и SOS" width="32%" />
+  <img src="docs/screenshots/v3/01-home.png" alt="Застава v3.0.1 — Главный хаб 460x660" width="32%" />
+  <img src="docs/screenshots/v3/03-clean-room.png" alt="Застава v3.0.1 — Чистая комната" width="32%" />
+  <img src="docs/screenshots/v3/05-bunker-sos.png" alt="Застава v3.0.1 — Бункер и SOS" width="32%" />
 </p>
 <p align="center">
-  <img src="docs/screenshots/v3/06-vpn-keys.png" alt="Застава v3.0.0 — VPN и ключи" width="32%" />
-  <img src="docs/screenshots/v3/07-checks-guides.png" alt="Застава v3.0.0 — 14 проверок и гайды" width="32%" />
-  <img src="docs/screenshots/v3/08-onboarding.png" alt="Застава v3.0.0 — Онбординг v3" width="32%" />
+  <img src="docs/screenshots/v3/06-vpn-keys.png" alt="Застава v3.0.1 — VPN и ключи" width="32%" />
+  <img src="docs/screenshots/v3/07-checks-guides.png" alt="Застава v3.0.1 — 14 проверок и гайды" width="32%" />
+  <img src="docs/screenshots/v3/08-onboarding.png" alt="Застава v3.0.1 — Онбординг v3" width="32%" />
 </p>
 
 ---
 
 ## Застава 3.0 vs обычный VPN vs антидетект
 
-| Критерий | Обычный VPN | Антидетект-браузер | Застава v3.0.0 |
+| Критерий | Обычный VPN | Антидетект-браузер | Застава v3.0.1 |
 | :--- | :---: | :---: | :---: |
 | **Остановка запроса при обрыве VPN (`0.04 мс` Kill-Switch)** | Нет (тихий слив домашнего IP) | Нет | **Да** |
 | **Защита IDE и CLI (`Cursor`, `Claude Code`, `Antigravity`, `Gemini CLI`)** | Нет | Нет | **Да** |
@@ -54,12 +54,12 @@
 
 Обычный VPN умеет тихо падать или переподключаться, пока вы пишете код в Cursor или общаетесь в Claude. Браузер и десктопные приложения этого не ждут — следующий запрос уходит с вашего настоящего IP. Сверху добавляются мелочи вроде московского часового пояса при лондонском IP, DNS домашнего провайдера или расхождения IP на **Stripe / Persona / Turnstile**.
 
-Застава v3.0.0 решает это без второго VPN, без подписок на антидетект и без чтения вашей переписки:
+Застава v3.0.1 решает это без второго VPN, без подписок на антидетект и без чтения вашей переписки:
 
 * **Ловит обрыв за `0.04 мс` и скачок ASN до отправки запроса.** Локальный шлюз на `127.0.0.1:8899` держит запросы к ИИ, если VPN упал, сменился IP, страна или даже провайдер (`ASN`) внутри той же страны в пределах 4 часов (`TRAVEL_ASN_JUMP_SAME_COUNTRY`) — или активен 4-часовой таймер после безопасного выхода. Информативные жёлтые предупреждения без риска смены ASN трафик не блокируют, а при перехвате открывается окно «Было → Стало» с причиной (`gate_reason`), паузой «До следующей смены сети» или постоянным исключением `(Сервис + Exit IP)`.
 * **«Чистая комната» и Browser Sandbox с пер-профильным loopback proxy alias (`127.0.1.x`).** Интерактивный мастер запуска нового или изолированного аккаунта («Новый аккаунт (4 шага)» и «Оплата и прогрев») с read-only детектором хвостов (процессы, браузеры, Desktop/MSIX, IP/DNS, `TZ/Locale`) и изолированными профилями браузера, где **весь** трафик (включая Stripe, Persona и Turnstile) строго заперт в своём маршруте без `transit_tunnel` fallback.
-* **Бесплатный локальный Бункер, экспорт Cursor/веб-чатов и «SOS-верификация».** Локальный архив контекста (`Local Bunker`) с автоматическим расписанием, санитизацией секретов и генерацией `RESTORE_PROMPT.md`, экспорт истории **Cursor**, **Claude Code**, **Claude Desktop** и веб-чатов (Claude / ChatGPT / Gemini), а также пошаговый экран **«SOS-верификация»** (SMS, KYC/Persona, оплата, разблокировка) и **Persona Risk Index** для оценки риска перед оплатой или проверкой.
-* **Ключи Заставы (`zastava://`) поверх любого VPN — стабильно на macOS и Windows.** Каждый ИИ-сервис может работать через свой ключ Заставы (`769 ₽/мес · 1 949 ₽ за 3 мес`, выдача за 1 минуту) или ваш собственный VPS поверх TUN VPN (V2Box Pro, Throne, Happ Plus, AmneziaVPN) благодаря PAC-политикам браузеров, пер-сервисным тумблерам мониторинга (**Claude / ChatGPT / Gemini**), изолированной привязке IP/истории (`ip_history`, `PINNED_BY_ZASTAVA_KEY`), автоматическому fallback к публичным узлам входа через системный `chained_proxy` на Windows, Happy Eyeballs, `SO_KEEPALIVE`, аварийному stale-кэшу DNS и диагностике фаз маршрута (`[proxy:route]`). На macOS `apply_pac` строго откатывает частичные правки при ошибке прав администратора, не оставляя ложно-зелёного статуса защиты.
+* **Бесплатный локальный Бункер, экспорт Cursor/веб-чатов и «SOS-верификация».** Единый локальный архив контекста (`Local Bunker`) с квотой диска (`500 МБ` по умолчанию, автоочистка старых снимков), автоматическим расписанием, санитизацией секретов (включая ручной ZIP-экспорт) и генерацией `RESTORE_PROMPT.md`, экспорт истории **Cursor**, **Claude Code**, **Claude Desktop** и веб-чатов (Claude / ChatGPT / Gemini), а также пошаговый экран **«SOS-верификация»** (SMS, KYC/Persona, оплата, разблокировка) и **Persona Risk Index** для оценки риска перед оплатой или проверкой.
+* **Ключи Заставы (`zastava://`) и коммерческие прокси поверх любого VPN — стабильно на macOS и Windows.** Каждый ИИ-сервис может работать через свой ключ Заставы (`769 ₽/мес · 1 949 ₽ за 3 мес`, выдача за 1 минуту), собственный VPS или коммерческий прокси в формате `socks5://host:port:user:pass` / `host:port:user:pass` (Proxyma, Proxy6 и др.) поверх TUN/прокси VPN (`v2box`, `Happ`, `iNCY`, `Shadowrocket`, `Clash`, `Amnezia`) благодаря PAC-политикам браузеров, пер-сервисным тумблерам мониторинга (**Claude / ChatGPT / Gemini**), изолированной привязке IP/истории (`ip_history`, `PINNED_BY_ZASTAVA_KEY`), автоматическому fallback к публичным узлам входа через системный `chained_proxy` на Windows, Happy Eyeballs (без ложных блокировок на dual-stack IPv6), `SO_KEEPALIVE`, аварийному stale-кэшу DNS и диагностике фаз маршрута (`[proxy:route]`). На macOS `apply_pac` строго откатывает частичные правки при ошибке прав администратора, не оставляя ложно-зелёного статуса защиты.
 * **Показывает 14 реальных проверок сети.** Не рисует зелёное там, где проверка не смогла достучаться до источника: при сбое честно показывает серый статус «Не удалось проверить», проверяет реальную Reverse DNS PTR-запись (`hickory-resolver`), честно помечает хостинги как `Datacenter / VPS IP (не резидентский)` и приоритизирует проверки по выбранному сервису (**Claude**, **ChatGPT**, **Gemini**). Под TUN/FakeDNS корректно распознаёт связку Fake-IP + публичный DNS и проверяет спам-базы через резервный DoH-канал.
 * **Оболочка v3 `460×660`, маскот-сторож и 4-состоянный трей.** Главный экран перестроен в компактный zero-scroll хаб с быстрой кнопкой питания, списком защищённых контуров, экраном «Что нового» и анимированным маскотом-сторожем. Иконка в системном трее поддерживает 4 состояния (зелёный, жёлтый, красный и серый `tray-gray.png` при отключённой защите).
 * **Автозапуск в трей и защита фоновых служб.** Застава может запускаться свернутой в трей при входе в систему (`--minimized`) — на Windows 11 работа с реестром идёт напрямую через нативный Win32 API (`advapi32`), без запуска `reg.exe` — и предотвращает ранний фоновый запуск `CoworkVMService` до старта шлюза.
@@ -76,10 +76,10 @@
 
 | Платформа | Установщик | Как поставить |
 | :--- | :--- | :--- |
-| **macOS** *(Apple Silicon и Intel)* | **[Скачать `Zastava_3.0.0_universal.dmg`](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Откройте `.dmg` и перетащите **Zastava** в `Applications`. Приложение не подписано Apple Developer ID — если macOS предупреждает, выполните в Терминале:<br>`xattr -cr /Applications/Zastava.app` |
-| **Windows 10 / 11** *(x64)* | **[Скачать `-setup.exe` или `.msi` (v3.0.0)](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Запустите установщик. Приложение не подписано Microsoft Authenticode, SmartScreen может предупредить. |
+| **macOS** *(Apple Silicon и Intel)* | **[Скачать `Zastava_3.0.1_universal.dmg`](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Откройте `.dmg` и перетащите **Zastava** в `Applications`. Приложение не подписано Apple Developer ID — если macOS предупреждает, выполните в Терминале:<br>`xattr -cr /Applications/Zastava.app` |
+| **Windows 10 / 11** *(x64)* | **[Скачать `-setup.exe` или `.msi` (v3.0.1)](https://github.com/kingbest1195/ai-antiban/releases/latest)** | Запустите установщик. Приложение не подписано Microsoft Authenticode, SmartScreen может предупредить. |
 
-> **Уже стоит 1.3.x или 2.x?** Откройте меню `···` → **«Проверить обновления»**. Пакет обновления проверяется криптоподписью minisign до установки, а при переходе с `2.x` на `3.0.0` автоматически создаётся резервная копия `state.v2.bak.json`.
+> **Уже стоит 1.3.x, 2.x или 3.0.0?** Откройте меню `···` → **«Проверить обновления»**. Пакет обновления проверяется криптоподписью minisign до установки, а при переходе с `2.x` на `3.0.1` автоматически создаётся резервная копия `state.v2.bak.json`.
 
 Все детали изменений — в [описании релиза](.github/release-notes.md) и [CHANGELOG.md](CHANGELOG.md).
 

@@ -110,6 +110,8 @@ export interface RiskReport {
   applicable_count?: number;
   /** unknown_count > 0: часть защиты не проверена, отчёт не «чистый». */
   incomplete?: boolean;
+  /** Задержка шлюза/активного ключа (мс) из лёгкого probe-замера. */
+  gateway_latency_ms?: number | null;
 }
 
 export interface CleanResult {

@@ -5,6 +5,8 @@ pub mod browser_discovery;
 pub mod browser_sandbox;
 pub mod detector;
 pub mod detector_env;
+pub mod sandbox_prefs;
+pub mod sandbox_proc;
 pub mod tz_guard;
 
 #[cfg(test)]
@@ -96,11 +98,11 @@ impl CleanProfileId {
     pub fn parse(raw: &str) -> Result<Self, String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err("Profile ID cannot be empty".to_string());
+            return Err("Идентификатор профиля не может быть пустым.".to_string());
         }
         if trimmed.len() > MAX_CLEAN_PROFILE_ID_LEN {
             return Err(format!(
-                "Profile ID exceeds max length ({MAX_CLEAN_PROFILE_ID_LEN})"
+                "Идентификатор профиля слишком длинный (максимум {MAX_CLEAN_PROFILE_ID_LEN} символов)."
             ));
         }
         if trimmed == "."
@@ -111,14 +113,14 @@ impl CleanProfileId {
             || trimmed.contains(':')
             || trimmed.contains('\0')
         {
-            return Err("Invalid profile ID: path traversal characters are forbidden".to_string());
+            return Err("Недопустимый идентификатор профиля: запрещены символы пути.".to_string());
         }
         if !trimmed
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Err(
-                "Invalid profile ID: only ASCII letters, digits, '-' and '_' are allowed"
+                "Недопустимый идентификатор профиля: разрешены только латинские буквы, цифры, '-' и '_'."
                     .to_string(),
             );
         }

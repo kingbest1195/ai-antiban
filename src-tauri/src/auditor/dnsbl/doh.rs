@@ -65,6 +65,11 @@ impl DohDns {
         Ok(Self::Reqwest(client))
     }
 
+    /// Creates a DoH resolver backed by a pre-built `reqwest::Client` (e.g. routed via active key exit).
+    pub fn with_client(client: reqwest::Client) -> Self {
+        Self::Reqwest(client)
+    }
+
     /// Creates a DoH resolver backed by an [`IpProbe`] (for deterministic offline tests).
     pub fn with_probe(probe: Arc<dyn IpProbe>) -> Self {
         Self::Probe(probe)

@@ -44,6 +44,7 @@ export interface UseSettingsControllerParams {
   open: boolean;
   autoUpdateEnabled: boolean;
   onToggleAutoUpdate: (enabled: boolean) => Promise<void>;
+  hideIpMode?: boolean;
   propBehavior?: InterceptionBehavior;
   propPosition?: PopupPosition;
   propCustomDomains?: string[];
@@ -60,6 +61,7 @@ export function useSettingsController({
   open,
   autoUpdateEnabled,
   onToggleAutoUpdate,
+  hideIpMode = false,
   propBehavior,
   propPosition,
   propCustomDomains,
@@ -106,6 +108,7 @@ export function useSettingsController({
     setDisabledProviders,
     trustedExceptions,
     setTrustedExceptions,
+    hideIpMode,
     onStateUpdated,
     onToast,
   });

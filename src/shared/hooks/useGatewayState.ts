@@ -35,6 +35,10 @@ export function dataAge(ageMs: number, auditFailed: boolean): number | null {
   return Math.max(1, Math.floor(ageMs / 60_000));
 }
 
+function isValidGatewayLatency(gwMs: unknown): gwMs is number {
+  return typeof gwMs === "number" && Number.isFinite(gwMs) && gwMs >= 0;
+}
+
 /** Число проверок в отчёте шлюза (места 0..13 в `RiskReport.checks`). */
 export const CHECK_SLOTS = 14;
 
@@ -186,8 +190,11 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
           ...(geminiSettled.status === "fulfilled" ? { gemini: geminiSettled.value } : {}),
         }));
 
+        const gwMs = claudeReport.gateway_latency_ms;
         const elapsed = Math.round(performance.now() - startTime);
-        setScanLatencyMs(Math.max(18, elapsed));
+        setScanLatencyMs(
+          isValidGatewayLatency(gwMs) ? Math.round(gwMs) : Math.max(18, elapsed),
+        );
         await sideReads;
         // Повторно читаем AppStateData после завершения аудита, чтобы blocked_providers всегда был актуален.
         try {
@@ -221,6 +228,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
       try {
         const report = await auditConnection(providerId, forceRefresh, beginRun(providerId));
         setReports((prev) => mergeProviderReport(prev, providerId, report));
+        if (isValidGatewayLatency(report.gateway_latency_ms)) {
+          setScanLatencyMs(Math.round(report.gateway_latency_ms));
+        }
         setPartials((prev) => ({ ...prev, [providerId]: undefined }));
         setAuditError(null);
         const refreshedAt = Date.now();
@@ -364,6 +374,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     onAuditRefreshed((report) => {
       const provider = report.provider || "anthropic";
       setReports((prev) => ({ ...prev, [provider]: report }));
+      if (isValidGatewayLatency(report.gateway_latency_ms)) {
+        setScanLatencyMs(Math.round(report.gateway_latency_ms));
+      }
       setAuditError(null);
       const ts = Date.now();
       reportAtRef.current = ts;

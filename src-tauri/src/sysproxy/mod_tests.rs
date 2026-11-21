@@ -172,24 +172,24 @@ fn test_parse_networksetup_webproxy_output() {
 
 #[test]
 fn test_parse_windows_proxy_server_and_loop_prevention() {
-    // Plain format
+    // Plain format -> http://
     assert_eq!(
         parse_windows_proxy_server("127.0.0.1:10808", Some(8899)),
-        Some("127.0.0.1:10808".to_string())
+        Some("http://127.0.0.1:10808".to_string())
     );
 
     // Protocol formats
     assert_eq!(
         parse_windows_proxy_server("http=127.0.0.1:10808;https=127.0.0.1:10808", Some(8899)),
-        Some("127.0.0.1:10808".to_string())
+        Some("http://127.0.0.1:10808".to_string())
     );
     assert_eq!(
         parse_windows_proxy_server("http=127.0.0.1:10808;https=127.0.0.1:2080", Some(8899)),
-        Some("127.0.0.1:2080".to_string())
+        Some("http://127.0.0.1:2080".to_string())
     );
     assert_eq!(
         parse_windows_proxy_server("socks=127.0.0.1:10808", Some(8899)),
-        Some("127.0.0.1:10808".to_string())
+        Some("socks5://127.0.0.1:10808".to_string())
     );
 
     // Loop prevention: Zastava's active gateway port or default ports

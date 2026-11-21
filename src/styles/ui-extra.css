@@ -82,7 +82,7 @@
 .zs-modal__head{display:flex;align-items:flex-start;gap:var(--space-3);padding:var(--space-5) var(--space-5) var(--space-3)}
 .zs-modal__title{margin:0;flex:1;font-size:20px;line-height:26px;font-weight:600;letter-spacing:-.01em}
 .zs-modal__body{flex:1 1 auto;min-height:0;overflow-y:auto;padding:var(--space-1) var(--space-5)}
-.zs-modal__foot{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--space-2);padding:var(--space-4) var(--space-5) var(--space-5)}
+.zs-modal__foot{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:var(--space-2);min-width:0;padding:var(--space-4) var(--space-5) var(--space-5)}
 
 /* Segmented */
 .zs-seg{display:flex;gap:2px;padding:2px;border-radius:var(--radius-md);background:var(--bg-2)}
@@ -130,14 +130,14 @@
 .zs-empty__extra{margin-top:var(--space-2);width:100%;max-width:340px;font-size:13px;line-height:18px;color:var(--ink-2)}
 .zs-empty__action{margin-top:var(--space-3);display:flex;flex-wrap:wrap;justify-content:center;gap:var(--space-2)}
 
-/* HintCard: компактная закрываемая контекстная подсказка раздела */
-.zs-hint{display:flex;align-items:flex-start;gap:var(--space-3);padding:var(--space-3);border-radius:var(--radius-md);background:var(--info-soft);border:1px solid color-mix(in srgb,var(--info-text) 25%,transparent);color:var(--ink-2)}
+/* HintCard: компактная спокойная строка-подсказка раздела (нейтральный фон, без «стены текста») */
+.zs-hint{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-2) var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);border:1px solid var(--line);color:var(--ink-2)}
 .zs-hint--neutral{background:var(--bg-2);border-color:var(--line)}
-.zs-hint__icon{width:24px;height:24px;flex:none;display:grid;place-items:center;border-radius:var(--radius-sm);background:color-mix(in srgb,var(--info-text) 14%,transparent);color:var(--info-text)}
+.zs-hint__icon{width:24px;height:24px;flex:none;display:grid;place-items:center;border-radius:var(--radius-sm);background:var(--bg-3);color:var(--ink-2)}
 .zs-hint--neutral .zs-hint__icon{background:var(--bg-3);color:var(--ink-2)}
 .zs-hint__body{flex:1;min-width:0}
 .zs-hint__title{margin:0 0 2px;font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
-.zs-hint__text{margin:0;font-size:12px;line-height:17px;color:var(--ink-2)}
+.zs-hint__text{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
 .zs-hint__action{margin-top:var(--space-2)}
 .zs-hint__close{width:24px;height:24px;flex:none;display:grid;place-items:center;padding:0;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--ink-3);cursor:pointer}
 .zs-hint__close:hover{background:color-mix(in srgb,var(--ink) 8%,transparent);color:var(--ink)}
@@ -162,7 +162,7 @@
 .zs-xrow__chev{transition:transform .12s ease}
 .zs-xrow__head[aria-expanded=true] .zs-xrow__chev{transform:rotate(90deg)}
 @media (prefers-reduced-motion:reduce){.zs-xrow__chev{transition:none}}
-.zs-xrow__detail{display:flex;flex-direction:column;gap:var(--space-3);margin:var(--space-1) 0 var(--space-3) calc(32px + var(--space-3));padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
+.zs-xrow__detail{display:flex;flex-direction:column;gap:var(--space-3);min-width:0;margin:var(--space-1) 0 var(--space-3) calc(32px + var(--space-3));padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
 
 /* CopyBlock: команда или адрес на слое bg-2, кнопка «Скопировать» справа внизу */
 .zs-code{display:flex;flex-direction:column;gap:var(--space-2);margin:var(--space-2) 0;padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
@@ -173,7 +173,7 @@
 .zs-step__toggle{display:block;width:100%;min-height:28px;margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer;border-radius:var(--radius-sm)}
 .zs-step__toggle:hover{color:var(--ink-2)}
 .zs-step__panel{display:flex;flex-direction:column;gap:var(--space-2);margin-top:var(--space-2)}
-.zs-banner__actions{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}
+.zs-banner__actions{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center;min-width:0}
 .zs-step__panel>.zs-btn{align-self:flex-start}
 .zs-step__panel>.zs-rows{margin-top:var(--space-1)}
 
@@ -196,8 +196,8 @@
 .zs-tip__pop{position:fixed;z-index:80;padding:10px 12px;border-radius:var(--radius-md);background:var(--bg-3);box-shadow:var(--shadow-pop);border:1px solid var(--line-strong);color:var(--ink-2);font-family:var(--font-sans);font-size:12px;line-height:17px;font-weight:400;letter-spacing:normal;text-transform:none;text-align:left;white-space:normal;overflow-wrap:break-word;pointer-events:none}
 .zs-tip__pop--pinned{pointer-events:auto;border-color:var(--info-text)}
 .zs-tip__title{display:block;margin-bottom:2px;color:var(--ink);font-weight:600}
-.zs-info-i{display:inline-grid;place-items:center;width:16px;height:16px;padding:0;border-radius:var(--radius-pill);border:1px solid var(--line-strong);background:transparent;color:var(--ink-3);font-family:inherit;font-size:10px;font-weight:700;line-height:1;cursor:pointer;flex:none}
-.zs-info-i:hover,.zs-info-i:focus-visible,.zs-info-i[aria-expanded=true]{color:var(--ink);border-color:var(--info-text);background:var(--info-soft)}
+.zs-info-i{display:inline-grid;place-items:center;width:16px;height:16px;padding:0;border-radius:var(--radius-pill);border:1px solid var(--line-strong);background:transparent;color:var(--ink-3);font-family:inherit;font-size:11px;font-weight:600;line-height:1;cursor:pointer;flex:none}
+.zs-info-i:hover,.zs-info-i:focus-visible,.zs-info-i[aria-expanded=true]{color:var(--info-text);border-color:var(--info-text);background:var(--info-soft)}
 .zs-info-i:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 
 /* Кнопка обновления в шапке: видна поверх любых баннеров и на любой вкладке */
@@ -220,6 +220,6 @@
 /* Нейтральная строка-пояснение на списке сервисов при выключенной защите */
 .zs-services-off-note{margin:0 0 var(--space-2);padding:var(--space-2) var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);font-size:12px;line-height:16px;color:var(--ink-2)}
 
-/* Кнопка «Остановить сеть» с подсказкой «!» */
+/* Кнопка «Остановить сеть» с подсказкой */
 .zs-app__action-stop{display:flex;align-items:center;gap:var(--space-2);min-width:0}
 .zs-app__action-stop .zs-btn{flex:1;min-width:0}

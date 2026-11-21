@@ -69,9 +69,26 @@ pub fn evaluate_dns_country_for_route_with_protection(
         } => (ip, country, public_service, sources),
         ResolverView::Unmeasured(u) => {
             if u.code == "DNS_WHOAMI_FAKE_IP" && all_sources_tun_fake_ip(&u.sources) {
+                let has_v4 = u
+                    .sources
+                    .iter()
+                    .filter_map(|s| s.addr.as_deref())
+                    .any(|a| !a.contains(':'));
+                let has_v6 = u
+                    .sources
+                    .iter()
+                    .filter_map(|s| s.addr.as_deref())
+                    .any(|a| a.contains(':'));
+                let cidr_note = match (has_v4, has_v6) {
+                    (false, true) => "fc00::/18",
+                    (true, true) => "198.18.0.0/15, fc00::/18",
+                    _ => "198.18.0.0/15",
+                };
                 return CheckResult::unknown(
                     "DNS_COUNTRY_FAKE_IP",
-                    "Сравнение страны DNS и выходного узла неприменимо: используется режим Fake-IP VPN-туннеля (198.18.0.0/15).",
+                    format!(
+                        "Сравнение страны DNS и выходного узла неприменимо: используется режим Fake-IP VPN-туннеля ({cidr_note})."
+                    ),
                     UnknownReason::NotApplicable,
                 )
                 .with_sources(&u.sources);

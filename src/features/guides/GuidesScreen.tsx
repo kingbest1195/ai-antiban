@@ -19,6 +19,7 @@ export interface GuidesScreenProps {
   initialGuide?: string;
   navKey?: number;
   currentIp?: string;
+  hideIpMode?: boolean;
   currentCountry?: string;
   currentTimezone?: string;
   onPinIp?: (ip: string) => void;
@@ -31,6 +32,7 @@ export function GuidesScreen({
   initialGuide = "01-personal-vpn-15min",
   navKey,
   currentIp = "185.212.102.40",
+  hideIpMode = false,
   currentCountry = "NL",
   currentTimezone,
   onPinIp,
@@ -62,6 +64,7 @@ export function GuidesScreen({
 
   const ctx: GuideContextValue = {
     currentIp,
+    hideIpMode,
     currentCountry: resolvedCountry,
     currentTimezone,
     onPinIp,

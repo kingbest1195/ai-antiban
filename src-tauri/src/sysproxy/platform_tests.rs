@@ -28,7 +28,8 @@ fn debug_output_never_contains_values() {
         "{pac:?} {ep:?} {reg:?} {:?}",
         ChainState {
             http: ep.clone(),
-            https: ep.clone()
+            https: ep.clone(),
+            socks: ProxyEndpoint::default(),
         }
     );
     assert!(!all.contains("hunter2"), "{all}");

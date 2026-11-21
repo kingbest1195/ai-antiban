@@ -48,6 +48,7 @@ fn a_vpn_service_never_gets_the_chain_or_bypass_either() {
     let both = ChainState {
         http: ep(true, "127.0.0.1", 2080),
         https: ep(true, "127.0.0.1", 2080),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&vpn, both.clone());
     p.seed_bypass(&vpn, &["vpn.local"]);
@@ -377,6 +378,7 @@ fn privileged_enable_batches_services_records_journal_and_rolls_back_on_cancel()
                 authenticated: Some(false),
             },
             https: ProxyEndpoint::default(),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j = open(&fs);
@@ -409,6 +411,7 @@ fn privileged_enable_batches_services_records_journal_and_rolls_back_on_cancel()
                     authenticated: Some(false),
                 },
                 https: ProxyEndpoint::default(),
+                socks: ProxyEndpoint::default(),
             },
         )
         .unwrap();
@@ -522,6 +525,7 @@ fn partial_admin_auth_required_rolls_back_and_returns_prefix() {
         ChainState {
             http: ep(true, "127.0.0.1", 2080),
             https: ProxyEndpoint::default(),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j2 = open(&fs2);
@@ -640,4 +644,32 @@ fn apply_pac_deduplicates_skipped_vpn_and_admin_auth_diagnostics_and_logs_transi
         1,
         "repeated AdminAuthRequired should log once: {logs:?}"
     );
+}
+
+#[test]
+fn heal_guard_auto_resets_suspension_after_cooldown() {
+    let (fs, p) = setup();
+    let mut j = open(&fs);
+    let guard = HealGuard::new();
+    let t0 = Instant::now();
+    refresh_pac(&mut j, &p, PAC, &guard, t0).unwrap();
+
+    // Burst rewrites suspend Wi-Fi.
+    for step in 1..=HEAL_MAX_REWRITES as u64 {
+        p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+        refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(step)).unwrap();
+    }
+    p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+    refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(10)).unwrap();
+    assert!(guard.is_suspended_at(&wifi().key(), t0 + Duration::from_secs(10)));
+    assert_eq!(
+        p.pac_of(&wifi()).url.as_deref(),
+        Some("http://vpn.example/p.pac")
+    );
+
+    // After HEAL_WINDOW (120s) cooldown expires, self-heal automatically resumes.
+    let after_cooldown = t0 + Duration::from_secs(10) + HEAL_WINDOW + Duration::from_secs(1);
+    assert!(!guard.is_suspended_at(&wifi().key(), after_cooldown));
+    refresh_pac(&mut j, &p, PAC, &guard, after_cooldown).unwrap();
+    assert_eq!(p.pac_of(&wifi()), pac(Some(PAC), Some(true)));
 }

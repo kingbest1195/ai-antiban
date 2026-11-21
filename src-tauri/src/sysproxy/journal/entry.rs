@@ -331,7 +331,9 @@ impl Entry {
             _ => None,
         })
         .collect();
-        known.iter().any(|k| k.http == c.http) && known.iter().any(|k| k.https == c.https)
+        known.iter().any(|k| k.http == c.http)
+            && known.iter().any(|k| k.https == c.https)
+            && known.iter().any(|k| k.socks == c.socks)
     }
 }
 

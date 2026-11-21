@@ -110,34 +110,17 @@
   border: 1px solid var(--line);
 }
 
-/* Sales cards (ConnectScreen layout="sales") */
-.zs-sale {
-  border: 1px solid var(--line-strong);
-}
-.zs-sale--key {
-  border-color: color-mix(in srgb, var(--brand) 55%, transparent);
-  background: color-mix(in srgb, var(--brand-soft) 45%, var(--bg-1));
-}
+/* Cards in ConnectSalesCards: flat --bg-1 surfaces, no neon borders or checkmarks */
 .zs-sale__list {
   margin: 0 0 var(--space-3);
-  padding: 0;
-  list-style: none;
+  padding-left: var(--space-4);
+  list-style: disc;
   display: flex;
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
   line-height: 18px;
-  color: var(--ink);
-}
-.zs-sale__list li {
-  display: flex;
-  gap: var(--space-2);
-}
-.zs-sale__list li::before {
-  content: "✓";
-  flex: none;
-  color: var(--brand-text);
-  font-weight: 700;
+  color: var(--ink-2);
 }
 
 .zs-v3-muted {

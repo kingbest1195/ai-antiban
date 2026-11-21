@@ -1,12 +1,9 @@
 /* SOS-верификация: только токены дизайн-системы. */
 .zs-sos__block { margin-top: var(--space-3); }
-.zs-sos__choices { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
 .zs-sos__list { margin: var(--space-2) 0 0; padding-left: var(--space-4); color: var(--ink-2); display: flex; flex-direction: column; gap: var(--space-2); }
-.zs-sos__step { margin-top: var(--space-3); padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-2); border: 1px solid var(--line); }
+.zs-sos__step { margin-top: var(--space-3); padding: var(--space-3); border-radius: var(--radius-md); background: var(--bg-2); }
 .zs-sos__step-title { margin: 0 0 var(--space-1); color: var(--ink); }
 .zs-sos__step-desc { margin: 0 0 var(--space-2); color: var(--ink-2); }
-.zs-sos__stop-card { border: 1px solid var(--danger); background: var(--danger-soft); border-radius: var(--radius-md); padding: var(--space-3); margin-top: var(--space-3); }
-.zs-sos__stop-head { display: flex; align-items: center; gap: var(--space-2); color: var(--danger-text); margin-bottom: var(--space-2); }
 .zs-sos__checklist { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-3); }
-.zs-sos__check-row { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--bg-2); border: 1px solid var(--line); }
+.zs-sos__check-row { display: flex; align-items: flex-start; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); background: var(--bg-2); }
 .zs-sos__check-row input { margin-top: 3px; accent-color: var(--brand); }

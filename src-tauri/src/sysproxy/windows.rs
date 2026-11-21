@@ -8,15 +8,20 @@
 //! The logic only talks to `Platform`, so it is tested with `FakePlatform` on every OS; the
 //! registry access and the WinINet notification live in `RealPlatform`.
 
-use super::journal::{ApplyOutcome, Journal, Resource, Value};
+use super::journal::{ApplyOutcome, EntryState, Journal, Resource, Value};
+use super::macos::HealGuard;
+use super::parsing::{is_local_proxy_reachable, windows_proxy_override_bypasses_all};
 use super::platform::{PResult, Platform, RegKind, RegValue};
 use super::{
-    EnableReport, parse_gateway_port_from_pac_url, parse_windows_proxy_server, set_chained_proxy,
+    EnableReport, os_effects_enabled, parse_gateway_port_from_pac_url, parse_windows_proxy_server,
+    set_chained_proxy,
 };
+use std::time::Instant;
 
 pub(super) const AUTO_CONFIG_URL: &str = "AutoConfigURL";
 pub(super) const PROXY_ENABLE: &str = "ProxyEnable";
 const PROXY_SERVER: &str = "ProxyServer";
+const PROXY_OVERRIDE: &str = "ProxyOverride";
 
 fn inet(name: &str) -> Resource {
     Resource::Inet {
@@ -29,10 +34,15 @@ fn is_enabled_dword(v: &Option<RegValue>) -> bool {
     matches!(v, Some(RegValue { kind: RegKind::Dword, data }) if data != "0")
 }
 
-/// Reads the third-party explicit proxy (when switched on) so the PAC can chain through it.
-/// Read-only; `ProxyServer` itself is never rewritten.
-fn detect_chained(p: &dyn Platform, gateway_port: Option<u16>) -> PResult<Option<String>> {
-    if !is_enabled_dword(&p.get_inet(PROXY_ENABLE)?) {
+fn read_proxy_server(p: &dyn Platform, gateway_port: Option<u16>) -> PResult<Option<String>> {
+    let bypass = match p.get_inet(PROXY_OVERRIDE)? {
+        Some(RegValue {
+            kind: RegKind::Sz | RegKind::ExpandSz,
+            data,
+        }) => windows_proxy_override_bypasses_all(Some(&data)),
+        _ => false,
+    };
+    if bypass {
         return Ok(None);
     }
     Ok(match p.get_inet(PROXY_SERVER)? {
@@ -44,6 +54,35 @@ fn detect_chained(p: &dyn Platform, gateway_port: Option<u16>) -> PResult<Option
     })
 }
 
+/// Reads the third-party explicit proxy (when switched on) so the PAC can chain through it.
+/// Read-only; `ProxyServer` itself is never rewritten.
+fn detect_chained(p: &dyn Platform, gateway_port: Option<u16>) -> PResult<Option<String>> {
+    if !is_enabled_dword(&p.get_inet(PROXY_ENABLE)?) {
+        return Ok(None);
+    }
+    read_proxy_server(p, gateway_port)
+}
+
+/// Computes the effective chained proxy for Windows: active `ProxyEnable=1` + `ProxyServer`, or
+/// a journaled `ProxyEnable` whose `ProxyServer` is still valid and reachable. Returns `None` when
+/// no external upstream exists so stale `chained_proxy` is always cleared.
+fn resolve_chained_target(
+    j: &Journal,
+    p: &dyn Platform,
+    gateway_port: Option<u16>,
+) -> PResult<Option<String>> {
+    if let Some(active) = detect_chained(p, gateway_port)? {
+        return Ok(Some(active));
+    }
+    if j.entry(&inet(PROXY_ENABLE)).is_some()
+        && let Some(target) = read_proxy_server(p, gateway_port)?
+        && (!os_effects_enabled() || is_local_proxy_reachable(&target))
+    {
+        return Ok(Some(target));
+    }
+    Ok(None)
+}
+
 /// Writes the PAC URL and switches the explicit proxy off so the PAC decides. Used for the first
 /// enable and for self-healing; a repeated call changes nothing that is already in place.
 pub(super) fn enable_inet(
@@ -51,34 +90,51 @@ pub(super) fn enable_inet(
     p: &dyn Platform,
     pac_url: &str,
 ) -> Result<EnableReport, String> {
+    enable_inet_with_heal(j, p, pac_url, None)
+}
+
+/// Self-heal-aware Windows WinINet PAC configuration with [`HealGuard`] loop-breaking so external
+/// proxy overrides (`iNCY` / `v2rayN`) do not trigger an endless 5s tug-of-war.
+pub(super) fn enable_inet_with_heal(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    heal: Option<(&HealGuard, Instant)>,
+) -> Result<EnableReport, String> {
     let gateway_port = parse_gateway_port_from_pac_url(pac_url);
-    let chained = detect_chained(p, gateway_port)
+    let chained = resolve_chained_target(j, p, gateway_port)
         .map_err(|_| "Не удалось прочитать системные настройки прокси.".to_string())?;
-    // Chained before the explicit proxy is switched off, so the PAC already routes through it.
-    if let Some(target) = chained {
-        set_chained_proxy(Some(target));
-    }
+    set_chained_proxy(chained.clone());
 
     let mut report = EnableReport::default();
+    if let Some((guard, now)) = heal {
+        let fp = vec![chained.unwrap_or_default()];
+        guard.network(fp);
+        if guard.is_suspended_at("wininet", now) {
+            return Ok(report);
+        }
+    }
+
     let mut note = |o: ApplyOutcome| {
         if o != ApplyOutcome::Unchanged {
             report.changed = true;
         }
     };
 
+    let pac_res = inet(AUTO_CONFIG_URL);
+    let was_in_place = j
+        .entry(&pac_res)
+        .is_some_and(|e| e.state == EntryState::Applied);
+
     // PAC first: the explicit proxy is switched off only when the PAC is in place.
-    match j.apply(
-        p,
-        &inet(AUTO_CONFIG_URL),
-        Value::Reg(Some(RegValue::sz(pac_url))),
-    ) {
+    match j.apply(p, &pac_res, Value::Reg(Some(RegValue::sz(pac_url)))) {
         Ok(o) => note(o),
         Err(e) => {
             crate::diagnostics::record(
                 "sysproxy:windows",
-                &format!("{} write failed: {e}", inet(AUTO_CONFIG_URL).id()),
+                &format!("{} write failed: {e}", pac_res.id()),
             );
-            eprintln!("Застава: {} не включён: {e}", inet(AUTO_CONFIG_URL).id());
+            eprintln!("Застава: {} не включён: {e}", pac_res.id());
             return Err("Не удалось включить защиту в настройках Windows.".to_string());
         }
     }
@@ -101,6 +157,17 @@ pub(super) fn enable_inet(
             }
         }
     }
+
+    if let Some((guard, now)) = heal
+        && was_in_place
+        && report.changed
+        && guard.note_rewrite("wininet", now)
+    {
+        eprintln!(
+            "Застава: настройки системного прокси Windows постоянно переписывает другое приложение; самолечение приостановлено на время ожидания"
+        );
+    }
+
     report
         .configured
         .push("Windows Internet Settings (WinINet)".to_string());
@@ -108,235 +175,5 @@ pub(super) fn enable_inet(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sysproxy::fs::FakeFs;
-    use crate::sysproxy::journal::{Journal, Outcome, recover_with};
-    use crate::sysproxy::platform::{FakePlatform, PlatOp};
-    use std::path::Path;
-    use std::sync::Arc;
-
-    const DIR: &str = "/data";
-    const PAC: &str = "http://127.0.0.1:8899/proxy.pac";
-
-    fn open(fs: &FakeFs) -> Journal {
-        Journal::open(Arc::new(fs.clone()), Path::new(DIR)).unwrap()
-    }
-
-    #[test]
-    fn enable_and_restore_return_exact_types_and_absence() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-        p.seed_inet(PROXY_SERVER, RegValue::sz("corp.example:3128"));
-        let mut j = open(&fs);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz(PAC)));
-        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(0)));
-        j.restore_all(&p);
-        assert_eq!(
-            p.inet_of(AUTO_CONFIG_URL),
-            None,
-            "absent is deleted, not blanked"
-        );
-        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(1)));
-        assert_eq!(
-            p.inet_of(PROXY_SERVER),
-            Some(RegValue::sz("corp.example:3128")),
-            "ProxyServer is never rewritten"
-        );
-    }
-
-    #[test]
-    fn third_party_pac_url_with_expand_type_comes_back_exactly() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        p.seed_inet(AUTO_CONFIG_URL, RegValue::expand_sz("%CORP%/p.pac"));
-        let mut j = open(&fs);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        j.restore_all(&p);
-        assert_eq!(
-            p.inet_of(AUTO_CONFIG_URL),
-            Some(RegValue::expand_sz("%CORP%/p.pac"))
-        );
-    }
-
-    #[test]
-    fn proxy_enable_that_is_already_off_gets_no_record() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        let mut j = open(&fs);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        assert!(j.entry(&inet(PROXY_ENABLE)).is_none());
-        assert_eq!(
-            p.inet_of(PROXY_ENABLE),
-            None,
-            "no value is not turned into 0"
-        );
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(0));
-        enable_inet(&mut j, &p, PAC).unwrap();
-        assert!(j.entry(&inet(PROXY_ENABLE)).is_none());
-    }
-
-    #[test]
-    fn external_pac_change_does_not_switch_off_a_foreign_proxy_enable() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-        let mut j = open(&fs);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        // The user's own PAC replaces ours; the user also turns the explicit proxy on again.
-        p.seed_inet(AUTO_CONFIG_URL, RegValue::sz("http://mine/p.pac"));
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-        let rep = j.restore_all(&p);
-        let pac_item = rep
-            .items
-            .iter()
-            .find(|i| i.resource == "inet:AutoConfigURL")
-            .unwrap();
-        assert_eq!(pac_item.outcome, Outcome::ExternalChange);
-        assert_eq!(
-            p.inet_of(AUTO_CONFIG_URL),
-            Some(RegValue::sz("http://mine/p.pac"))
-        );
-        assert_eq!(
-            p.inet_of(PROXY_ENABLE),
-            Some(RegValue::dword(1)),
-            "only our own 0 is ever reverted, the foreign 1 stays"
-        );
-    }
-
-    #[test]
-    fn the_two_values_are_independent() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-        let mut j = open(&fs);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        // A foreign change of ProxyEnable must not stop the PAC value from being restored.
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(2));
-        let rep = j.restore_all(&p);
-        assert_eq!(rep.restored(), 1);
-        assert_eq!(rep.external(), 1);
-        assert_eq!(p.inet_of(AUTO_CONFIG_URL), None);
-    }
-
-    #[test]
-    fn notification_failure_keeps_the_record_and_the_restore_retries_it() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        let mut j = open(&fs);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        // The value is restored but WinINet could not be told: the record stays for a retry.
-        p.fail_next(PlatOp::NotifyInet);
-        let rep = j.restore_all(&p);
-        assert_eq!(rep.failed(), 1);
-        assert_eq!(p.inet_of(AUTO_CONFIG_URL), None);
-        assert!(!j.is_empty());
-        p.clear_calls();
-        let rep = j.restore_all(&p);
-        assert_eq!(rep.failed(), 0);
-        assert!(j.is_empty());
-        assert!(
-            p.calls()
-                .iter()
-                .any(|c| c.starts_with("notify_inet_refresh"))
-        );
-    }
-
-    #[test]
-    fn notification_failure_while_enabling_keeps_the_record_and_is_repeated() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        let mut j = open(&fs);
-        p.fail_next(PlatOp::NotifyInet);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        assert!(j.entry(&inet(AUTO_CONFIG_URL)).unwrap().notify_pending);
-        p.clear_calls();
-        let r = enable_inet(&mut j, &p, PAC).unwrap();
-        assert!(!r.changed);
-        assert!(!j.entry(&inet(AUTO_CONFIG_URL)).unwrap().notify_pending);
-        assert!(
-            p.calls()
-                .iter()
-                .any(|c| c.starts_with("notify_inet_refresh"))
-        );
-    }
-
-    #[test]
-    fn crash_between_intent_and_write_loses_nothing() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        p.seed_inet(AUTO_CONFIG_URL, RegValue::sz("http://corp/p.pac"));
-        {
-            let mut j = open(&fs);
-            p.fail_next(PlatOp::SetInet);
-            assert!(enable_inet(&mut j, &p, PAC).is_err());
-        }
-        recover_with(Arc::new(fs.clone()), &p, Path::new(DIR)).unwrap();
-        assert_eq!(
-            p.inet_of(AUTO_CONFIG_URL),
-            Some(RegValue::sz("http://corp/p.pac"))
-        );
-    }
-
-    #[test]
-    fn explicit_proxy_is_detected_for_the_chain_but_never_rewritten() {
-        let p = FakePlatform::new();
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-        p.seed_inet(
-            PROXY_SERVER,
-            RegValue::sz("http=127.0.0.1:2080;https=127.0.0.1:2080"),
-        );
-        assert_eq!(
-            detect_chained(&p, Some(8899)).unwrap().as_deref(),
-            Some("127.0.0.1:2080")
-        );
-        p.seed_inet(PROXY_SERVER, RegValue::sz("127.0.0.1:8899"));
-        assert_eq!(
-            detect_chained(&p, Some(8899)).unwrap(),
-            None,
-            "our own gateway is no upstream"
-        );
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(0));
-        assert_eq!(detect_chained(&p, None).unwrap(), None);
-
-        // ExpandSz ProxyServer is also recognized.
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-        p.seed_inet(PROXY_SERVER, RegValue::expand_sz("127.0.0.1:10808"));
-        assert_eq!(
-            detect_chained(&p, Some(8899)).unwrap().as_deref(),
-            Some("127.0.0.1:10808")
-        );
-    }
-
-    #[test]
-    fn vpn_override_on_windows_rechains_and_heals_pac_and_proxy_enable() {
-        let (fs, p) = (FakeFs::new(), FakePlatform::new());
-        let mut j = open(&fs);
-        enable_inet(&mut j, &p, PAC).unwrap();
-        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz(PAC)));
-        p.clear_calls();
-
-        // A VPN client (e.g. Throne/v2rayN/Happ) blanks AutoConfigURL and sets ProxyEnable=1.
-        p.seed_inet(AUTO_CONFIG_URL, RegValue::sz(""));
-        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-        p.seed_inet(PROXY_SERVER, RegValue::sz("127.0.0.1:10808"));
-        assert_eq!(
-            detect_chained(&p, Some(8899)).unwrap().as_deref(),
-            Some("127.0.0.1:10808")
-        );
-
-        let rep = enable_inet(&mut j, &p, PAC).unwrap();
-        assert!(rep.changed);
-        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz(PAC)));
-        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(0)));
-        assert!(
-            p.calls()
-                .iter()
-                .any(|c| c.starts_with("notify_inet_refresh"))
-        );
-
-        // Clean restore brings back the VPN's empty AutoConfigURL and ProxyEnable=1 without
-        // touching ProxyServer.
-        j.restore_all(&p);
-        assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz("")));
-        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(1)));
-        assert_eq!(
-            p.inet_of(PROXY_SERVER),
-            Some(RegValue::sz("127.0.0.1:10808"))
-        );
-    }
-}
+#[path = "windows_tests.rs"]
+mod tests;

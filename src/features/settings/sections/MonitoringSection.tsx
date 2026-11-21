@@ -2,6 +2,7 @@ import type { FormEvent } from "react";
 import type { ProviderId } from "../../../types";
 import { Badge, Button, Field, Mono, Row, Rows, Section, Switch } from "../../../ui";
 import { providers as providerCopy, settings as copy } from "../../../shared/copy/ru";
+import { formatIp } from "../../../shared/lib/format";
 import { MONITORED_PROVIDERS } from "../useSettingsController";
 
 interface MonitoringSectionProps {
@@ -9,6 +10,7 @@ interface MonitoringSectionProps {
   monitoringBusy: ProviderId | null;
   exceptionEntries: { provider: string; ip: string }[];
   exceptionsBusy: boolean;
+  hideIpMode?: boolean;
   customDomains: string[];
   newDomainInput: string;
   domainBusy: boolean;
@@ -26,6 +28,7 @@ export function MonitoringSection({
   monitoringBusy,
   exceptionEntries,
   exceptionsBusy,
+  hideIpMode = false,
   customDomains,
   newDomainInput,
   domainBusy,
@@ -87,19 +90,20 @@ export function MonitoringSection({
             <Rows className="zs-settings__rows">
               {exceptionEntries.map(({ provider, ip }) => {
                 const label = providerLabel(provider);
+                const displayIp = formatIp(ip, hideIpMode);
                 return (
                   <Row
                     key={`${provider}:${ip}`}
                     icon="lock"
                     title={label}
-                    sub={<Mono>{ip}</Mono>}
+                    sub={<Mono>{displayIp}</Mono>}
                     trail={
                       <Button
                         variant="quiet"
                         size="sm"
                         iconOnly
                         icon="x"
-                        aria-label={copy.trustedExceptions.remove(label, ip)}
+                        aria-label={copy.trustedExceptions.remove(label, displayIp)}
                         disabled={exceptionsBusy}
                         onClick={() => void onRemoveTrustedException(provider, ip)}
                       />

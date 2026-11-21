@@ -124,12 +124,14 @@ describe("Tooltip interaction state (hover + focus + click toggle + Escape + out
     expect(isTooltipVisible(afterOutside)).toBe(false);
   });
 
-  it("InfoTip рендерит доступную кнопку с aria-expanded и классом zs-info-i", () => {
+  it("InfoTip рендерит доступную кнопку с aria-expanded, классом zs-info-i и спокойной иконкой «i» (без «!»)", () => {
     const html = renderToStaticMarkup(createElement(InfoTip, { title: "ASN", text: "Номер провайдера" }));
     expect(html).toContain("<button");
     expect(html).toContain('class="zs-info-i"');
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('aria-label="Пояснение"');
+    expect(html).toContain(">i</button>");
+    expect(html).not.toContain(">!</button>");
 
     const tipHtml = renderToStaticMarkup(
       createElement(Tip, { text: "Текст", children: createElement("span", null, "Якорь") }),

@@ -109,6 +109,49 @@ fn record_route_phase(phase: RoutePhase, entry: &Entry, note: &str) {
     );
 }
 
+const HEDGED_DIRECT_HEADSTART: Duration = Duration::from_millis(750);
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_chained_attempt(
+    cp: &str,
+    entry: &Entry,
+    target_host: &str,
+    target_port: u16,
+    budget: Duration,
+    tls: &Arc<ClientConfig>,
+    gateway_port: u16,
+) -> Result<UpstreamStream, PhaseError> {
+    match tokio::time::timeout(budget, async {
+        let tcp = connect_entry_tcp_via_chained(cp, entry, budget, gateway_port)
+            .await
+            .map_err(|ce| match ce {
+                ChainedError::Unreachable(e) => PhaseError::new(RoutePhase::TcpChained, e),
+                ChainedError::Refused { status } => PhaseError::new(
+                    RoutePhase::TcpChained,
+                    io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        format!("chained proxy refused entry tunnel (status {status})"),
+                    ),
+                ),
+            })?;
+        handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
+    })
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => Err(PhaseError::new(
+            RoutePhase::TcpChained,
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "{} chained entry connection timed out",
+                    entry.proto.as_str()
+                ),
+            ),
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn connect_entry_with(
     entry: &Entry,
@@ -123,61 +166,122 @@ pub(super) async fn connect_entry_with(
     let started = tokio::time::Instant::now();
     let mut resolved_addrs: Option<Vec<SocketAddr>> = None;
 
-    let direct_res: Result<UpstreamStream, PhaseError> = async {
-        let dns_rem = timeout.saturating_sub(started.elapsed());
-        let addrs = match tokio::time::timeout(
-            dns_rem,
-            resolve_entry_checked(entry, allow_local, gateway_port),
-        )
-        .await
-        {
-            Ok(Ok(addrs)) => addrs,
-            Ok(Err(e)) => return Err(PhaseError::new(RoutePhase::Dns, e)),
-            Err(_) => {
-                return Err(PhaseError::new(
-                    RoutePhase::Dns,
-                    io::Error::new(io::ErrorKind::TimedOut, "entry DNS lookup timed out"),
-                ));
-            }
-        };
-        resolved_addrs = Some(addrs.clone());
-
-        let rem = timeout.saturating_sub(started.elapsed());
-        if rem.is_zero() {
-            return Err(PhaseError::new(
-                RoutePhase::TcpDirect,
-                io::Error::new(io::ErrorKind::TimedOut, "entry connect budget exhausted"),
-            ));
-        }
-
-        let can_chain = chained_proxy
-            .is_some_and(|cp| is_chained_eligible_for_entry(entry, Some(&addrs), gateway_port, cp));
-        let direct_budget = if can_chain {
-            ((rem * 55) / 100).min(Duration::from_secs(5)).max(rem / 2)
-        } else {
-            rem
-        };
-
-        let direct_io = tokio::time::timeout(direct_budget, async {
-            let tcp = tcp_connect_addrs(addrs, direct_budget)
-                .await
-                .map_err(|e| PhaseError::new(RoutePhase::TcpDirect, e))?;
-            handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
-        })
-        .await;
-
-        match direct_io {
-            Ok(res) => res,
-            Err(_) => Err(PhaseError::new(
-                RoutePhase::TcpDirect,
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("{} direct entry connection timed out", entry.proto.as_str()),
-                ),
-            )),
-        }
-    }
+    let dns_rem = timeout.saturating_sub(started.elapsed());
+    let dns_res = tokio::time::timeout(
+        dns_rem,
+        resolve_entry_checked(entry, allow_local, gateway_port),
+    )
     .await;
+
+    let direct_res: Result<UpstreamStream, PhaseError> = match dns_res {
+        Ok(Ok(addrs)) => {
+            resolved_addrs = Some(addrs.clone());
+            let rem = timeout.saturating_sub(started.elapsed());
+            if rem.is_zero() {
+                Err(PhaseError::new(
+                    RoutePhase::TcpDirect,
+                    io::Error::new(io::ErrorKind::TimedOut, "entry connect budget exhausted"),
+                ))
+            } else if let Some(cp) = chained_proxy
+                .filter(|cp| is_chained_eligible_for_entry(entry, Some(&addrs), gateway_port, cp))
+            {
+                let mut direct_fut = Box::pin(async {
+                    match tokio::time::timeout(rem, async {
+                        let tcp = tcp_connect_addrs(addrs, rem)
+                            .await
+                            .map_err(|e| PhaseError::new(RoutePhase::TcpDirect, e))?;
+                        handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
+                    })
+                    .await
+                    {
+                        Ok(res) => res,
+                        Err(_) => Err(PhaseError::new(
+                            RoutePhase::TcpDirect,
+                            io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "{} direct entry connection timed out",
+                                    entry.proto.as_str()
+                                ),
+                            ),
+                        )),
+                    }
+                });
+
+                let headstart = HEDGED_DIRECT_HEADSTART.min(rem);
+                match tokio::time::timeout(headstart, &mut direct_fut).await {
+                    Ok(Ok(stream)) => return Ok(stream),
+                    Ok(Err(pe)) => Err(pe),
+                    Err(_) => {
+                        let chain_rem = timeout.saturating_sub(started.elapsed());
+                        let mut chained_fut = Box::pin(connect_chained_attempt(
+                            cp,
+                            entry,
+                            target_host,
+                            target_port,
+                            chain_rem,
+                            tls,
+                            gateway_port,
+                        ));
+                        tokio::select! {
+                            d = &mut direct_fut => match d {
+                                Ok(stream) => return Ok(stream),
+                                Err(pe) => {
+                                    record_route_phase(pe.phase, entry, &format!("err={}", pe.err));
+                                    return match chained_fut.await {
+                                        Ok(stream) => {
+                                            record_route_phase(RoutePhase::TcpChained, entry, "status=recovered_via_chained");
+                                            Ok(stream)
+                                        }
+                                        Err(cpe) => {
+                                            record_route_phase(cpe.phase, entry, &format!("err={}", cpe.err));
+                                            Err(cpe.err)
+                                        }
+                                    };
+                                }
+                            },
+                            c = &mut chained_fut => match c {
+                                Ok(stream) => {
+                                    record_route_phase(RoutePhase::TcpChained, entry, "status=recovered_via_chained");
+                                    return Ok(stream);
+                                }
+                                Err(cpe) => {
+                                    record_route_phase(cpe.phase, entry, &format!("err={}", cpe.err));
+                                    return direct_fut.await.map_err(|pe| {
+                                        record_route_phase(pe.phase, entry, &format!("err={}", pe.err));
+                                        pe.err
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                match tokio::time::timeout(rem, async {
+                    let tcp = tcp_connect_addrs(addrs, rem)
+                        .await
+                        .map_err(|e| PhaseError::new(RoutePhase::TcpDirect, e))?;
+                    handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
+                })
+                .await
+                {
+                    Ok(res) => res,
+                    Err(_) => Err(PhaseError::new(
+                        RoutePhase::TcpDirect,
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("{} direct entry connection timed out", entry.proto.as_str()),
+                        ),
+                    )),
+                }
+            }
+        }
+        Ok(Err(e)) => Err(PhaseError::new(RoutePhase::Dns, e)),
+        Err(_) => Err(PhaseError::new(
+            RoutePhase::Dns,
+            io::Error::new(io::ErrorKind::TimedOut, "entry DNS lookup timed out"),
+        )),
+    };
 
     let (direct_phase, direct_err) = match direct_res {
         Ok(stream) => return Ok(stream),
@@ -216,37 +320,8 @@ pub(super) async fn connect_entry_with(
         return Err(err);
     }
 
-    let chained_res: Result<UpstreamStream, PhaseError> = match tokio::time::timeout(rem, async {
-        let tcp = connect_entry_tcp_via_chained(cp, entry, rem, gateway_port)
-            .await
-            .map_err(|ce| match ce {
-                ChainedError::Unreachable(e) => PhaseError::new(RoutePhase::TcpChained, e),
-                ChainedError::Refused { status } => PhaseError::new(
-                    RoutePhase::TcpChained,
-                    io::Error::new(
-                        io::ErrorKind::ConnectionRefused,
-                        format!("chained proxy refused entry tunnel (status {status})"),
-                    ),
-                ),
-            })?;
-        handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
-    })
-    .await
+    match connect_chained_attempt(cp, entry, target_host, target_port, rem, tls, gateway_port).await
     {
-        Ok(res) => res,
-        Err(_) => Err(PhaseError::new(
-            RoutePhase::TcpChained,
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "{} chained entry connection timed out",
-                    entry.proto.as_str()
-                ),
-            ),
-        )),
-    };
-
-    match chained_res {
         Ok(stream) => {
             record_route_phase(
                 RoutePhase::TcpChained,

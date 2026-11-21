@@ -1,4 +1,5 @@
 mod cascade;
+mod entry_relay;
 mod exit_probe;
 mod resolver;
 

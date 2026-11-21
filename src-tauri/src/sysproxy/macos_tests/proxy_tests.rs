@@ -211,6 +211,7 @@ fn third_party_explicit_proxy_is_chained_and_returned_after_a_crash() {
     let both = ChainState {
         http: ep(true, "127.0.0.1", 2080),
         https: ep(true, "127.0.0.1", 2080),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&wifi(), both.clone());
     {
@@ -235,6 +236,7 @@ fn different_http_and_https_upstreams_are_refused_before_any_write() {
         ChainState {
             http: ep(true, "10.0.0.1", 1080),
             https: ep(true, "10.0.0.2", 2080),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j = open(&fs);
@@ -254,6 +256,7 @@ fn upstream_with_authentication_is_refused() {
         ChainState {
             http: web,
             https: ProxyEndpoint::default(),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j = open(&fs);
@@ -270,6 +273,7 @@ fn only_the_active_endpoint_is_switched_off_and_the_other_stays_as_it_was() {
         ChainState {
             http: ep(true, "127.0.0.1", 2080),
             https: https_off.clone(),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j = open(&fs);
@@ -288,6 +292,7 @@ fn explicit_proxy_pointing_at_our_own_gateway_is_not_a_third_party() {
     let ours = ChainState {
         http: ep(true, "127.0.0.1", 8899),
         https: ep(true, "127.0.0.1", 8899),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&wifi(), ours.clone());
     let mut j = open(&fs);
@@ -305,6 +310,7 @@ fn different_upstreams_on_different_services_are_refused() {
         ChainState {
             http: ep(true, "10.0.0.1", 1080),
             https: ProxyEndpoint::default(),
+            socks: ProxyEndpoint::default(),
         },
     );
     p.seed_chain(
@@ -312,6 +318,7 @@ fn different_upstreams_on_different_services_are_refused() {
         ChainState {
             http: ep(true, "10.0.0.9", 1080),
             https: ProxyEndpoint::default(),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j = open(&fs);
@@ -330,6 +337,7 @@ fn throne_enabling_its_proxy_after_us_is_chained_by_the_self_heal() {
     let throne = ChainState {
         http: ep(true, "127.0.0.1", 2080),
         https: ep(true, "127.0.0.1", 2080),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&wifi(), throne.clone());
     let r = enable_pac(&mut j, &p, PAC).unwrap();
@@ -387,6 +395,7 @@ fn the_explicit_proxy_returns_on_its_own_service_with_the_original_bypass_list()
     let both = ChainState {
         http: ep(true, "127.0.0.1", 2080),
         https: ep(true, "127.0.0.1", 2080),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&wifi(), both.clone());
     p.seed_bypass(&wifi(), &["*.corp.example", "10.1.0.0/16"]);
@@ -394,6 +403,7 @@ fn the_explicit_proxy_returns_on_its_own_service_with_the_original_bypass_list()
     let off = ChainState {
         http: ep(false, "old.example", 3128),
         https: ep(false, "old.example", 3128),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&usb(), off.clone());
     p.seed_bypass(&usb(), &["usb.local"]);
@@ -443,6 +453,7 @@ fn a_service_zastava_did_not_touch_gets_no_call_at_all() {
         ChainState {
             http: ep(true, "192.168.1.5", 3128),
             https: ep(true, "192.168.1.5", 3128),
+            socks: ProxyEndpoint::default(),
         },
     );
     p.seed_bypass(&off_svc, &["x.local"]);
@@ -452,6 +463,7 @@ fn a_service_zastava_did_not_touch_gets_no_call_at_all() {
         ChainState {
             http: ep(true, "127.0.0.1", 2080),
             https: ep(true, "127.0.0.1", 2080),
+            socks: ProxyEndpoint::default(),
         },
     );
     let mut j = open(&fs);
@@ -475,6 +487,7 @@ fn a_bypass_list_the_user_changed_after_us_is_left_and_the_proxy_still_returns()
     let both = ChainState {
         http: ep(true, "127.0.0.1", 2080),
         https: ep(true, "127.0.0.1", 2080),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&wifi(), both.clone());
     p.seed_bypass(&wifi(), &["a.example"]);
@@ -499,6 +512,7 @@ fn an_unreadable_bypass_list_does_not_stop_the_chain() {
         ChainState {
             http: ep(true, "127.0.0.1", 2080),
             https: ep(true, "127.0.0.1", 2080),
+            socks: ProxyEndpoint::default(),
         },
     );
     p.fail_next(PlatOp::GetBypass);
@@ -506,4 +520,57 @@ fn an_unreadable_bypass_list_does_not_stop_the_chain() {
     enable_pac(&mut j, &p, PAC).unwrap();
     assert_eq!(p.chain_of(&wifi()).http.enabled, Some(false));
     assert!(j.entry(&Resource::Bypass { service: wifi() }).is_none());
+}
+
+#[test]
+fn socks_only_upstream_is_captured_as_socks5_and_cleared_when_removed() {
+    let (fs, p) = setup();
+    let socks_chain = ChainState {
+        http: ProxyEndpoint::default(),
+        https: ProxyEndpoint::default(),
+        socks: ep(true, "127.0.0.1", 10808),
+    };
+    p.seed_chain(&wifi(), socks_chain.clone());
+    let mut j = open(&fs);
+    let planned =
+        crate::sysproxy::macos::planner::plan_physical_pac(&p, PAC, None, Some(&j)).unwrap();
+    assert_eq!(
+        planned.upstream_proxy.as_deref(),
+        Some("socks5://127.0.0.1:10808")
+    );
+    let _r = enable_pac(&mut j, &p, PAC).unwrap();
+    assert_eq!(p.chain_of(&wifi()).socks.enabled, Some(false));
+    j.restore_all(&p);
+    assert_eq!(p.chain_of(&wifi()), socks_chain);
+    drop(j);
+
+    // When upstream disappears, chained_proxy clears cleanly to None.
+    p.seed_chain(&wifi(), ChainState::default());
+    let j2 = open(&fs);
+    let planned2 =
+        crate::sysproxy::macos::planner::plan_physical_pac(&p, PAC, None, Some(&j2)).unwrap();
+    assert_eq!(planned2.upstream_proxy, None);
+}
+
+#[test]
+fn deferred_os_pac_still_detects_socks_and_http_upstreams_readonly() {
+    let (fs, p) = setup();
+    p.set_temp_dns(true);
+    p.seed_chain(
+        &wifi(),
+        ChainState {
+            http: ProxyEndpoint::default(),
+            https: ProxyEndpoint::default(),
+            socks: ep(true, "127.0.0.1", 2080),
+        },
+    );
+    let j = open(&fs);
+    let planned =
+        crate::sysproxy::macos::planner::plan_physical_pac(&p, PAC, None, Some(&j)).unwrap();
+    assert!(planned.os_pac_deferred);
+    assert_eq!(
+        planned.upstream_proxy.as_deref(),
+        Some("socks5://127.0.0.1:2080")
+    );
+    assert_eq!(p.os_writes(), 0);
 }

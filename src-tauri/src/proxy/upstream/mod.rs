@@ -4,7 +4,9 @@ mod chained;
 mod entry_connect;
 mod handshakes;
 
-pub use chained::{ChainedError, connect_chained_tcp, connect_via_chained_proxy};
+pub use chained::{
+    ChainedError, connect_chained_tcp, connect_via_chained_proxy, is_socks5_chained,
+};
 use entry_connect::connect_entry_with;
 
 use std::io;

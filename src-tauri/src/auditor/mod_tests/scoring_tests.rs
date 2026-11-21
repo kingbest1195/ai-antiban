@@ -148,6 +148,7 @@ fn report_fixture() -> RiskReport {
         unknown_count: 0,
         applicable_count: 14,
         incomplete: false,
+        gateway_latency_ms: None,
     }
 }
 

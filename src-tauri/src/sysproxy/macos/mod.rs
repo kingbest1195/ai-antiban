@@ -8,7 +8,7 @@
 use super::EnableReport;
 use super::journal::Journal;
 use super::platform::Platform;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -43,7 +43,7 @@ pub(super) struct HealGuard {
 
 struct HealState {
     seen: BTreeMap<String, Vec<Instant>>,
-    suspended: BTreeSet<String>,
+    suspended: BTreeMap<String, Instant>,
     /// Keys of the services the last pass looked at: a change means another network.
     fingerprint: Vec<String>,
 }
@@ -53,7 +53,7 @@ impl HealGuard {
         Self {
             st: Mutex::new(HealState {
                 seen: BTreeMap::new(),
-                suspended: BTreeSet::new(),
+                suspended: BTreeMap::new(),
                 fingerprint: Vec::new(),
             }),
         }
@@ -71,8 +71,24 @@ impl HealGuard {
         st.fingerprint.clear();
     }
 
+    /// Returns `true` while `key` is within its [`HEAL_WINDOW`] cooldown; once the cooldown
+    /// expires, the suspension auto-resets so self-healing resumes cleanly.
+    pub(super) fn is_suspended_at(&self, key: &str, now: Instant) -> bool {
+        let mut st = self.lock();
+        let Some(&since) = st.suspended.get(key) else {
+            return false;
+        };
+        if now.saturating_duration_since(since) < HEAL_WINDOW {
+            return true;
+        }
+        st.suspended.remove(key);
+        st.seen.remove(key);
+        false
+    }
+
+    #[cfg(test)]
     pub(super) fn is_suspended(&self, key: &str) -> bool {
-        self.lock().suspended.contains(key)
+        self.is_suspended_at(key, Instant::now())
     }
 
     /// A different set of services is another network: start over.
@@ -92,7 +108,7 @@ impl HealGuard {
         list.retain(|t| now.saturating_duration_since(*t) < HEAL_WINDOW);
         list.push(now);
         if list.len() >= HEAL_MAX_REWRITES {
-            return st.suspended.insert(key.to_string());
+            return st.suspended.insert(key.to_string(), now).is_none();
         }
         false
     }

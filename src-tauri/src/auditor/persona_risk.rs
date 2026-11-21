@@ -198,7 +198,7 @@ fn build_ip_type_factor(input: &PersonaRiskInput<'_>) -> PersonaRiskFactor {
         return factor(
             "tech_ip_reputation",
             tech,
-            "Тип выходного IP (Datacenter / VPN / Tor)",
+            "Тип выходного IP (Дата-центр, VPN или Tor)",
             "Нет активного отчёта аудита для оценки типа IP.",
             15,
             false,
@@ -246,7 +246,7 @@ fn build_ip_type_factor(input: &PersonaRiskInput<'_>) -> PersonaRiskFactor {
         return factor(
             "tech_ip_reputation",
             tech,
-            "Datacenter / VPS без закрепления IP",
+            "Дата-центр или VPS без закрепления IP",
             "IP дата-центра не закреплён: тихая смена узла повышает риск проверки.",
             15,
             true,
@@ -287,7 +287,7 @@ fn build_jump_cooldown_factor(input: &PersonaRiskInput<'_>) -> PersonaRiskFactor
     });
 
     let detail = if tainted_ip {
-        "Текущий выходной IP отмечен как скомпрометированный (tainted)."
+        "Текущий выходной IP скомпрометирован (отмечен после бана)."
     } else if travel_jump {
         "Зафиксирован прыжок ASN или смена страны менее 4 часов назад."
     } else if cooldown_active {

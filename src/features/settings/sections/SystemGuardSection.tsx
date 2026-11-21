@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { CoworkGuardStatus, ProtectionChangePreviewItem } from "../../../types";
 import { openExternal } from "../../../utils/opener";
 import { Badge, Banner, Button, ExpandRow, Link, Mono, Row, Rows, Section } from "../../../ui";
@@ -6,6 +7,7 @@ import { settings as copy } from "../../../shared/copy/ru";
 const SOURCE_URL = "https://github.com/kingbest1195/ai-antiban";
 
 interface SystemGuardSectionProps {
+  autoUpdateEnabled?: boolean;
   coworkStatus: CoworkGuardStatus | null;
   coworkBusy: boolean;
   onInstallCoworkGuard: () => void;
@@ -26,6 +28,7 @@ interface SystemGuardSectionProps {
 }
 
 export function SystemGuardSection({
+  autoUpdateEnabled = true,
   coworkStatus,
   coworkBusy,
   onInstallCoworkGuard,
@@ -44,6 +47,16 @@ export function SystemGuardSection({
   onResetDismissedHints,
   onReplayOnboarding,
 }: SystemGuardSectionProps) {
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  const handleToggleAdvanced = () => {
+    const next = !advancedOpen;
+    setAdvancedOpen(next);
+    if (next && !previewOpen) {
+      onTogglePreview();
+    }
+  };
+
   return (
     <>
       <Section title={copy.coworkGuard.section}>
@@ -71,7 +84,7 @@ export function SystemGuardSection({
             </Banner>
 
             {coworkStatus.platform === "windows" && (
-              <div className="zs-settings__form" style={{ marginTop: "var(--space-2)", gap: "var(--space-2)", flexWrap: "wrap" }}>
+              <div className="zs-settings__badges">
                 {coworkStatus.service_present && coworkStatus.start_type !== null && (
                   <Badge
                     tone={
@@ -114,14 +127,14 @@ export function SystemGuardSection({
                       icon="shield"
                       title={item.name}
                       sub={<Mono>{item.detail}</Mono>}
-                      trail={<Badge tone="info">{item.kind === "process" ? "Процесс" : "LaunchAgent"}</Badge>}
+                      trail={<Badge tone="info">{item.kind === "process" ? "Процесс" : "Автозапуск"}</Badge>}
                     />
                   ))}
                 </Rows>
               </>
             )}
 
-            <div className="zs-settings__form" style={{ marginTop: "var(--space-2)", flexWrap: "wrap" }}>
+            <div className="zs-settings__form">
               {coworkStatus.platform === "windows" && coworkStatus.supported && (
                 <Button
                   variant={coworkStatus.needs_repair ? "primary" : "secondary"}
@@ -140,85 +153,12 @@ export function SystemGuardSection({
         )}
       </Section>
 
-      <Section title={copy.diagnostics.section}>
-        <p className="zs-t-body zs-settings__lead">{copy.diagnostics.text}</p>
-        <div className="zs-settings__form">
-          <Button variant="secondary" disabled={exportBusy} onClick={() => void onExportDiagnostics()}>
-            {exportBusy ? copy.diagnostics.exportBusy : copy.diagnostics.exportAction}
-          </Button>
-        </div>
-        <Rows className="zs-settings__rows">
-          <ExpandRow
-            icon="shield"
-            title={copy.diagnostics.previewTitle}
-            sub={previewLoading ? copy.diagnostics.previewSubLoading : copy.diagnostics.previewSub(previewItems.length)}
-            open={previewOpen}
-            onToggle={onTogglePreview}
-            detailLabel={copy.diagnostics.previewTitle}
-          >
-            {previewError ? (
-              <Banner tone="warn" title={copy.diagnostics.previewError}>
-                {previewError}
-              </Banner>
-            ) : previewItems.length === 0 ? (
-              <p className="zs-settings__empty">{copy.diagnostics.previewEmpty}</p>
-            ) : (
-              <Rows>
-                {previewItems.map((item) => (
-                  <Row
-                    key={`${item.category}:${item.target}`}
-                    icon="term"
-                    title={item.target}
-                    sub={`${item.action} — ${item.description}`}
-                    trail={item.reversible ? <Badge tone="ok">{copy.diagnostics.reversibleBadge}</Badge> : undefined}
-                  />
-                ))}
-              </Rows>
-            )}
-          </ExpandRow>
-        </Rows>
-      </Section>
-
-      <Section title={copy.privacy.section}>
-        <Rows>
-          <Row icon="lock" title={copy.privacy.local} sub={copy.privacy.localText} />
-          <Row icon="shield" title={copy.privacy.selectiveTitle} sub={copy.privacy.selectiveText} />
-        </Rows>
-        <p className="zs-settings__sub">{copy.privacy.networkTitle}</p>
-        <Rows>
-          {copy.privacy.network.map((n) => (
-            <Row
-              key={n.what}
-              icon="globe"
-              title={n.what}
-              sub={
-                <>
-                  <Mono>{n.where}</Mono>: {n.note}
-                </>
-              }
-            />
-          ))}
-        </Rows>
-        <p className="zs-settings__source">
-          <Link
-            href={SOURCE_URL}
-            chevron
-            onClick={(e) => {
-              e.preventDefault();
-              openExternal(SOURCE_URL);
-            }}
-          >
-            {copy.privacy.source}
-          </Link>
-        </p>
-      </Section>
-
       {(onResetDismissedHints || onReplayOnboarding) && (
         <Section title="Подсказки и обучение">
           <p className="zs-t-body zs-settings__lead">
-            Вернуть закрытые баннеры-подсказки в разделах или пройти сценарий первого знакомства заново.
+            Вернуть закрытые подсказки в разделах или пройти знакомство заново.
           </p>
-          <div className="zs-settings__form" style={{ flexWrap: "wrap" }}>
+          <div className="zs-settings__form">
             {onResetDismissedHints && (
               <Button variant="secondary" disabled={hintsResetBusy} onClick={() => void onResetDismissedHints()}>
                 {hintsResetBusy ? "Сбрасываем…" : "Показать все подсказки снова"}
@@ -250,6 +190,94 @@ export function SystemGuardSection({
             {proxyResult.text}
           </Banner>
         )}
+      </Section>
+
+      <Section title={copy.advanced.section}>
+        <Rows className="zs-settings__rows">
+          <ExpandRow
+            icon="term"
+            title={copy.advanced.title}
+            sub={copy.advanced.sub}
+            open={advancedOpen}
+            onToggle={handleToggleAdvanced}
+            detailLabel={copy.advanced.title}
+          >
+            <p className="zs-settings__sub">{copy.diagnostics.previewTitle}</p>
+            {previewLoading ? (
+              <p className="zs-settings__hint">{copy.diagnostics.previewSubLoading}</p>
+            ) : previewError ? (
+              <Banner tone="warn" title={copy.diagnostics.previewError}>
+                {previewError}
+              </Banner>
+            ) : previewItems.length === 0 ? (
+              <p className="zs-settings__empty">{copy.diagnostics.previewEmpty}</p>
+            ) : (
+              <ul className="zs-settings__preview-list">
+                {previewItems.map((item) => (
+                  <li key={`${item.category}:${item.target}`} className="zs-settings__preview-item">
+                    <div className="zs-settings__preview-head">
+                      <p className="zs-settings__preview-title">{item.action}</p>
+                      {item.reversible && <Badge tone="ok">{copy.diagnostics.reversibleBadge}</Badge>}
+                    </div>
+                    <p className="zs-settings__preview-desc">{item.description}</p>
+                    <Mono className="zs-settings__preview-detail">{item.target}</Mono>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <p className="zs-settings__sub">{copy.privacy.networkTitle}</p>
+            <ul className="zs-settings__preview-list">
+              {copy.privacy.network.map((n) => {
+                const dynamicNote =
+                  n.where === "api.github.com"
+                    ? `${n.note} (сейчас ${autoUpdateEnabled ? "включено" : "отключено"})`
+                    : n.note;
+                return (
+                  <li key={n.what} className="zs-settings__preview-item">
+                    <div className="zs-settings__preview-head">
+                      <p className="zs-settings__preview-title">{n.what}</p>
+                    </div>
+                    <p className="zs-settings__preview-desc">{dynamicNote}</p>
+                    <Mono className="zs-settings__preview-detail">{n.where}</Mono>
+                  </li>
+                );
+              })}
+            </ul>
+
+            <p className="zs-settings__sub">{copy.privacy.section}</p>
+            <ul className="zs-settings__preview-list">
+              <li className="zs-settings__preview-item">
+                <p className="zs-settings__preview-title">{copy.privacy.local}</p>
+                <p className="zs-settings__preview-desc">{copy.privacy.localText}</p>
+              </li>
+              <li className="zs-settings__preview-item">
+                <p className="zs-settings__preview-title">{copy.privacy.selectiveTitle}</p>
+                <p className="zs-settings__preview-desc">{copy.privacy.selectiveText}</p>
+              </li>
+            </ul>
+
+            <div className="zs-settings__form">
+              <Button variant="secondary" size="sm" disabled={exportBusy} onClick={() => void onExportDiagnostics()}>
+                {exportBusy ? copy.diagnostics.exportBusy : copy.diagnostics.exportAction}
+              </Button>
+              <span className="zs-settings__sub">{copy.diagnostics.exportHint}</span>
+            </div>
+
+            <p className="zs-settings__source">
+              <Link
+                href={SOURCE_URL}
+                chevron
+                onClick={(e) => {
+                  e.preventDefault();
+                  openExternal(SOURCE_URL);
+                }}
+              >
+                {copy.privacy.source}
+              </Link>
+            </p>
+          </ExpandRow>
+        </Rows>
       </Section>
     </>
   );

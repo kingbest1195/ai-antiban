@@ -206,12 +206,11 @@ pub fn evaluate_udp_stun_for_route(
     let sanctioned = udp_ip_country.is_some_and(crate::sanctions::is_sanctioned_or_blocked_country);
     if sanctioned {
         let cc = udp_ip_country.unwrap_or("??");
-        return CheckResult::warning(
-            "UDP_STUN_MISMATCH",
+        return CheckResult::ok(
+            "UDP_STUN_KEY_ISOLATED",
             format!(
-                "По UDP виден адрес {first_ip} ({cc}, ответ {labels}), хотя HTTP-трафик AI идёт через ВПН Заставы ({http_exit_ip}). Включите зарубежный VPN для системного UDP-трафика."
+                "ИИ-трафик защищён ключом Заставы ({http_exit_ip}); системный UDP идёт напрямую ({first_ip}, {cc}, ответ {labels}) — для звонков и WebRTC используйте песочницу или VPN."
             ),
-            Some(GUIDE_OS_NETWORK.to_string()),
         )
         .with_measured_via(via);
     }

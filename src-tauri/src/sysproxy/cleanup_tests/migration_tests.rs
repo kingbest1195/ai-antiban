@@ -192,6 +192,7 @@ fn chain_endpoints_are_untouched_by_the_migration() {
             authenticated: None,
         },
         https: ProxyEndpoint::default(),
+        socks: ProxyEndpoint::default(),
     };
     p.seed_chain(&wifi(), chain.clone());
     let mut j = open(&fs);

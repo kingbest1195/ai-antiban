@@ -70,7 +70,7 @@ pub(super) fn apply_pac_with(
         super::super::platform::clear_last_os_error();
     }
     let now = heal.map(|(_, t)| t).unwrap_or_else(Instant::now);
-    let planned = plan_physical_pac(p, pac_url, heal)?;
+    let planned = plan_physical_pac(p, pac_url, heal, Some(j))?;
 
     // Phase 2: write, service by service; one failure does not stop the others.
     let want = Value::Pac(PacState {

@@ -9,7 +9,7 @@ const CLIENTS: { provider: ProviderId; name: string; icon: "term" | "globe" }[] 
   { provider: "openai", name: copy.cache.chatgpt, icon: "globe" },
 ];
 
-/** Сброс кэша и меток устройства клиентов ИИ: тихая danger-кнопка и подтверждение. */
+/** Очистка хвостов и меток устройства клиентов ИИ: тихая danger-кнопка и подтверждение. */
 export function CacheSection({ backup }: { backup: ClaudeBackup }) {
   const [pending, setPending] = useState<ProviderId | null>(null);
   const t = copy.cache;

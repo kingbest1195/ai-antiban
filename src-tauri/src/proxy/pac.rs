@@ -212,9 +212,41 @@ const LOCAL_DIRECT_RULE: &str = r#"    // Local network first: printers (AirPrin
     }
 "#;
 
+/// Formats a chained proxy URL or `host:port` into a PAC fallback directive.
+fn format_pac_fallback(chained_proxy: Option<&str>) -> String {
+    let Some(raw) = chained_proxy.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "DIRECT".to_string();
+    };
+    let lower = raw.to_ascii_lowercase();
+    if let Some(rest) = lower
+        .strip_prefix("socks5h://")
+        .or_else(|| lower.strip_prefix("socks5://"))
+    {
+        let offset = raw.len() - rest.len();
+        let addr = raw[offset..].trim();
+        return if addr.is_empty() {
+            "DIRECT".to_string()
+        } else {
+            format!("SOCKS5 {addr}; DIRECT")
+        };
+    }
+    let addr = if let Some(rest) = lower.strip_prefix("http://") {
+        let offset = raw.len() - rest.len();
+        raw[offset..].trim()
+    } else {
+        raw
+    };
+    if addr.is_empty() {
+        "DIRECT".to_string()
+    } else {
+        format!("PROXY {addr}; DIRECT")
+    }
+}
+
 /// Generates a standard Proxy Auto-Configuration (PAC) script routing AI domains to proxy.
 /// Local-network addresses always return `DIRECT` first (see [`LOCAL_DIRECT_RULE`]).
-/// If `chained_proxy` is specified, non-AI traffic falls back to `PROXY chained_proxy; DIRECT`.
+/// If `chained_proxy` is specified, non-AI traffic falls back to `PROXY host:port; DIRECT`
+/// or `SOCKS5 host:port; DIRECT` (matching its scheme).
 /// Otherwise, non-AI traffic falls back directly to `DIRECT`.
 pub fn generate_pac_script(
     domains: &[String],
@@ -222,10 +254,7 @@ pub fn generate_pac_script(
     chained_proxy: Option<&str>,
 ) -> String {
     let domains_json = serde_json::to_string_pretty(domains).unwrap_or_else(|_| "[]".to_string());
-    let fallback = match chained_proxy.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(cp) => format!("PROXY {cp}; DIRECT"),
-        None => "DIRECT".to_string(),
-    };
+    let fallback = format_pac_fallback(chained_proxy);
 
     format!(
         r#"// Zastava Selective PAC Script

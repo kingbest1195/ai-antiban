@@ -10,6 +10,7 @@ import {
   setProviderMonitoring,
 } from "../../utils/api";
 import { providers as providerCopy, settings as copy } from "../../shared/copy/ru";
+import { formatIp } from "../../shared/lib/format";
 
 export const MONITORED_PROVIDERS: ProviderId[] = ["anthropic", "openai", "gemini"];
 
@@ -22,6 +23,7 @@ export function useSettingsExceptions({
   setDisabledProviders,
   trustedExceptions,
   setTrustedExceptions,
+  hideIpMode = false,
   onStateUpdated,
   onToast,
 }: {
@@ -31,6 +33,7 @@ export function useSettingsExceptions({
   setDisabledProviders: (providers: string[]) => void;
   trustedExceptions: Record<string, string[]>;
   setTrustedExceptions: (exceptions: Record<string, string[]>) => void;
+  hideIpMode?: boolean;
   onStateUpdated?: () => Promise<unknown> | void;
   onToast?: ShowToast;
 }) {
@@ -126,7 +129,7 @@ export function useSettingsExceptions({
       const updated = await removeTrustedException(provider, ip);
       setTrustedExceptions(updated.trusted_exceptions ?? {});
       await onStateUpdated?.();
-      onToast?.(copy.trustedExceptions.removedTitle, copy.trustedExceptions.removedText(label, ip), "info");
+      onToast?.(copy.trustedExceptions.removedTitle, copy.trustedExceptions.removedText(label, formatIp(ip, hideIpMode)), "info");
     } catch (err) {
       onToast?.(copy.trustedExceptions.error, errText(err), "warning");
     } finally {

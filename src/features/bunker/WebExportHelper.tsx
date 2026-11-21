@@ -12,6 +12,8 @@ import "./bunker.css";
 export interface WebExportHelperProps {
   /** Заголовок для EmptyState (можно переопределить при встраивании). */
   title?: string;
+  /** Вариант основной кнопки (внутри BunkerCard — `secondary`, чтобы на экране оставался 1 `primary`). */
+  ctaVariant?: "primary" | "secondary";
   onConverted?: (result: WebExportConvertResult) => void;
   onToast?: ShowToast;
 }
@@ -20,7 +22,12 @@ export interface WebExportHelperProps {
  * Помощник экспорта для пользователей веб-версий Claude.ai / ChatGPT:
  * заменяет мёртвую заглушку «Claude не найден» и локально конвертирует export.zip / conversations.json.
  */
-export function WebExportHelper({ title, onConverted, onToast }: WebExportHelperProps) {
+export function WebExportHelper({
+  title,
+  ctaVariant = "primary",
+  onConverted,
+  onToast,
+}: WebExportHelperProps) {
   const t = copy.webExport;
   const [sourcePath, setSourcePath] = useState("");
   const [converting, setConverting] = useState(false);
@@ -107,7 +114,7 @@ export function WebExportHelper({ title, onConverted, onToast }: WebExportHelper
               setError(null);
             }}
           />
-          <Button type="submit" variant="primary" block disabled={converting} icon="download">
+          <Button type="submit" variant={ctaVariant} block disabled={converting} icon="download">
             {converting ? t.convertingBtn : t.convertBtn}
           </Button>
         </form>

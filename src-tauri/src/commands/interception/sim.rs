@@ -145,5 +145,6 @@ pub(super) async fn build_simulated_risk_report(
         unknown_count,
         applicable_count,
         incomplete: unknown_count > 0,
+        gateway_latency_ms: None,
     }
 }

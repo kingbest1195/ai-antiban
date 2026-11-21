@@ -21,10 +21,10 @@ use serde::{Deserialize, Serialize};
 pub use elevate::{build_elevated_cli_params, parse_install_cli_args};
 pub use macos::{parse_launchctl_output, parse_macos_ps_output};
 pub use task_xml::{
-    build_schtasks_create_args, build_windows_summary, build_windows_task_xml,
-    build_windows_task_xml_with_system_root, cowork_guard_inline_ps, decode_windows_cmd_text,
-    encode_utf16_le_with_bom, is_task_xml_healthy, parse_reg_start_dword, parse_sc_running,
-    parse_tasklist_has_claude, validate_windows_task_xml,
+    SchtasksQueryError, build_schtasks_create_args, build_windows_summary, build_windows_task_xml,
+    build_windows_task_xml_with_system_root, classify_schtasks_query_error, cowork_guard_inline_ps,
+    decode_windows_cmd_text, encode_utf16_le_with_bom, is_task_list_healthy, is_task_xml_healthy,
+    parse_reg_start_dword, parse_sc_running, parse_tasklist_has_claude, validate_windows_task_xml,
 };
 
 pub const COWORK_SERVICE_NAME: &str = "CoworkVMService";

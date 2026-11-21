@@ -21,23 +21,22 @@ pub fn build_protection_changes_preview(
 ) -> Vec<ProtectionChangePreviewItem> {
     let pac_url = format!("http://127.0.0.1:{gateway_port}/proxy.pac");
     let tz_note = if sync_ai_tz_enabled {
-        " и TZ/LANG/LC_TIME для согласования часового пояса"
+        " и часовой пояс с локалью для согласования региона"
     } else {
         ""
     };
 
-    let sysproxy_target = if cfg!(target_os = "windows") {
-        "Системный PAC (WinINet AutoConfigURL)"
-    } else {
-        "Системный PAC на физических интерфейсах (Wi-Fi, Ethernet)"
-    };
-    let sysproxy_desc = if cfg!(target_os = "windows") {
-        format!(
-            "Устанавливает AutoConfigURL={pac_url} в настройках WinINet текущего пользователя. Предыдущее значение сохраняется в журнале и восстанавливается при отключении или выходе."
+    let (sysproxy_title, sysproxy_target, sysproxy_desc) = if cfg!(target_os = "windows") {
+        (
+            "Системные настройки прокси Windows",
+            format!("WinINet AutoConfigURL → {pac_url}"),
+            "Направляет трафик ИИ-сервисов через локальный шлюз Заставы без вмешательства в обычные сайты. Прежнее значение сохраняется и возвращается при выходе.".to_string(),
         )
     } else {
-        format!(
-            "Назначает PAC {pac_url} только на физические сетевые интерфейсы macOS (виртуальные VPN-туннели utun/tun не затрагиваются). Прежнее состояние сохраняется в журнале."
+        (
+            "Системный прокси для Wi-Fi и Ethernet",
+            format!("PAC {pac_url}"),
+            "Назначает правило маршрутизации только на обычные сетевые подключения macOS, не затрагивая виртуальные VPN-туннели. Прежние настройки восстанавливаются при выходе.".to_string(),
         )
     };
 
@@ -53,28 +52,28 @@ pub fn build_protection_changes_preview(
         sysproxy::browser_policies::KEY_DOH_MODE,
     );
 
-    let (shell_target, shell_action, shell_desc) = if cfg!(target_os = "windows") {
-        let action = match cli_mode {
-            state::CliMode::GlobalTerminal => "upsert_managed_block",
-            state::CliMode::AiOnly => "restore_or_skip",
+    let (shell_target, shell_title, shell_desc) = if cfg!(target_os = "windows") {
+        let title = match cli_mode {
+            state::CliMode::GlobalTerminal => "Прокси для терминала PowerShell",
+            state::CliMode::AiOnly => "Оболочка терминала не изменяется",
         };
         (
-            "Профили PowerShell (Microsoft.PowerShell_profile.ps1)",
-            action,
+            "Microsoft.PowerShell_profile.ps1",
+            title,
             format!(
-                "В режиме global_terminal добавляет маркерный блок # >>> zastava ... # <<< zastava (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY на http://127.0.0.1:{gateway_port}{tz_note}); в режиме ai_only блок снимается без потери завершающего переноса строки."
+                "В режиме «Весь терминал» добавляет в профиль PowerShell адрес локального шлюза (порт {gateway_port}{tz_note}). В режиме «Только ИИ-приложения» этот блок аккуратно удаляется."
             ),
         )
     } else {
-        let action = match cli_mode {
-            state::CliMode::GlobalTerminal => "upsert_managed_block",
-            state::CliMode::AiOnly => "restore_or_skip",
+        let title = match cli_mode {
+            state::CliMode::GlobalTerminal => "Прокси для терминала (zsh / bash)",
+            state::CliMode::AiOnly => "Оболочка терминала не изменяется",
         };
         (
             "~/.zshrc, ~/.bash_profile",
-            action,
+            title,
             format!(
-                "В режиме global_terminal добавляет изолированный блок # >>> zastava ... # <<< zastava (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY на http://127.0.0.1:{gateway_port}{tz_note}); в безопасном режиме ai_only оболочка не меняется и старый блок удаляется с сохранением завершающего переноса строки."
+                "В режиме «Весь терминал» добавляет в профиль оболочки адрес локального шлюза (порт {gateway_port}{tz_note}). В безопасном режиме «Только ИИ-приложения» оболочка не трогается, а старый блок удаляется."
             ),
         )
     };
@@ -83,25 +82,25 @@ pub fn build_protection_changes_preview(
     detected_names.sort_unstable();
     detected_names.dedup();
     let detected_note = if detected_names.is_empty() {
-        "обнаруженных в системе редакторов".to_string()
+        "найденных на компьютере редакторов".to_string()
     } else {
-        format!("обнаруженных редакторов ({})", detected_names.join(", "))
+        format!("найденных редакторов ({})", detected_names.join(", "))
     };
 
     vec![
         ProtectionChangePreviewItem {
             category: "system_proxy".to_string(),
-            target: sysproxy_target.to_string(),
-            action: "set_pac_url".to_string(),
+            target: sysproxy_target,
+            action: sysproxy_title.to_string(),
             description: sysproxy_desc,
             reversible: true,
         },
         ProtectionChangePreviewItem {
             category: "browser_policies".to_string(),
-            target: format!("Политики браузеров Chromium ({policy_keys})"),
-            action: "apply_browser_policies".to_string(),
+            target: format!("Chromium: {policy_keys}"),
+            action: "Защита браузеров от сетевых утечек".to_string(),
             description: format!(
-                "Задаёт ProxyMode=pac_script, ProxyPacUrl={pac_url}, отключает QUIC (QuicAllowed) и DoH (DnsOverHttpsMode) для Chromium-браузеров ({} целей). Все прежние политики возвращаются через журнал.",
+                "Включает маршрут Заставы для ИИ и отключает обходные протоколы QUIC и встроенный DoH в браузерах ({} целей). Все прежние политики возвращаются при выходе.",
                 domains.len().max(1)
             ),
             reversible: true,
@@ -109,16 +108,16 @@ pub fn build_protection_changes_preview(
         ProtectionChangePreviewItem {
             category: "shell_rc".to_string(),
             target: shell_target.to_string(),
-            action: shell_action.to_string(),
+            action: shell_title.to_string(),
             description: shell_desc,
             reversible: true,
         },
         ProtectionChangePreviewItem {
             category: "cli_settings".to_string(),
             target: "~/.claude/settings.json, ~/.gemini/settings.json".to_string(),
-            action: "update_env_keys".to_string(),
+            action: "Настройки терминальных агентов ИИ".to_string(),
             description: format!(
-                "Точечно обновляет переменные окружения внутри объекта env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY на http://127.0.0.1:{gateway_port}{tz_note}) без перезаписи остальных настроек."
+                "Точечно задаёт адрес локального шлюза (порт {gateway_port}{tz_note}) в переменных окружения CLI-инструментов, не затрагивая остальные параметры."
             ),
             reversible: true,
         },
@@ -126,18 +125,18 @@ pub fn build_protection_changes_preview(
             category: "ide_settings".to_string(),
             target: "VS Code, Cursor, Windsurf, VSCodium, Antigravity (User/settings.json)"
                 .to_string(),
-            action: "update_jsonc_keys".to_string(),
+            action: "Прокси для редакторов кода и ИИ-расширений".to_string(),
             description: format!(
-                "Точечно задаёт http.proxy и terminal.integrated.env.*{tz_note} в User/settings.json {detected_note} через JSONC-редактор с сохранением комментариев и откатом в журнале."
+                "Точечно прописывает локальный шлюз{tz_note} в настройках {detected_note}, сохраняя комментарии и возвращая исходный файл при отключении."
             ),
             reversible: true,
         },
         ProtectionChangePreviewItem {
             category: "ide_settings".to_string(),
             target: "JetBrains IDE (options/proxy.settings.xml)".to_string(),
-            action: "monitor_only".to_string(),
+            action: "Контроль сетевых настроек JetBrains IDE".to_string(),
             description: format!(
-                "Проверяется в разделе «Покрытие» и по живому трафику шлюза; файл proxy.settings.xml автоматически не изменяется (при необходимости укажите PAC {pac_url} в настройках HTTP Proxy IDE)."
+                "Застава проверяет покрытие редакторов JetBrains по живому трафику и не меняет их файлы автоматически (при необходимости укажите адрес автонастройки {pac_url})."
             ),
             reversible: true,
         },

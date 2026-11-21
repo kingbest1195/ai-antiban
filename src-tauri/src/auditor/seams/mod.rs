@@ -21,7 +21,7 @@ pub(crate) use dns::is_usable_nameserver;
 #[allow(unused_imports)]
 pub(crate) use dns::parse_scutil_dns_nameservers;
 pub use dns::{DnsLookup, LookupOutcome, SystemDns, TxtOutcome};
-pub use probe::{HttpProbeOutcome, IpProbe, ReqwestProbe};
+pub use probe::{ClientIpProbe, HttpProbeOutcome, IpProbe, ReqwestProbe};
 #[cfg(test)]
 use system::is_plain_zone_name;
 #[cfg(any(test, target_os = "windows"))]

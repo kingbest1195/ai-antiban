@@ -31,6 +31,8 @@ pub use cache_cleaner::clean_ai_app_cache;
 pub use dnsbl::{
     check_all_dnsbl, check_all_dnsbl_with, check_all_dnsbl_with_doh, evaluate_dnsbl_report,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use evaluate_checks::reconcile_key_exit_external_lists;
 pub use geo_matrix::{CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo};
 pub use history::{
     apply_pinned_travel_grace, evaluate_impossible_travel, evaluate_impossible_travel_with_exit,
@@ -103,6 +105,9 @@ pub struct RiskReport {
     /// `unknown_count > 0`: part of the protection was not verified, the report is not a clean bill.
     #[serde(default)]
     pub incomplete: bool,
+    /// Clean round-trip latency (ms) measured on the exit/key check (without 4s OS probe timeouts).
+    #[serde(default)]
+    pub gateway_latency_ms: Option<u64>,
 }
 
 /// A piece of an audit as soon as it is ready: the interface shows each check when it finishes

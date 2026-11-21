@@ -33,8 +33,9 @@ use zastava_lib::clean_room::{
     CleanProfileStatus, CleanRoomFixAction, CreateCleanProfileInput, TraceSeverity,
 };
 use zastava_lib::commands::clean_room::{
-    create_clean_profile_in, prepare_clean_browser_launch_with_env, resolve_audit_provider,
-    run_clean_room_audit_with_env,
+    create_clean_profile_in, delete_clean_profile_in, prepare_clean_browser_launch_with_env,
+    resolve_audit_provider, run_clean_room_audit_with_env, run_clean_room_audit_with_route_env,
+    untaint_clean_room_ip_in, update_clean_profile_route_in,
 };
 use zastava_lib::core::net_safety::is_alias_port;
 use zastava_lib::proxy::hold_queue::HoldQueue;
@@ -421,7 +422,7 @@ async fn audit_error_and_tainted_profile_and_custom_provider_enforcement() {
     )
     .await
     .unwrap_err();
-    assert!(err.contains("Hard Readiness Gate"), "{err}");
+    assert!(err.contains("заблокирован проверкой безопасности"), "{err}");
 
     // 3. P0 #3: Tainted profile must be rejected server-side BEFORE audit/launch
     let tainted_prof = create_clean_profile_in(
@@ -454,7 +455,10 @@ async fn audit_error_and_tainted_profile_and_custom_provider_enforcement() {
     )
     .await
     .unwrap_err();
-    assert!(tainted_err.contains("tainted"), "{tainted_err}");
+    assert!(
+        tainted_err.contains("отмечен после блокировки"),
+        "{tainted_err}"
+    );
 }
 
 #[tokio::test]
@@ -608,4 +612,89 @@ async fn protection_flags_and_windows_cli_process_filter() {
          20|claude.exe|C:\\Users\\u\\AppData\\Local\\AnthropicClaude\\app-1.0\\claude.exe\n",
     );
     assert_eq!(procs, vec!["claude.exe".to_string()]);
+}
+
+#[tokio::test]
+async fn preflight_defaults_to_active_route_rebinds_and_stops_silent_auto_taint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = AppState::new_in_memory();
+    let auditor = clean_us_auditor();
+    let (direct_addr, _) = spawn_direct_echo().await;
+    let mgr = setup_mgr(auditor.clone(), state.clone(), direct_addr).await;
+    let reg = zastava_lib::clean_room::browser_sandbox::SandboxProcessRegistry::new();
+
+    let socks_port = spawn_socks_echo().await;
+    state
+        .upsert_route(socks_route("r-active", socks_port, true))
+        .await
+        .unwrap();
+    state.set_default_route(Some("r-active")).await.unwrap();
+    let active_tel = zastava_lib::auditor::network::NetworkTelemetry {
+        ip: "198.51.100.88".into(),
+        country_code: "US".into(),
+        hostname: None,
+        asn: Some(13335),
+        org: None,
+        isp: Some("Cloudflare".into()),
+        timezone: Some("America/New_York".into()),
+        resolved_at: current_timestamp(),
+    };
+    auditor
+        .resolver
+        .set_cached_for_route(Some("r-active".into()), active_tel)
+        .await;
+
+    let a1 = run_clean_room_audit_with_route_env(
+        &EmptyDetectorEnv,
+        tmp.path(),
+        &state,
+        &auditor,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let a2 = run_clean_room_audit_with_route_env(
+        &EmptyDetectorEnv,
+        tmp.path(),
+        &state,
+        &auditor,
+        None,
+        Some("direct"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (a1.exit_ip.as_deref(), a2.exit_ip.as_deref()),
+        (Some("198.51.100.88"), Some("198.51.100.42"))
+    );
+
+    let mk = |name: &str| CreateCleanProfileInput {
+        label: name.into(),
+        provider: "anthropic".into(),
+        browser_engine: "chrome".into(),
+        bound_route_id: None,
+    };
+    let prof = create_clean_profile_in(mk("Rebind"), &state).await.unwrap();
+    let rebound = update_clean_profile_route_in(&prof.id, Some("r-active"), &state, &mgr)
+        .await
+        .unwrap();
+    assert_eq!(rebound.bound_route_id.as_deref(), Some("r-active"));
+
+    state.write().await.clean_room.profiles[0].last_exit_ip = Some("198.51.100.88".into());
+    let d1 = delete_clean_profile_in(&prof.id, None, Some(tmp.path()), &state, &mgr, &reg)
+        .await
+        .unwrap();
+    assert!(!d1.tainted_ips.contains_key("198.51.100.88"));
+
+    let prof2 = create_clean_profile_in(mk("Taint"), &state).await.unwrap();
+    state.write().await.clean_room.profiles[0].last_exit_ip = Some("198.51.100.99".into());
+    let d2 = delete_clean_profile_in(&prof2.id, Some(true), Some(tmp.path()), &state, &mgr, &reg)
+        .await
+        .unwrap();
+    assert!(d2.tainted_ips.contains_key("198.51.100.99"));
+    let d3 = untaint_clean_room_ip_in(" 198.51.100.99 ", &state)
+        .await
+        .unwrap();
+    assert!(!d3.tainted_ips.contains_key("198.51.100.99"));
 }

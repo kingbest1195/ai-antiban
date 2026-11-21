@@ -88,6 +88,7 @@ pub fn read_snapshot_meta(snapshot_dir: &Path) -> Option<BunkerSnapshotMeta> {
 }
 
 /// Lists all valid snapshots inside `snapshots_dir`, sorted newest-first.
+/// Ignores `.tmp-*` staging directories.
 pub fn list_snapshots(snapshots_dir: &Path) -> Vec<BunkerSnapshotMeta> {
     if !snapshots_dir.is_dir() {
         return Vec::new();
@@ -96,7 +97,12 @@ pub fn list_snapshots(snapshots_dir: &Path) -> Vec<BunkerSnapshotMeta> {
     if let Ok(entries) = fs::read_dir(snapshots_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_dir()
+            let is_tmp = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with(".tmp-"));
+            if !is_tmp
+                && p.is_dir()
                 && let Some(meta) = read_snapshot_meta(&p)
             {
                 list.push(meta);
@@ -111,40 +117,80 @@ pub fn list_snapshots(snapshots_dir: &Path) -> Vec<BunkerSnapshotMeta> {
     list
 }
 
-/// Enforces FIFO retention on `snapshots_dir`, keeping at most `retention_count.max(1)` newest
-/// snapshots and deleting the oldest directories. Returns the number of pruned snapshots.
-pub fn prune_old_snapshots(snapshots_dir: &Path, retention_count: usize) -> Result<usize, String> {
+/// Removes any leftover `.tmp-*` staging directories inside `snapshots_dir`.
+pub fn cleanup_stale_staging_dirs(snapshots_dir: &Path) {
+    if !snapshots_dir.is_dir() {
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(snapshots_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(".tmp-"))
+            {
+                let _ = fs::remove_dir_all(&p);
+            }
+        }
+    }
+}
+
+/// Enforces FIFO + byte-quota retention on `snapshots_dir`, keeping at most `retention_count.max(1)`
+/// newest snapshots and keeping total size `<= max_total_bytes` (when `max_total_bytes > 0`),
+/// while ALWAYS preserving at least the newest 1 valid snapshot.
+pub fn prune_old_snapshots(
+    snapshots_dir: &Path,
+    retention_count: usize,
+    max_total_bytes: u64,
+) -> Result<usize, String> {
+    cleanup_stale_staging_dirs(snapshots_dir);
     let keep = retention_count.max(1);
     let mut snapshots = list_snapshots(snapshots_dir);
-    if snapshots.len() <= keep {
+    if snapshots.len() <= 1 {
         return Ok(0);
     }
-    // `snapshots` is newest-first; sort oldest-first for FIFO removal.
+    let mut remaining_count = snapshots.len();
+    let mut remaining_bytes: u64 = snapshots.iter().map(|s| s.total_bytes).sum();
+
+    // `snapshots` is newest-first; reverse to iterate oldest-first while preserving index 0 (newest).
     snapshots.reverse();
-    let to_remove = snapshots.len() - keep;
     let mut pruned = 0usize;
-    for old in snapshots.into_iter().take(to_remove) {
+    for old in snapshots.into_iter() {
+        if remaining_count <= 1 {
+            break;
+        }
+        let over_count = remaining_count > keep;
+        let over_quota = max_total_bytes > 0 && remaining_bytes > max_total_bytes;
+        if !over_count && !over_quota {
+            break;
+        }
         let dir = Path::new(&old.snapshot_dir);
         if dir.is_dir() {
             fs::remove_dir_all(dir)
                 .map_err(|e| format!("Failed to prune old snapshot {}: {e}", dir.display()))?;
             pruned += 1;
         }
+        remaining_count -= 1;
+        remaining_bytes = remaining_bytes.saturating_sub(old.total_bytes);
     }
     Ok(pruned)
 }
 
-/// Enforces FIFO retention on `web_exports_dir`, keeping at most `retention_count.max(1)` newest
-/// web-export directories and deleting the oldest ones. Returns the number of pruned directories.
+/// Enforces FIFO + byte-quota retention on `web_exports_dir`, keeping at most `retention_count.max(1)`
+/// newest web-export directories and keeping total size `<= max_total_bytes` (when `> 0`),
+/// while ALWAYS preserving at least the newest 1 export directory.
 pub fn prune_old_web_exports(
     web_exports_dir: &Path,
     retention_count: usize,
+    max_total_bytes: u64,
 ) -> Result<usize, String> {
     if !web_exports_dir.is_dir() {
         return Ok(0);
     }
     let keep = retention_count.max(1);
-    let mut dirs: Vec<(u128, String, std::path::PathBuf)> = Vec::new();
+    let mut dirs: Vec<(u128, String, std::path::PathBuf, u64)> = Vec::new();
     if let Ok(entries) = fs::read_dir(web_exports_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -157,22 +203,37 @@ pub fn prune_old_web_exports(
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_nanos());
-            dirs.push((mtime_nanos, name, p));
+            let (_, bytes) = dir_stats(&p);
+            dirs.push((mtime_nanos, name, p, bytes));
         }
     }
-    if dirs.len() <= keep {
+    if dirs.len() <= 1 {
         return Ok(0);
     }
-    // Newest first (by timestamp, then lexicographic timestamped folder name), then prune tail.
+    // Newest first (by timestamp, then lexicographic timestamped folder name).
     dirs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let mut remaining_count = dirs.len();
+    let mut remaining_bytes: u64 = dirs.iter().map(|d| d.3).sum();
+    // Reverse to iterate oldest-first while preserving the newest 1.
+    dirs.reverse();
     let mut pruned = 0usize;
-    for (_, _, old_dir) in dirs.into_iter().skip(keep) {
+    for (_, _, old_dir, bytes) in dirs {
+        if remaining_count <= 1 {
+            break;
+        }
+        let over_count = remaining_count > keep;
+        let over_quota = max_total_bytes > 0 && remaining_bytes > max_total_bytes;
+        if !over_count && !over_quota {
+            break;
+        }
         if old_dir.is_dir() {
             fs::remove_dir_all(&old_dir).map_err(|e| {
                 format!("Failed to prune old web export {}: {e}", old_dir.display())
             })?;
             pruned += 1;
         }
+        remaining_count -= 1;
+        remaining_bytes = remaining_bytes.saturating_sub(bytes);
     }
     Ok(pruned)
 }

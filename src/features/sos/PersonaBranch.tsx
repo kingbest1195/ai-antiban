@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Banner, Button, Card, Icon } from "../../ui";
+import { Banner, Button, Card, Segmented } from "../../ui";
 import { bunkerCopy } from "../../shared/copy/ru/bunker";
 import { sosCopy as copy } from "../../shared/copy/ru/sos";
 import type { ShowToast } from "../../shared/hooks";
@@ -11,6 +11,7 @@ export type PersonaDocChoice = "ru_only" | "foreign_legal";
 
 export interface PersonaBranchProps {
   initialChoice?: PersonaDocChoice;
+  ctaVariant?: "primary" | "secondary";
   onToast?: ShowToast;
   onBackupCreated?: () => void;
 }
@@ -20,7 +21,12 @@ export interface PersonaBranchProps {
  * 1A (RU-only): строгий красный STOP + 3-шаговый Протокол выживания (Бункер + отмена списаний + BYOK/OpenRouter).
  * 1B (ВНЖ / иностранный паспорт): 4-пунктовый Pre-Flight чек-лист согласования реальных данных.
  */
-export function PersonaBranch({ initialChoice = "ru_only", onToast, onBackupCreated }: PersonaBranchProps) {
+export function PersonaBranch({
+  initialChoice = "ru_only",
+  ctaVariant = "primary",
+  onToast,
+  onBackupCreated,
+}: PersonaBranchProps) {
   const t = copy.persona;
   const [choice, setChoice] = useState<PersonaDocChoice>(initialChoice);
   const [backingUp, setBackingUp] = useState(false);
@@ -66,32 +72,21 @@ export function PersonaBranch({ initialChoice = "ru_only", onToast, onBackupCrea
 
   return (
     <Card title={t.question}>
-      <div className="zs-sos__choices" role="radiogroup" aria-label={t.question}>
-        <Button
-          variant={choice === "ru_only" ? "primary" : "secondary"}
-          block
-          onClick={() => setChoice("ru_only")}
-        >
-          {t.choiceRuOnly}
-        </Button>
-        <Button
-          variant={choice === "foreign_legal" ? "primary" : "secondary"}
-          block
-          onClick={() => setChoice("foreign_legal")}
-        >
-          {t.choiceForeign}
-        </Button>
-      </div>
+      <Segmented<PersonaDocChoice>
+        aria-label={t.question}
+        value={choice}
+        onChange={setChoice}
+        options={[
+          { value: "ru_only", label: t.choiceRuOnly },
+          { value: "foreign_legal", label: t.choiceForeign },
+        ]}
+      />
 
       {choice === "ru_only" ? (
         <>
-          <div className="zs-sos__stop-card" role="alert">
-            <div className="zs-sos__stop-head">
-              <Icon name="alert" />
-              <strong className="zs-t-heading">{t.ruStopTitle}</strong>
-            </div>
-            <p className="zs-t-body">{t.ruStopBody}</p>
-          </div>
+          <Banner tone="danger" icon="alert" role="alert" title={t.ruStopTitle} className="zs-sos__block">
+            {t.ruStopBody}
+          </Banner>
 
           <div className="zs-sos__block">
             <p className="zs-t-heading">{t.protocolTitle}</p>
@@ -102,7 +97,7 @@ export function PersonaBranch({ initialChoice = "ru_only", onToast, onBackupCrea
               </p>
               <p className="zs-t-caption zs-sos__step-desc">{t.step1Desc}</p>
               <Button
-                variant="primary"
+                variant={ctaVariant}
                 block
                 icon="shield"
                 disabled={backingUp}

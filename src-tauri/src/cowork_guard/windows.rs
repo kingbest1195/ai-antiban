@@ -1,9 +1,10 @@
 //! Windows CoworkVMService status querying, Task Scheduler registration, and enforcement.
 
 use super::task_xml::{
-    build_schtasks_create_args, build_windows_summary, build_windows_task_xml,
-    decode_windows_cmd_text, encode_utf16_le_with_bom, is_task_xml_healthy, parse_sc_running,
-    parse_tasklist_has_claude, validate_windows_task_xml,
+    SchtasksQueryError, build_schtasks_create_args, build_windows_summary, build_windows_task_xml,
+    classify_schtasks_query_error, decode_windows_cmd_text, encode_utf16_le_with_bom,
+    is_task_list_healthy, is_task_xml_healthy, parse_sc_running, parse_tasklist_has_claude,
+    validate_windows_task_xml,
 };
 use super::{
     COWORK_SERVICE_NAME, COWORK_SERVICE_REG_SUBKEY, COWORK_TASK_FULL_NAME, CoworkGuardStatus,
@@ -47,7 +48,14 @@ pub(super) fn query_windows_status() -> CoworkGuardStatus {
             let xml = decode_windows_cmd_text(&out.stdout);
             (true, is_task_xml_healthy(&xml))
         }
-        _ => (false, false),
+        Some(ref out) => {
+            let err_kind = classify_schtasks_query_error(
+                &decode_windows_cmd_text(&out.stderr),
+                &decode_windows_cmd_text(&out.stdout),
+            );
+            query_task_fallback(err_kind, service_present, start_type)
+        }
+        None => (false, false),
     };
 
     let (needs_repair, summary) = build_windows_summary(
@@ -140,7 +148,85 @@ fn register_cowork_guard_task() -> Result<(), String> {
             out.status.code()
         ));
     }
+    grant_authenticated_users_read_on_task();
     Ok(())
+}
+
+fn query_task_fallback(
+    xml_err: SchtasksQueryError,
+    service_present: bool,
+    start_type: Option<u32>,
+) -> (bool, bool) {
+    let mut saw_access_denied = xml_err == SchtasksQueryError::AccessDenied;
+    for args in [
+        vec!["/Query", "/TN", COWORK_TASK_FULL_NAME, "/FO", "LIST", "/V"],
+        vec!["/Query", "/TN", COWORK_TASK_FULL_NAME, "/FO", "LIST"],
+    ] {
+        if let Some(out) = run_hidden_cmd("schtasks.exe", &args) {
+            if out.status.success() {
+                let text = decode_windows_cmd_text(&out.stdout);
+                return (true, is_task_list_healthy(&text));
+            }
+            let err = classify_schtasks_query_error(
+                &decode_windows_cmd_text(&out.stderr),
+                &decode_windows_cmd_text(&out.stdout),
+            );
+            if err == SchtasksQueryError::AccessDenied {
+                saw_access_denied = true;
+            }
+        }
+    }
+    if saw_access_denied {
+        let healthy = service_present && matches!(start_type, Some(3) | Some(4));
+        return (true, healthy);
+    }
+    (false, false)
+}
+
+fn grant_authenticated_users_read_on_task() {
+    let sys_root = std::env::var("SystemRoot")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| r"C:\Windows".to_string());
+    let ps_exe = format!(
+        r"{}\System32\WindowsPowerShell\v1.0\powershell.exe",
+        sys_root.trim_end_matches(['\\', '/'])
+    );
+    let script = "$ErrorActionPreference='SilentlyContinue';\
+        $s=New-Object -ComObject Schedule.Service;$s.Connect();\
+        $f=$s.GetFolder('\\Zastava');\
+        if($f){\
+          $fsd=$f.GetSecurityDescriptor(0x4);\
+          if($fsd -and $fsd -notmatch '\\(A;;[A-Z]*GR;;;AU\\)' -and $fsd -notmatch '\\(A;;FA;;;AU\\)'){\
+            $newFsd=if($fsd -match 'S:'){$fsd -replace 'S:','(A;;GR;;;AU)S:'}else{$fsd+'(A;;GR;;;AU)'};\
+            $f.SetSecurityDescriptor($newFsd,0)\
+          };\
+          $t=$f.GetTask('CoworkVMServiceManualGuard');\
+          if($t){\
+            $sd=$t.GetSecurityDescriptor(0x4);\
+            if($sd -and $sd -notmatch '\\(A;;[A-Z]*GR;;;AU\\)' -and $sd -notmatch '\\(A;;FA;;;AU\\)'){\
+              $newSd=if($sd -match 'S:'){$sd -replace 'S:','(A;;GR;;;AU)S:'}else{$sd+'(A;;GR;;;AU)'};\
+              $t.SetSecurityDescriptor($newSd,0)\
+            }\
+          }\
+        }";
+    if let Some(out) = run_hidden_cmd(
+        &ps_exe,
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ],
+    ) && !out.status.success()
+    {
+        let err = decode_windows_cmd_text(&out.stderr);
+        if !err.is_empty() {
+            crate::diagnostics::record("cowork_guard", &format!("ACL AU read skipped: {err}"));
+        }
+    }
 }
 
 /// Applies `Start = 3` (Manual) and stops `CoworkVMService` when `claude.exe` is not running.

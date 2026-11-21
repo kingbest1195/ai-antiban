@@ -17,6 +17,7 @@ import type { MenuEntry } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { backup as copy } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
+import { formatIp } from "../../shared/lib/format";
 import {
   KEY_OPTION_NEW,
   KEY_OPTION_NONE,
@@ -41,6 +42,7 @@ export {
 export interface ProfilesSectionProps {
   currentIp: string;
   currentCountry: string;
+  hideIpMode?: boolean;
   activeUpstreamKey?: string | null;
   routesSnapshot?: RoutesSnapshot | null;
   refreshTrigger?: number;
@@ -53,6 +55,7 @@ export interface ProfilesSectionProps {
 export function ProfilesSection({
   currentIp,
   currentCountry,
+  hideIpMode = false,
   routesSnapshot: propRoutesSnapshot,
   refreshTrigger = 0,
   onRoutesUpdated,
@@ -172,7 +175,7 @@ export function ProfilesSection({
     try {
       const res = await bindIpToClaudeProfile(profileId, currentIp, currentCountry);
       setProfiles(res.profiles || []);
-      onToast(t_toast.ipBound, t_toast.ipBoundText(currentIp, currentCountry), "success");
+      onToast(t_toast.ipBound, t_toast.ipBoundText(formatIp(currentIp, hideIpMode), currentCountry), "success");
     } catch (err) {
       onToast(t_toast.ipBindError, errText(err), "error");
     } finally {
@@ -389,7 +392,7 @@ export function ProfilesSection({
                           <span className="zs-profile__line">
                             {p.bound_ip ? (
                               <>
-                                {t.boundIp} <Mono>{p.bound_ip}</Mono>
+                                {t.boundIp} <Mono>{formatIp(p.bound_ip, hideIpMode)}</Mono>
                                 {country ? ` · ${country}` : ""}
                               </>
                             ) : (
@@ -439,6 +442,7 @@ export function ProfilesSection({
         routes={routes}
         ipKnown={ipKnown}
         currentIp={currentIp}
+        hideIpMode={hideIpMode}
         createOpen={createOpen}
         creating={creating}
         newName={newName}

@@ -8,7 +8,7 @@ import type {
   DetectedBrowser,
   LaunchCleanBrowserResult,
 } from "../../../types";
-import { mockFlags, mockState } from "./state";
+import { DIRECT_ROUTE_ID, mockFlags, mockRoutesSnapshot, mockState } from "./state";
 
 function nowSec(): number {
   return Math.floor(Date.now() / 1000);
@@ -40,11 +40,19 @@ function cloneCleanRoomState(cr: CleanRoomState): CleanRoomState {
   };
 }
 
-export function currentMockExitInfo(): {
+export function currentMockExitInfo(routeId?: string | null): {
   ip: string;
   country: string;
   timezone: string;
 } {
+  if (routeId && routeId !== DIRECT_ROUTE_ID) {
+    const found = mockRoutesSnapshot.routes.find((r) => r.id === routeId && r.enabled);
+    if (found?.exit_ip) {
+      const country = found.country || "NL";
+      const tz = country === "US" ? "America/New_York" : country === "DE" ? "Europe/Berlin" : "Europe/Amsterdam";
+      return { ip: found.exit_ip, country, timezone: tz };
+    }
+  }
   if (mockFlags.scenario === "turkey") {
     return { ip: "185.220.101.5", country: "TR", timezone: "Europe/Istanbul" };
   }
@@ -81,12 +89,16 @@ export function mockDiscoverCleanBrowsers(): DetectedBrowser[] {
   ];
 }
 
-export function mockRunCleanRoomAudit(profileId?: string): CleanRoomAuditReport {
+export function mockRunCleanRoomAudit(profileId?: string, routeId?: string): CleanRoomAuditReport {
   const cr = ensureCleanRoomState();
-  const exit = currentMockExitInfo();
+  const targetProfile = profileId ? cr.profiles.find((p) => p.id === profileId) : undefined;
+  const resolvedRouteId =
+    routeId !== undefined
+      ? routeId
+      : (targetProfile?.bound_route_id ?? mockRoutesSnapshot.default_route_id);
+  const exit = currentMockExitInfo(resolvedRouteId);
   const ipIsTainted = Boolean(cr.tainted_ips[exit.ip]);
   const osTzMatchesExit = mockFlags.osTzCurrent === exit.timezone;
-  const targetProfile = profileId ? cr.profiles.find((p) => p.id === profileId) : undefined;
   const findings: CleanRoomFinding[] = [];
 
   if (mockFlags.killswitchStatus) {
@@ -115,7 +127,7 @@ export function mockRunCleanRoomAudit(profileId?: string): CleanRoomAuditReport 
 
   if (ipIsTainted) {
     findings.push({
-      id: "ip_tainted",
+      id: "exit_ip_tainted",
       category: "ip_collision",
       title: "Выходной IP помечен как скомпрометированный",
       detail: `На адресе ${exit.ip} ранее был зафиксирован бан или запрос Persona. Смените ключ/сервер.`,
@@ -256,7 +268,7 @@ export function mockLaunchCleanBrowser(
       "Запуск песочницы заблокирован: устраните критические замечания в «Детекторе хвостов».",
     );
   }
-  const exit = currentMockExitInfo();
+  const exit = currentMockExitInfo(profile.bound_route_id);
   profile.last_opened_at = nowSec();
   profile.last_exit_ip = exit.ip;
   profile.last_exit_country = exit.country;
@@ -285,8 +297,25 @@ export function mockMarkCleanProfileTainted(
   return cloneProfile(profile);
 }
 
-export function mockDeleteCleanProfile(profileId: string): CleanRoomState {
+export function mockUpdateCleanProfileRoute(
+  profileId: string,
+  routeId: string | null,
+): CleanRoomProfile {
   const cr = ensureCleanRoomState();
+  const profile = findProfileOrThrow(cr, profileId);
+  profile.bound_route_id = routeId && routeId !== DIRECT_ROUTE_ID ? routeId : null;
+  return cloneProfile(profile);
+}
+
+export function mockDeleteCleanProfile(
+  profileId: string,
+  taintExitIp = false,
+): CleanRoomState {
+  const cr = ensureCleanRoomState();
+  const removed = cr.profiles.find((p) => p.id === profileId);
+  if (taintExitIp && removed?.last_exit_ip) {
+    cr.tainted_ips[removed.last_exit_ip] = nowSec();
+  }
   cr.profiles = cr.profiles.filter((p) => p.id !== profileId);
   if (cr.active_profile_id === profileId) {
     cr.active_profile_id = cr.profiles[0]?.id ?? null;
@@ -298,6 +327,15 @@ export function mockMarkIpTainted(ip?: string): CleanRoomState {
   const cr = ensureCleanRoomState();
   const targetIp = ip?.trim() || currentMockExitInfo().ip;
   cr.tainted_ips[targetIp] = nowSec();
+  return cloneCleanRoomState(cr);
+}
+
+export function mockUntaintCleanRoomIp(ip: string): CleanRoomState {
+  const cr = ensureCleanRoomState();
+  const targetIp = ip.trim();
+  if (targetIp) {
+    delete cr.tainted_ips[targetIp];
+  }
   return cloneCleanRoomState(cr);
 }
 

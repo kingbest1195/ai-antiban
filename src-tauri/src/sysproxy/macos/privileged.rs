@@ -132,6 +132,12 @@ pub(super) fn build_privileged_networksetup_script(
                         "/usr/sbin/networksetup -setsecurewebproxystate {q_name} {flag}"
                     ));
                 }
+                if let Some(on) = chain.socks.enabled {
+                    let flag = if on { "on" } else { "off" };
+                    cmds.push(format!(
+                        "/usr/sbin/networksetup -setsocksfirewallproxystate {q_name} {flag}"
+                    ));
+                }
             }
             _ => {
                 return Err("Несовпадение ресурса и значения при настройке прокси.".into());
@@ -207,7 +213,7 @@ where
     if !is_safe_pac_url(pac_url) {
         return Err("Небезопасный адрес PAC-конфигурации.".to_string());
     }
-    let planned = plan_physical_pac(p, pac_url, None)?;
+    let planned = plan_physical_pac(p, pac_url, None, Some(j))?;
     if planned.plans.is_empty() {
         return Ok(EnableReport {
             skipped_vpn: planned.vpn_untouched,

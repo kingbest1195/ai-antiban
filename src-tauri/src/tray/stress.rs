@@ -34,6 +34,7 @@ fn fake_report(status: auditor::OverallStatus) -> auditor::RiskReport {
         unknown_count: 0,
         applicable_count: 13,
         incomplete: false,
+        gateway_latency_ms: None,
     }
 }
 

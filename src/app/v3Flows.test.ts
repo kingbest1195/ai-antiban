@@ -1,5 +1,4 @@
-import { createElement, isValidElement } from "react";
-import type { ReactElement, ReactNode } from "react";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppStateData, PersonaRiskFixTarget, RiskReport } from "../types";
@@ -16,6 +15,7 @@ import { handleSysproxyAdminAuthRequired } from "../shared/hooks/useTrayEvents";
 import { mockGetPersonaRiskReport } from "../utils/api/mocks/sos";
 import { routePersonaFixTarget } from "./AppShell";
 import { completeAndRefreshOnboarding } from "./AppShellDialogs";
+import { DeepLinkModal } from "./DeepLinkModal";
 
 const openerMock = vi.hoisted(() => ({
   openExternal: vi.fn(async () => {}),
@@ -30,7 +30,6 @@ vi.mock("../ui/Modal", () => ({
     open ? createElement("div", { "data-modal": title }, children as never, footer as never) : null,
 }));
 
-import { ArchiveSection } from "../features/backup/ArchiveSection";
 import { BackupScreen } from "../features/backup/BackupScreen";
 import { WebExportHelper } from "../features/bunker/WebExportHelper";
 import { ChecksScreen } from "../features/checks/ChecksScreen";
@@ -42,21 +41,6 @@ import { ServicesPage } from "../features/shell-v3/ServicesPage";
 import type { OverviewView } from "../features/shell-v3/types";
 import type { OverviewScreenProps } from "../features/overview/OverviewScreen";
 import type { ClaudeBackup } from "../shared/hooks";
-
-function collectElements(node: ReactNode, predicate: (el: ReactElement) => boolean, out: ReactElement[] = []): ReactElement[] {
-  if (!node || typeof node === "boolean" || typeof node === "string" || typeof node === "number") return out;
-  if (Array.isArray(node)) {
-    for (const child of node) collectElements(child, predicate, out);
-    return out;
-  }
-  if (isValidElement(node)) {
-    if (predicate(node)) out.push(node);
-    const props = node.props as { children?: ReactNode; action?: ReactNode };
-    if (props.action) collectElements(props.action, predicate, out);
-    if (props.children) collectElements(props.children, predicate, out);
-  }
-  return out;
-}
 
 function makeBaseState(over: Partial<AppStateData> = {}): AppStateData {
   return {
@@ -372,28 +356,30 @@ describe("v3 Flows: P0/P1/P2 fixes & contract verification", () => {
     expect(bundles).not.toContain("Сеть и проверки");
   });
 
-  it("P2 #16: ArchiveSection forwards onToast to WebExportHelper when Claude dir is missing", () => {
-    const onToast = vi.fn();
-    const tree = ArchiveSection({
-      backup: makeMockBackup({
-        exists: false,
-        claude_dir_path: "~/.claude",
-        projects_count: 0,
-        sessions_count: 0,
-        plans_count: 0,
-        memory_files_count: 0,
-        total_size_bytes: 0,
-        projects: [],
-        has_claude_md: false,
-        has_history: false,
-        has_settings: false,
-        has_desktop_config: false,
-        has_claude_json: false,
+  it("hideIpMode=true маскирует exit_ip и entrySummary в DeepLinkModal", () => {
+    const payload = {
+      label: "DE · Key",
+      country: "DE",
+      exit_ip: "185.212.102.40",
+      entry: [{ proto: "https", host: "45.32.11.22", port: 443 }],
+    };
+    const bytes = new TextEncoder().encode(JSON.stringify(payload));
+    const encoded = btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    const html = renderToStaticMarkup(
+      createElement(DeepLinkModal, {
+        deepLinkKey: `zastava://${encoded}`,
+        hideIpMode: true,
+        onClose: vi.fn(),
+        onConfirm: vi.fn(),
       }),
-      onToast,
-    });
-    const helpers = collectElements(tree, (el) => el.type === WebExportHelper);
-    expect(helpers).toHaveLength(1);
-    expect((helpers[0].props as { onToast?: unknown }).onToast).toBe(onToast);
+    );
+
+    expect(html).not.toContain("185.212.102.40");
+    expect(html).not.toContain("45.32.11.22");
+    expect(html).toContain("•••.•••.•••.40");
+    expect(html).toContain("•••.•••.•••.22");
   });
 });

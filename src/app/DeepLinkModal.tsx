@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ClaudeProfile } from "../types";
 import { listClaudeProfiles } from "../utils/api";
 import { decodeZastavaKeyPreview, formatRemainingTimeRu } from "../shared/lib/zastavaKey";
+import { formatIp, maskIpsInText } from "../shared/lib/format";
 import { Badge, Button, Card, Field, Modal, Mono, Segmented, Select } from "../ui";
 import type { SegmentedOption, SelectOption } from "../ui";
 
@@ -14,6 +15,7 @@ export interface DeepLinkConfirmOptions {
 
 export interface DeepLinkModalProps {
   deepLinkKey: string | null;
+  hideIpMode?: boolean;
   onClose: () => void;
   onConfirm: (options: DeepLinkConfirmOptions) => void;
   submitting?: boolean;
@@ -28,6 +30,7 @@ const SCOPE_OPTIONS: SegmentedOption<DeepLinkScope>[] = [
 /** Модальное окно подтверждения подключения ключа из ссылки zastava://... */
 export function DeepLinkModal({
   deepLinkKey,
+  hideIpMode = false,
   onClose,
   onConfirm,
   submitting = false,
@@ -131,12 +134,12 @@ export function DeepLinkModal({
             <div className="zs-stack" style={{ gap: "var(--space-1)", marginBottom: "var(--space-2)" }}>
               {preview?.exit_ip && (
                 <div className="zs-t-caption">
-                  Выходной IP: <Mono>{preview.exit_ip}</Mono>
+                  Выходной IP: <Mono>{formatIp(preview.exit_ip, hideIpMode)}</Mono>
                 </div>
               )}
               {preview?.entrySummary && (
                 <div className="zs-t-caption">
-                  Узел входа: <Mono>{preview.entrySummary}</Mono>
+                  Узел входа: <Mono>{maskIpsInText(preview.entrySummary, hideIpMode)}</Mono>
                 </div>
               )}
               {expiryText && (

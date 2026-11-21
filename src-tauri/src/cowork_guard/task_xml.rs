@@ -43,19 +43,61 @@ pub fn parse_sc_running(output: &str) -> bool {
 
 /// Verifies `schtasks /Query /TN "Zastava\CoworkVMServiceManualGuard" /XML` output:
 /// - Boot trigger (`<BootTrigger>`)
-/// - Principal is `SYSTEM` (`S-1-5-18` or `NT AUTHORITY\SYSTEM`)
+/// - Principal is `SYSTEM` (`S-1-5-18`, `NT AUTHORITY\SYSTEM`, `NT AUTHORITY\СИСТЕМА`, `<UserId>SYSTEM</UserId>`)
 /// - Highest privileges (`<RunLevel>HighestAvailable</RunLevel>`)
 /// - Does not execute anything inside user-writable `%LOCALAPPDATA%` / `AppData\Local`
 pub fn is_task_xml_healthy(xml: &str) -> bool {
-    let lower = xml.to_ascii_lowercase();
+    let lower = xml.to_lowercase();
     let has_boot = lower.contains("<boottrigger>");
-    let is_system = lower.contains("s-1-5-18") || lower.contains("nt authority\\system");
+    let is_system = lower.contains("s-1-5-18")
+        || lower.contains("nt authority\\system")
+        || lower.contains("nt authority\\система")
+        || lower.contains("<userid>system</userid>")
+        || lower.contains("<userid>система</userid>");
     let is_highest = lower.contains("<runlevel>highestavailable</runlevel>");
     let uses_powershell = lower.contains("powershell.exe");
     let no_user_writable = !lower.contains("appdata\\local")
         && !lower.contains("%localappdata%")
         && !lower.contains("zastava.exe");
     has_boot && is_system && is_highest && uses_powershell && no_user_writable
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchtasksQueryError {
+    AccessDenied,
+    NotFound,
+    Other,
+}
+
+/// Classifies `schtasks.exe /Query` error output across English and Russian Windows locales.
+pub fn classify_schtasks_query_error(stderr: &str, stdout: &str) -> SchtasksQueryError {
+    let combined = format!("{stderr}\n{stdout}").to_lowercase();
+    if combined.contains("access is denied")
+        || combined.contains("отказано в доступе")
+        || combined.contains("0x80070005")
+        || combined.contains("недостаточно прав")
+    {
+        return SchtasksQueryError::AccessDenied;
+    }
+    if combined.contains("cannot find")
+        || combined.contains("не удается найти")
+        || combined.contains("не удаётся найти")
+        || combined.contains("does not exist")
+        || combined.contains("не существует")
+    {
+        return SchtasksQueryError::NotFound;
+    }
+    SchtasksQueryError::Other
+}
+
+/// Fallback verification for `schtasks.exe /Query /TN ... /FO LIST [/V]` when `/XML` is denied.
+pub fn is_task_list_healthy(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    let has_task_name = lower.contains("coworkvmservicemanualguard");
+    let no_user_writable = !lower.contains("appdata\\local")
+        && !lower.contains("%localappdata%")
+        && !lower.contains("zastava.exe");
+    has_task_name && no_user_writable
 }
 
 /// Fixed inline PowerShell payload executed by `\Zastava\CoworkVMServiceManualGuard` as SYSTEM.
@@ -178,29 +220,29 @@ pub fn build_windows_summary(
         (service_present && (bad_start || !task_ok)) || (task_installed && !task_healthy);
 
     let summary = if !service_present && !task_installed {
-        "Служба CoworkVMService не обнаружена (Microsoft Store версия Claude Desktop не установлена)."
+        "Фоновая служба Claude не обнаружена — приложение из Microsoft Store не установлено."
             .to_string()
     } else if !service_present && task_ok {
-        "Задача планировщика настроена. Служба CoworkVMService сейчас не установлена.".to_string()
+        "Защита настроена. Фоновая служба Claude сейчас не установлена.".to_string()
     } else if start_type == Some(3) && task_ok {
         if service_running {
-            "Защита активна: тип запуска «Вручную» (Start=3), задача планировщика исправна. Служба сейчас работает для открытого Claude."
+            "Защита активна: фоновая служба Claude запускается только вручную, задача защиты исправна. Сейчас служба работает для открытого Claude."
                 .to_string()
         } else {
-            "Защита активна: тип запуска CoworkVMService — «Вручную» (Start=3), задача при старте Windows исправна."
+            "Защита активна: фоновая служба Claude переведена в ручной режим и не стартует до входа в систему."
                 .to_string()
         }
     } else if start_type == Some(2) {
-        "CoworkVMService стоит на автозапуске (Start=2) и стартует до входа в систему. Нажмите «Настроить / Восстановить» для перевода в «Вручную» (Start=3)."
+        "Фоновая служба Claude стоит на автозапуске и может стартовать до входа в систему и до запуска Заставы. Нажмите «Починить в 1 клик», чтобы перевести её в ручной режим."
             .to_string()
     } else if start_type == Some(4) {
-        "CoworkVMService отключена (Start=4) — Cowork в Claude не запустится. Восстановите тип запуска «Вручную» (Start=3)."
+        "Фоновая служба Claude полностью отключена — режим Cowork в приложении не запустится. Нажмите «Починить в 1 клик», чтобы вернуть ручной запуск."
             .to_string()
     } else if !task_ok {
-        "Тип запуска пока «Вручную», но задача планировщика не настроена или повреждена: обновление Claude может вернуть автозапуск."
+        "Служба сейчас запускается вручную, но защитная задача планировщика не настроена или повреждена: обновление Claude может вернуть автозапуск."
             .to_string()
     } else {
-        "Состояние CoworkVMService определено частично. Нажмите «Настроить / Восстановить»."
+        "Состояние фоновой службы Claude определено частично. Нажмите «Починить в 1 клик»."
             .to_string()
     };
 
@@ -242,20 +284,56 @@ pub fn encode_utf16_le_with_bom(text: &str) -> Vec<u8> {
     bytes
 }
 
-/// Decodes stdout/stderr from Windows console tools (handling UTF-16 LE BOM as well as UTF-8).
+fn is_likely_utf16_le_without_bom(bytes: &[u8]) -> bool {
+    let mut len = bytes.len();
+    while len >= 2 && bytes[len - 2] == 0 && bytes[len - 1] == 0 {
+        len -= 2;
+    }
+    let trimmed = &bytes[..len];
+    if trimmed.len() < 4 || !trimmed.len().is_multiple_of(2) {
+        return false;
+    }
+    let pairs = trimmed.len() / 2;
+    let mut odd_zeros = 0usize;
+    let mut all_odd_ascii_or_cyrillic = true;
+    for chunk in trimmed.chunks_exact(2) {
+        if chunk[0] == 0 && chunk[1] != 0 {
+            return false;
+        }
+        if chunk[1] == 0 && chunk[0] != 0 {
+            odd_zeros += 1;
+        }
+        if chunk[1] != 0 && chunk[1] != 0x04 {
+            all_odd_ascii_or_cyrillic = false;
+        }
+    }
+    (odd_zeros >= 2 && odd_zeros * 4 >= pairs) || (odd_zeros >= 1 && all_odd_ascii_or_cyrillic)
+}
+
+fn decode_utf16_le_payload(payload: &[u8]) -> String {
+    let units: Vec<u16> = payload
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
+}
+
+/// Decodes stdout/stderr from Windows console tools (handling UTF-16 LE with or without BOM,
+/// as well as UTF-8).
 pub fn decode_windows_cmd_text(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() >= 2 {
-        let payload = &bytes[2..];
-        let units: Vec<u16> = payload
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        return String::from_utf16_lossy(&units)
-            .trim_end_matches('\0')
-            .trim()
-            .to_string();
+        return decode_utf16_le_payload(&bytes[2..]);
     }
-    String::from_utf8_lossy(bytes).trim().to_string()
+    if is_likely_utf16_le_without_bom(bytes) {
+        return decode_utf16_le_payload(bytes);
+    }
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
 }
 
 /// Validates generated Task Scheduler 1.2 XML before passing it to `schtasks.exe /Create`.
