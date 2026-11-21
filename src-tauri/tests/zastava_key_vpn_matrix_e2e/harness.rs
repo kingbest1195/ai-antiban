@@ -487,7 +487,8 @@ pub async fn send_connect_and_echo(
     let mut head = Vec::new();
     let mut b = [0u8; 1];
     loop {
-        let n = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut b))
+        // Windows loopback SYN retries on closed local ports can take ~2-3.5s before ECONNREFUSED.
+        let n = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut b))
             .await
             .map_err(|_| "connect header timeout".to_string())?
             .map_err(|e| format!("read header: {e}"))?;

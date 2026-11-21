@@ -7,10 +7,18 @@ use super::macos::{self, HEAL_WINDOW, HealGuard};
 use super::platform::Platform;
 use super::state::state;
 use super::windows;
-use super::{EnableReport, FileCtx, Os, RealProbe};
+use super::{EnableReport, FileCtx, Os, SystemProbe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+struct EmptyProcessProbe;
+
+impl SystemProbe for EmptyProcessProbe {
+    fn run(&self, _program: &str, _args: &[&str]) -> Option<String> {
+        Some(String::new())
+    }
+}
 
 pub const HEAL_WINDOW_SECS: u64 = HEAL_WINDOW.as_secs();
 
@@ -110,7 +118,7 @@ pub fn apply_browser_policies_for_os(
         pac_url,
         Some(&file_ctx),
         os,
-        &RealProbe,
+        &EmptyProcessProbe,
     );
     state().set_browser_pac_policy_active(rep.pac_policy_active);
     rep
