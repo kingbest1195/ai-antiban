@@ -208,12 +208,12 @@ pub fn browser_user_data_dirs(browser: &ChromiumBrowserDef, ctx: &FileCtx, os: O
 /// Compiled out on Windows non-test builds so `Local State` / `Profile *` scanning strings are
 /// absent from Windows release binaries.
 pub fn discover_browser_prefs_files_in(fs: &dyn Fs, user_data_dir: &Path) -> Vec<PathBuf> {
-    #[cfg(all(target_os = "windows", not(test)))]
+    #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
     {
         let _ = (fs, user_data_dir);
         Vec::new()
     }
-    #[cfg(any(not(target_os = "windows"), test))]
+    #[cfg(any(not(target_os = "windows"), test, feature = "test-support"))]
     {
         let mut found = BTreeSet::new();
         let direct = user_data_dir.join("Preferences");
