@@ -42,6 +42,7 @@ async fn stop_alias_handle(handle: AliasHandle) {
         .is_err()
     {
         task.abort();
+        let _ = task.await;
     }
     crate::core::net_safety::unregister_alias_port(handle.port);
 }

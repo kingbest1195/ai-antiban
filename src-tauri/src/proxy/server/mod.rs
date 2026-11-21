@@ -82,7 +82,7 @@ enum TunnelPolicy {
 
 pub struct ProxyServer {
     pub bound_addr: SocketAddr,
-    listener: TcpListener,
+    listener: std::sync::Mutex<Option<TcpListener>>,
     auditor: Auditor,
     state: AppState,
     pub hold_queue: Arc<HoldQueue>,
@@ -132,7 +132,7 @@ impl ProxyServer {
 
         Ok(Self {
             bound_addr,
-            listener,
+            listener: std::sync::Mutex::new(Some(listener)),
             auditor,
             state,
             hold_queue,
@@ -166,7 +166,7 @@ impl ProxyServer {
 
         Ok(Self {
             bound_addr,
-            listener,
+            listener: std::sync::Mutex::new(Some(listener)),
             auditor,
             state,
             hold_queue,
@@ -217,7 +217,7 @@ impl ProxyServer {
         crate::core::net_safety::register_alias_port(bound_addr.port());
         Ok(Self {
             bound_addr,
-            listener,
+            listener: std::sync::Mutex::new(Some(listener)),
             auditor: self.auditor.clone(),
             state: self.state.clone(),
             hold_queue: Arc::clone(&self.hold_queue),
@@ -247,10 +247,20 @@ impl ProxyServer {
 
     /// Runs the proxy accept loop in the background.
     pub async fn run(self: Arc<Self>) {
+        // Move TcpListener out so stopping the accept loop drops the listening socket immediately
+        // even while active handle_connection tasks still hold Arc<ProxyServer>.
+        let Some(listener) = self
+            .listener
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
+            return;
+        };
         let mut stop_rx = self.alias_stop_rx.clone();
         loop {
             let accept_res = tokio::select! {
-                res = self.listener.accept() => res,
+                res = listener.accept() => res,
                 _ = wait_optional_stop(&mut stop_rx) => return,
             };
             match accept_res {
