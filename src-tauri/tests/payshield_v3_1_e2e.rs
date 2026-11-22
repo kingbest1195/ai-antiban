@@ -28,7 +28,7 @@ use zastava_lib::clean_room::quarantine::{
 };
 use zastava_lib::cowork_guard::{
     COWORK_TASK_SDDL, CoworkGuardStatus, SchtasksQueryError, classify_schtasks_query_error,
-    decode_windows_cmd_text, is_task_xml_healthy, verify_post_install_status,
+    decode_cp866, decode_windows_cmd_text, is_task_xml_healthy, verify_post_install_status,
 };
 use zastava_lib::os_tz::{
     OsTzPlatform, get_os_timezone_sync_status_with_keep, keep_system_tz_on_exit, read_baseline,
@@ -324,8 +324,17 @@ fn e2e_7_windows_cowork_guard_cp866_acl_and_post_install_err() {
         0x8E, 0x98, 0x88, 0x81, 0x8A, 0x80, 0x3A, 0x20, 0x8E, 0xE2, 0xAA, 0xA0, 0xA7, 0xA0, 0xAD,
         0xAE, 0x20, 0xA2, 0x20, 0xA4, 0xAE, 0xE1, 0xE2, 0xE3, 0xAF, 0xA5, 0x2E,
     ];
-    let decoded = decode_windows_cmd_text(&cp866_denied);
+    let decoded = decode_cp866(&cp866_denied);
     assert_eq!(decoded, "ОШИБКА: Отказано в доступе.");
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(
+        decode_windows_cmd_text(&cp866_denied),
+        "ОШИБКА: Отказано в доступе."
+    );
+    assert_eq!(
+        decode_windows_cmd_text("ОШИБКА: Отказано в доступе.".as_bytes()),
+        "ОШИБКА: Отказано в доступе."
+    );
     assert_eq!(
         classify_schtasks_query_error(&decoded, ""),
         SchtasksQueryError::AccessDenied
