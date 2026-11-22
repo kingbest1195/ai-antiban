@@ -332,7 +332,9 @@ jobs:
           [ -n "$EXE_SIG" ] || { echo "Empty Windows NSIS signature"; exit 1; }
           [ -n "$MSI_SIG" ] || { echo "Empty Windows MSI signature"; exit 1; }
 
-          export MAC_ASSET="$(basename "$mac_sig_file" .sig)"
+          # tauri-action публикует universal macOS updater-архив как Zastava_universal.app.tar.gz
+          # (локально в bundle/macos/ он называется Zastava.app.tar.gz).
+          export MAC_ASSET="Zastava_universal.app.tar.gz"
           export EXE_ASSET="$(basename "$exe_sig_file" .sig)"
           export MSI_ASSET="$(basename "$msi_sig_file" .sig)"
 
