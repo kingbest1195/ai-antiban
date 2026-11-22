@@ -1,6 +1,6 @@
 //! Journaled application, revert, and active-policy checks for browser policy specs.
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 use super::chromium::MACOS_CHROMIUM_DOMAIN_NAMES;
 #[cfg(all(test, target_os = "windows"))]
 use super::chromium::WINDOWS_CHROMIUM_DOMAIN_NAMES;

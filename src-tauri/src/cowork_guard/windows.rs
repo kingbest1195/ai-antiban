@@ -68,9 +68,7 @@ pub(super) fn query_windows_status() -> CoworkGuardStatus {
                 }
             }
             Err(err) => {
-                if query_task_via_registry_taskcache() {
-                    (true, false, Some(err))
-                } else if err.starts_with("ACCESS_DENIED:") {
+                if query_task_via_registry_taskcache() || err.starts_with("ACCESS_DENIED:") {
                     (true, false, Some(err))
                 } else {
                     (false, false, Some(err))

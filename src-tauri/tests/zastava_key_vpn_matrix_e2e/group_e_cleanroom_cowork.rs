@@ -549,10 +549,14 @@ async fn e2e_clean_room_restart_recovery_on_preferred_port() {
         .set_cached_for_route(Some(route.id.clone()), clean_de_telemetry())
         .await;
 
+    // Pick a free port outside the OS ephemeral range so concurrent tests binding `:0` cannot steal it across restart.
+    let preferred_seed =
+        (42100..42500).find(|&p| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok());
+
     let (srv1, task1) = start_proxy_server(auditor.clone(), state.clone(), None, None).await;
     let pm1 = ProxyManager::from_server(Arc::clone(&srv1));
     let port1 = pm1
-        .ensure_profile_alias_preferred("prof-restart", Some(route.id.clone()), None)
+        .ensure_profile_alias_preferred("prof-restart", Some(route.id.clone()), preferred_seed)
         .await
         .unwrap();
     assert_eq!(
@@ -567,6 +571,7 @@ async fn e2e_clean_room_restart_recovery_on_preferred_port() {
     );
     pm1.stop_profile_alias("prof-restart").await;
     task1.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
     // Simulated restart: new ProxyManager rebinds on the exact same preferred port1
     let (srv2, task2) = start_proxy_server(auditor, state, None, None).await;

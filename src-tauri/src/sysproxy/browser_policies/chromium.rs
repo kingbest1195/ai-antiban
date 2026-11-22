@@ -147,6 +147,7 @@ pub const CHROMIUM_BROWSERS: [ChromiumBrowserDef; 15] = [
 ];
 
 /// Chromium-family preference domains on macOS.
+#[cfg(any(target_os = "macos", test))]
 pub const MACOS_CHROMIUM_DOMAIN_NAMES: [&str; 15] = [
     "com.google.Chrome",
     "com.google.Chrome.beta",

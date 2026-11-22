@@ -97,6 +97,7 @@ pub(crate) use state::{
 
 use orchestrator::data_dir;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Spawns a Command configured on Windows with `CREATE_NO_WINDOW` (0x08000000)
@@ -282,16 +283,15 @@ pub const RESTORE_DEFERRED_TEXT: &str = "Застава закрыта, но а�
 /// state). Goes through [`silent_command`], so dry-run mode starts nothing.
 pub fn notify_restore_deferred() {
     // Quit goes through the tray handler and then through the exit events: tell the user once.
-    static TOLD: AtomicBool = AtomicBool::new(false);
-    if TOLD.swap(true, Ordering::SeqCst) {
-        return;
-    }
     #[cfg(target_os = "macos")]
     {
-        let script = format!(
-            "display dialog \"{RESTORE_DEFERRED_TEXT}\" with title \"Застава\" buttons {{\"OK\"}} default button \"OK\" with icon caution giving up after 60"
-        );
-        let _ = silent_command("osascript").args(["-e", &script]).spawn();
+        static TOLD: AtomicBool = AtomicBool::new(false);
+        if !TOLD.swap(true, Ordering::SeqCst) {
+            let script = format!(
+                "display dialog \"{RESTORE_DEFERRED_TEXT}\" with title \"Застава\" buttons {{\"OK\"}} default button \"OK\" with icon caution giving up after 60"
+            );
+            let _ = silent_command("osascript").args(["-e", &script]).spawn();
+        }
     }
 }
 
