@@ -266,7 +266,7 @@ fn is_likely_utf16_le_without_bom(bytes: &[u8]) -> bool {
     let pairs = trimmed.len() / 2;
     let mut odd_zeros = 0usize;
     let mut all_odd_ascii_or_cyrillic = true;
-    for chunk in trimmed.chunks_exact(2) {
+    for chunk in trimmed.as_chunks::<2>().0 {
         if chunk[0] == 0 && chunk[1] != 0 {
             return false;
         }
@@ -282,8 +282,10 @@ fn is_likely_utf16_le_without_bom(bytes: &[u8]) -> bool {
 
 fn decode_utf16_le_payload(payload: &[u8]) -> String {
     let units: Vec<u16> = payload
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     String::from_utf16_lossy(&units)
         .trim_end_matches('\0')

@@ -42,7 +42,9 @@ mod win {
     };
     use windows::Win32::NetworkManagement::IpHelper::{
         FIXED_INFO_W2KSP1, GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, GetExtendedTcpTable,
-        GetNetworkParams, IP_ADAPTER_ADDRESSES_LH, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+        GetNetworkParams, IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_DNS_SERVER_ADDRESS_XP,
+        IP_ADAPTER_UNICAST_ADDRESS_LH, IP_ADDR_STRING, MIB_TCPTABLE_OWNER_PID,
+        TCP_TABLE_OWNER_PID_ALL,
     };
     use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows::Win32::Networking::WinSock::{
@@ -129,7 +131,8 @@ mod win {
                 let item = unsafe { &*cur };
                 let mut ipv4_addrs = Vec::new();
                 let mut ipv6_addrs = Vec::new();
-                let mut ua = item.FirstUnicastAddress as *const _;
+                let mut ua: *const IP_ADAPTER_UNICAST_ADDRESS_LH =
+                    item.FirstUnicastAddress.cast_const();
                 while !ua.is_null() {
                     // SAFETY: Linked list node inside `buf`.
                     let u = unsafe { &*ua };
@@ -145,7 +148,8 @@ mod win {
                     ua = u.Next;
                 }
                 let mut dns_servers = Vec::new();
-                let mut da = item.FirstDnsServerAddress as *const _;
+                let mut da: *const IP_ADAPTER_DNS_SERVER_ADDRESS_XP =
+                    item.FirstDnsServerAddress.cast_const();
                 while !da.is_null() {
                     // SAFETY: Linked list node inside `buf`.
                     let d = unsafe { &*da };
@@ -190,7 +194,7 @@ mod win {
             // SAFETY: `ptr` was populated by `GetNetworkParams`.
             let info = unsafe { &*ptr };
             let mut dns_servers = Vec::new();
-            let mut cur = &info.DnsServerList as *const _;
+            let mut cur: *const IP_ADDR_STRING = &raw const info.DnsServerList;
             while !cur.is_null() {
                 // SAFETY: Linked list nodes reside inside `buf`.
                 let node = unsafe { &*cur };

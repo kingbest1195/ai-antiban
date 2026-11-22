@@ -401,7 +401,7 @@ fn check_network_and_os_hygiene(
 fn mask_path_hint(path: &Path) -> String {
     let s = path.to_string_lossy();
     if let Some(idx) = s.find("AppData") {
-        return format!("~/{}", &s[idx..].replace('\\', "/"));
+        return format!("~/{}", s[idx..].replace('\\', "/"));
     }
     if let Some(idx) = s.find("Library") {
         return format!("~/{}", &s[idx..]);

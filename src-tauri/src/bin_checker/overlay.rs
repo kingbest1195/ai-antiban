@@ -93,7 +93,7 @@ impl BinOverlay {
                 _ => short_prefixes.push(entry),
             }
         }
-        short_prefixes.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+        short_prefixes.sort_by_key(|a| std::cmp::Reverse(a.prefix.len()));
         Ok(Self {
             exact_8,
             exact_6,

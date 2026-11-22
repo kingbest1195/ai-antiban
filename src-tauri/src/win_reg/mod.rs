@@ -79,8 +79,10 @@ pub fn decode_utf16_le_string(bytes: &[u8]) -> Result<String, String> {
         return Err(format!("invalid UTF-16 byte length {}", bytes.len()));
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     let text = String::from_utf16(&units).map_err(|e| format!("invalid UTF-16 sequence: {e}"))?;
     Ok(text.trim_end_matches('\0').to_string())
@@ -92,8 +94,10 @@ pub fn decode_multi_sz(bytes: &[u8]) -> Result<Vec<String>, String> {
         return Err(format!("invalid REG_MULTI_SZ byte length {}", bytes.len()));
     }
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     let mut out = Vec::new();
     for segment in units.split(|&u| u == 0) {

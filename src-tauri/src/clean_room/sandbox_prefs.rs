@@ -68,7 +68,7 @@ pub fn write_first_run_sentinel(profile_dir: &Path) -> Result<PathBuf, String> {
     ensure_private_dir(profile_dir)?;
     let sentinel = profile_dir.join("First Run");
     if !sentinel.exists() {
-        let f = fs::File::create(&sentinel).map_err(|e| {
+        let _f = fs::File::create(&sentinel).map_err(|e| {
             format!(
                 "Не удалось создать маркер первого запуска {}: {e}",
                 sentinel.display()
@@ -77,7 +77,7 @@ pub fn write_first_run_sentinel(profile_dir: &Path) -> Result<PathBuf, String> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
+            let _ = _f.set_permissions(fs::Permissions::from_mode(0o600));
         }
     }
     Ok(sentinel)

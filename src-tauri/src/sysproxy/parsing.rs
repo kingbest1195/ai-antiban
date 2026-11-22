@@ -37,10 +37,7 @@ pub fn is_gateway_target(server: &str, port: u16, gateway_port: Option<u16>) -> 
         .trim_end_matches(']')
         .to_ascii_lowercase();
     let is_loopback = s == "127.0.0.1" || s == "localhost" || s == "::1";
-    if is_loopback && (port == 8899 || port == 8900) {
-        return true;
-    }
-    false
+    is_loopback && (port == 8899 || port == 8900)
 }
 
 /// Strips a known proxy URL scheme (`http://`, `https://`, `socks5h://`, `socks5://`, `socks://`),
