@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::sysproxy::platform::{Platform, RealPlatform};
 
 #[test]

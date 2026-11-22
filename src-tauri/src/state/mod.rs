@@ -11,7 +11,7 @@ mod schema_v3;
 mod settings;
 mod stats;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;

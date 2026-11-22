@@ -1,6 +1,8 @@
 use super::*;
 use crate::sysproxy::fs::FsOp;
-use crate::sysproxy::platform::{FakePlatform, PlatOp};
+#[cfg(unix)]
+use crate::sysproxy::platform::FakePlatform;
+use crate::sysproxy::platform::PlatOp;
 
 // --- crashes ---------------------------------------------------------------------------
 

@@ -246,8 +246,10 @@ pub(super) use migration::{
     LAUNCHD_MIGRATION_MARK, LEGACY_MIGRATION_MARK, VPN_PAC_MIGRATION_MARK, migrate_legacy,
     migrate_legacy_pac,
 };
+#[cfg(all(test, target_os = "macos"))]
+pub(super) use restore::restore_with_probe_options;
 #[cfg(test)]
-pub(super) use restore::{Scope, restore_with, restore_with_probe, restore_with_probe_options};
+pub(super) use restore::{Scope, restore_with, restore_with_probe};
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::collections::BTreeMap;

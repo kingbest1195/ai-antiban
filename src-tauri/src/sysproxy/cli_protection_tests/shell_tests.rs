@@ -1,10 +1,12 @@
 use super::*;
 use crate::sysproxy::ZASTAVA_RC_START;
 use crate::sysproxy::ide::{ide_candidates, ide_env_key};
+#[cfg(unix)]
 use crate::sysproxy::platform::FakePlatform;
 use crate::sysproxy::shell_rc::{
     build_powershell_guard_block_with_tz, build_shell_rc_guard_block_with_tz,
 };
+#[cfg(unix)]
 use std::sync::Arc;
 
 // --- shell and PowerShell profiles -------------------------------------------------------
