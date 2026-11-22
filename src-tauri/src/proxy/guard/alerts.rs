@@ -208,6 +208,7 @@ impl NetworkGuard {
             detected_at_ms: now_unix_ms(),
             phase: PHASE_READY.to_string(),
             gate_reason: Some(reason),
+            checkout_risk: None,
         };
 
         env.hold_queue.set_alert(payload.clone());
@@ -285,6 +286,7 @@ impl NetworkGuard {
             detected_at_ms: now_unix_ms(),
             phase: PHASE_FAILED.to_string(),
             gate_reason: Some(reason),
+            checkout_risk: None,
         };
 
         env.hold_queue.set_alert(payload.clone());

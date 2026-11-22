@@ -97,6 +97,56 @@ jobs:
             echo 'RELEASE_NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
+      # SignPath.io Foundation OSS (бесплатно для open-source): сначала собираем и подписываем сам
+      # `zastava.exe`, затем пакуем NSIS/MSI с `--no-binary-patching`, чтобы не сбить подпись exe.
+      - name: Build Windows binary before signing (--no-bundle)
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '{"build":{"beforeBuildCommand":""}}\n' > "$RUNNER_TEMP/tauri-nobuild.json"
+          pnpm tauri build --no-bundle --config "$RUNNER_TEMP/tauri-nobuild.json"
+
+      - name: Upload Windows binary for SignPath
+        id: upload-windows-exe
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-app-exe
+          path: src-tauri/target/release/zastava.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Sign Windows binary (zastava.exe) via SignPath.io OSS
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-windows-exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-windows-exe
+
+      - name: Install signed zastava.exe before bundling
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          signed="$(find signed-windows-exe -type f -name 'zastava.exe' | head -n 1)"
+          [ -n "$signed" ] || { echo "Missing signed zastava.exe"; exit 1; }
+          cp -f "$signed" src-tauri/target/release/zastava.exe
+          touch src-tauri/target/release/zastava.exe
+
+      - name: Verify pre-bundle zastava.exe Authenticode signature
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
+        shell: powershell
+        run: |
+          $sig = Get-AuthenticodeSignature "src-tauri/target/release/zastava.exe"
+          Write-Host "Pre-bundle zastava.exe signature: $($sig.Status) ($($sig.SignerCertificate.Subject))"
+          if ($sig.Status -ne 'Valid') { throw "Pre-bundle zastava.exe signature is not Valid: $($sig.Status)" }
+
       - name: Build Tauri release artifacts
         uses: tauri-apps/tauri-action@v0
         env:
@@ -109,7 +159,15 @@ jobs:
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          args: ${{ matrix.args }}
+          args: ${{ (matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true') && format('--no-binary-patching --config {0}/tauri-nobuild.json', runner.temp) || matrix.args }}
+
+      - name: Verify zastava.exe signature survived bundling
+        if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
+        shell: powershell
+        run: |
+          $sig = Get-AuthenticodeSignature "src-tauri/target/release/zastava.exe"
+          Write-Host "Post-bundle zastava.exe signature: $($sig.Status) ($($sig.SignerCertificate.Subject))"
+          if ($sig.Status -ne 'Valid') { throw "Post-bundle zastava.exe signature was invalidated during bundling: $($sig.Status)" }
 
       # Bug #9: опциональная подпись Authenticode через SignPath.io OSS (активируется после верификации проекта).
       # 1) Загружаем Windows-инсталляторы как workflow artifact (без него SignPath падает).
@@ -138,8 +196,9 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: signed-windows-installers
 
-      # 3) Подменяем локальные бандлы подписанными, переподписываем minisign (.sig) и обновляем draft-релиз + latest.json.
-      - name: Re-sign minisign & refresh draft release after SignPath
+      # 3) Подменяем локальные бандлы подписанными, переподписываем minisign (.sig) и обновляем ассеты в draft-релизе.
+      #    `latest.json` собирается централизованно в `finalize-release` после завершения обеих платформ (без гонки).
+      - name: Re-sign minisign & refresh Windows draft assets after SignPath
         if: ${{ matrix.platform == 'windows-latest' && vars.SIGNPATH_ENABLED == 'true' }}
         shell: bash
         env:
@@ -151,9 +210,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
           nsis_dir="src-tauri/target/release/bundle/nsis"
           msi_dir="src-tauri/target/release/bundle/msi"
-          for f in "$nsis_dir"/*.exe "$msi_dir"/*.msi; do
+          bundles=("$nsis_dir"/*.exe "$msi_dir"/*.msi)
+          [ ${#bundles[@]} -gt 0 ] || { echo "No Windows installer bundles found"; exit 1; }
+          for f in "${bundles[@]}"; do
             base="$(basename "$f")"
             signed="$(find signed-windows-installers -type f -name "$base" | head -n 1)"
             [ -n "$signed" ] || { echo "Missing signed artifact for $base"; exit 1; }
@@ -161,27 +223,53 @@ jobs:
             pnpm tauri signer sign "$f"
           done
           if [ "$IS_TAG" = "true" ]; then
-            assets=()
-            for f in "$nsis_dir"/*.exe "$nsis_dir"/*.exe.sig "$msi_dir"/*.msi "$msi_dir"/*.msi.sig; do
-              assets+=("$f")
-            done
+            assets=("$nsis_dir"/*.exe "$nsis_dir"/*.exe.sig "$msi_dir"/*.msi "$msi_dir"/*.msi.sig)
+            [ ${#assets[@]} -ge 4 ] || { echo "Expected signed installers and .sig files, found ${#assets[@]}"; exit 1; }
             gh release upload "$TAG" "${assets[@]}" --repo "$REPO" --clobber
-            tmp_dir="$(mktemp -d)"
-            gh release download "$TAG" --repo "$REPO" --pattern "latest.json" --dir "$tmp_dir"
-            EXE_SIG="$(cat "$nsis_dir"/*.exe.sig)"
-            MSI_SIG="$(cat "$msi_dir"/*.msi.sig)"
-            node -e '
-              const fs = require("fs");
-              const p = process.argv[1];
-              const lj = JSON.parse(fs.readFileSync(p, "utf8"));
-              if (lj.platforms?.["windows-x86_64"]) lj.platforms["windows-x86_64"].signature = process.env.MSI_SIG.trim();
-              if (lj.platforms?.["windows-x86_64-msi"]) lj.platforms["windows-x86_64-msi"].signature = process.env.MSI_SIG.trim();
-              if (lj.platforms?.["windows-x86_64-nsis"]) lj.platforms["windows-x86_64-nsis"].signature = process.env.EXE_SIG.trim();
-              fs.writeFileSync(p, JSON.stringify(lj, null, 2));
-            ' "$tmp_dir/latest.json"
-            gh release upload "$TAG" "$tmp_dir/latest.json" --repo "$REPO" --clobber
-            rm -rf "$tmp_dir"
           fi
+
+      - name: Upload macOS updater signature metadata
+        if: ${{ matrix.platform == 'macos-latest' && startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-sig-macos
+          path: src-tauri/target/universal-apple-darwin/release/bundle/macos/*.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload Windows updater signature metadata
+        if: ${{ matrix.platform == 'windows-latest' && startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-sig-windows
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe.sig
+            src-tauri/target/release/bundle/msi/*.msi.sig
+          if-no-files-found: error
+          retention-days: 1
+
+      # Неблокирующая диагностика Windows Defender на релизных бинарниках и инсталляторах.
+      - name: Windows Defender diagnostic scan (non-blocking)
+        if: matrix.platform == 'windows-latest'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          if (-not (Test-Path $mp)) {
+            Write-Host "MpCmdRun.exe not found at $mp; skipping Defender scan."
+            exit 0
+          }
+          $targets = @("src-tauri\target\release\zastava.exe")
+          if (Test-Path "src-tauri\target\release\bundle") {
+            $targets += Get-ChildItem -Path "src-tauri\target\release\bundle" -Include *.exe,*.msi -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          }
+          foreach ($t in $targets) {
+            if (Test-Path $t) {
+              Write-Host "=== MpCmdRun scan: $t ==="
+              & $mp -Scan -ScanType 3 -File $t
+              Write-Host "Exit code: $LASTEXITCODE"
+            }
+          }
 
       # Bug #9: SLSA Build Provenance Attestation для всех артефактов релиза (.dmg, .tar.gz, .exe, .msi).
       - name: Attest build provenance (macOS)
@@ -200,10 +288,89 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/msi/*.msi
 
+  # Сборка единого latest.json на одном runner после завершения обеих платформ (исключает гонку перезаписи).
+  finalize-release:
+    name: Finalize latest.json
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download platform updater signatures
+        uses: actions/download-artifact@v4
+        with:
+          path: updater-sigs
+
+      - name: Build and upload canonical latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          mac_sig_file="$(find updater-sigs/updater-sig-macos -type f -name '*.tar.gz.sig' | sort | head -n 1)"
+          exe_sig_file="$(find updater-sigs/updater-sig-windows -type f -name '*.exe.sig' | sort | head -n 1)"
+          msi_sig_file="$(find updater-sigs/updater-sig-windows -type f -name '*.msi.sig' | sort | head -n 1)"
+          [ -n "$mac_sig_file" ] && [ -f "$mac_sig_file" ] || { echo "Missing macOS .tar.gz.sig artifact"; exit 1; }
+          [ -n "$exe_sig_file" ] && [ -f "$exe_sig_file" ] || { echo "Missing Windows .exe.sig artifact"; exit 1; }
+          [ -n "$msi_sig_file" ] && [ -f "$msi_sig_file" ] || { echo "Missing Windows .msi.sig artifact"; exit 1; }
+
+          export MAC_SIG="$(cat "$mac_sig_file")"
+          export EXE_SIG="$(cat "$exe_sig_file")"
+          export MSI_SIG="$(cat "$msi_sig_file")"
+          [ -n "$MAC_SIG" ] || { echo "Empty macOS signature"; exit 1; }
+          [ -n "$EXE_SIG" ] || { echo "Empty Windows NSIS signature"; exit 1; }
+          [ -n "$MSI_SIG" ] || { echo "Empty Windows MSI signature"; exit 1; }
+
+          export MAC_ASSET="$(basename "$mac_sig_file" .sig)"
+          export EXE_ASSET="$(basename "$exe_sig_file" .sig)"
+          export MSI_ASSET="$(basename "$msi_sig_file" .sig)"
+
+          notes_body="$(sed "s/\${VERSION}/${TAG}/g" .github/release-notes.md)"
+          case "$TAG" in
+            *-*) notes_body="$(printf '> **Пробная сборка (prerelease).** Для проверки перед релизом, не для массового обновления: автообновление её не предлагает.\n\n%s' "$notes_body")" ;;
+          esac
+          export RELEASE_NOTES="$notes_body"
+
+          tmp_dir="$(mktemp -d)"
+          node -e '
+            const fs = require("fs");
+            const conf = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+            const base = `https://github.com/${process.env.REPO}/releases/download/${process.env.TAG}/`;
+            const macEntry = { url: base + process.env.MAC_ASSET, signature: process.env.MAC_SIG.trim() };
+            const exeEntry = { url: base + process.env.EXE_ASSET, signature: process.env.EXE_SIG.trim() };
+            const msiEntry = { url: base + process.env.MSI_ASSET, signature: process.env.MSI_SIG.trim() };
+            const latest = {
+              version: conf.version,
+              notes: process.env.RELEASE_NOTES.trim(),
+              pub_date: new Date().toISOString(),
+              platforms: {
+                "darwin-aarch64": macEntry,
+                "darwin-x86_64": macEntry,
+                "windows-x86_64": msiEntry,
+                "windows-x86_64-msi": msiEntry,
+                "windows-x86_64-nsis": exeEntry,
+              },
+            };
+            fs.writeFileSync(process.argv[1], JSON.stringify(latest, null, 2));
+          ' "$tmp_dir/latest.json"
+          gh release upload "$TAG" "$tmp_dir/latest.json" --repo "$REPO" --clobber
+          rm -rf "$tmp_dir"
+
   # Проверка черновика: набор ассетов, latest.json, minisign-подписи. Падение => релиз остаётся draft.
   verify:
     name: Verify release assets
-    needs: build
+    needs: finalize-release
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:

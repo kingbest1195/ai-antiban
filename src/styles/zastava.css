@@ -67,9 +67,9 @@
 
 /* Card */
 .zs-card{padding:var(--space-4);border-radius:var(--radius-lg);background:var(--bg-1)}
-.zs-card__head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);margin-bottom:var(--space-2)}
-.zs-card__title{margin:0;font-size:15px;line-height:22px;font-weight:600}
-.zs-card__aside{font-size:12px;line-height:16px;color:var(--ink-3)}
+.zs-card__head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--space-2) var(--space-3);margin-bottom:var(--space-2)}
+.zs-card__title{margin:0;flex:1 1 160px;min-width:0;font-size:15px;line-height:22px;font-weight:600;overflow-wrap:anywhere}
+.zs-card__aside{font-size:12px;line-height:16px;color:var(--ink-3);min-width:0;max-width:100%}
 
 /* Row */
 .zs-rows{margin:0;padding:0;list-style:none}

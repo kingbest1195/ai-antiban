@@ -35,7 +35,7 @@ export interface BackupScreenProps {
   onToast: ShowToast;
 }
 
-/** Экран «Аккаунты, Бункер и SOS»: риск KYC и блокировки Claude, Бункер данных, SOS-дерево и профили Claude Desktop. */
+/** Экран «Аккаунты, Бункер и SOS»: риск проверки личности и блокировки Claude, Бункер данных, SOS-дерево и профили Claude Desktop. */
 export function BackupScreen({
   backup,
   currentIp,
@@ -80,7 +80,7 @@ export function BackupScreen({
 
       <HintCard
         hintId="backup_intro"
-        body="Проверяйте риск KYC и блокировки Claude перед оплатой, сохраняйте бэкап истории в Бункер и держите профили раздельно."
+        body="Проверяйте риск проверки личности и блокировки Claude перед оплатой, сохраняйте бэкап истории в Бункер и держите профили раздельно."
         dismissedHints={localDismissed}
         onDismiss={handleDismiss}
       />

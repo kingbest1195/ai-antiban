@@ -92,25 +92,46 @@ impl NetworkGuard {
         let task = async move {
             #[cfg(not(test))]
             let mut n: u64 = 0;
+            #[cfg(not(test))]
+            let mut sync_tracker = PeriodicSysproxySync::default();
             loop {
                 if let Some(env) = guard.env.get() {
                     guard.check_route_and_tick(env).await;
                     #[cfg(not(test))]
-                    if n.is_multiple_of(20) {
-                        let flags = tokio::task::spawn_blocking(|| {
-                            crate::sysproxy::refresh_if_services_changed();
-                            crate::sysproxy::reconcile_browser_pac_prefs(None);
-                            crate::auditor::AuditProtectionFlags {
-                                sysproxy_active: crate::sysproxy::is_sysproxy_active(),
-                                cli_or_sandbox_protection_active:
-                                    crate::sysproxy::is_cli_protection_enabled()
-                                        || crate::sysproxy::is_browser_pac_policy_active(),
-                                os_pac_deferred: crate::sysproxy::is_os_pac_deferred(),
-                            }
-                        })
-                        .await;
-                        if let Ok(flags) = flags {
-                            env.auditor.set_protection_flags(flags);
+                    {
+                        let chained = crate::sysproxy::get_chained_proxy();
+                        let current_fp = compute_local_route_fingerprint(chained.as_deref());
+                        let sysproxy_active = crate::sysproxy::is_sysproxy_active();
+                        let os_pac_deferred = crate::sysproxy::is_os_pac_deferred();
+                        let needs_refresh = sync_tracker.should_refresh(
+                            &current_fp,
+                            sysproxy_active,
+                            os_pac_deferred,
+                        );
+                        let should_reconcile_prefs =
+                            !cfg!(target_os = "windows") && n.is_multiple_of(20);
+
+                        if needs_refresh || should_reconcile_prefs {
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if needs_refresh {
+                                    crate::sysproxy::refresh_if_services_changed();
+                                }
+                                if should_reconcile_prefs {
+                                    crate::sysproxy::reconcile_browser_pac_prefs(None);
+                                }
+                            })
+                            .await;
+                        }
+                        if needs_refresh || should_reconcile_prefs || n.is_multiple_of(20) {
+                            env.auditor.set_protection_flags(
+                                crate::auditor::AuditProtectionFlags {
+                                    sysproxy_active: crate::sysproxy::is_sysproxy_active(),
+                                    cli_or_sandbox_protection_active:
+                                        crate::sysproxy::is_cli_protection_enabled()
+                                            || crate::sysproxy::is_browser_pac_policy_active(),
+                                    os_pac_deferred: crate::sysproxy::is_os_pac_deferred(),
+                                },
+                            );
                         }
                     }
                 }
@@ -370,5 +391,67 @@ impl NetworkGuard {
             Some(env) => self.check_route_and_tick(env).await,
             None => self.check_route_and_tick(&Env::from_ctx(ctx.clone())).await,
         }
+    }
+}
+
+/// Tracks the last route/proxy state synced via `refresh_if_services_changed()` so steady-state
+/// ticks never re-open the ownership journal or rewrite WinINet/browser policies every 5 seconds.
+/// When `os_pac_deferred` is set (macOS temporary VPN DNS), retries at most once every 5s;
+/// otherwise performs a low-frequency self-heal & newly-installed-browser check every 120s.
+#[derive(Default)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct PeriodicSysproxySync {
+    last_route_fp: Option<String>,
+    last_active: bool,
+    last_refresh_at: Option<Instant>,
+}
+
+impl PeriodicSysproxySync {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) const DEFERRED_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) const SELF_HEAL_INTERVAL: Duration = Duration::from_secs(120);
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn should_refresh(
+        &mut self,
+        route_fp: &str,
+        sysproxy_active: bool,
+        os_pac_deferred: bool,
+    ) -> bool {
+        self.should_refresh_at(route_fp, sysproxy_active, os_pac_deferred, Instant::now())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn should_refresh_at(
+        &mut self,
+        route_fp: &str,
+        sysproxy_active: bool,
+        os_pac_deferred: bool,
+        now: Instant,
+    ) -> bool {
+        if !sysproxy_active {
+            self.last_active = false;
+            self.last_route_fp = None;
+            self.last_refresh_at = None;
+            return false;
+        }
+        let route_or_active_changed =
+            !self.last_active || self.last_route_fp.as_deref() != Some(route_fp);
+        let interval = if os_pac_deferred {
+            Self::DEFERRED_RETRY_INTERVAL
+        } else {
+            Self::SELF_HEAL_INTERVAL
+        };
+        let timer_due = self
+            .last_refresh_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= interval);
+        let refresh = route_or_active_changed || timer_due;
+        if refresh {
+            self.last_active = true;
+            self.last_route_fp = Some(route_fp.to_string());
+            self.last_refresh_at = Some(now);
+        }
+        refresh
     }
 }

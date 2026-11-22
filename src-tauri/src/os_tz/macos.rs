@@ -106,6 +106,17 @@ pub(super) fn current_iana_timezone() -> Result<String, String> {
     iana_time_zone::get_timezone().map_err(|e| e.to_string())
 }
 
+pub(super) fn parse_defaults_auto_tz_output(success: bool, stdout: &str) -> Option<bool> {
+    if !success {
+        return None;
+    }
+    match stdout.trim() {
+        "1" | "true" | "YES" => Some(true),
+        "0" | "false" | "NO" => Some(false),
+        _ => None,
+    }
+}
+
 pub(super) fn is_auto_tz_enabled() -> Result<Option<bool>, String> {
     if !os_tz_effects_enabled() {
         return Ok(None);
@@ -118,15 +129,11 @@ pub(super) fn is_auto_tz_enabled() -> Result<Option<bool>, String> {
         ])
         .output();
     match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            match s.as_str() {
-                "1" | "true" | "YES" => Ok(Some(true)),
-                "0" | "false" | "NO" => Ok(Some(false)),
-                _ => Ok(None),
-            }
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            Ok(parse_defaults_auto_tz_output(o.status.success(), &stdout))
         }
-        _ => Ok(Some(false)),
+        Err(_) => Ok(None),
     }
 }
 

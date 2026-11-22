@@ -250,9 +250,8 @@ fn build_browser_command(
     args: &[String],
     tz_for_spawn: Option<&str>,
 ) -> Command {
-    #[cfg(target_os = "windows")]
-    let mut cmd = crate::sysproxy::silent_command(executable_path);
-    #[cfg(not(target_os = "windows"))]
+    // GUI browsers are launched directly without CREATE_NO_WINDOW (`silent_command`)
+    // so Windows Defender does not treat windowless Chromium spawning as suspicious.
     let mut cmd = Command::new(executable_path);
 
     cmd.args(args)
@@ -293,5 +292,33 @@ mod tests {
         // Empty profile_dir or empty cmdline must never match.
         assert!(!is_sandbox_browser_cmdline(matching_cmd, Path::new("")));
         assert!(!is_sandbox_browser_cmdline("", profile_dir));
+    }
+
+    #[test]
+    fn build_browser_command_preserves_sandbox_args_and_tz_without_silent_command() {
+        let profile_dir = Path::new("/tmp/zastava-clean/clean-profiles/cr-test-2");
+        let args = build_hardened_chromium_args_for_engine(
+            profile_dir,
+            18899,
+            Some("https://claude.ai"),
+            "edge",
+        );
+        let cmd = build_browser_command("msedge.exe", &args, Some("Europe/Amsterdam"));
+        assert_eq!(cmd.get_program(), "msedge.exe");
+        let got_args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            got_args
+                .iter()
+                .any(|a| a == "--proxy-server=http://127.0.0.1:18899")
+        );
+        assert!(got_args.iter().any(|a| a == "--disable-quic"));
+        assert!(got_args.iter().any(|a| a == "https://claude.ai"));
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == "TZ" && v == Some(std::ffi::OsStr::new("Europe/Amsterdam")))
+        );
     }
 }

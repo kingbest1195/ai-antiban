@@ -23,6 +23,10 @@ use watchers::{
 };
 
 pub fn run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = crate::try_handle_early_cli_args(&args) {
+        std::process::exit(code);
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             handle_single_instance_launch(app, &argv);
@@ -31,7 +35,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // Register panic guard and OS termination signal watcher for systemic proxy clean-up
+            // Register panic guard, Layer 0 shutdown/startup-drain hooks, and OS signal watcher
+            crate::core::shutdown::register_shutdown_hook(|| {
+                startup::note_shutdown_global();
+            });
+            crate::core::shutdown::register_startup_drain_hook(startup::wait_for_startup_drain);
             sysproxy::register_clean_exit_guard();
             sysproxy::spawn_signal_cleanup_watcher();
             // Only the directory is pinned here (cheap). The ownership recovery pass, the
@@ -60,9 +68,19 @@ pub fn run() {
             let (guard_for_watcher, pac_url) = start_proxy(app, &risk_auditor, &app_state);
             app.manage(guard_for_watcher.clone());
 
+            let guard_for_shutdown = guard_for_watcher.clone();
+            crate::core::shutdown::register_tunnel_abort_hook(move || {
+                guard_for_shutdown.abort_all_tunnels_on_shutdown();
+            });
+            let app_for_sandbox_exit = app.handle().clone();
+            crate::core::shutdown::register_sandbox_exit_hook(move || {
+                terminate_sandboxes_once(&app_for_sandbox_exit);
+            });
+
             let startup_state = Arc::new(StartupState::new());
             let startup_for_shutdown = startup_state.clone();
             crate::core::shutdown::register_shutdown_hook(move || {
+                startup::note_shutdown_global();
                 startup_for_shutdown.begin_shutdown();
             });
             app.manage(startup_state.clone());
@@ -104,11 +122,22 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event
-                && window.label() == "main"
-            {
-                let _ = window.hide();
-                api.prevent_close();
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                } else if window.label() == "alert-popup" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(pm) = app.try_state::<proxy::ProxyManager>()
+                            && pm.hold_queue.block_all_checkout_holds().await > 0
+                        {
+                            let _ = app.emit("interceptor://resolved", "");
+                        }
+                    });
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -147,6 +176,8 @@ pub fn run() {
             commands::sysproxy::get_cli_settings,
             commands::sysproxy::set_cli_mode,
             commands::sysproxy::set_sync_ai_tz_enabled,
+            commands::sysproxy::get_keep_system_tz_on_exit,
+            commands::sysproxy::set_keep_system_tz_on_exit,
             commands::sysproxy::open_os_datetime_settings_cmd,
             commands::sysproxy::open_os_network_settings_cmd,
             commands::sysproxy::get_sysproxy_status,
@@ -155,6 +186,13 @@ pub fn run() {
             commands::sysproxy::export_diagnostic_bundle_cmd,
             commands::sysproxy::preview_protection_changes_cmd,
             commands::payment::check_payment_bin,
+            commands::payment::check_card_bin,
+            commands::payment::evaluate_payment_readiness,
+            commands::payment::cancel_and_inspect,
+            commands::payment::allow_checkout_15m,
+            commands::payment::activate_post_payment_quarantine,
+            commands::payment::get_post_payment_quarantine_status,
+            commands::payment::override_post_payment_quarantine,
             commands::updates::check_for_updates,
             commands::updates::install_update,
             commands::updates::toggle_auto_update,
@@ -233,6 +271,9 @@ pub fn run() {
             commands::bunker::open_bunker_folder,
             commands::bunker::convert_web_export,
             commands::bunker::generate_bunker_restore_prompt,
+            commands::bunker::get_payment_passport,
+            commands::bunker::save_payment_passport,
+            commands::bunker::verify_payment_passport,
             commands::sos::get_persona_risk_report,
             commands::sos::update_persona_self_check
         ])
@@ -246,19 +287,8 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
-                static SANDBOX_SHUTDOWN_DONE: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
                 startup::note_shutdown(app_handle);
-                if !SANDBOX_SHUTDOWN_DONE.swap(true, std::sync::atomic::Ordering::SeqCst)
-                    && let Some(sandbox_registry) = app_handle
-                        .try_state::<crate::clean_room::browser_sandbox::SandboxProcessRegistry>()
-                {
-                    let data_dir = app_handle.path().app_data_dir().ok();
-                    crate::clean_room::browser_sandbox::terminate_all_sandboxes_on_exit(
-                        &sandbox_registry,
-                        data_dir.as_deref(),
-                    );
-                }
+                terminate_sandboxes_once(app_handle);
                 // Cmd+Q / closing the last window / external OS exit: run shutdown cleanup only if
                 // it has not already executed via the async tray-quit or updater flows.
                 if let Some(report) = sysproxy::cleanup_on_shutdown_once(Some(app_handle), "quit") {
@@ -290,6 +320,8 @@ fn init_services(
 ) -> Result<(state::AppState, auditor::Auditor), Box<dyn std::error::Error>> {
     let app_state = state::init_app_state(app.handle())
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    let keep_tz = tauri::async_runtime::block_on(app_state.get_keep_system_tz_on_exit());
+    os_tz::set_keep_system_tz_on_exit(keep_tz);
     app.manage(app_state.clone());
 
     let risk_auditor = auditor::Auditor::new()
@@ -326,37 +358,76 @@ fn start_proxy(
     })
 }
 
+fn terminate_sandboxes_once(app_handle: &tauri::AppHandle) {
+    static SANDBOX_SHUTDOWN_DONE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !SANDBOX_SHUTDOWN_DONE.swap(true, std::sync::atomic::Ordering::SeqCst)
+        && let Some(sandbox_registry) =
+            app_handle.try_state::<crate::clean_room::browser_sandbox::SandboxProcessRegistry>()
+    {
+        let data_dir = app_handle.path().app_data_dir().ok();
+        crate::clean_room::browser_sandbox::terminate_all_sandboxes_on_exit(
+            &sandbox_registry,
+            data_dir.as_deref(),
+        );
+    }
+}
+
+fn run_default_protection_with(
+    is_shutting_down: impl Fn() -> bool,
+    enable_sys: impl FnOnce(),
+    enable_cli: impl FnOnce(),
+) {
+    if is_shutting_down() {
+        return;
+    }
+    enable_sys();
+    if is_shutting_down() {
+        return;
+    }
+    enable_cli();
+}
+
 /// Protection is ON by default: route AI domains through the local interceptor.
 fn enable_default_protection(app: &tauri::AppHandle, app_state: &state::AppState, pac_url: &str) {
-    match sysproxy::enable_sysproxy(pac_url) {
-        Ok(status) => println!(
-            "Застава: сетевой контроль включен ({} сетевых служб)",
-            status.services_configured.len()
-        ),
-        Err(e) => {
-            crate::diagnostics::record("startup:sysproxy", &e);
-            if e.starts_with("ADMIN_AUTH_REQUIRED:") {
-                let _ = app.emit("sysproxy://admin-auth-required", &e);
+    run_default_protection_with(
+        startup::is_shutting_down_global,
+        || match sysproxy::enable_sysproxy(pac_url) {
+            Ok(status) => println!(
+                "Застава: сетевой контроль включен ({} сетевых служб)",
+                status.services_configured.len()
+            ),
+            Err(e) => {
+                crate::diagnostics::record("startup:sysproxy", &e);
+                if e.starts_with("ADMIN_AUTH_REQUIRED:") {
+                    let _ = app.emit("sysproxy://admin-auth-required", &e);
+                }
+                eprintln!("Застава: не удалось включить защиту при старте: {e}");
             }
-            eprintln!("Застава: не удалось включить защиту при старте: {e}");
-        }
-    }
-    let (mode, tz) = tauri::async_runtime::block_on(async {
-        let data = app_state.get_data().await;
-        (data.cli_mode, data.effective_sync_tz())
-    });
-    let cli_report = sysproxy::enable_cli_and_ide_protection_with(pac_url, mode, tz.as_deref());
-    if cli_report.enabled {
-        println!(
-            "Застава: защита CLI/IDE включена ({})",
-            cli_report.configured_targets.join(", ")
-        );
-    } else if let Some(err) = &cli_report.error {
-        eprintln!("Застава: {err}");
-    }
-    for note in &cli_report.notes {
-        eprintln!("Застава: {note}");
-    }
+        },
+        || {
+            let (mode, tz) = tauri::async_runtime::block_on(async {
+                let data = app_state.get_data().await;
+                (data.cli_mode, data.effective_sync_tz())
+            });
+            if startup::is_shutting_down_global() {
+                return;
+            }
+            let cli_report =
+                sysproxy::enable_cli_and_ide_protection_with(pac_url, mode, tz.as_deref());
+            if cli_report.enabled {
+                println!(
+                    "Застава: защита CLI/IDE включена ({})",
+                    cli_report.configured_targets.join(", ")
+                );
+            } else if let Some(err) = &cli_report.error {
+                eprintln!("Застава: {err}");
+            }
+            for note in &cli_report.notes {
+                eprintln!("Застава: {note}");
+            }
+        },
+    );
 }
 
 /// The real steps of the background start (see [`startup`]).
@@ -379,7 +450,9 @@ impl StartupSteps for RealSteps {
                     Ok(report) => eprintln!("Застава: {}", report.summary()),
                     Err(e) => eprintln!("Застава: восстановление отложено, {e}"),
                 }
-                os_tz::recover_baseline_on_start(dir);
+                if !os_tz::keep_system_tz_on_exit() {
+                    os_tz::recover_baseline_on_start(dir);
+                }
             }
             None => eprintln!("Застава: каталог данных недоступен, восстановление отложено"),
         }

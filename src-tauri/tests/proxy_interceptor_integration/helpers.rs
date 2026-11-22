@@ -75,5 +75,6 @@ pub(crate) fn detecting_payload(id: &str) -> RiskInterceptPayload {
         detected_at_ms: 1_700_000_000_000,
         phase: PHASE_DETECTING.to_string(),
         gate_reason: None,
+        checkout_risk: None,
     }
 }

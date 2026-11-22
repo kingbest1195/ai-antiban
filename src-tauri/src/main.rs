@@ -3,15 +3,8 @@
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--cleanup") {
-        std::process::exit(zastava_lib::sysproxy::run_cleanup_cli());
-    }
-    if let Some(error_file) = zastava_lib::cowork_guard::parse_install_cli_args(&args) {
-        std::process::exit(
-            zastava_lib::cowork_guard::run_install_cowork_guard_cli_with_error_file(
-                error_file.as_deref(),
-            ),
-        );
+    if let Some(code) = zastava_lib::try_handle_early_cli_args(&args) {
+        std::process::exit(code);
     }
     zastava_lib::run()
 }

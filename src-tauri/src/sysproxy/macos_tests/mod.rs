@@ -44,5 +44,6 @@ pub(super) fn touched(p: &FakePlatform, svc: &ServiceId) -> bool {
     p.calls().iter().any(|c| c.contains(&key))
 }
 
+mod privileged_tests;
 mod proxy_tests;
 mod vpn_tests;

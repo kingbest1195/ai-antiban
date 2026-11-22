@@ -26,12 +26,16 @@ import {
 import type { AlertState } from "./alertState";
 import { alertDialog as copy, providers as providerCopy } from "../../shared/copy/ru";
 import { formatCountryWithCode } from "../../shared/lib/country";
+import { CheckoutAlertView } from "./CheckoutAlertView";
+import type { CheckoutResolutionAction } from "./CheckoutAlertView";
 import "./alert.css";
+
+export type AlertResolutionAction = InterceptionAction | CheckoutResolutionAction;
 
 export interface AlertWindowProps {
   initialPayload?: RiskInterceptPayload;
   hideIpMode?: boolean;
-  onResolved?: (action?: InterceptionAction) => void;
+  onResolved?: (action?: AlertResolutionAction) => void;
 }
 
 /**
@@ -210,6 +214,16 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
 
   // До первого события нечего показывать: ни демо-данных, ни пустого диалога.
   if (!payload) return null;
+
+  if (payload.scope === "checkout" || payload.checkout_risk) {
+    return (
+      <CheckoutAlertView
+        payload={payload}
+        hideIpMode={effectiveHideIpMode}
+        onResolved={(action) => onResolved?.(action)}
+      />
+    );
+  }
 
   const { report, network_change } = payload;
   const detecting = isDetecting(state);

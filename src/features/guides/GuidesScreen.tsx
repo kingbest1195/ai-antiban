@@ -33,7 +33,7 @@ export function GuidesScreen({
   navKey,
   currentIp = "185.212.102.40",
   hideIpMode = false,
-  currentCountry = "NL",
+  currentCountry,
   currentTimezone,
   onPinIp,
   onOpenPaymentTools,
@@ -60,7 +60,8 @@ export function GuidesScreen({
   }, [initialGuide, navKey]);
 
   const { copiedId, copy: copyText } = useCopy(onToast);
-  const resolvedCountry = currentCountry && currentCountry !== "--" ? currentCountry : "NL";
+  const trimmedCountry = currentCountry?.trim();
+  const resolvedCountry = trimmedCountry && trimmedCountry !== "--" ? trimmedCountry : undefined;
 
   const ctx: GuideContextValue = {
     currentIp,

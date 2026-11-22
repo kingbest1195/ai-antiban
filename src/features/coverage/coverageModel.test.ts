@@ -333,7 +333,13 @@ describe("кнопка «Перезапустить Antigravity с защито�
     const outcomes: RestartOutcome[] = ["restarted", "not_closed", "needs_automation_permission", "launch_failed", "not_installed", "unsupported"];
     const views = outcomes.map((o) => restartResult(o));
     expect(new Set(views.map((v) => v.title)).size).toBe(outcomes.length);
-    expect(restartResult("restarted")).toMatchObject({ tone: "ok", text: "Сделайте запрос: статус обновится сам." });
+    expect(restartResult("restarted")).toMatchObject({
+      tone: "ok",
+      title: copy.restart.result.restarted.title,
+      text: copy.restart.result.restarted.text,
+    });
+    expect(restartResult("restarted").text).toContain("Сделайте запрос: статус обновится сам.");
+    expect(restartResult("restarted").text).toContain("После выхода из Заставы это приложение понадобится перезапустить.");
     expect(restartResult("not_closed").tone).toBe("warn");
     expect(restartResult("not_closed").text).toContain("закройте его сами");
     expect(restartResult("needs_automation_permission").text).toContain("Системные настройки → Конфиденциальность и безопасность → Автоматизация");

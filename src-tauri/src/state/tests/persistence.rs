@@ -75,12 +75,23 @@ async fn test_persistence_save_load() {
         .expect("set strict pinning");
 
     // Reload fresh instance from disk
-    let reloaded = AppState::load_or_default(file_path);
+    let reloaded = AppState::load_or_default(file_path.clone());
     assert_eq!(
         reloaded.get_pinned_ip().await,
         Some("95.217.1.1".to_string())
     );
     assert!(reloaded.is_strict_pinning_enabled().await);
+    assert!(!reloaded.get_keep_system_tz_on_exit().await);
+
+    {
+        let _g = crate::os_tz::KEEP_TZ_TEST_LOCK.lock().await;
+        reloaded.set_keep_system_tz_on_exit(true).await.unwrap();
+        assert!(reloaded.get_keep_system_tz_on_exit().await);
+        assert!(crate::os_tz::keep_system_tz_on_exit());
+        let reloaded2 = AppState::load_or_default(file_path);
+        assert!(reloaded2.get_keep_system_tz_on_exit().await);
+        crate::os_tz::set_keep_system_tz_on_exit(false);
+    }
 }
 
 #[tokio::test]
@@ -555,6 +566,7 @@ fn test_v3_schema_defaults_and_roundtrip_serialization() {
         warmup_started_at: Some(1_750_000_200),
         launchpad_step: 3,
         completed_checklist: vec!["no_ru_mail".to_string()],
+        post_payment_quarantine: None,
     });
     d.clean_room.active_profile_id = Some("cr-1".to_string());
     d.clean_room

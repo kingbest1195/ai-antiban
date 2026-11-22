@@ -580,9 +580,7 @@ describe("Mounted v3 Navigation & Lifecycle Flows", () => {
       m.result,
       (el) => (el.props as { children?: unknown }).children === "Открыть профили и SOS",
     );
-    expect(backupBtn).toHaveLength(1);
-    (backupBtn[0].props as { onClick: () => void }).onClick();
-    expect(onPushRoute).toHaveBeenCalledWith({ page: "backup" });
+    expect(backupBtn).toHaveLength(0);
 
     m.unmount();
   });

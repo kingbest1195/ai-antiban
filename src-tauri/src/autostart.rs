@@ -176,7 +176,7 @@ pub fn query_os_autostart_active() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        return is_windows_run_installed();
+        is_windows_run_installed()
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

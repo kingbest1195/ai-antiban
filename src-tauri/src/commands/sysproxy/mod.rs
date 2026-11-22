@@ -23,6 +23,22 @@ pub(crate) use crate::diagnostics::{
 #[cfg_attr(not(test), allow(unused_imports))]
 use crate::{diagnostics, routing};
 
+pub(crate) async fn restore_os_tz_on_disable_with(
+    state: &state::AppState,
+    data_dir: Option<&std::path::Path>,
+    restore_fn: impl FnOnce(&std::path::Path) -> Result<bool, String> + Send + 'static,
+) -> Result<bool, String> {
+    if state.get_keep_system_tz_on_exit().await {
+        return Ok(false);
+    }
+    let Some(dir) = data_dir.map(std::path::Path::to_path_buf) else {
+        return Ok(false);
+    };
+    tokio::task::spawn_blocking(move || restore_fn(&dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Shared system-proxy toggle used by both the `toggle_sysproxy` Tauri command and the tray menu.
 pub(crate) async fn toggle_sysproxy_shared(
     enable: bool,
@@ -40,26 +56,21 @@ pub(crate) async fn toggle_sysproxy_shared(
         Ok(enabled)
     } else {
         crate::startup::note_user_off(app);
-        if let Some(dir) = os_tz::resolve_app_data_dir(Some(app)) {
-            let restore_res =
-                tokio::task::spawn_blocking(move || os_tz::restore_if_synced_on_disable(&dir))
-                    .await;
-            match restore_res {
-                Ok(Ok(true)) => {
-                    eprintln!(
-                        "Застава: системный часовой пояс ОС восстановлен при выключении защиты."
-                    );
-                }
-                Ok(Ok(false)) => {}
-                Ok(Err(err)) => {
-                    crate::diagnostics::record("cmd:os_tz_restore_on_disable", &err);
-                    eprintln!(
-                        "Застава: не удалось восстановить часовой пояс ОС при выключении защиты: {err}"
-                    );
-                }
-                Err(err) => {
-                    crate::diagnostics::record("cmd:os_tz_restore_on_disable", &err.to_string());
-                }
+        let dir = os_tz::resolve_app_data_dir(Some(app));
+        match restore_os_tz_on_disable_with(state, dir.as_deref(), |d| {
+            os_tz::restore_if_synced_on_disable(d)
+        })
+        .await
+        {
+            Ok(true) => {
+                eprintln!("Застава: системный часовой пояс ОС восстановлен при выключении защиты.");
+            }
+            Ok(false) => {}
+            Err(err) => {
+                crate::diagnostics::record("cmd:os_tz_restore_on_disable", &err);
+                eprintln!(
+                    "Застава: не удалось восстановить часовой пояс ОС при выключении защиты: {err}"
+                );
             }
         }
         let report = sysproxy::cleanup_all_persistent_settings();
@@ -215,6 +226,27 @@ pub async fn set_sync_ai_tz_enabled(
         .map_err(|e| e.to_string())?;
     auditor.resolver.check_cache().os.clear().await;
     read_cli_settings(&state).await
+}
+
+/// Returns whether Zastava keeps the synced OS system timezone across exit, update, and disable.
+#[tauri::command]
+pub async fn get_keep_system_tz_on_exit(
+    state: tauri::State<'_, state::AppState>,
+) -> Result<bool, String> {
+    Ok(state.get_keep_system_tz_on_exit().await)
+}
+
+/// Updates `keep_system_tz_on_exit` in persistent state and in the lock-free `os_tz` cache.
+#[tauri::command]
+pub async fn set_keep_system_tz_on_exit(
+    enabled: bool,
+    state: tauri::State<'_, state::AppState>,
+) -> Result<bool, String> {
+    state
+        .set_keep_system_tz_on_exit(enabled)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(enabled)
 }
 
 /// Stores the zone and, while the time zone switch is on, writes only the time zone / locale keys

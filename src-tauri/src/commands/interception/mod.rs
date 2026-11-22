@@ -116,6 +116,7 @@ pub async fn simulate_interception(
             .unwrap_or(0),
         phase: proxy::hold_queue::PHASE_READY.to_string(),
         gate_reason,
+        checkout_risk: None,
     };
 
     // Emit first, then show: the hidden window must not display its placeholder content.

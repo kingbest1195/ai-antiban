@@ -4,13 +4,17 @@ use super::baseline::{read_baseline, remove_baseline, write_baseline_atomic};
 use super::mapping::{validate_iana_tz, zones_equivalent};
 use super::{
     BASELINE_FILE_NAME, EXIT_RESTORE_RAN, OS_TZ_OPS, OsTzBaseline, OsTzPlatform, OsTzSyncStatus,
-    RealOsTzPlatform, resolve_app_data_dir,
+    RealOsTzPlatform, keep_system_tz_on_exit, resolve_app_data_dir,
 };
 use chrono::Utc;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-fn build_status(platform: &dyn OsTzPlatform, baseline: Option<&OsTzBaseline>) -> OsTzSyncStatus {
+fn build_status_with_keep(
+    platform: &dyn OsTzPlatform,
+    baseline: Option<&OsTzBaseline>,
+    keep_on_exit: bool,
+) -> OsTzSyncStatus {
     let current_os_tz = platform.current_iana_timezone().ok();
     match baseline {
         Some(b) => OsTzSyncStatus {
@@ -18,7 +22,7 @@ fn build_status(platform: &dyn OsTzPlatform, baseline: Option<&OsTzBaseline>) ->
             current_os_tz,
             original_os_tz: Some(b.original_iana.clone()),
             synced_target_tz: Some(b.synced_iana.clone()),
-            auto_restore_pending: true,
+            auto_restore_pending: !keep_on_exit,
         },
         None => OsTzSyncStatus {
             synced: false,
@@ -30,9 +34,13 @@ fn build_status(platform: &dyn OsTzPlatform, baseline: Option<&OsTzBaseline>) ->
     }
 }
 
+fn build_status(platform: &dyn OsTzPlatform, baseline: Option<&OsTzBaseline>) -> OsTzSyncStatus {
+    build_status_with_keep(platform, baseline, keep_system_tz_on_exit())
+}
+
 /// Returns the current OS timezone sync status using `RealOsTzPlatform`.
 pub fn get_os_timezone_sync_status(data_dir: &Path) -> Result<OsTzSyncStatus, String> {
-    get_os_timezone_sync_status_with(&RealOsTzPlatform, data_dir)
+    get_os_timezone_sync_status_with_keep(&RealOsTzPlatform, data_dir, keep_system_tz_on_exit())
 }
 
 /// Returns the current OS timezone sync status using an injectable `OsTzPlatform`.
@@ -40,15 +48,33 @@ pub fn get_os_timezone_sync_status_with(
     platform: &dyn OsTzPlatform,
     data_dir: &Path,
 ) -> Result<OsTzSyncStatus, String> {
+    get_os_timezone_sync_status_with_keep(platform, data_dir, keep_system_tz_on_exit())
+}
+
+/// Returns the current OS timezone sync status with an explicit `keep_on_exit` flag.
+pub fn get_os_timezone_sync_status_with_keep(
+    platform: &dyn OsTzPlatform,
+    data_dir: &Path,
+    keep_on_exit: bool,
+) -> Result<OsTzSyncStatus, String> {
     let _guard = OS_TZ_OPS.lock().unwrap_or_else(|e| e.into_inner());
     let baseline = read_baseline(data_dir)?;
-    Ok(build_status(platform, baseline.as_ref()))
+    Ok(build_status_with_keep(
+        platform,
+        baseline.as_ref(),
+        keep_on_exit,
+    ))
 }
 
 /// Syncs the OS system timezone to `target_iana`, saving the original baseline atomically before
 /// modifying the OS. Subsequent syncs preserve the original baseline.
 pub fn sync_os_timezone(data_dir: &Path, target_iana: &str) -> Result<OsTzSyncStatus, String> {
-    sync_os_timezone_with(&RealOsTzPlatform, data_dir, target_iana)
+    sync_os_timezone_with_keep(
+        &RealOsTzPlatform,
+        data_dir,
+        target_iana,
+        keep_system_tz_on_exit(),
+    )
 }
 
 /// Injectable version of [`sync_os_timezone`] for unit tests.
@@ -56,6 +82,16 @@ pub fn sync_os_timezone_with(
     platform: &dyn OsTzPlatform,
     data_dir: &Path,
     target_iana: &str,
+) -> Result<OsTzSyncStatus, String> {
+    sync_os_timezone_with_keep(platform, data_dir, target_iana, false)
+}
+
+/// Injectable version of [`sync_os_timezone`] with an explicit `keep_on_exit` flag.
+pub fn sync_os_timezone_with_keep(
+    platform: &dyn OsTzPlatform,
+    data_dir: &Path,
+    target_iana: &str,
+    keep_on_exit: bool,
 ) -> Result<OsTzSyncStatus, String> {
     let _guard = OS_TZ_OPS.lock().unwrap_or_else(|e| e.into_inner());
     let clean_target = validate_iana_tz(target_iana)?;
@@ -120,7 +156,11 @@ pub fn sync_os_timezone_with(
     baseline.synced_at_utc = Utc::now().to_rfc3339();
     let _ = write_baseline_atomic(data_dir, &baseline);
 
-    Ok(build_status(platform, Some(&baseline)))
+    Ok(build_status_with_keep(
+        platform,
+        Some(&baseline),
+        keep_on_exit,
+    ))
 }
 
 /// Restores the OS system timezone from `os_tz_baseline.json` and removes the baseline file on
@@ -157,12 +197,23 @@ pub fn restore_os_timezone_with(
 }
 
 /// Restores the baseline OS timezone on startup if a previous run crashed while synced.
-/// Never panics; keeps `os_tz_baseline.json` intact if restoration fails/is cancelled.
+/// Skipped (keeping `os_tz_baseline.json` intact) when `keep_system_tz_on_exit` is enabled.
 pub fn recover_baseline_on_start(data_dir: &Path) {
-    recover_baseline_on_start_with(&RealOsTzPlatform, data_dir);
+    recover_baseline_on_start_with_keep(&RealOsTzPlatform, data_dir, keep_system_tz_on_exit());
 }
 
 pub fn recover_baseline_on_start_with(platform: &dyn OsTzPlatform, data_dir: &Path) {
+    recover_baseline_on_start_with_keep(platform, data_dir, false);
+}
+
+pub fn recover_baseline_on_start_with_keep(
+    platform: &dyn OsTzPlatform,
+    data_dir: &Path,
+    keep_on_exit: bool,
+) {
+    if keep_on_exit {
+        return;
+    }
     let Ok(Some(baseline)) = read_baseline(data_dir) else {
         return;
     };
@@ -183,14 +234,26 @@ pub fn recover_baseline_on_start_with(platform: &dyn OsTzPlatform, data_dir: &Pa
 }
 
 /// Best-effort restore when disabling system proxy protection (`toggle_sysproxy(false)`).
+/// Skipped (keeping `os_tz_baseline.json` intact) when `keep_system_tz_on_exit` is enabled.
 pub fn restore_if_synced_on_disable(data_dir: &Path) -> Result<bool, String> {
-    restore_if_synced_on_disable_with(&RealOsTzPlatform, data_dir)
+    restore_if_synced_on_disable_with_keep(&RealOsTzPlatform, data_dir, keep_system_tz_on_exit())
 }
 
 pub fn restore_if_synced_on_disable_with(
     platform: &dyn OsTzPlatform,
     data_dir: &Path,
 ) -> Result<bool, String> {
+    restore_if_synced_on_disable_with_keep(platform, data_dir, false)
+}
+
+pub fn restore_if_synced_on_disable_with_keep(
+    platform: &dyn OsTzPlatform,
+    data_dir: &Path,
+    keep_on_exit: bool,
+) -> Result<bool, String> {
+    if keep_on_exit {
+        return Ok(false);
+    }
     if read_baseline(data_dir)?.is_none() {
         return Ok(false);
     }
@@ -199,8 +262,11 @@ pub fn restore_if_synced_on_disable_with(
 }
 
 /// Best-effort non-panicking restore on application quit. Guarded so `ExitRequested` + `Exit`
-/// cannot prompt twice in the same process exit.
+/// cannot prompt twice in the same process exit, and skipped when `keep_system_tz_on_exit` is true.
 pub fn restore_on_exit_once(app: Option<&tauri::AppHandle>) {
+    if keep_system_tz_on_exit() {
+        return;
+    }
     if EXIT_RESTORE_RAN.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -217,4 +283,21 @@ pub fn restore_on_exit_once(app: Option<&tauri::AppHandle>) {
             baseline.original_iana
         );
     }
+}
+
+/// Testable exit-restore seam respecting explicit `keep_on_exit` without touching the global
+/// `EXIT_RESTORE_RAN` flag.
+pub fn restore_on_exit_once_with_keep(
+    platform: &dyn OsTzPlatform,
+    data_dir: &Path,
+    keep_on_exit: bool,
+) -> Result<bool, String> {
+    if keep_on_exit {
+        return Ok(false);
+    }
+    if read_baseline(data_dir)?.is_none() {
+        return Ok(false);
+    }
+    restore_os_timezone_with(platform, data_dir)?;
+    Ok(true)
 }

@@ -1,4 +1,4 @@
-//! Process inspection for running Chromium-family browsers (`ps` / `tasklist`).
+//! Process inspection for running Chromium-family browsers (`ps` / native Win32 snapshot).
 
 use super::RunningBrowserInfo;
 use super::chromium::{CHROMIUM_BROWSERS, clean_pac_url, same_pac_url};
@@ -35,10 +35,24 @@ fn linux_exe_basename(line: &str) -> Option<String> {
         .map(|s| s.to_ascii_lowercase())
 }
 
-fn parse_tasklist_csv_image(line: &str) -> Option<String> {
-    let first = line.trim().split(',').next()?;
-    let unquoted = first.trim().trim_matches('"').trim().to_ascii_lowercase();
-    (!unquoted.is_empty()).then_some(unquoted)
+pub(crate) fn record_windows_running_browsers(
+    entries: &[crate::win_native::process::ProcessEntry],
+    map: &mut BTreeMap<&'static str, RunningBrowserInfo>,
+) {
+    for entry in entries {
+        let image = crate::win_native::extract_exe_basename(&entry.exe_name)
+            .trim()
+            .to_ascii_lowercase();
+        if image.is_empty() {
+            continue;
+        }
+        for browser in CHROMIUM_BROWSERS {
+            if browser.process_names.iter().any(|p| *p == image) {
+                let info = map.entry(browser.id).or_default();
+                info.running = true;
+            }
+        }
+    }
 }
 
 /// Inspects running OS processes via `probe` and returns a map keyed by [`ChromiumBrowserDef::id`].
@@ -96,17 +110,10 @@ pub fn inspect_running_browsers(
             }
         }
         Os::Windows => {
-            let listing = probe.run("tasklist", &["/FO", "CSV", "/NH"])?;
-            for line in listing.lines() {
-                let Some(image) = parse_tasklist_csv_image(line) else {
-                    continue;
-                };
-                for browser in CHROMIUM_BROWSERS {
-                    if browser.process_names.iter().any(|p| *p == image) {
-                        let entry = map.entry(browser.id).or_default();
-                        entry.running = true;
-                    }
-                }
+            if crate::sysproxy::os_effects_enabled()
+                && let Ok(entries) = crate::win_native::process::list_processes()
+            {
+                record_windows_running_browsers(&entries, &mut map);
             }
         }
     }

@@ -26,7 +26,7 @@ pub trait SystemInfo: Send + Sync {
     /// User locale tags from the OS settings (macOS `AppleLocale`/`AppleLanguages`, Windows
     /// regional settings).
     fn os_locales(&self) -> Result<Vec<String>, SystemReadError>;
-    /// Text of the OS DNS configuration (`scutil --dns` / `ipconfig /all`).
+    /// Text of the OS DNS configuration (`scutil --dns` / native Win32 network APIs).
     fn dns_listing(&self) -> Result<String, SystemReadError>;
     /// Output of `reg query` of the location consent value (Windows only).
     fn location_consent(&self, machine_wide: bool) -> Result<String, SystemReadError>;
@@ -220,10 +220,19 @@ impl SystemInfo for RealSystem {
         run_for_text(crate::sysproxy::silent_command("scutil").arg("--dns"))
     }
 
-    // Not built locally (cfg(windows)): verified by the Windows CI only.
     #[cfg(target_os = "windows")]
     fn dns_listing(&self) -> Result<String, SystemReadError> {
-        run_for_text(crate::sysproxy::silent_command("ipconfig").arg("/all"))
+        if !crate::sysproxy::os_effects_enabled() {
+            return Err(SystemReadError::Failed);
+        }
+        let params = crate::win_native::network::get_network_params().ok();
+        let adapters = crate::win_native::network::get_adapters_addresses().unwrap_or_default();
+        let text = crate::win_native::network::format_dns_listing(params.as_ref(), &adapters);
+        if text.trim().is_empty() {
+            Err(SystemReadError::Failed)
+        } else {
+            Ok(text)
+        }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -262,7 +271,7 @@ impl SystemInfo for RealSystem {
 }
 
 /// Stdout of a finished command; a spawn error, a non-zero exit or an empty output is `Failed`.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn run_for_text(cmd: &mut std::process::Command) -> Result<String, SystemReadError> {
     match cmd.output() {
         Ok(out) if out.status.success() => {

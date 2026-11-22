@@ -1,6 +1,6 @@
-//! Task Scheduler XML generation, validation, and Windows CLI output parsing.
+//! Task Scheduler XML generation, validation, and Windows text decoding helpers.
 
-use super::COWORK_TASK_FULL_NAME;
+use super::{APPLY_COWORK_GUARD_ONCE_ARG, COWORK_TASK_FULL_NAME};
 
 /// Parses `reg query ... /v Start` stdout and extracts the `REG_DWORD` value (e.g. `0x2` -> `2`).
 pub fn parse_reg_start_dword(output: &str) -> Option<u32> {
@@ -41,11 +41,11 @@ pub fn parse_sc_running(output: &str) -> bool {
     })
 }
 
-/// Verifies `schtasks /Query /TN "Zastava\CoworkVMServiceManualGuard" /XML` output:
+/// Verifies Task Scheduler XML for `\Zastava\CoworkVMServiceManualGuard`:
 /// - Boot trigger (`<BootTrigger>`)
 /// - Principal is `SYSTEM` (`S-1-5-18`, `NT AUTHORITY\SYSTEM`, `NT AUTHORITY\СИСТЕМА`, `<UserId>SYSTEM</UserId>`)
 /// - Highest privileges (`<RunLevel>HighestAvailable</RunLevel>`)
-/// - Does not execute anything inside user-writable `%LOCALAPPDATA%` / `AppData\Local`
+/// - Runs `zastava.exe` with `--apply-cowork-guard-once` (no unexpanded `%LOCALAPPDATA%` or shells)
 pub fn is_task_xml_healthy(xml: &str) -> bool {
     let lower = xml.to_lowercase();
     let has_boot = lower.contains("<boottrigger>");
@@ -55,11 +55,13 @@ pub fn is_task_xml_healthy(xml: &str) -> bool {
         || lower.contains("<userid>system</userid>")
         || lower.contains("<userid>система</userid>");
     let is_highest = lower.contains("<runlevel>highestavailable</runlevel>");
-    let uses_powershell = lower.contains("powershell.exe");
-    let no_user_writable = !lower.contains("appdata\\local")
-        && !lower.contains("%localappdata%")
-        && !lower.contains("zastava.exe");
-    has_boot && is_system && is_highest && uses_powershell && no_user_writable
+    let uses_native_guard =
+        lower.contains("zastava.exe") && lower.contains(APPLY_COWORK_GUARD_ONCE_ARG);
+    let no_shell = !lower.contains("powershell")
+        && !lower.contains("pwsh")
+        && !lower.contains("cmd.exe")
+        && !lower.contains("%localappdata%");
+    has_boot && is_system && is_highest && uses_native_guard && no_shell
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,12 +71,14 @@ pub enum SchtasksQueryError {
     Other,
 }
 
-/// Classifies `schtasks.exe /Query` error output across English and Russian Windows locales.
+/// Classifies Task Scheduler error output across English and Russian Windows locales.
 pub fn classify_schtasks_query_error(stderr: &str, stdout: &str) -> SchtasksQueryError {
     let combined = format!("{stderr}\n{stdout}").to_lowercase();
     if combined.contains("access is denied")
+        || combined.contains("access denied")
         || combined.contains("отказано в доступе")
         || combined.contains("0x80070005")
+        || combined.contains("e_accessdenied")
         || combined.contains("недостаточно прав")
     {
         return SchtasksQueryError::AccessDenied;
@@ -90,40 +94,12 @@ pub fn classify_schtasks_query_error(stderr: &str, stdout: &str) -> SchtasksQuer
     SchtasksQueryError::Other
 }
 
-/// Fallback verification for `schtasks.exe /Query /TN ... /FO LIST [/V]` when `/XML` is denied.
+/// Validates task metadata text output when inspected as a list.
 pub fn is_task_list_healthy(output: &str) -> bool {
     let lower = output.to_lowercase();
     let has_task_name = lower.contains("coworkvmservicemanualguard");
-    let no_user_writable = !lower.contains("appdata\\local")
-        && !lower.contains("%localappdata%")
-        && !lower.contains("zastava.exe");
-    has_task_name && no_user_writable
-}
-
-/// Fixed inline PowerShell payload executed by `\Zastava\CoworkVMServiceManualGuard` as SYSTEM.
-/// Uses zero user-writable paths; sets `Start = 3` (Manual, NEVER 4 Disabled) and stops the
-/// service if running while `claude.exe` is not running.
-pub fn cowork_guard_inline_ps() -> &'static str {
-    "$ErrorActionPreference='SilentlyContinue';\
-     $names=@('CoworkVMService');\
-     Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\*' |\
-       Where-Object { $_.ImagePath -like '*WindowsApps\\Claude_*\\app\\resources\\cowork-svc.exe*' } |\
-       ForEach-Object { if ($_.PSChildName -and ($names -notcontains $_.PSChildName)) { $names += $_.PSChildName } };\
-     $claudeRunning = @(Get-Process -Name 'claude' -ErrorAction SilentlyContinue).Count -gt 0;\
-     foreach ($n in $names) {\
-       $reg='HKLM:\\SYSTEM\\CurrentControlSet\\Services\\'+$n;\
-       if (Test-Path $reg) {\
-         $cur=(Get-ItemProperty -Path $reg -Name 'Start').Start;\
-         if ($cur -ne 3) {\
-           Set-Service -Name $n -StartupType Manual;\
-           Set-ItemProperty -Path $reg -Name 'Start' -Value 3 -Type DWord;\
-         }\
-         $svc=Get-Service -Name $n;\
-         if ($svc -and $svc.Status -eq 'Running' -and -not $claudeRunning) {\
-           Stop-Service -Name $n -Force;\
-         }\
-       }\
-     }"
+    let no_unexpanded = !lower.contains("%localappdata%");
+    has_task_name && no_unexpanded
 }
 
 fn xml_escape_text(input: &str) -> String {
@@ -140,17 +116,10 @@ fn xml_escape_text(input: &str) -> String {
 }
 
 /// Builds the Task Scheduler 1.2 XML for `\Zastava\CoworkVMServiceManualGuard` (`AtStartup` as
-/// `NT AUTHORITY\SYSTEM`, `HighestAvailable`). Uses `System32\WindowsPowerShell\v1.0\powershell.exe`
-/// (no user-writable paths, no `-EncodedCommand`, no `-ExecutionPolicy Bypass`).
-pub fn build_windows_task_xml_with_system_root(system_root: &str) -> String {
-    let root = system_root.trim_end_matches(['\\', '/']);
-    let ps_exe = xml_escape_text(&format!(
-        r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe"
-    ));
-    let ps_args = xml_escape_text(&format!(
-        "-NoProfile -NonInteractive -WindowStyle Hidden -Command \"{}\"",
-        cowork_guard_inline_ps()
-    ));
+/// `NT AUTHORITY\SYSTEM`, `HighestAvailable`) invoking `exe_path --apply-cowork-guard-once`.
+pub fn build_windows_task_xml_with_exe(exe_path: &str) -> String {
+    let escaped_exe = xml_escape_text(exe_path.trim());
+    let escaped_arg = xml_escape_text(APPLY_COWORK_GUARD_ONCE_ARG);
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -189,8 +158,8 @@ pub fn build_windows_task_xml_with_system_root(system_root: &str) -> String {
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{ps_exe}</Command>
-      <Arguments>{ps_args}</Arguments>
+      <Command>{escaped_exe}</Command>
+      <Arguments>{escaped_arg}</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -198,13 +167,14 @@ pub fn build_windows_task_xml_with_system_root(system_root: &str) -> String {
     )
 }
 
-/// Builds the Task Scheduler XML using `%SystemRoot%` (defaulting to `C:\Windows`).
+/// Builds the Task Scheduler XML using the current `zastava.exe` path.
 pub fn build_windows_task_xml() -> String {
-    let sys_root = std::env::var("SystemRoot")
+    let exe = std::env::current_exe()
         .ok()
+        .map(|p| p.to_string_lossy().into_owned())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| r"C:\Windows".to_string());
-    build_windows_task_xml_with_system_root(&sys_root)
+        .unwrap_or_else(|| r"C:\Program Files\Zastava\zastava.exe".to_string());
+    build_windows_task_xml_with_exe(&exe)
 }
 
 pub fn build_windows_summary(
@@ -249,7 +219,7 @@ pub fn build_windows_summary(
     (needs_repair, summary)
 }
 
-/// Parses `tasklist /FI "IMAGENAME eq claude.exe" /FO CSV /NH` output to check whether `claude.exe` is running.
+/// Parses CSV process listing output to check whether `claude.exe` is running.
 pub fn parse_tasklist_has_claude(output: &str) -> bool {
     output.lines().any(|line| {
         let trimmed = line.trim();
@@ -261,7 +231,7 @@ pub fn parse_tasklist_has_claude(output: &str) -> bool {
     })
 }
 
-/// Builds the argument list for `schtasks.exe /Create` using a Task Scheduler XML file.
+/// Legacy helper kept for argument-layout unit checks.
 pub fn build_schtasks_create_args(xml_path: &str) -> [&str; 6] {
     [
         "/Create",
@@ -273,7 +243,7 @@ pub fn build_schtasks_create_args(xml_path: &str) -> [&str; 6] {
     ]
 }
 
-/// Encodes XML text as little-endian UTF-16 with BOM (`0xFF, 0xFE`) for Windows `schtasks.exe /XML`.
+/// Encodes XML text as little-endian UTF-16 with BOM (`0xFF, 0xFE`).
 pub fn encode_utf16_le_with_bom(text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(2 + text.len() * 2);
     bytes.push(0xFF);
@@ -321,8 +291,78 @@ fn decode_utf16_le_payload(payload: &[u8]) -> String {
         .to_string()
 }
 
-/// Decodes stdout/stderr from Windows console tools (handling UTF-16 LE with or without BOM,
-/// as well as UTF-8).
+#[cfg(target_os = "windows")]
+fn decode_oem_cp_windows(bytes: &[u8]) -> Option<String> {
+    const CP_OEMCP: u32 = 1;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MultiByteToWideChar(
+            code_page: u32,
+            dw_flags: u32,
+            lp_multi_byte_str: *const u8,
+            cb_multi_byte: i32,
+            lp_wide_char_str: *mut u16,
+            cch_wide_char: i32,
+        ) -> i32;
+    }
+    let len = i32::try_from(bytes.len()).ok()?;
+    if len == 0 {
+        return Some(String::new());
+    }
+    // SAFETY: `bytes` is valid for `len` bytes; null output pointer queries required UTF-16 buffer length.
+    let wide_len =
+        unsafe { MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, core::ptr::null_mut(), 0) };
+    if wide_len <= 0 {
+        return None;
+    }
+    let mut wide = vec![0u16; wide_len as usize];
+    // SAFETY: `wide` has capacity `wide_len` UTF-16 code units.
+    let written = unsafe {
+        MultiByteToWideChar(
+            CP_OEMCP,
+            0,
+            bytes.as_ptr(),
+            len,
+            wide.as_mut_ptr(),
+            wide_len,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    wide.truncate(written as usize);
+    Some(String::from_utf16_lossy(&wide))
+}
+
+#[rustfmt::skip]
+const CP866_HIGH: [char; 128] = [
+    'А','Б','В','Г','Д','Е','Ж','З','И','Й','К','Л','М','Н','О','П',
+    'Р','С','Т','У','Ф','Х','Ц','Ч','Ш','Щ','Ъ','Ы','Ь','Э','Ю','Я',
+    'а','б','в','г','д','е','ж','з','и','й','к','л','м','н','о','п',
+    '░','▒','▓','│','┤','╡','╢','╖','╕','╣','║','╗','╝','╜','╛','┐',
+    '└','┴','┬','├','─','┼','╞','╟','╚','╔','╩','╦','╠','═','╬','╧',
+    '╨','╤','╥','╙','╘','╒','╓','╫','╪','┘','┌','█','▄','▌','▐','▀',
+    'р','с','т','у','ф','х','ц','ч','ш','щ','ъ','ы','ь','э','ю','я',
+    'Ё','ё','Є','є','Ї','ї','Ў','ў','°','∙','·','√','№','¤','■','\u{00A0}',
+];
+
+/// Decodes raw OEM CP866 bytes (Russian Windows console default) into UTF-8 `String`.
+pub fn decode_cp866(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b < 0x80 {
+            out.push(b as char);
+        } else {
+            out.push(CP866_HIGH[(b - 0x80) as usize]);
+        }
+    }
+    out
+}
+
+/// Decodes Windows text buffers in strict order:
+/// 1. UTF-16 LE (with BOM or heuristic without BOM),
+/// 2. Valid UTF-8 (`std::str::from_utf8`),
+/// 3. Windows `MultiByteToWideChar(CP_OEMCP)` on Windows / pure-Rust CP866 fallback cross-platform.
 pub fn decode_windows_cmd_text(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0xFF, 0xFE]) && bytes.len() >= 2 {
         return decode_utf16_le_payload(&bytes[2..]);
@@ -330,18 +370,20 @@ pub fn decode_windows_cmd_text(bytes: &[u8]) -> String {
     if is_likely_utf16_le_without_bom(bytes) {
         return decode_utf16_le_payload(bytes);
     }
-    String::from_utf8_lossy(bytes)
+    if let Ok(utf8) = std::str::from_utf8(bytes) {
+        return utf8.trim_end_matches('\0').trim().to_string();
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(oem) = decode_oem_cp_windows(bytes) {
+        return oem.trim_end_matches('\0').trim().to_string();
+    }
+    decode_cp866(bytes)
         .trim_end_matches('\0')
         .trim()
         .to_string()
 }
 
-/// Validates generated Task Scheduler 1.2 XML before passing it to `schtasks.exe /Create`.
-///
-/// Under the Task Scheduler 1.2 XSD (`http://schemas.microsoft.com/windows/2004/02/mit/task`),
-/// `<LogonType>` only accepts `S4U`, `Password`, `InteractiveToken`, or
-/// `InteractiveTokenOrPassword`; for built-in `S-1-5-18` (`NT AUTHORITY\SYSTEM`), `<LogonType>`
-/// should be omitted (values like `ServiceAccount` are PowerShell-only and fail XSD validation).
+/// Validates generated Task Scheduler 1.2 XML before COM registration.
 pub fn validate_windows_task_xml(xml: &str) -> Result<(), String> {
     let lower = xml.to_ascii_lowercase();
     if !lower.contains("encoding=\"utf-16\"") {

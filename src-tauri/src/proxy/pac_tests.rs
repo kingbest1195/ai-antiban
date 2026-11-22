@@ -287,4 +287,95 @@ fn disabling_all_providers_produces_empty_ai_domains_in_pac() {
     let pac = generate_pac_script(&domains, "127.0.0.1:8899", None);
     assert!(pac.contains("var aiDomains = [];"));
     assert!(pac.contains("return \"DIRECT\";"));
+    assert!(!pac.contains("checkout.stripe.com"));
+}
+
+fn eval_pac_find_proxy(pac: &str, host: &str) -> String {
+    let start = pac.find("var aiDomains = ").expect("aiDomains") + "var aiDomains = ".len();
+    let end = start + pac[start..].find(";\n").expect("end of aiDomains");
+    let domains: Vec<String> =
+        serde_json::from_str(&pac[start..end]).expect("valid aiDomains JSON");
+    let lower = host.to_ascii_lowercase();
+    for d in &domains {
+        if lower == *d || lower.ends_with(&format!(".{d}")) {
+            return "PROXY 127.0.0.1:8899".to_string();
+        }
+    }
+    let fallback_line = pac
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with("return \""))
+        .expect("fallback return");
+    fallback_line
+        .trim()
+        .trim_start_matches("return \"")
+        .trim_end_matches("\";")
+        .to_string()
+}
+
+#[test]
+fn payment_and_kyc_domains_share_ai_proxy_route_in_direct_and_chained_modes() {
+    let matrix = ProviderMatrix::load_bundled().unwrap();
+    let domains = get_all_ai_domains_filtered(&matrix, &[], &HashSet::new());
+
+    for chained in [
+        None,
+        Some("127.0.0.1:10808"),
+        Some("socks5://127.0.0.1:10808"),
+    ] {
+        let pac = generate_pac_script(&domains, "127.0.0.1:8899", chained);
+        let expected_ai_proxy = eval_pac_find_proxy(&pac, "claude.ai");
+        assert_eq!(expected_ai_proxy, "PROXY 127.0.0.1:8899");
+
+        for host in [
+            "claude.ai",
+            "m.stripe.network",
+            "checkout.stripe.com",
+            "inquiry.withpersona.com",
+            "challenges.cloudflare.com",
+            "pay.google.com",
+            "payments.google.com",
+            "link.com",
+            "b.stripecdn.com",
+            "js.hcaptcha.com",
+            "newassets.hcaptcha.com",
+            // Suffix matches (*.stripe.com, *.withpersona.com, *.hcaptcha.com, *.arkoselabs.com)
+            "custom-sub.stripe.com",
+            "verify.withpersona.com",
+            "imgs.hcaptcha.com",
+            "client-api.arkoselabs.com",
+        ] {
+            assert_eq!(
+                eval_pac_find_proxy(&pac, host),
+                expected_ai_proxy,
+                "host {host} must match claude.ai route when chained={chained:?}"
+            );
+        }
+
+        let non_ai = eval_pac_find_proxy(&pac, "example.com");
+        assert_ne!(non_ai, "PROXY 127.0.0.1:8899");
+        if chained.is_none() {
+            assert_eq!(non_ai, "DIRECT");
+        } else {
+            assert!(non_ai.ends_with("; DIRECT"), "got {non_ai}");
+        }
+    }
+}
+
+#[test]
+fn provider_matrix_payment_kyc_domains_matches_constant() {
+    let raw: serde_json::Value =
+        serde_json::from_str(crate::auditor::rules::DEFAULT_PROVIDER_MATRIX_JSON)
+            .expect("valid provider_matrix.json");
+    let json_domains: Vec<String> = raw["payment_kyc_domains"]
+        .as_array()
+        .expect("payment_kyc_domains array in provider_matrix.json")
+        .iter()
+        .map(|v| v.as_str().expect("string domain").to_string())
+        .collect();
+    let expected: Vec<String> = crate::auditor::geo_matrix::PAYMENT_AND_KYC_DOMAINS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert_eq!(json_domains, expected);
 }

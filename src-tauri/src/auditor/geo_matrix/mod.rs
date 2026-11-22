@@ -1,5 +1,7 @@
 mod domains;
 
+pub use domains::{PAYMENT_AND_KYC_DOMAINS, is_payment_or_kyc_host};
+
 #[cfg(test)]
 mod tests;
 

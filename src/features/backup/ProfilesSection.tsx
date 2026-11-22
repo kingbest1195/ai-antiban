@@ -29,6 +29,8 @@ import {
   resolveInitialBindChoice,
 } from "./profileModel";
 import { ProfileModals } from "./ProfileModals";
+import { QuarantineOverrideModal } from "../subscription/QuarantineOverrideModal";
+import { useQuarantineGuard } from "../subscription/useQuarantineGuard";
 
 export {
   KEY_OPTION_NEW,
@@ -85,6 +87,7 @@ export function ProfilesSection({
   const [bindChoice, setBindChoice] = useState<string>(KEY_OPTION_NONE);
   const [bindKeyInput, setBindKeyInput] = useState("");
   const [savingBind, setSavingBind] = useState(false);
+  const quarantine = useQuarantineGuard();
   const t = copy.profiles;
   const t_toast = copy.toast;
   const ipKnown = Boolean(currentIp) && currentIp !== "--";
@@ -150,20 +153,22 @@ export function ProfilesSection({
 
   const handleSwitch = async (profileId: string) => {
     if (profileId === activeProfileId || switchingId) return;
-    setSwitchingId(profileId);
-    try {
-      const res = await switchClaudeProfile(profileId);
-      setActiveProfileId(res.active_profile.id);
-      await fetchProfiles();
-      await refreshRoutes();
-      await onRoutesUpdated?.();
-      onToast(t_toast.switched, res.message || t_toast.switchedText(res.active_profile.name), "success");
-      await onProfileSwitched(res.active_profile.name, res.pinned_ip_updated);
-    } catch (err) {
-      onToast(t_toast.switchError, errText(err), "error");
-    } finally {
-      setSwitchingId(null);
-    }
+    quarantine.guardRouteSwitch(async () => {
+      setSwitchingId(profileId);
+      try {
+        const res = await switchClaudeProfile(profileId);
+        setActiveProfileId(res.active_profile.id);
+        await fetchProfiles();
+        await refreshRoutes();
+        await onRoutesUpdated?.();
+        onToast(t_toast.switched, res.message || t_toast.switchedText(res.active_profile.name), "success");
+        await onProfileSwitched(res.active_profile.name, res.pinned_ip_updated);
+      } catch (err) {
+        onToast(t_toast.switchError, errText(err), "error");
+      } finally {
+        setSwitchingId(null);
+      }
+    });
   };
 
   const handleBindCurrentIp = async (profileId: string) => {
@@ -194,48 +199,53 @@ export function ProfilesSection({
   const handleSaveBindKey = async (e: FormEvent) => {
     e.preventDefault();
     if (!bindingTarget || savingBind) return;
-    setSavingBind(true);
-    try {
-      let res;
-      if (bindChoice === KEY_OPTION_NONE) {
-        res = await bindUpstreamToClaudeProfile(bindingTarget.id, null);
-        setProfiles(res.profiles || []);
-        onToast(t_toast.unbound, t_toast.unboundText, "info");
-      } else if (bindChoice === KEY_OPTION_NEW) {
-        const cleanKey = bindKeyInput.trim();
-        if (!cleanKey) return;
-        res = await bindUpstreamToClaudeProfile(bindingTarget.id, cleanKey);
-        setProfiles(res.profiles || []);
-        onToast(t_toast.keyBound, t_toast.keyBoundText(bindingTarget.name), "success");
-      } else {
-        res = await bindRouteToClaudeProfile(bindingTarget.id, bindChoice);
-        setProfiles(res.profiles || []);
-        onToast(t_toast.keyBound, t_toast.keyBoundText(bindingTarget.name), "success");
+    const targetProfile = bindingTarget;
+    quarantine.guardRouteSwitch(async () => {
+      setSavingBind(true);
+      try {
+        let res;
+        if (bindChoice === KEY_OPTION_NONE) {
+          res = await bindUpstreamToClaudeProfile(targetProfile.id, null);
+          setProfiles(res.profiles || []);
+          onToast(t_toast.unbound, t_toast.unboundText, "info");
+        } else if (bindChoice === KEY_OPTION_NEW) {
+          const cleanKey = bindKeyInput.trim();
+          if (!cleanKey) return;
+          res = await bindUpstreamToClaudeProfile(targetProfile.id, cleanKey);
+          setProfiles(res.profiles || []);
+          onToast(t_toast.keyBound, t_toast.keyBoundText(targetProfile.name), "success");
+        } else {
+          res = await bindRouteToClaudeProfile(targetProfile.id, bindChoice);
+          setProfiles(res.profiles || []);
+          onToast(t_toast.keyBound, t_toast.keyBoundText(targetProfile.name), "success");
+        }
+        await refreshRoutes();
+        await onRoutesUpdated?.();
+        setBindingTarget(null);
+        setBindKeyInput("");
+      } catch (err) {
+        onToast(t_toast.keyBindError, errText(err), "error");
+      } finally {
+        setSavingBind(false);
       }
-      await refreshRoutes();
-      await onRoutesUpdated?.();
-      setBindingTarget(null);
-      setBindKeyInput("");
-    } catch (err) {
-      onToast(t_toast.keyBindError, errText(err), "error");
-    } finally {
-      setSavingBind(false);
-    }
+    });
   };
 
   const handleUnbindKey = async (profileId: string) => {
-    setBindingProxyId(profileId);
-    try {
-      const res = await bindUpstreamToClaudeProfile(profileId, null);
-      setProfiles(res.profiles || []);
-      await refreshRoutes();
-      await onRoutesUpdated?.();
-      onToast(t_toast.unbound, t_toast.unboundText, "info");
-    } catch (err) {
-      onToast(t_toast.unbindError, errText(err), "error");
-    } finally {
-      setBindingProxyId(null);
-    }
+    quarantine.guardRouteSwitch(async () => {
+      setBindingProxyId(profileId);
+      try {
+        const res = await bindUpstreamToClaudeProfile(profileId, null);
+        setProfiles(res.profiles || []);
+        await refreshRoutes();
+        await onRoutesUpdated?.();
+        onToast(t_toast.unbound, t_toast.unboundText, "info");
+      } catch (err) {
+        onToast(t_toast.unbindError, errText(err), "error");
+      } finally {
+        setBindingProxyId(null);
+      }
+    });
   };
 
   const handleRemove = async () => {
@@ -471,6 +481,13 @@ export function ProfilesSection({
         safeLogoutBusy={safeLogoutBusy}
         onConfirmSafeLogout={handleSafeLogout}
         onCancelSafeLogout={() => (safeLogoutBusy ? undefined : setSafeLogoutOpen(false))}
+      />
+      <QuarantineOverrideModal
+        open={quarantine.overrideModalOpen}
+        remainingHours={quarantine.quarantineStatus?.remainingHours ?? 72}
+        busy={quarantine.overriding}
+        onCancel={quarantine.cancelOverride}
+        onConfirm={() => void quarantine.confirmOverrideAndRun()}
       />
     </>
   );

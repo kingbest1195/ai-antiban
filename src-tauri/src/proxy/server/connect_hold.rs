@@ -54,6 +54,7 @@ impl ProxyServer {
                     .unwrap_or(0),
                 phase: PHASE_READY.to_string(),
                 gate_reason: Some(build_gate_reason(Some(report), None, false)),
+                checkout_risk: None,
             };
 
             // Emit event to UI and bring emergency modal to front once per active provider hold.

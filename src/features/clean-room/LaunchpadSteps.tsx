@@ -8,10 +8,9 @@ import {
 import { Badge, Banner, Button, Card, Field, Row, Rows } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
-import { AddressCard } from "../subscription/AddressCard";
-import { CardCheck } from "../subscription/CardCheck";
 import { Warmup } from "../subscription/Warmup";
 import "../subscription/subscription.css";
+import { LaunchpadPaymentStep } from "./LaunchpadPaymentStep";
 import { resolveSandboxBlockReason } from "./SandboxProfilesCard";
 
 export interface LaunchpadStepsProps {
@@ -171,8 +170,8 @@ export function LaunchpadSteps({
       {step === 1 && (
         <div className="cr-stack">
           <div>
-            <h4 className="zs-t-heading" style={{ margin: 0 }}>{copy.launchpad.step1.title}</h4>
-            <p className="zs-t-body cr-lead" style={{ marginTop: 4 }}>{copy.launchpad.step1.text}</p>
+            <h4 className="zs-t-heading cr-step-head__title">{copy.launchpad.step1.title}</h4>
+            <p className="zs-t-body cr-step-head__text">{copy.launchpad.step1.text}</p>
           </div>
           <Rows>
             <Row
@@ -200,7 +199,7 @@ export function LaunchpadSteps({
             />
           </Rows>
           {!canLaunchStep2 && (
-            <p className="zs-t-caption cr-lead" style={{ marginBottom: 0 }}>
+            <p className="zs-t-caption cr-gate-hint">
               {copy.launchpad.step1.gateHint}
             </p>
           )}
@@ -220,8 +219,8 @@ export function LaunchpadSteps({
       {step === 2 && (
         <div className="cr-stack">
           <div>
-            <h4 className="zs-t-heading" style={{ margin: 0 }}>{copy.launchpad.step2.title}</h4>
-            <p className="zs-t-body cr-lead" style={{ marginTop: 4 }}>{copy.launchpad.step2.text}</p>
+            <h4 className="zs-t-heading cr-step-head__title">{copy.launchpad.step2.title}</h4>
+            <p className="zs-t-body cr-step-head__text">{copy.launchpad.step2.text}</p>
           </div>
           {activeProfile?.provider === "custom" && (
             <Field
@@ -245,7 +244,7 @@ export function LaunchpadSteps({
             </Button>
           </div>
           <div>
-            <p className="zs-t-heading" style={{ margin: 0 }}>{copy.launchpad.step2.checklistTitle}</p>
+            <p className="zs-t-heading cr-step-head__title">{copy.launchpad.step2.checklistTitle}</p>
             <ul className="cr-checklist">
               {copy.launchpad.step2.checklist.map((item) => (
                 <li key={item.id}>
@@ -280,8 +279,8 @@ export function LaunchpadSteps({
       {step === 3 && (
         <div className="cr-stack">
           <div>
-            <h4 className="zs-t-heading" style={{ margin: 0 }}>{copy.launchpad.step3.title}</h4>
-            <p className="zs-t-body cr-lead" style={{ marginTop: 4 }}>{copy.launchpad.step3.text}</p>
+            <h4 className="zs-t-heading cr-step-head__title">{copy.launchpad.step3.title}</h4>
+            <p className="zs-t-body cr-step-head__text">{copy.launchpad.step3.text}</p>
           </div>
           <Warmup
             state={state}
@@ -294,7 +293,7 @@ export function LaunchpadSteps({
             onToast={toast}
           />
           <div>
-            <p className="zs-t-heading" style={{ margin: 0 }}>{copy.launchpad.step3.checklistTitle}</p>
+            <p className="zs-t-heading cr-step-head__title">{copy.launchpad.step3.checklistTitle}</p>
             <ul className="cr-checklist">
               {copy.launchpad.step3.checklist.map((item) => (
                 <li key={item.id}>
@@ -322,8 +321,8 @@ export function LaunchpadSteps({
       {step === 4 && (
         <div className="cr-stack">
           <div>
-            <h4 className="zs-t-heading" style={{ margin: 0 }}>{copy.launchpad.step4.title}</h4>
-            <p className="zs-t-body cr-lead" style={{ marginTop: 4 }}>{copy.launchpad.step4.text}</p>
+            <h4 className="zs-t-heading cr-step-head__title">{copy.launchpad.step4.title}</h4>
+            <p className="zs-t-body cr-step-head__text">{copy.launchpad.step4.text}</p>
           </div>
           <Banner
             tone="danger"
@@ -333,12 +332,19 @@ export function LaunchpadSteps({
           >
             {copy.launchpad.step4.resellerWarningText}
           </Banner>
-          <CardCheck
+          <LaunchpadPaymentStep
+            profileId={activeProfile?.id ?? null}
+            routeId={activeProfile?.bound_route_id ?? null}
+            exitIp={activeProfile?.last_exit_ip ?? state?.pinned_ip ?? null}
             exitCountry={exitCountry}
-            onToast={toast}
+            hideIpMode={Boolean(state?.hide_ip_mode)}
+            inCleanRoom={Boolean(activeProfile)}
+            warmupStartedAt={activeProfile?.warmup_started_at ?? state?.warmup_started_at ?? null}
+            compactPrimary={false}
             onNavigateToPaymentGuide={onNavigateToGuide ? () => onNavigateToGuide("payment") : undefined}
+            onStateUpdated={onStateUpdated}
+            onToast={toast}
           />
-          <AddressCard onToast={toast} />
           {onNavigateToGuide && (
             <Button variant="secondary" icon="arrow" onClick={() => onNavigateToGuide("payment")}>
               {copy.launchpad.step4.openGuideBtn}

@@ -18,7 +18,9 @@ pub use coverage::{
     lookup_process_name_by_port,
 };
 pub use guard::{ALL_PROVIDERS, Gate, GuardCtx, NetworkGuard};
-pub use hold_queue::{HoldQueue, HoldResolution, InterceptionAction, RiskInterceptPayload};
+pub use hold_queue::{
+    CheckoutRiskAlert, HoldQueue, HoldResolution, InterceptionAction, RiskInterceptPayload,
+};
 pub use pac::generate_pac_script;
 pub use server::ProxyServer;
 use std::collections::HashMap;

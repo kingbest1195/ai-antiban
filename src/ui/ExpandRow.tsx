@@ -26,21 +26,29 @@ export function ExpandRow({ icon, tone = "neutral", title, sub, trail, open, onT
   const detailId = useId();
   return (
     <li className={cx("zs-xrow", className)}>
-      <button type="button" className="zs-xrow__head" aria-expanded={open} aria-controls={detailId} onClick={onToggle}>
+      <div className="zs-xrow__head zs-row--action" data-open={open || undefined}>
         {icon && (
           <span className={cx("zs-row__icon", tone !== "neutral" && `zs-row__icon--${tone}`)}>
             <Icon name={icon} />
           </span>
         )}
         <span className="zs-row__body">
-          <span className="zs-row__title">{title}</span>
-          {sub && <span className="zs-row__sub">{sub}</span>}
+          <button
+            type="button"
+            className="zs-row__hit zs-xrow__hit"
+            aria-expanded={open}
+            aria-controls={detailId}
+            onClick={onToggle}
+          >
+            <span className="zs-row__title">{title}</span>
+            {sub && <span className="zs-row__sub">{sub}</span>}
+          </button>
         </span>
         <span className="zs-row__trail">
           {trail}
           <Icon name="chev" className="zs-xrow__chev" />
         </span>
-      </button>
+      </div>
       {open && (
         <div id={detailId} className="zs-xrow__detail" role="region" aria-label={detailLabel}>
           {children}

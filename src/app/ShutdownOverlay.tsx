@@ -1,5 +1,5 @@
 import type { ShutdownProgressPayload } from "../types";
-import { Icon, Progress, Spinner } from "../ui";
+import { Banner, Icon, Progress, Spinner } from "../ui";
 import { shutdown as copy } from "../shared/copy/ru";
 
 export interface ShutdownOverlayProps {
@@ -19,6 +19,9 @@ export function ShutdownOverlay({ progress }: ShutdownOverlayProps) {
   const clampedStep = Math.max(0, Math.min(total, progress.step));
   const percent = progress.done ? 100 : Math.round((clampedStep / total) * 100);
   const liveLabel = progress.label || (isUpdate ? copy.titleUpdate : copy.titleQuit);
+  const boundApps = Array.from(
+    new Set((progress.gateway_bound_apps ?? []).map((app) => app.trim()).filter(Boolean)),
+  );
 
   return (
     <div
@@ -78,6 +81,12 @@ export function ShutdownOverlay({ progress }: ShutdownOverlayProps) {
             );
           })}
         </ol>
+
+        {boundApps.length > 0 && (
+          <Banner tone="info" title={copy.boundAppsTitle}>
+            {copy.boundAppsHint(boundApps)}
+          </Banner>
+        )}
       </div>
     </div>
   );

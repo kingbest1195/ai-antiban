@@ -206,6 +206,109 @@ fn all_providers() -> Vec<String> {
     KNOWN_PROVIDERS.iter().map(|p| p.to_string()).collect()
 }
 
+#[test]
+fn periodic_sysproxy_sync_skips_unchanged_steady_state_ticks() {
+    use super::probe_loop::PeriodicSysproxySync;
+
+    let mut sync = PeriodicSysproxySync::default();
+    let t0 = Instant::now();
+
+    // Inactive sysproxy never triggers periodic refresh.
+    assert!(!sync.should_refresh_at("192.168.1.10|upstream:", false, false, t0));
+
+    // Activation triggers once for the current route fingerprint.
+    assert!(sync.should_refresh_at("192.168.1.10|upstream:", true, false, t0));
+    // Repeated steady-state ticks inside 120s with unchanged route are skipped.
+    assert!(!sync.should_refresh_at(
+        "192.168.1.10|upstream:",
+        true,
+        false,
+        t0 + Duration::from_millis(250),
+    ));
+    assert!(!sync.should_refresh_at(
+        "192.168.1.10|upstream:",
+        true,
+        false,
+        t0 + Duration::from_secs(30),
+    ));
+    assert!(!sync.should_refresh_at(
+        "192.168.1.10|upstream:",
+        true,
+        false,
+        t0 + Duration::from_secs(119),
+    ));
+
+    // Reaching the 120s self-heal / new-browser interval triggers one refresh, then pauses again.
+    let t_heal = t0 + PeriodicSysproxySync::SELF_HEAL_INTERVAL;
+    assert!(sync.should_refresh_at("192.168.1.10|upstream:", true, false, t_heal));
+    assert!(!sync.should_refresh_at(
+        "192.168.1.10|upstream:",
+        true,
+        false,
+        t_heal + Duration::from_secs(5),
+    ));
+
+    // Route change or chained upstream change triggers a refresh immediately, even inside 120s.
+    let t_route = t_heal + Duration::from_secs(10);
+    assert!(sync.should_refresh_at("10.8.0.2|upstream:", true, false, t_route));
+    assert!(!sync.should_refresh_at(
+        "10.8.0.2|upstream:",
+        true,
+        false,
+        t_route + Duration::from_secs(1),
+    ));
+
+    // Deferred macOS OS PAC does NOT fire every 250ms; it throttles retries to once per 5s.
+    assert!(!sync.should_refresh_at(
+        "10.8.0.2|upstream:",
+        true,
+        true,
+        t_route + Duration::from_millis(250),
+    ));
+    assert!(!sync.should_refresh_at(
+        "10.8.0.2|upstream:",
+        true,
+        true,
+        t_route + Duration::from_millis(4750),
+    ));
+    let t_def1 = t_route + PeriodicSysproxySync::DEFERRED_RETRY_INTERVAL;
+    assert!(sync.should_refresh_at("10.8.0.2|upstream:", true, true, t_def1));
+    assert!(!sync.should_refresh_at(
+        "10.8.0.2|upstream:",
+        true,
+        true,
+        t_def1 + Duration::from_millis(250),
+    ));
+    assert!(sync.should_refresh_at(
+        "10.8.0.2|upstream:",
+        true,
+        true,
+        t_def1 + PeriodicSysproxySync::DEFERRED_RETRY_INTERVAL,
+    ));
+    // Clearing deferral drops back to steady-state (120s) without immediate extra write.
+    let t_cleared = t_def1 + PeriodicSysproxySync::DEFERRED_RETRY_INTERVAL + Duration::from_secs(1);
+    assert!(!sync.should_refresh_at("10.8.0.2|upstream:", true, false, t_cleared));
+
+    // Turning sysproxy off resets state so next activation refreshes immediately.
+    assert!(!sync.should_refresh_at(
+        "10.8.0.2|upstream:",
+        false,
+        false,
+        t_cleared + Duration::from_secs(1),
+    ));
+    assert!(sync.should_refresh_at(
+        "10.8.0.2|upstream:",
+        true,
+        false,
+        t_cleared + Duration::from_secs(2),
+    ));
+
+    // Production wrapper `should_refresh` delegates to `Instant::now()` cleanly.
+    let mut wall_sync = PeriodicSysproxySync::default();
+    assert!(wall_sync.should_refresh("192.168.1.10|upstream:", true, false));
+    assert!(!wall_sync.should_refresh("192.168.1.10|upstream:", true, false));
+}
+
 mod allow_and_ttl_tests;
 mod asn_cooldown_tests;
 mod audit_lifecycle_tests;

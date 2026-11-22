@@ -190,6 +190,7 @@ pub async fn restart_app_with_gateway(
     .await
     .map_err(|e| format!("restart task failed: {e}"))??;
     if outcome == RestartOutcome::Restarted {
+        crate::sysproxy::record_gateway_launched_app("Antigravity");
         // The status should follow the new process; a failed re-read is not a failed restart.
         let _ =
             super::coverage::build_snapshot(&proxy_manager, state.get_cli_mode().await, true).await;

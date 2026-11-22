@@ -111,12 +111,15 @@ export function SettingsModal({
           <TerminalSection
             cliMode={ctrl.cliMode}
             syncTz={ctrl.syncTz}
+            keepOsTzOnExit={ctrl.keepOsTzOnExit}
+            keepOsTzBusy={ctrl.keepOsTzBusy}
             terminalBusy={ctrl.terminalBusy}
             osTzStatus={ctrl.osTz.osTzStatus}
             osTzLoading={ctrl.osTz.osTzLoading}
             osTzError={ctrl.osTz.osTzError}
             onCliModeChange={ctrl.handleCliModeChange}
             onToggleSyncTz={ctrl.handleToggleSyncTz}
+            onToggleKeepOsTzOnExit={ctrl.handleToggleKeepOsTzOnExit}
             onSyncOsTimezone={ctrl.osTz.syncOsTimezone}
             onRestoreOsTimezone={ctrl.osTz.restoreOsTimezone}
           />

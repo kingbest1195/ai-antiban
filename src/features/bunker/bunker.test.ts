@@ -94,7 +94,7 @@ describe("bunker feature: BunkerCard, WebExportHelper & PersonaRiskCard", () => 
         onNavigateToCleanRoom: vi.fn(),
       }),
     );
-    expect(html).toContain("Риск KYC и блокировки Claude");
+    expect(html).toContain("Риск проверки личности и блокировки Claude");
     expect(formatBytesCompact(2_097_152)).toBe("2.0 МБ");
     const fresh = await getPersonaRiskReport();
     expect(fresh.self_check.bought_or_grey_account).toBe(true);

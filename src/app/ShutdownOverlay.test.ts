@@ -53,5 +53,70 @@ describe("ShutdownOverlay: прелоадер завершения работы 
     expect(html).toContain("100%");
     expect(html).not.toContain("zs-shutdown__step--pending");
     expect(html).not.toContain("zs-shutdown__step--active");
+    expect(html).not.toContain(copy.boundAppsTitle);
+  });
+
+  it("не показывает подсказку о перезапуске, если gateway_bound_apps пуст или не передан", () => {
+    const htmlUndefined = renderToStaticMarkup(
+      createElement(ShutdownOverlay, {
+        progress: {
+          mode: "quit",
+          step: 4,
+          total: 4,
+          label: "Готово, закрываем приложение...",
+          done: true,
+        },
+      }),
+    );
+    const htmlEmpty = renderToStaticMarkup(
+      createElement(ShutdownOverlay, {
+        progress: {
+          mode: "quit",
+          step: 4,
+          total: 4,
+          label: "Готово, закрываем приложение...",
+          done: true,
+          gateway_bound_apps: [],
+        },
+      }),
+    );
+
+    expect(htmlUndefined).not.toContain(copy.boundAppsTitle);
+    expect(htmlEmpty).not.toContain(copy.boundAppsTitle);
+  });
+
+  it("показывает спокойную подсказку с точным списком приложений при непустом gateway_bound_apps", () => {
+    const htmlSingle = renderToStaticMarkup(
+      createElement(ShutdownOverlay, {
+        progress: {
+          mode: "quit",
+          step: 4,
+          total: 4,
+          label: "Готово, закрываем приложение...",
+          done: true,
+          gateway_bound_apps: ["Antigravity"],
+        },
+      }),
+    );
+    expect(htmlSingle).toContain("zs-banner--info");
+    expect(htmlSingle).toContain(copy.boundAppsTitle);
+    expect(htmlSingle).toContain(copy.boundAppsHint(["Antigravity"]));
+    expect(htmlSingle).toContain("Antigravity");
+
+    const htmlMulti = renderToStaticMarkup(
+      createElement(ShutdownOverlay, {
+        progress: {
+          mode: "quit",
+          step: 4,
+          total: 4,
+          label: "Готово, закрываем приложение...",
+          done: true,
+          gateway_bound_apps: ["Antigravity", "Cursor", "  ", "Antigravity"],
+        },
+      }),
+    );
+    expect(htmlMulti).toContain(copy.boundAppsTitle);
+    expect(htmlMulti).toContain(copy.boundAppsHint(["Antigravity", "Cursor"]));
+    expect(htmlMulti).toContain("Antigravity, Cursor");
   });
 });

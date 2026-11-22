@@ -218,8 +218,9 @@ describe("AlertStrip", () => {
         onAuditRefresh: vi.fn(),
       }),
     );
-    expect(html).toContain("Требуется защита фоновой службы Claude");
+    expect(html).toContain("Фоновая служба Claude не защищена");
     expect(html).toContain("Запрос прав администратора отменён");
+    expect(html).not.toContain("CoworkVMService");
   });
 });
 
@@ -392,9 +393,87 @@ describe("HomeHub & HeaderBar & NotificationStack", () => {
       }),
     );
 
-    expect(html).toContain("Требуется защита фоновой службы Claude");
-    expect(html).not.toContain("Требуется защита службы CoworkVMService");
+    expect(html).toContain("Фоновая служба Claude не защищена");
+    expect(html).not.toContain("CoworkVMService");
     expect(html).toContain("Доступ запрещён (отменено UAC)");
     expect(html).toContain('role="alert"');
+  });
+
+  it("HomeHub показывает TZ-баннер ТОЛЬКО при warn/crit (включая TIMEZONE_SYNCED_CLI_ONLY) и без primary CTA в AlertStrip", () => {
+    const cliOnlyReport = {
+      provider: "anthropic" as const,
+      overall_status: "yellow" as const,
+      trust_score: 90,
+      telemetry: { ip: "185.212.102.40", country_code: "NL", timezone: "Europe/Amsterdam", resolved_at: 1 },
+      geo_result: { status: "ok" as const, code: "GEO_OK", message: "ok" },
+      pinning_result: { status: "ok" as const, code: "PIN_OK", message: "ok" },
+      travel_result: { status: "ok" as const, code: "TRAVEL_OK", message: "ok" },
+      dnsbl_result: { status: "ok" as const, code: "DNSBL_OK", message: "ok" },
+      dnsbl_clean_count: "",
+      asn_result: { status: "ok" as const, code: "ASN_OK", message: "ok" },
+      ipv6_result: { status: "ok" as const, code: "IPV6_OK", message: "ok" },
+      timezone_result: { status: "warning" as const, code: "TIMEZONE_SYNCED_CLI_ONLY", message: "CLI only" },
+      checks: [],
+    };
+    const commonHomeProps = {
+      togglingSysproxy: false,
+      coworkGuard: {
+        status: null,
+        needsRepair: false,
+        repairing: false,
+        error: null,
+        repair: vi.fn(async () => null),
+        refresh: vi.fn(async () => null),
+      },
+      personaRisk: null,
+      gatewayStats: null,
+      state: null,
+      routeUnavailableBanner: null,
+      onPushRoute: vi.fn(),
+      onDismissRouteUnavailable: vi.fn(),
+      onRefreshRoutes: vi.fn(async () => {}),
+      onRefreshState: vi.fn(async () => {}),
+      onAuditRefresh: vi.fn(),
+      version: "3.1.0",
+    };
+
+    const htmlWarn = renderToStaticMarkup(
+      createElement(HomeHub, {
+        ...commonHomeProps,
+        overview: makeBaseOverview({ activeReport: cliOnlyReport }),
+        view: makeBaseView({ model: { ...makeBaseView().model, banner: "timezone" } }),
+      }),
+    );
+    expect(htmlWarn).toContain("Часовой пояс системы отличается от IP");
+    expect(htmlWarn).toContain("Синхронизировать пояс системы");
+    expect(htmlWarn).not.toContain("zs-btn--primary");
+
+    const htmlOk = renderToStaticMarkup(
+      createElement(HomeHub, {
+        ...commonHomeProps,
+        overview: makeBaseOverview({
+          activeReport: {
+            ...cliOnlyReport,
+            overall_status: "green",
+            timezone_result: { status: "ok", code: "TIMEZONE_OK", message: "ok" },
+          },
+        }),
+        view: makeBaseView({ model: { ...makeBaseView().model, banner: null } }),
+        osTz: {
+          osTzStatus: {
+            synced: true,
+            current_os_tz: "Europe/Amsterdam",
+            original_os_tz: "Europe/Moscow",
+            synced_target_tz: "Europe/Amsterdam",
+            auto_restore_pending: true,
+          },
+          osTzLoading: false,
+          syncOsTimezone: vi.fn(),
+          restoreOsTimezone: vi.fn(),
+        },
+      }),
+    );
+    expect(htmlOk).not.toContain("Часовой пояс системы отличается от IP");
+    expect(htmlOk).not.toContain("Часовой пояс не совпадает со страной IP");
   });
 });

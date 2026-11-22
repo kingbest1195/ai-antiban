@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { subscription } from "../../shared/copy/ru";
 import { listCleanProfiles } from "../../utils/api/cleanRoom";
 import { setMockScenario } from "../../utils/api/mocks/state";
 import {
@@ -37,8 +38,8 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
     );
     expect(html).toContain("Чек-лист перед проверкой для легального ВНЖ / иностранного паспорта");
     expect(html).toContain("1. Страна выходного IP Заставы строго совпадает со страной документа");
-    expect(html).toContain("2. Часовой пояс ОС и браузера совпадает со страной документа");
-    expect(html).toContain("3. Имя и фамилия в биллинге карты совпадают с документом");
+    expect(html).toContain("2. Часовой пояс системы и браузера совпадает со страной документа");
+    expect(html).toContain("3. Имя и фамилия в адресе оплаты карты совпадают с документом");
     expect(html).toContain("4. Реальная камера, ровный свет, без OBS Virtual Camera");
   });
 
@@ -49,13 +50,22 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
     expect(html).toContain("физическую SIM-карту или легальную eSIM");
   });
 
-  it("Branch 3 (Оплата / 3DS): содержит CardCheck, AddressCard и предупреждение о двойном VPN", () => {
+  it("Branch 3 (Оплата / 3DS): содержит CardCheck, AddressCard (без US-штатов по умолчанию) и не подставляет NL при --", () => {
     const html = renderToStaticMarkup(
       createElement(PaymentBranch, { currentCountry: "US", onToast: vi.fn() }),
     );
     expect(html).toContain("Ошибка оплаты / 3DS / Your card was declined");
     expect(html).toContain("двойной туннель ломает 3DS");
-    expect(html).toContain("DE");
+    expect(html).toContain(subscription.address.nonUsTitle);
+    expect(html).toContain(subscription.address.nonUsUnknownText);
+    expect(html).not.toContain("subs-state-tab-DE");
+    expect(html).not.toContain("19801");
+
+    const unknownCountryHtml = renderToStaticMarkup(
+      createElement(PaymentBranch, { currentCountry: "--", onToast: vi.fn() }),
+    );
+    expect(unknownCountryHtml).toContain("Маршрут VPN не выбран");
+    expect(unknownCountryHtml).not.toContain("Нидерланды");
   });
 
   it("Branch 4 (Бан): BannedBranch и executeBannedCleanRoomJump помечают IP tainted и прыгают в Чистую комнату (Шаг 1)", async () => {
@@ -86,7 +96,7 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
       }),
     );
     expect(html).toContain("Выберите вашу ситуацию ниже");
-    expect(html).toContain("Persona (KYC)");
+    expect(html).toContain("Проверка личности");
     expect(html).toContain("SMS на номер");
     expect(html).toContain("Ошибка оплаты");
     expect(html).toContain("Бан аккаунта");

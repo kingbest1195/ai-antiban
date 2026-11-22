@@ -97,6 +97,7 @@ async fn test_cancel_all_superseded_drains_all_holds_and_clears_alert() {
         detected_at_ms: 0,
         phase: PHASE_READY.to_string(),
         gate_reason: None,
+        checkout_risk: None,
     });
     assert!(queue.current_alert().is_some());
     assert_eq!(queue.active_entry_count().await, 2);
@@ -127,4 +128,47 @@ async fn test_is_active_and_has_active_non_sim_holds() {
     queue.cancel_all_superseded().await;
     assert!(!queue.is_active("hold-1").await);
     assert!(!queue.has_active_non_sim_holds().await);
+}
+
+#[tokio::test]
+async fn test_cancel_all_superseded_preserves_checkout_holds_and_block_all_checkout_clears_them() {
+    let queue = HoldQueue::new();
+    let rx_net = queue.register("hold-net".to_string(), "anthropic").await;
+    let (chk_id, rx_chk, leader) = queue
+        .register_or_coalesce_provider("hold-chk".to_string(), "checkout:checkout.stripe.com")
+        .await;
+    assert!(leader);
+    assert_eq!(chk_id, "hold-chk");
+
+    queue.set_alert(RiskInterceptPayload {
+        id: chk_id.clone(),
+        provider: ProviderId::Anthropic,
+        host: "checkout.stripe.com".to_string(),
+        report: None,
+        ttl_seconds: DEFAULT_HOLD_TTL_SECS,
+        scope: "checkout".to_string(),
+        network_change: None,
+        is_simulation: false,
+        detected_at_ms: 0,
+        phase: PHASE_READY.to_string(),
+        gate_reason: Some("PayShield check".to_string()),
+        checkout_risk: None,
+    });
+
+    // NetworkGuard recovery/transition supersedes only non-checkout holds.
+    let superseded = queue.cancel_all_superseded().await;
+    assert_eq!(superseded, 1);
+    assert_eq!(rx_net.await.unwrap(), HoldResolution::Superseded);
+    assert!(queue.is_active(&chk_id).await);
+    assert_eq!(
+        queue.current_alert().map(|a| a.id),
+        Some("hold-chk".to_string())
+    );
+
+    // OS CloseRequested on alert-popup explicitly blocks checkout holds immediately.
+    let blocked = queue.block_all_checkout_holds().await;
+    assert_eq!(blocked, 1);
+    assert_eq!(rx_chk.await.unwrap(), HoldResolution::Block);
+    assert!(!queue.is_active(&chk_id).await);
+    assert!(queue.current_alert().is_none());
 }

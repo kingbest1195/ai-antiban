@@ -10,6 +10,7 @@ pub mod ip_type;
 pub mod leaks;
 pub mod network;
 pub mod os_env;
+pub mod payment_readiness;
 pub mod persona_risk;
 pub mod probes;
 pub mod profile_switcher;

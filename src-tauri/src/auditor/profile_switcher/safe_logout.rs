@@ -167,20 +167,8 @@ fn close_claude_processes() -> usize {
 }
 
 #[cfg(target_os = "windows")]
-fn count_windows_claude_processes() -> usize {
-    let Ok(out) = crate::sysproxy::silent_command("tasklist")
-        .args(["/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"])
-        .output()
-    else {
-        return 0;
-    };
-    if !out.status.success() {
-        return 0;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.to_ascii_lowercase().contains("claude.exe"))
-        .count()
+fn windows_claude_pids() -> Vec<u32> {
+    crate::win_native::process::find_pids_by_exe_name("claude.exe").unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
@@ -188,23 +176,23 @@ fn close_claude_processes() -> usize {
     if !crate::sysproxy::os_effects_enabled() {
         return 0;
     }
-    let initial = count_windows_claude_processes();
-    if initial == 0 {
+    let initial = windows_claude_pids();
+    if initial.is_empty() {
         return 0;
     }
-    let _ = crate::sysproxy::silent_command("taskkill")
-        .args(["/IM", "claude.exe", "/T"])
-        .output();
+    for pid in &initial {
+        let _ = crate::win_native::process::terminate_process_by_pid(*pid, 1);
+    }
     for _ in 0..8 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if count_windows_claude_processes() == 0 {
-            return initial;
+        if windows_claude_pids().is_empty() {
+            return initial.len();
         }
     }
-    let _ = crate::sysproxy::silent_command("taskkill")
-        .args(["/IM", "claude.exe", "/T", "/F"])
-        .output();
-    initial
+    for pid in windows_claude_pids() {
+        let _ = crate::win_native::process::terminate_process_by_pid(pid, 1);
+    }
+    initial.len()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

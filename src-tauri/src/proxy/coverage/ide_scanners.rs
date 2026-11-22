@@ -72,11 +72,20 @@ pub(super) fn antigravity_app_fact(
     }
 }
 
-/// Does a process listing (`ps -axo comm=` paths or `tasklist` names) show Antigravity? Names
+/// Does a process listing (`ps -axo comm=` paths) show Antigravity? Names
 /// only: the arguments of processes are never requested.
 pub(super) fn listing_has_antigravity(text: &str) -> bool {
     text.lines()
         .any(|l| l.to_ascii_lowercase().contains("antigravity"))
+}
+
+/// Checks native Win32 `ProcessEntry` list for Antigravity without spawning child processes.
+pub(super) fn entries_have_antigravity(
+    entries: &[crate::win_native::process::ProcessEntry],
+) -> bool {
+    entries
+        .iter()
+        .any(|p| p.exe_name.to_ascii_lowercase().contains("antigravity"))
 }
 
 /// Is a process of this application an agent of Antigravity? The agent is a separate

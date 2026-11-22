@@ -476,9 +476,15 @@ fn e2e_cowork_guard_xml_localized_system_utf16_no_bom_and_acl_fallback() {
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>SYSTEM</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
-  <Actions Context="Author"><Exec><Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>C:\Program Files\Zastava\zastava.exe</Command><Arguments>--apply-cowork-guard-once</Arguments></Exec></Actions>
 </Task>"#;
     assert!(is_task_xml_healthy(xml_system_tag));
+
+    let legacy_ps = xml_system_tag.replace(
+        r"C:\Program Files\Zastava\zastava.exe",
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+    );
+    assert!(!is_task_xml_healthy(&legacy_ps));
 
     let xml_ru_system = xml_system_tag.replace(
         "<UserId>SYSTEM</UserId>",

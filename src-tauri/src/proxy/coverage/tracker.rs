@@ -294,11 +294,21 @@ impl CoverageTracker {
         {
             return answer;
         }
-        let listing = match self.os {
-            Os::Windows => self.probe.run("tasklist", &["/FO", "CSV", "/NH"]),
-            _ => self.probe.run("ps", &["-axo", "comm="]),
+        let answer = match self.os {
+            Os::Windows => {
+                if !crate::sysproxy::os_effects_enabled() {
+                    false
+                } else {
+                    crate::win_native::process::list_processes()
+                        .map(|entries| super::ide_scanners::entries_have_antigravity(&entries))
+                        .unwrap_or(false)
+                }
+            }
+            _ => self
+                .probe
+                .run("ps", &["-axo", "comm="])
+                .is_some_and(|t| listing_has_antigravity(&t)),
         };
-        let answer = listing.is_some_and(|t| listing_has_antigravity(&t));
         if let Ok(mut g) = self.running.lock() {
             *g = Some((now, answer));
         }

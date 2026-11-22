@@ -1,3 +1,5 @@
+import { useState } from "react";
+import type { BinReport } from "../../types";
 import { Card } from "../../ui";
 import { sosCopy as copy } from "../../shared/copy/ru/sos";
 import type { ShowToast } from "../../shared/hooks";
@@ -20,6 +22,10 @@ export function PaymentBranch({
   onNavigateToPaymentGuide,
 }: PaymentBranchProps) {
   const t = copy.payment;
+  const [binReport, setBinReport] = useState<BinReport | null>(null);
+  const trimmedCountry = currentCountry?.trim();
+  const resolvedCountry = trimmedCountry && trimmedCountry !== "--" ? trimmedCountry : undefined;
+
   return (
     <div className="zs-stack">
       <Card title={t.title}>
@@ -35,12 +41,13 @@ export function PaymentBranch({
         </div>
       </Card>
       <CardCheck
-        country={currentCountry}
+        exitCountry={resolvedCountry}
         ctaVariant={ctaVariant}
         onToast={onToast}
         onNavigateToPaymentGuide={onNavigateToPaymentGuide}
+        onBinChecked={setBinReport}
       />
-      <AddressCard onToast={onToast} />
+      <AddressCard cardCountry={binReport?.countryCode ?? null} scenario="card" onToast={onToast} />
     </div>
   );
 }

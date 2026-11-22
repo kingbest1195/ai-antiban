@@ -235,7 +235,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
           }
           action={
             <>
-              <Button size="sm" variant="primary" onClick={() => openZastavaBot(expiringRoute.id)}>
+              <Button size="sm" variant="secondary" onClick={() => openZastavaBot(expiringRoute.id)}>
                 {copy.banner.expiringKey.renew}
               </Button>{" "}
               {props.onOpenConnect && (

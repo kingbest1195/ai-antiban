@@ -108,6 +108,43 @@ Wireless LAN adapter Wi-Fi:
     assert!(ru_joined.contains("TUN/VPN"), "{ru_joined}");
     assert!(ru_joined.contains("198.18.0.2"), "{ru_joined}");
     assert!(!ru_joined.contains("10.0.0.2"), "{ru_joined}");
+
+    // Native Win32 GetAdaptersAddresses + GetNetworkParams formatting (without host IP leaks)
+    let params = crate::win_native::network::NetworkParamsInfo {
+        host_name: "DESKTOP-TEST".into(),
+        domain_name: "corp.local".into(),
+        dns_servers: vec!["1.1.1.1".into()],
+    };
+    let adapters = vec![
+        crate::win_native::network::AdapterInfo {
+            friendly_name: "Ethernet".into(),
+            description: "Realtek PCIe".into(),
+            adapter_name: "{eth}".into(),
+            is_up: false,
+            if_type: 6,
+            ipv4_addrs: vec![],
+            ipv6_addrs: vec![],
+            dns_servers: vec!["192.168.0.1".into()],
+        },
+        crate::win_native::network::AdapterInfo {
+            friendly_name: "Happ".into(),
+            description: "Wintun Userspace Tunnel".into(),
+            adapter_name: "{happ}".into(),
+            is_up: true,
+            if_type: 53,
+            ipv4_addrs: vec!["172.19.0.1".into()],
+            ipv6_addrs: vec![],
+            dns_servers: vec!["198.18.0.2".into()],
+        },
+    ];
+    let native_snap =
+        crate::diagnostics::ipconfig::format_windows_adapters_snapshot(Some(&params), &adapters)
+            .join("\n");
+    assert!(native_snap.contains("Happ(desc=Wintun Userspace Tunnel, TUN/VPN, dns=[198.18.0.2])"));
+    assert!(!native_snap.contains("Ethernet"));
+    assert!(!native_snap.contains("172.19.0.1"));
+    let native_dns = crate::win_native::network::format_dns_listing(Some(&params), &adapters);
+    assert!(native_dns.contains("1.1.1.1") && native_dns.contains("198.18.0.2"));
 }
 
 #[tokio::test]
@@ -381,4 +418,41 @@ fn preview_protection_changes_covers_all_layers_and_marks_all_reversible() {
             .iter()
             .any(|i| i.category == "ide_settings" && i.target.contains("JetBrains"))
     );
+}
+
+#[tokio::test]
+async fn toggle_sysproxy_off_respects_keep_system_tz_on_exit() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let _g = crate::os_tz::KEEP_TZ_TEST_LOCK.lock().await;
+    let state = state::AppState::new_in_memory();
+    let dir = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    // Default keep_system_tz_on_exit == false -> restore callback is invoked.
+    assert!(!state.get_keep_system_tz_on_exit().await);
+    let c1 = calls.clone();
+    let restored = restore_os_tz_on_disable_with(&state, Some(dir.path()), move |_| {
+        c1.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    })
+    .await
+    .unwrap();
+    assert!(restored);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // keep_system_tz_on_exit == true -> restore callback is skipped.
+    state.set_keep_system_tz_on_exit(true).await.unwrap();
+    let c2 = calls.clone();
+    let skipped = restore_os_tz_on_disable_with(&state, Some(dir.path()), move |_| {
+        c2.fetch_add(1, Ordering::SeqCst);
+        Ok(true)
+    })
+    .await
+    .unwrap();
+    assert!(!skipped);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    crate::os_tz::set_keep_system_tz_on_exit(false);
 }

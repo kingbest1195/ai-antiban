@@ -21,12 +21,45 @@
 .guides-mail .zs-row__trail{color:var(--ink)}
 
 /* Карточки хостингов и сервисов карт: строка с переходом, описание, бейджи */
+.guides-card .zs-card__head{flex-wrap:wrap;gap:var(--space-2) var(--space-3)}
+.guides-card .zs-card__title{min-width:0;flex:1 1 auto}
+.guides-card>.zs-banner{margin-bottom:var(--space-3)}
 .guides-offers{margin:0;padding:0;list-style:none}
-.guides-offer{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3) 0;border-top:1px solid var(--line)}
-.guides-offer:first-child{border-top:0;padding-top:var(--space-1)}
+.guides-offer{display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-4) 0;border-top:1px solid var(--line)}
+.guides-offer:first-child{border-top:0;padding-top:var(--space-2)}
 .guides-offer:last-child{padding-bottom:var(--space-1)}
 .guides-offer .zs-row:first-child{padding:0}
-.guides-offer__text{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-offer__text{margin:0;font-size:13px;line-height:19px;color:var(--ink-2)}
 .guides-offer__facts{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
 .guides-offer__facts strong{color:var(--ink);font-weight:600}
 .guides-offer__chips,.guides-offer__meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+
+/* Нумерованные шаги внутри карточки провайдера (Т-Банк) */
+.guides-steps{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:var(--space-2)}
+.guides-steps__item{display:flex;align-items:flex-start;gap:var(--space-2);font-size:13px;line-height:19px;color:var(--ink-2)}
+.guides-steps__num{width:20px;height:20px;flex:none;display:grid;place-items:center;margin-top:1px;border-radius:var(--radius-pill);background:var(--bg-2);color:var(--ink);font-family:var(--font-mono);font-size:11px;font-weight:600;font-variant-numeric:tabular-nums}
+.guides-steps__text{flex:1;min-width:0}
+.guides-steps__text strong{color:var(--ink);font-weight:600}
+
+/* Компактный альтернативный вариант (СберБанк Онлайн) */
+.guides-alt{padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
+.guides-alt__title{margin:0 0 var(--space-1);font-size:13px;line-height:18px;font-weight:600;color:var(--ink)}
+.guides-alt__text{margin:0;font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-alt__text strong{color:var(--ink);font-weight:600}
+
+/* 2–3 коротких ключевых пункта прямо в карточке (вместо тяжёлого жёлтого блока) */
+.guides-points{padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
+.guides-points__title{margin:0 0 var(--space-2);font-size:12px;line-height:16px;font-weight:600;color:var(--ink)}
+.guides-points__list{margin:0;padding-left:var(--space-4);display:flex;flex-direction:column;gap:var(--space-2);font-size:13px;line-height:18px;color:var(--ink-2)}
+.guides-points__list strong{color:var(--ink);font-weight:600}
+
+/* Компактное раскрытие «Важные нюансы» */
+.guides-nuances{border-radius:var(--radius-md);background:var(--bg-2)}
+.guides-nuances__summary{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-2) var(--space-3);list-style:none;font-size:13px;line-height:18px;font-weight:500;color:var(--ink-2);cursor:pointer;border-radius:var(--radius-md)}
+.guides-nuances__summary::-webkit-details-marker{display:none}
+.guides-nuances__summary:hover{color:var(--ink)}
+.guides-nuances__chev{flex:none;transition:transform .14s cubic-bezier(.22,1,.36,1)}
+.guides-nuances[open] .guides-nuances__chev{transform:rotate(90deg)}
+@media (prefers-reduced-motion:reduce){.guides-nuances__chev{transition:none}}
+.guides-nuances__list{margin:0;padding:0 var(--space-3) var(--space-3) var(--space-6);display:flex;flex-direction:column;gap:var(--space-2);font-size:12px;line-height:17px;color:var(--ink-2)}
+.guides-nuances__list strong{color:var(--ink);font-weight:600}

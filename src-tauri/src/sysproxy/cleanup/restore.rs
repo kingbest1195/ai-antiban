@@ -1,9 +1,15 @@
 use super::super::browser_policies;
-use super::super::journal::{Journal, Outcome, RecoveryReport, ReportItem, Resource};
-use super::super::platform::{Platform, classify_services};
+use super::super::journal::{Journal, Outcome, RecoveryReport, ReportItem, Resource, Value};
+use super::super::platform::{Platform, ServiceId, classify_services, is_virtual_tunnel_device};
 use super::super::{FileCtx, Run, os_effects_enabled, state, with_journal};
 use super::migration::migrate_legacy_with;
+use super::signatures::is_zastava_pac_signature;
 use crate::sysproxy::{Os, RealProbe, SystemProbe};
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RestoreOptions {
+    pub allow_privileged_quit_fallback: bool,
+}
 
 /// Which journal resources a restore pass covers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,9 +65,60 @@ fn held_by_connected_vpn(j: &Journal, p: &dyn Platform, scope: Scope) -> Vec<Res
         .collect()
 }
 
+fn has_active_utun_vpn(p: &dyn Platform) -> bool {
+    if p.vpn_connections()
+        .is_ok_and(|list| list.iter().any(|c| c.connected))
+    {
+        return true;
+    }
+    p.list_services().is_ok_and(|services| {
+        services
+            .iter()
+            .any(|s| s.enabled && is_virtual_tunnel_device(&s.device))
+    })
+}
+
+fn entry_has_zastava_pac(j: &Journal, svc: &ServiceId) -> bool {
+    let Some(entry) = j.entry(&Resource::Pac {
+        service: svc.clone(),
+    }) else {
+        return false;
+    };
+    let port = state().gateway_port();
+    let val = entry.expected.as_ref().or(entry.pending.as_ref());
+    matches!(
+        val,
+        Some(Value::Pac(pac))
+            if pac
+                .url
+                .as_deref()
+                .is_some_and(|u| is_zastava_pac_signature(u, port))
+    )
+}
+
+fn is_exempt_physical_pac_under_utun_vpn(
+    j: &Journal,
+    r: &Resource,
+    vpn_held: &[Resource],
+    utun_vpn_active: bool,
+) -> bool {
+    if !utun_vpn_active || vpn_held.contains(r) {
+        return false;
+    }
+    match r {
+        Resource::Pac { service } | Resource::Chain { service } => {
+            entry_has_zastava_pac(j, service)
+        }
+        _ => false,
+    }
+}
+
 /// Restores the journal resources in `scope`. PAC and chain are written through `networksetup`;
 /// while an active VPN keeps temporary DNS settings (or that cannot be checked) they are NOT
 /// written: their records stay and the pass reports a failure, so a later pass finishes the job.
+/// Exception: when an active `utun*` / PacketTunnel VPN causes `temp_dns_overrides == true`,
+/// Zastava's own local `Resource::Pac` (and paired `Chain`) on physical interfaces is still
+/// restored without touching DNS.
 pub(crate) fn restore_with(j: &mut Journal, p: &dyn Platform, scope: Scope) -> RecoveryReport {
     let probe = os_effects_enabled().then_some((Os::current(), &RealProbe as &dyn SystemProbe));
     restore_with_probe(j, p, scope, probe)
@@ -73,17 +130,51 @@ pub(crate) fn restore_with_probe(
     scope: Scope,
     probe: Option<(Os, &dyn SystemProbe)>,
 ) -> RecoveryReport {
-    let net_ids: Vec<String> = j
+    restore_with_probe_options(j, p, scope, probe, RestoreOptions::default())
+}
+
+pub(crate) fn restore_with_probe_options(
+    j: &mut Journal,
+    p: &dyn Platform,
+    scope: Scope,
+    probe: Option<(Os, &dyn SystemProbe)>,
+    opts: RestoreOptions,
+) -> RecoveryReport {
+    let net_resources: Vec<Resource> = j
         .entries()
         .iter()
         .filter(|e| scope.covers(&e.resource) && is_network_setting(&e.resource))
-        .map(|e| e.resource.id())
+        .map(|e| e.resource.clone())
         .collect();
-    let dns_blocked = !net_ids.is_empty() && !matches!(p.temp_dns_overrides(), Ok(false));
-    let vpn_held = if net_ids.is_empty() {
+    let dns_res = if net_resources.is_empty() {
+        Ok(false)
+    } else {
+        p.temp_dns_overrides()
+    };
+    let dns_blocked = !net_resources.is_empty() && !matches!(dns_res, Ok(false));
+    let vpn_held = if net_resources.is_empty() {
         Vec::new()
     } else {
         held_by_connected_vpn(j, p, scope)
+    };
+    let utun_vpn_active = matches!(dns_res, Ok(true)) && has_active_utun_vpn(p);
+    let exempt_net: Vec<Resource> = if dns_blocked {
+        net_resources
+            .iter()
+            .filter(|r| is_exempt_physical_pac_under_utun_vpn(j, r, &vpn_held, utun_vpn_active))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let deferred_net_ids: Vec<String> = if dns_blocked {
+        net_resources
+            .iter()
+            .filter(|r| !vpn_held.contains(r) && !exempt_net.contains(r))
+            .map(Resource::id)
+            .collect()
+    } else {
+        Vec::new()
     };
     let browser_held: Vec<Resource> = if let Some((os, pr)) = probe
         && j.entries().iter().any(|e| {
@@ -108,10 +199,34 @@ pub(crate) fn restore_with_probe(
     };
     let mut report = j.restore_where(p, |r| {
         scope.covers(r)
-            && (!dns_blocked || !is_network_setting(r))
+            && (!dns_blocked || !is_network_setting(r) || exempt_net.contains(r))
             && !vpn_held.contains(r)
             && !browser_held.contains(r)
     });
+    if opts.allow_privileged_quit_fallback && cfg!(target_os = "macos") {
+        let admin_auth_res: Vec<Resource> = net_resources
+            .iter()
+            .filter(|r| matches!(r, Resource::Pac { .. } | Resource::Chain { .. }))
+            .filter(|r| {
+                let id = r.id();
+                report.items.iter().any(|item| {
+                    item.resource == id && item.outcome == Outcome::Failed("admin_auth")
+                })
+            })
+            .cloned()
+            .collect();
+        if !admin_auth_res.is_empty() {
+            let updated = super::super::macos::disable_pac_privileged(j, p, &admin_auth_res);
+            for upd in updated {
+                if let Some(existing) = report.items.iter_mut().find(|i| i.resource == upd.resource)
+                {
+                    existing.outcome = upd.outcome;
+                } else {
+                    report.items.push(upd);
+                }
+            }
+        }
+    }
     for r in &vpn_held {
         // Not an error: the record stays and is put back once the VPN is disconnected.
         report.items.push(ReportItem {
@@ -126,7 +241,7 @@ pub(crate) fn restore_with_probe(
         });
     }
     if dns_blocked {
-        for id in net_ids {
+        for id in deferred_net_ids {
             report.items.push(ReportItem {
                 resource: id,
                 outcome: Outcome::Failed("temp_dns"),
@@ -139,8 +254,9 @@ pub(crate) fn restore_with_probe(
 /// Restore of everything in the journal plus the one-time legacy migration, and the cut of an old
 /// Zastava block out of `~/.zshenv` by its exact markers (a half marker or an edited block is
 /// left as it is and named in the log).
+#[cfg(test)]
 pub(crate) fn restore_and_migrate(j: &mut Journal, p: &dyn Platform) -> RecoveryReport {
-    restore_and_migrate_with(j, p, false)
+    restore_and_migrate_with_options(j, p, false, RestoreOptions::default())
 }
 
 /// [`restore_and_migrate`] for the start of the app (`at_app_start`): the protection is enabled
@@ -150,7 +266,17 @@ pub(crate) fn restore_and_migrate_with(
     p: &dyn Platform,
     at_app_start: bool,
 ) -> RecoveryReport {
-    let mut report = restore_with(j, p, Scope::All);
+    restore_and_migrate_with_options(j, p, at_app_start, RestoreOptions::default())
+}
+
+pub(crate) fn restore_and_migrate_with_options(
+    j: &mut Journal,
+    p: &dyn Platform,
+    at_app_start: bool,
+    opts: RestoreOptions,
+) -> RecoveryReport {
+    let probe = os_effects_enabled().then_some((Os::current(), &RealProbe as &dyn SystemProbe));
+    let mut report = restore_with_probe_options(j, p, Scope::All, probe, opts);
     report.items.extend(migrate_legacy_with(
         j,
         p,

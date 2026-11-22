@@ -11,6 +11,7 @@ use super::{
 pub struct DnsDict {
     pub servers: Vec<String>,
     pub search_domains: Vec<String>,
+    pub interface_name: Option<String>,
     /// An unrecognised key other than `ServerAddresses` / `SearchDomains` / benign metadata was present.
     pub unknown_fields: bool,
 }
@@ -29,6 +30,7 @@ pub fn parse_scutil_dns(output: &str) -> DnsDict {
     let mut d = DnsDict {
         servers: vec![],
         search_domains: vec![],
+        interface_name: None,
         unknown_fields: false,
     };
     let mut current: Option<&'static str> = None;
@@ -85,6 +87,9 @@ pub fn parse_scutil_dns(output: &str) -> DnsDict {
                 };
                 sub_depth = 1;
             } else if is_benign_scutil_dns_key(k) {
+                if k == "InterfaceName" && !v.ends_with('{') && !v.is_empty() {
+                    d.interface_name = Some(v.to_string());
+                }
                 if v.ends_with('{') {
                     current = Some("ignored");
                     sub_depth = 1;
@@ -161,6 +166,14 @@ where
             continue;
         };
         if !physical_services.iter().any(|s| s.name == name) {
+            continue;
+        }
+        if entry
+            .dns
+            .interface_name
+            .as_deref()
+            .is_some_and(super::macos::is_virtual_tunnel_device)
+        {
             continue;
         }
         if let Some(active_ids) = active_service_ids

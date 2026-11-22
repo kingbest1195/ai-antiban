@@ -257,6 +257,21 @@ fn inactive_secondary_physical_service_with_stale_setup_dns_is_ignored() {
         })
         .unwrap()
     );
+
+    // Virtual tunnel DNS entries (`InterfaceName : utun4`) are ignored even if UserDefinedName matches.
+    let utun_entry = vec![SetupDnsEntry {
+        service_id: "WIFI-UUID".into(),
+        user_defined_name: Some("Wi-Fi".into()),
+        dns: parse_scutil_dns(
+            "<dictionary> {\n  InterfaceName : utun4\n  ServerAddresses : <array> {\n    0 : 198.18.0.2\n  }\n}\n",
+        ),
+    }];
+    assert!(
+        !has_physical_temp_dns_override_active(&physical, &utun_entry, &active_ids, |_| {
+            Ok((Vec::new(), Vec::new()))
+        })
+        .unwrap()
+    );
 }
 
 #[test]

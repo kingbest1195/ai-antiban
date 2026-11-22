@@ -3,6 +3,7 @@
 pub use super::schema_v3::{
     BunkerSettings, CleanProfileStatus, CleanRoomProfile, CleanRoomState,
     DEFAULT_BUNKER_INTERVAL_HOURS, DEFAULT_BUNKER_RETENTION_COUNT, PersonaSelfCheck,
+    PostPaymentQuarantine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -230,6 +231,10 @@ pub struct AppStateData {
     /// protection switch. State files of 2.0.0 and older have no such field: on.
     #[serde(default = "default_true")]
     pub sync_ai_tz_enabled: bool,
+    /// When true, keeps the synced OS system timezone across app exits, updates, restarts, and
+    /// `toggle_sysproxy(false)`, preserving `os_tz_baseline.json` for manual restore.
+    #[serde(default)]
+    pub keep_system_tz_on_exit: bool,
     /// Coverage of command-line tools (see [`CliMode`]). Older state files: `ai_only`.
     #[serde(default)]
     pub cli_mode: CliMode,
@@ -314,6 +319,7 @@ impl std::fmt::Debug for AppStateData {
             .field("warmup_started_at", &self.warmup_started_at)
             .field("synced_ai_timezone", &self.synced_ai_timezone)
             .field("sync_ai_tz_enabled", &self.sync_ai_tz_enabled)
+            .field("keep_system_tz_on_exit", &self.keep_system_tz_on_exit)
             .field("cli_mode", &self.cli_mode)
             .field("auto_update_enabled", &self.auto_update_enabled)
             .field("autostart_enabled", &self.autostart_enabled)
@@ -401,6 +407,7 @@ impl Default for AppStateData {
             warmup_started_at: None,
             synced_ai_timezone: None,
             sync_ai_tz_enabled: true,
+            keep_system_tz_on_exit: false,
             cli_mode: CliMode::AiOnly,
             auto_update_enabled: true,
             autostart_enabled: false,

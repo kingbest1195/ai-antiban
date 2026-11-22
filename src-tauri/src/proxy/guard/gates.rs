@@ -27,6 +27,7 @@ impl NetworkGuard {
         }
         let (tunnel_abort_tx, _abort_rx) = watch::channel(0u64);
         let (kill_tx, _kill_rx) = watch::channel(false);
+        let (shutdown_abort_tx, _shutdown_rx) = watch::channel(false);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(2000))
             // Never reuse keep-alive sockets: they may still point to the previous route.
@@ -39,6 +40,7 @@ impl NetworkGuard {
             provider_gates,
             tunnel_abort_tx,
             kill_tx,
+            shutdown_abort_tx,
             gate_lock: std::sync::Mutex::new(()),
             pause_mode: std::sync::Mutex::new(PauseMode::None),
             gate_reason: std::sync::Mutex::new(None),
@@ -171,10 +173,21 @@ impl NetworkGuard {
         self.kill_tx.subscribe()
     }
 
+    /// Subscribes to the process-shutdown tunnel-abort signal (covers routed and transit tunnels).
+    pub fn subscribe_shutdown_abort(&self) -> watch::Receiver<bool> {
+        self.shutdown_abort_tx.subscribe()
+    }
+
     /// Aborts unrouted tunnels (routed tunnels only obey the manual kill-switch).
     pub fn abort_active_tunnels(&self) {
         self.tunnel_abort_tx
             .send_modify(|val| *val = val.wrapping_add(1));
+    }
+
+    /// Aborts ALL active tunnels (`FollowGate`, `KillSwitchOnly`, and `transit_tunnel`) on app shutdown.
+    pub fn abort_all_tunnels_on_shutdown(&self) {
+        self.shutdown_abort_tx.send_replace(true);
+        self.abort_active_tunnels();
     }
 
     /// Cheap local check used by every CONNECT. On a route change it closes the gate and aborts

@@ -41,6 +41,18 @@ pub async fn gate_closed(rx: &mut watch::Receiver<Gate>) {
     }
 }
 
+/// Completes as soon as shutdown tunnel abort is signalled.
+pub async fn shutdown_aborted(rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 impl NetworkGuard {
     /// Engages the kill flag and blocks the gate as one step with respect to `set_gate`.
     fn engage_kill(&self) {

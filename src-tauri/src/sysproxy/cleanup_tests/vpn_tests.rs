@@ -317,6 +317,33 @@ fn shutdown_cleanup_guard_runs_once_emits_steps_and_resets_for_retry() {
     );
     assert!(update_events[4].done);
     assert_eq!(update_events[4].label, "Перезапуск после обновления...");
+
+    // When keep_tz = true, step 4 reflects saving OS TZ and skips tz_restore().
+    guard.reset();
+    let mut keep_events = Vec::new();
+    let tz_calls = AtomicUsize::new(0);
+    let res4 = guard.run_once_with_tz_keep(
+        "quit",
+        true,
+        true,
+        |p| keep_events.push(p),
+        || {},
+        RecoveryReport::default,
+        RecoveryReport::default,
+        || {
+            tz_calls.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+    assert!(res4.is_some());
+    assert_eq!(tz_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        keep_events[3],
+        ShutdownProgressPayload::step_with_keep_tz("quit", 4, true)
+    );
+    assert_eq!(
+        keep_events[3].label,
+        "Сохранение системного часового пояса ОС..."
+    );
 }
 
 #[test]

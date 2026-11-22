@@ -2,8 +2,7 @@
 
 use std::path::{Path, PathBuf};
 #[cfg(not(target_os = "windows"))]
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::browser_sandbox::SandboxProcessRegistry;
@@ -120,19 +119,31 @@ pub fn find_sandbox_pids_for_profile(profile_dir: &Path) -> Vec<u32> {
     }
     #[cfg(target_os = "windows")]
     {
-        let ps_cmd = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | Select-Object ProcessId,CommandLine | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }";
-        let Ok(out) = crate::sysproxy::silent_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-        else {
+        let Ok(entries) = crate::win_native::process::list_processes() else {
             return Vec::new();
         };
-        if !out.status.success() {
-            return Vec::new();
+        let self_pid = std::process::id();
+        let mut pids = Vec::new();
+        for entry in entries {
+            if entry.pid == 0 || entry.pid == self_pid {
+                continue;
+            }
+            let exe_lower = entry.exe_name.to_ascii_lowercase();
+            let is_chromium = ["chrome", "chromium", "msedge", "brave"]
+                .iter()
+                .any(|b| exe_lower.contains(b));
+            if !is_chromium {
+                continue;
+            }
+            if let Ok(Some(cmdline)) =
+                crate::win_native::process::query_process_command_line(entry.pid)
+                && is_sandbox_browser_cmdline(&cmdline, profile_dir)
+                && !pids.contains(&entry.pid)
+            {
+                pids.push(entry.pid);
+            }
         }
-        parse_ps_pids_for_profile(&String::from_utf8_lossy(&out.stdout), profile_dir)
+        pids
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -154,19 +165,11 @@ pub fn find_sandbox_pids_for_profile(profile_dir: &Path) -> Vec<u32> {
 pub(super) fn read_process_cmdline(pid: u32) -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        let ps_cmd =
-            format!("(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine");
-        let out = crate::sysproxy::silent_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
+        crate::win_native::process::query_process_command_line(pid)
+            .ok()
+            .flatten()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -191,27 +194,14 @@ fn is_pid_alive_for_profile(pid: u32, profile_dir: &Path) -> bool {
 }
 
 /// Fast liveness check for a PID whose command line was already verified against `profile_dir`.
-/// Avoids spawning `powershell.exe` every poll tick on Windows.
 fn is_pid_alive_fast(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
     #[cfg(target_os = "windows")]
     {
-        let filter = format!("PID eq {pid}");
-        let Ok(out) = crate::sysproxy::silent_command("tasklist")
-            .args(["/FI", &filter, "/NH", "/FO", "CSV"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-        else {
-            return false;
-        };
-        if !out.status.success() {
-            return false;
-        }
-        let needle = format!(",\"{pid}\",");
-        String::from_utf8_lossy(&out.stdout).contains(&needle)
+        crate::win_native::process::list_processes()
+            .is_ok_and(|entries| entries.iter().any(|p| p.pid == pid))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -228,11 +218,7 @@ fn is_pid_alive_fast(pid: u32) -> bool {
 fn send_term_to_pid(pid: u32) {
     #[cfg(target_os = "windows")]
     {
-        let _ = crate::sysproxy::silent_command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crate::win_native::process::terminate_process_by_pid(pid, 1);
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -247,11 +233,7 @@ fn send_term_to_pid(pid: u32) {
 fn send_force_kill_to_pid(pid: u32) {
     #[cfg(target_os = "windows")]
     {
-        let _ = crate::sysproxy::silent_command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crate::win_native::process::terminate_process_by_pid(pid, 1);
     }
     #[cfg(not(target_os = "windows"))]
     {

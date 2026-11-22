@@ -34,6 +34,7 @@ export const mockState: AppStateData = {
   custom_ai_domains: [],
   // Как в шлюзе: подмена включена по умолчанию, применяется только при известной зоне.
   sync_ai_tz_enabled: true,
+  keep_system_tz_on_exit: false,
   cli_mode: "ai_only",
   split_tunnel_mode: false,
   hide_ip_mode: false,
@@ -64,6 +65,7 @@ export const mockFlags = {
   cliProtection: true,
   cliMode: "ai_only" as CliMode,
   syncAiTz: true,
+  keepSystemTzOnExit: false,
   splitTunnelMode: false,
   osTzCurrent: "Europe/Moscow",
   osTzOriginal: null as string | null,
@@ -167,9 +169,13 @@ export function snapshotMockState(): AppStateData {
           profiles: mockState.clean_room.profiles.map((p) => ({
             ...p,
             completed_checklist: [...p.completed_checklist],
+            post_payment_quarantine: p.post_payment_quarantine ? { ...p.post_payment_quarantine } : null,
           })),
           active_profile_id: mockState.clean_room.active_profile_id,
           tainted_ips: { ...mockState.clean_room.tainted_ips },
+          global_post_payment_quarantine: mockState.clean_room.global_post_payment_quarantine
+            ? { ...mockState.clean_room.global_post_payment_quarantine }
+            : null,
         }
       : undefined,
     bunker: mockState.bunker ? { ...mockState.bunker } : undefined,

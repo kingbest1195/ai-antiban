@@ -1,4 +1,4 @@
-use crate::auditor::geo_matrix::ProviderId;
+use crate::auditor::geo_matrix::{PAYMENT_AND_KYC_DOMAINS, ProviderId};
 use crate::auditor::rules::ProviderMatrix;
 use std::collections::HashSet;
 
@@ -95,6 +95,20 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "myaccount.google.com",
 ];
 
+fn append_payment_and_kyc_domains(domains: &mut Vec<String>) {
+    if domains.is_empty() {
+        return;
+    }
+    for &d in PAYMENT_AND_KYC_DOMAINS {
+        if !domains
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(d))
+        {
+            domains.push(d.to_string());
+        }
+    }
+}
+
 /// Collects all configured AI domains from the matrix.
 pub fn get_all_ai_domains(matrix: &ProviderMatrix) -> Vec<String> {
     let mut domains = Vec::new();
@@ -107,10 +121,10 @@ pub fn get_all_ai_domains(matrix: &ProviderMatrix) -> Vec<String> {
     }
 
     if domains.is_empty() {
-        DEFAULT_AI_DOMAINS.iter().map(|s| s.to_string()).collect()
-    } else {
-        domains
+        domains = DEFAULT_AI_DOMAINS.iter().map(|s| s.to_string()).collect();
     }
+    append_payment_and_kyc_domains(&mut domains);
+    domains
 }
 
 /// Collects all configured AI domains from the matrix merged with user-defined custom domains.
@@ -185,6 +199,7 @@ pub fn get_all_ai_domains_filtered(
             domains.push(clean);
         }
     }
+    append_payment_and_kyc_domains(&mut domains);
     domains
 }
 
@@ -253,7 +268,10 @@ pub fn generate_pac_script(
     proxy_host_port: &str,
     chained_proxy: Option<&str>,
 ) -> String {
-    let domains_json = serde_json::to_string_pretty(domains).unwrap_or_else(|_| "[]".to_string());
+    let mut effective_domains = domains.to_vec();
+    append_payment_and_kyc_domains(&mut effective_domains);
+    let domains_json =
+        serde_json::to_string_pretty(&effective_domains).unwrap_or_else(|_| "[]".to_string());
     let fallback = format_pac_fallback(chained_proxy);
 
     format!(

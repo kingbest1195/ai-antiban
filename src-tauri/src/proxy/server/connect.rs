@@ -41,6 +41,23 @@ impl ProxyServer {
                 .await;
         }
 
+        if crate::auditor::geo_matrix::is_payment_or_kyc_host(&host)
+            && self.guard.is_manual_killswitch()
+        {
+            self.state
+                .stats()
+                .record_intercepted(&host, "anthropic", "BLOCKED", "??");
+            return send_forbidden(
+                client,
+                "Network kill-switch is engaged in Zastava: payment traffic is stopped.",
+            )
+            .await;
+        }
+
+        if !self.check_checkout_guard(client, &host).await? {
+            return Ok(());
+        }
+
         let provider = match provider_opt {
             Some(p) => {
                 // Only a tunnel to an enabled AI host is an AI request (the canary is Zastava's
@@ -55,6 +72,69 @@ impl ProxyServer {
                 p
             }
             None => {
+                if crate::auditor::geo_matrix::is_payment_or_kyc_host(&host) {
+                    if self.guard.is_manual_killswitch() {
+                        self.state
+                            .stats()
+                            .record_intercepted(&host, "anthropic", "BLOCKED", "??");
+                        return send_forbidden(
+                            client,
+                            "Network kill-switch is engaged in Zastava: payment traffic is stopped.",
+                        )
+                        .await;
+                    }
+                    let pay_selection =
+                        active_payment_route_selection(&self.state, &st_snapshot).await;
+                    match &pay_selection {
+                        RouteSelection::Missing(id) => {
+                            return self
+                                .refuse_route_down(
+                                    client,
+                                    &host,
+                                    ProviderId::Anthropic,
+                                    id,
+                                    RouteDownReason::Missing,
+                                    None,
+                                    is_canary,
+                                )
+                                .await;
+                        }
+                        RouteSelection::Invalid(why) => {
+                            return self
+                                .refuse_route_down(
+                                    client,
+                                    &host,
+                                    ProviderId::Anthropic,
+                                    INVALID_PROFILE_ROUTE_ID,
+                                    RouteDownReason::Invalid,
+                                    Some(why),
+                                    is_canary,
+                                )
+                                .await;
+                        }
+                        RouteSelection::Route(r) => {
+                            if let Err(reason) =
+                                r.check_usable(crate::auditor::network::current_timestamp())
+                            {
+                                return self
+                                    .refuse_route_down(
+                                        client,
+                                        &host,
+                                        ProviderId::Anthropic,
+                                        &r.id,
+                                        reason,
+                                        None,
+                                        is_canary,
+                                    )
+                                    .await;
+                            }
+                        }
+                        RouteSelection::Direct => {}
+                    }
+                    return self
+                        .tunnel_to_target(client, &host, port, None, &pay_selection)
+                        .await;
+                }
                 // Direct pass-through for non-AI or monitoring-disabled domains: allows terminal
                 // users to set HTTPS_PROXY cleanly without interfering with excluded providers.
                 self.state.stats().record_direct_bypassed_host(&host);
@@ -372,4 +452,21 @@ impl ProxyServer {
         )
         .await
     }
+}
+
+async fn active_payment_route_selection(
+    state: &crate::state::AppState,
+    snapshot: &crate::state::AppStateData,
+) -> RouteSelection {
+    for provider in [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+    ] {
+        if snapshot.is_provider_disabled(provider.as_str()) {
+            continue;
+        }
+        return state.route_selection(provider.as_str()).await;
+    }
+    RouteSelection::Direct
 }

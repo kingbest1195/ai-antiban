@@ -217,7 +217,7 @@ export function RouteListSection({
                     {showRenew && (
                       <Button
                         size="sm"
-                        variant={!suppressPrimaryCta && (expiryUrgency === "critical" || isExpired) ? "primary" : "secondary"}
+                        variant="secondary"
                         onClick={() => openZastavaBot(r.id)}
                       >
                         {copy.key.renew}

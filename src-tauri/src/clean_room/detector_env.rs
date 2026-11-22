@@ -1,7 +1,7 @@
 //! Host OS metadata & process probes for the Clean Room trace detector.
 //!
-//! Strictly read-only (`exists()`, `tasklist`, `pgrep`) — never reads secrets,
-//! Keychain, DPAPI, Credential Manager, or SQLite Cookies contents.
+//! Strictly read-only (`exists()`, native Win32 ToolHelp32/QueryFullProcessImageNameW, `pgrep`) —
+//! never reads secrets, Keychain, DPAPI, Credential Manager, or SQLite Cookies contents.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -119,43 +119,53 @@ pub fn parse_windows_running_ai_processes(process_lines: &str) -> Vec<String> {
     found.into_iter().collect()
 }
 
+/// Classifies native Win32 `ProcessEntry` rows using `resolve_image_path` so only Claude Desktop
+/// (never native Claude Code CLI `claude.exe`), plus `ChatGPT.exe` and `Cursor.exe` are flagged.
+pub fn classify_windows_process_entries<F>(
+    entries: &[crate::win_native::process::ProcessEntry],
+    resolve_image_path: F,
+) -> Vec<String>
+where
+    F: Fn(u32) -> Option<String>,
+{
+    let mut found = BTreeSet::new();
+    for entry in entries {
+        if entry.pid == 0 {
+            continue;
+        }
+        let base = crate::win_native::extract_exe_basename(&entry.exe_name);
+        match base.to_ascii_lowercase().as_str() {
+            "claude.exe" => {
+                if let Some(exe_path) = resolve_image_path(entry.pid)
+                    && is_windows_claude_desktop_exe(&exe_path)
+                {
+                    found.insert("claude.exe".to_string());
+                }
+            }
+            "chatgpt.exe" => {
+                found.insert("ChatGPT.exe".to_string());
+            }
+            "cursor.exe" => {
+                found.insert("Cursor.exe".to_string());
+            }
+            _ => {}
+        }
+    }
+    found.into_iter().collect()
+}
+
 fn query_running_ai_processes() -> Vec<String> {
     if !crate::sysproxy::os_effects_enabled() {
         return Vec::new();
     }
     #[cfg(target_os = "windows")]
     {
-        let script = r#"Get-CimInstance Win32_Process -Filter "Name='claude.exe' OR Name='ChatGPT.exe' OR Name='Cursor.exe'" | ForEach-Object { "$($_.ProcessId)|$($_.Name)|$($_.ExecutablePath)" }"#;
-        if let Ok(out) = crate::sysproxy::silent_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .output()
-            && out.status.success()
-        {
-            return parse_windows_running_ai_processes(&String::from_utf8_lossy(&out.stdout));
-        }
-
-        // Fallback without PowerShell: only match ChatGPT.exe and Cursor.exe by image name,
-        // never claude.exe (which would falsely match native Claude Code CLI).
-        let Ok(out) = crate::sysproxy::silent_command("tasklist")
-            .args(["/FO", "CSV", "/NH"])
-            .output()
-        else {
+        let Ok(entries) = crate::win_native::process::list_processes() else {
             return Vec::new();
         };
-        if !out.status.success() {
-            return Vec::new();
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut found = BTreeSet::new();
-        for target in ["ChatGPT.exe", "Cursor.exe"] {
-            if text.lines().any(|l| {
-                l.to_ascii_lowercase()
-                    .contains(&format!("\"{}\"", target.to_ascii_lowercase()))
-            }) {
-                found.insert(target.to_string());
-            }
-        }
-        found.into_iter().collect()
+        classify_windows_process_entries(&entries, |pid| {
+            crate::win_native::process::query_process_image_path(pid).ok()
+        })
     }
     #[cfg(target_os = "macos")]
     {

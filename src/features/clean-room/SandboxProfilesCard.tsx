@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import type { CleanProfileStatus, CleanRoomProfile, CleanRoomState, DetectedBrowser, RouteView } from "../../types";
+import type { CleanRoomProfile, CleanRoomState, DetectedBrowser, RouteView } from "../../types";
 import {
   createCleanProfile,
   deleteCleanProfile,
@@ -12,11 +12,21 @@ import {
 } from "../../utils/api";
 import { openExternal } from "../../utils/opener";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ExpandRow, Field, InfoTip, Mono, Rows, Select } from "../../ui";
-import type { BadgeTone } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
-import { formatRouteOptionLabel } from "../../shared/lib/country";
+import { countryName, formatRouteOptionLabel } from "../../shared/lib/country";
 import { formatIp } from "../../shared/lib/format";
+import { QuarantineOverrideModal } from "../subscription/QuarantineOverrideModal";
+import { useQuarantineGuard } from "../subscription/useQuarantineGuard";
+import {
+  DIRECT_VALUE,
+  STATUS_TONE,
+  providerLabel,
+  resolveBoundRouteLabel,
+  resolveSandboxBlockReason,
+} from "./sandboxProfileHelpers";
+
+export { resolveSandboxBlockReason };
 
 export interface SandboxProfilesCardProps {
   profiles: readonly CleanRoomProfile[];
@@ -32,51 +42,8 @@ export interface SandboxProfilesCardProps {
   onProfilesChanged?: (nextState?: CleanRoomState) => Promise<unknown> | void;
   onProfileLaunched?: (profile: CleanRoomProfile) => void;
   openCreateTrigger?: number;
+  quarantineRefreshKey?: number;
   toast?: ShowToast;
-}
-
-const DIRECT_VALUE = "__direct__";
-const STATUS_TONE: Record<CleanProfileStatus, BadgeTone> = {
-  active: "info",
-  warming_up: "warn",
-  ready: "ok",
-  tainted: "danger",
-};
-
-/** Возвращает причину блокировки запуска песочницы или null, если запуск разрешён. */
-export function resolveSandboxBlockReason(
-  profile: Pick<CleanRoomProfile, "status">,
-  readyToLaunch: boolean,
-  manualKillswitch: boolean,
-): string | null {
-  if (manualKillswitch) return copy.sandbox.profileCard.blockedReasonKillswitch;
-  if (profile.status === "tainted") return copy.sandbox.profileCard.blockedReasonTainted;
-  if (!readyToLaunch) return copy.sandbox.profileCard.blockedReasonAudit;
-  return null;
-}
-
-function providerLabel(provider: string): string {
-  const key = provider.toLowerCase();
-  if (key === "anthropic" || key === "claude") return copy.sandbox.providers.anthropic;
-  if (key === "openai" || key === "chatgpt") return copy.sandbox.providers.openai;
-  if (key === "gemini") return copy.sandbox.providers.gemini;
-  return copy.sandbox.providers.custom;
-}
-
-function resolveBoundRouteLabel(
-  boundRouteId: string | null,
-  routes: readonly RouteView[],
-  hideIpMode: boolean,
-): string {
-  if (!boundRouteId) return copy.sandbox.profileCard.routeDirect;
-  const found = routes.find((r) => r.id === boundRouteId);
-  if (!found) return copy.sandbox.profileCard.routeMissing;
-  return formatRouteOptionLabel({
-    label: found.label,
-    country: found.country,
-    ipOrHost: found.exit_ip ? formatIp(found.exit_ip, hideIpMode) : null,
-    fallbackLabel: found.id,
-  });
 }
 
 /** Карточка «Браузерная песочница (для веба)»: обнаружение Chromium, создание и запуск изолированных профилей. */
@@ -93,6 +60,7 @@ export function SandboxProfilesCard({
   onProfilesChanged,
   onProfileLaunched,
   openCreateTrigger = 0,
+  quarantineRefreshKey = 0,
   toast,
 }: SandboxProfilesCardProps) {
   const [browsers, setBrowsers] = useState<DetectedBrowser[]>(initialBrowsers ?? []);
@@ -107,6 +75,10 @@ export function SandboxProfilesCard({
   const [confirmTaint, setConfirmTaint] = useState<CleanRoomProfile | null>(null);
   const [taintExitIpOnDelete, setTaintExitIpOnDelete] = useState<boolean>(false);
   const [taintedOpen, setTaintedOpen] = useState<boolean>(false);
+  const quarantine = useQuarantineGuard({
+    profileId: activeProfileId,
+    refreshKey: quarantineRefreshKey,
+  });
 
   const loadBrowsers = useCallback(async () => {
     try {
@@ -183,11 +155,13 @@ export function SandboxProfilesCard({
 
   const handleChangeProfileRoute = (profileId: string, nextValue: string) => {
     const nextRouteId = nextValue === DIRECT_VALUE ? null : nextValue;
-    void runAction(`__route__:${profileId}`, async () => {
-      await updateCleanProfileRoute(profileId, nextRouteId);
-      toast?.(copy.sandbox.profileCard.routeUpdatedTitle, copy.sandbox.profileCard.routeUpdatedText, "success");
-      await onProfilesChanged?.();
-    });
+    quarantine.guardRouteSwitch(() =>
+      runAction(`__route__:${profileId}`, async () => {
+        await updateCleanProfileRoute(profileId, nextRouteId);
+        toast?.(copy.sandbox.profileCard.routeUpdatedTitle, copy.sandbox.profileCard.routeUpdatedText, "success");
+        await onProfilesChanged?.();
+      }),
+    );
   };
 
   const taintedEntries = Object.keys(taintedIps);
@@ -308,8 +282,11 @@ export function SandboxProfilesCard({
                 const blockReason = resolveSandboxBlockReason(profile, readyToLaunch, manualKillswitch);
                 const canLaunch = blockReason === null;
                 const maskedExitIp = profile.last_exit_ip ? formatIp(profile.last_exit_ip, hideIpMode) : null;
+                const exitCountryLabel = profile.last_exit_country
+                  ? countryName(profile.last_exit_country) || profile.last_exit_country
+                  : "";
                 const ipMeta = maskedExitIp
-                  ? `${maskedExitIp}${profile.last_exit_country ? ` (${profile.last_exit_country})` : ""}`
+                  ? `${maskedExitIp}${exitCountryLabel ? ` (${exitCountryLabel})` : ""}`
                   : copy.sandbox.profileCard.neverOpened;
                 return (
                   <li
@@ -483,6 +460,14 @@ export function SandboxProfilesCard({
           </label>
         )}
       </ConfirmModal>
+
+      <QuarantineOverrideModal
+        open={quarantine.overrideModalOpen}
+        remainingHours={quarantine.quarantineStatus?.remainingHours ?? 72}
+        busy={quarantine.overriding}
+        onCancel={quarantine.cancelOverride}
+        onConfirm={() => void quarantine.confirmOverrideAndRun()}
+      />
     </Card>
   );
 }

@@ -3,6 +3,7 @@
 //! and background auto-backup scheduler.
 
 pub mod cursor_export;
+pub mod payment_passport;
 pub mod restore_prompt;
 pub mod retention;
 pub mod scheduler;
@@ -11,6 +12,8 @@ pub mod web_helper;
 mod sanitize;
 mod web_parsers;
 
+#[cfg(test)]
+mod payment_passport_tests;
 #[cfg(test)]
 mod tests;
 

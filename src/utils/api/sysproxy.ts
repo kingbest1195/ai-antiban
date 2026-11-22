@@ -161,6 +161,22 @@ export async function setSplitTunnelMode(enabled: boolean): Promise<void> {
   mockState.split_tunnel_mode = enabled;
 }
 
+export async function getKeepSystemTzOnExit(): Promise<boolean> {
+  if (isTauri()) {
+    return await tauriInvoke<boolean>("get_keep_system_tz_on_exit");
+  }
+  return mockFlags.keepSystemTzOnExit;
+}
+
+export async function setKeepSystemTzOnExit(enabled: boolean): Promise<boolean> {
+  if (isTauri()) {
+    return await tauriInvoke<boolean>("set_keep_system_tz_on_exit", { enabled });
+  }
+  mockFlags.keepSystemTzOnExit = enabled;
+  mockState.keep_system_tz_on_exit = enabled;
+  return enabled;
+}
+
 const mockCliSettings = (): CliSettings => ({
   cli_mode: mockFlags.cliMode,
   sync_ai_tz_enabled: mockFlags.syncAiTz,

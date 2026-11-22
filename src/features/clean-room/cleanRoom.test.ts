@@ -10,6 +10,7 @@ import type {
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
 import { overview as overviewCopy, subscription as subCopy } from "../../shared/copy/ru";
 import { warmupProgress } from "../subscription/Warmup";
+import { LaunchpadPaymentStep } from "./LaunchpadPaymentStep";
 import {
   CleanRoomScreen,
   isCleanRoomReadyToLaunch,
@@ -189,7 +190,7 @@ describe("CleanRoomScreen — вкладки, CooldownBanner и EmptyState", () 
     expect(html).toContain(copy.launchpad.title);
   });
 
-  it("рендерит быструю вкладку «Оплата и прогрев» напрямую с CardCheck, AddressCard (DE/OR/NH/MT/AK) и Warmup", () => {
+  it("рендерит быструю вкладку «Оплата и прогрев» с переключателем сценария (App Store -> US-адрес, Картой на сайте -> CardCheck) и Warmup", () => {
     const startedSec = Math.floor(Date.now() / 1000) - 48 * 3600;
     const state = makeState({
       clean_room: {
@@ -199,7 +200,7 @@ describe("CleanRoomScreen — вкладки, CooldownBanner и EmptyState", () 
       },
     });
 
-    const html = renderToStaticMarkup(
+    const appStoreHtml = renderToStaticMarkup(
       createElement(CleanRoomScreen, {
         state,
         initialTab: "payment",
@@ -208,15 +209,29 @@ describe("CleanRoomScreen — вкладки, CooldownBanner и EmptyState", () 
       }),
     );
 
-    expect(html).toContain(subCopy.card.title);
-    expect(html).toContain(subCopy.card.gateway("US"));
-    expect(html).toContain(subCopy.address.title);
+    expect(appStoreHtml).toContain(subCopy.flow.appStore);
+    expect(appStoreHtml).toContain(subCopy.flow.card);
+    expect(appStoreHtml).toContain(subCopy.address.title);
     for (const code of ["DE", "OR", "NH", "MT", "AK"]) {
-      expect(html).toContain(code);
+      expect(appStoreHtml).toContain(code);
     }
-    expect(html).toContain(subCopy.warmup.title);
-    expect(html).toContain("48 ч");
-    expect(html).toContain(copy.launchpad.step3.disclaimer);
+    expect(appStoreHtml).not.toContain(subCopy.card.title);
+    expect(appStoreHtml).toContain(subCopy.warmup.title);
+    expect(appStoreHtml).toContain("48 ч");
+    expect(appStoreHtml).toContain(copy.launchpad.step3.disclaimer);
+
+    const cardFlowHtml = renderToStaticMarkup(
+      createElement(LaunchpadPaymentStep, {
+        initialFlow: "card",
+        profileId: "cr-1",
+        exitCountry: "US",
+        inCleanRoom: true,
+      }),
+    );
+    expect(cardFlowHtml).toContain(subCopy.card.title);
+    expect(cardFlowHtml).toContain(subCopy.card.gateway("US"));
+    expect(cardFlowHtml).toContain(subCopy.readiness.title);
+    expect(cardFlowHtml).not.toContain("subs-state-tab-DE");
   });
 
   it("показывает CooldownBanner внутри Чистой комнаты при активном 4-часовом таймере", () => {

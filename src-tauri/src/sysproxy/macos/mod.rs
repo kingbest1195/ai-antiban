@@ -153,13 +153,13 @@ mod planner;
 mod privileged;
 
 use apply::apply_pac;
-pub(super) use privileged::enable_pac_privileged;
 #[cfg(test)]
 #[allow(unused_imports)]
 use privileged::{
     applescript_string_literal, build_osascript_arg, build_privileged_networksetup_script,
-    enable_pac_privileged_with, is_safe_pac_url, posix_single_quote,
+    disable_pac_privileged_with, enable_pac_privileged_with, is_safe_pac_url, posix_single_quote,
 };
+pub(in crate::sysproxy) use privileged::{disable_pac_privileged, enable_pac_privileged};
 
 #[cfg(test)]
 #[path = "../macos_tests/mod.rs"]

@@ -1,12 +1,9 @@
-/* Подписка: только токены. Вёрстка вокруг примитивов src/ui. */
+/* Подписка: только токены. Вёрстка вокруг примитивов src/ui под окно 460×660. */
 
 .subs-lead{margin:0 0 var(--space-3);color:var(--ink-2)}
 .subs-form{margin:0}
 .subs-form .zs-input{letter-spacing:.08em}
-
-/* Примеры BIN: подпись и кнопки sm в одну переносимую строку */
-.subs-examples{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin-top:var(--space-3)}
-.subs-examples__label{color:var(--ink-3)}
+.subs-block-gap{margin-top:var(--space-3)}
 
 /* Кнопка-ссылка в Banner: выравниваем текст по тексту баннера */
 .subs-banner-action{margin-left:calc(-1 * var(--space-3))}
@@ -16,6 +13,32 @@
 .subs-states .zs-tab{min-width:0}
 .subs-full{margin-top:var(--space-3)}
 
+/* Оценка готовности, защита после оплаты и памятка */
+.subs-readiness-controls{display:flex;flex-direction:column;gap:var(--space-3);margin-bottom:var(--space-3)}
+.subs-readiness-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-3)}
+.subs-verdict-hero{display:flex;flex-direction:column;gap:var(--space-2);margin-bottom:var(--space-3)}
+.subs-verdict-title{margin:0;font-size:17px;line-height:24px;font-weight:600;color:var(--ink)}
+.subs-reasons{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:var(--space-1);font-size:13px;line-height:18px;color:var(--ink-2)}
+
+.subs-details{margin-top:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);padding:var(--space-2) var(--space-3)}
+.subs-details__summary{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);font-size:13px;line-height:18px;font-weight:600;color:var(--ink-2);cursor:pointer;list-style:none}
+.subs-details__summary::-webkit-details-marker{display:none}
+.subs-details__chev{transition:transform .15s ease;flex:none}
+.subs-details[open] .subs-details__chev{transform:rotate(90deg)}
+.subs-details__body{margin-top:var(--space-3);display:flex;flex-direction:column;gap:var(--space-2)}
+.subs-details__score{font-family:var(--font-mono);font-size:13px;line-height:18px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}
+
+.subs-axes{display:flex;flex-direction:column;gap:var(--space-2)}
+.subs-axis{padding:var(--space-2) var(--space-3);border-radius:var(--radius-md);background:var(--bg-1)}
+.subs-axis__head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
+.subs-axis__score{font-family:var(--font-mono);font-size:13px;line-height:18px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}
+.subs-axis__note{margin:var(--space-1) 0 0;font-size:12px;line-height:16px;color:var(--ink-2)}
+.subs-quarantine-countdown{font-variant-numeric:tabular-nums}
+
+@media (max-width:440px){
+  .subs-readiness-grid{grid-template-columns:minmax(0,1fr)}
+}
+
 /* Таймер прогрева */
 .subs-timer{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-3)}
 .subs-timer>.zs-stats,.subs-timer>.zs-progress{align-self:stretch}
@@ -23,3 +46,8 @@
 .subs-ready{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin:0;color:var(--ink-2)}
 .subs-timer>div>.zs-btn--quiet{margin-left:calc(-1 * var(--space-3))}
 .subs-note{margin-top:var(--space-3);padding:var(--space-2) var(--space-3);border-radius:var(--radius-md);background:var(--bg-2);color:var(--ink-2)}
+.subs-note__text{margin:0}
+
+@media (prefers-reduced-motion:reduce){
+  .subs-details__chev{transition:none}
+}

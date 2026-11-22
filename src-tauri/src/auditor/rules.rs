@@ -177,7 +177,7 @@ mod tests {
     fn test_load_bundled_rules() {
         let rules = RuleSet::load_bundled().expect("bundled rules should parse successfully");
         let matrix = rules.provider_matrix.blocking_read();
-        assert_eq!(matrix.version, "1.0.0");
+        assert_eq!(matrix.version, "1.1.0");
         assert!(matrix.global_blocked_countries.contains(&"RU".to_string()));
         assert!(matrix.global_blocked_countries.contains(&"HK".to_string()));
         assert!(matrix.providers.contains_key("anthropic"));

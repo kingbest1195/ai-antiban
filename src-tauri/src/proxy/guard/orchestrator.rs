@@ -240,6 +240,7 @@ impl NetworkGuard {
             detected_at_ms: now_unix_ms(),
             phase: PHASE_DETECTING.to_string(),
             gate_reason: Some(reason),
+            checkout_risk: None,
         };
 
         log_timing(&id, "detected", t0);

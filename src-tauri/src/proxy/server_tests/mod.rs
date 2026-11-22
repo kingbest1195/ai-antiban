@@ -1,3 +1,4 @@
+mod checkout_guard_tests;
 mod coverage_and_holds_tests;
 mod hold_recovery_tests;
 mod transit_helpers_tests;

@@ -134,6 +134,7 @@ export interface BinAuditResult {
   status: CheckStatus;
   advisory: string;
   guide_ref?: string;
+  report?: import("./payment").BinReport | null;
 }
 
 export interface IpHistoryEntry {

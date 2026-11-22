@@ -76,9 +76,10 @@ export function isDetecting(state: AlertState): boolean {
   return state.payload?.phase === "detecting";
 }
 
-/** Опасный адрес/отчёт (RU, BY или overall_status === "red"): требует подтверждения перед принудительным разрешением. */
+/** Опасный адрес/отчёт (RU, BY, overall_status === "red" или checkout_risk red): требует подтверждения. */
 export function isHighRiskAlert(payload: RiskInterceptPayload | null | undefined): boolean {
   if (!payload) return false;
+  if (payload.checkout_risk?.tier === "red") return true;
   const cc = (payload.network_change?.new_country || payload.report?.telemetry?.country_code)?.toUpperCase();
   return cc === "RU" || cc === "BY" || payload.report?.overall_status === "red";
 }

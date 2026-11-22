@@ -1,5 +1,6 @@
 import { Button, Card, EmptyState, InfoTip, Mono, Spinner, cx, toneForScore } from "../../ui";
 import { overview as copy, shell as shellCopy } from "../../shared/copy/ru";
+import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
 import { formatCountryWithCode } from "../../shared/lib/country";
 import { formatIp, formatNumber } from "../../shared/lib/format";
 import { WatchdogMascot } from "../mascot";
@@ -49,6 +50,7 @@ export function HomeHub({
   view,
   togglingSysproxy,
   coworkGuard,
+  osTz: osTzProp,
   personaRisk,
   gatewayStats,
   state,
@@ -60,6 +62,8 @@ export function HomeHub({
   onAuditRefresh,
   version,
 }: HomeHubProps) {
+  const sharedOsTz = useOsTimezoneSync(overview.activeReport?.telemetry?.timezone);
+  const osTz = osTzProp ?? sharedOsTz;
   const { loading, failed, model, progress } = view;
   const off = !overview.startupPending && !overview.sysproxyActive && !overview.killswitchFrozen;
   const mascotState = resolveMascotState({
@@ -80,7 +84,7 @@ export function HomeHub({
   const direct = gatewayStats ? formatNumber(gatewayStats.direct_bypassed_requests) : "—";
 
   return (
-    <>
+    <div className="zs-v3-home">
       <Card className="zs-v3-hero">
         <div className="zs-v3-hero__top">
           <div className="zs-v3-hero__mascot">
@@ -140,7 +144,7 @@ export function HomeHub({
                     type="button"
                     className={`zs-v3-persona-pill zs-v3-persona-pill--${personaPill.tone}`}
                     onClick={() => onPushRoute({ page: "backup" })}
-                    title="Открыть риск KYC и блокировки Claude и Бункер"
+                    title="Проверить риск блокировки и сохранённые профили"
                   >
                     {personaPill.label}
                   </button>
@@ -175,6 +179,7 @@ export function HomeHub({
         view={view}
         overview={overview}
         coworkGuard={coworkGuard}
+        osTz={osTz}
         ipChangeCooldownUntil={state?.ip_change_cooldown_until}
         routeUnavailableBanner={routeUnavailableBanner}
         routesSnapshot={overview.routesSnapshot}
@@ -199,6 +204,6 @@ export function HomeHub({
         <span>{shellCopy.footer}</span>
         <Mono>v{version}</Mono>
       </footer>
-    </>
+    </div>
   );
 }

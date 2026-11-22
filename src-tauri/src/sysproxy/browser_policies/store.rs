@@ -5,9 +5,257 @@ use super::chromium::CHROMIUM_BROWSERS;
 use super::{PolicyStore, PolicyValue};
 use crate::sysproxy::platform::{PResult, PlatformError};
 use crate::sysproxy::{note_dry_run_blocked, os_effects_enabled};
+#[cfg(any(target_os = "windows", test))]
+use std::path::{Path, PathBuf};
 
 /// Production [`PolicyStore`] backed by `crate::win_reg` on Windows and `defaults` on macOS.
 pub struct RealPolicyStore;
+
+#[cfg(any(target_os = "windows", test))]
+struct WindowsBrowserInstallSpec {
+    domain: &'static str,
+    /// `(exe_name, required_path_substr, forbidden_path_substr)` checked under `App Paths`.
+    app_paths: &'static [(&'static str, Option<&'static str>, Option<&'static str>)],
+    /// `ENV_KEY/relative/path/to/browser.exe` fallbacks (never touches Chromium `User Data`).
+    fallback_paths: &'static [&'static str],
+}
+
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_BROWSER_INSTALL_SPECS: &[WindowsBrowserInstallSpec] = &[
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Google\Chrome",
+        app_paths: &[("chrome.exe", Some("google"), Some("chromium"))],
+        fallback_paths: &[
+            "ProgramFiles/Google/Chrome/Application/chrome.exe",
+            "ProgramFiles(x86)/Google/Chrome/Application/chrome.exe",
+            "LOCALAPPDATA/Google/Chrome/Application/chrome.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Microsoft\Edge",
+        app_paths: &[("msedge.exe", None, None)],
+        fallback_paths: &[
+            "ProgramFiles(x86)/Microsoft/Edge/Application/msedge.exe",
+            "ProgramFiles/Microsoft/Edge/Application/msedge.exe",
+            "LOCALAPPDATA/Microsoft/Edge/Application/msedge.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\BraveSoftware\Brave",
+        app_paths: &[("brave.exe", None, None)],
+        fallback_paths: &[
+            "ProgramFiles/BraveSoftware/Brave-Browser/Application/brave.exe",
+            "ProgramFiles(x86)/BraveSoftware/Brave-Browser/Application/brave.exe",
+            "LOCALAPPDATA/BraveSoftware/Brave-Browser/Application/brave.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Chromium",
+        app_paths: &[("chrome.exe", Some("chromium"), None)],
+        fallback_paths: &[
+            "ProgramFiles/Chromium/Application/chrome.exe",
+            "ProgramFiles(x86)/Chromium/Application/chrome.exe",
+            "LOCALAPPDATA/Chromium/Application/chrome.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Vivaldi",
+        app_paths: &[("vivaldi.exe", None, None)],
+        fallback_paths: &[
+            "ProgramFiles/Vivaldi/Application/vivaldi.exe",
+            "ProgramFiles(x86)/Vivaldi/Application/vivaldi.exe",
+            "LOCALAPPDATA/Vivaldi/Application/vivaldi.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\YandexBrowser",
+        app_paths: &[("browser.exe", Some("yandex"), None)],
+        fallback_paths: &[
+            "LOCALAPPDATA/Yandex/YandexBrowser/Application/browser.exe",
+            "ProgramFiles/Yandex/YandexBrowser/Application/browser.exe",
+            "ProgramFiles(x86)/Yandex/YandexBrowser/Application/browser.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Yandex\YandexBrowser",
+        app_paths: &[("browser.exe", Some("yandex"), None)],
+        fallback_paths: &[
+            "LOCALAPPDATA/Yandex/YandexBrowser/Application/browser.exe",
+            "ProgramFiles/Yandex/YandexBrowser/Application/browser.exe",
+            "ProgramFiles(x86)/Yandex/YandexBrowser/Application/browser.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Perplexity\Comet",
+        app_paths: &[("comet.exe", None, None)],
+        fallback_paths: &[
+            "LOCALAPPDATA/Perplexity/Comet/Application/comet.exe",
+            "ProgramFiles/Perplexity/Comet/Application/comet.exe",
+            "ProgramFiles(x86)/Perplexity/Comet/Application/comet.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Opera Software\Opera Stable",
+        app_paths: &[
+            ("opera.exe", None, Some("opera gx")),
+            ("launcher.exe", Some("opera"), Some("opera gx")),
+        ],
+        fallback_paths: &[
+            "LOCALAPPDATA/Programs/Opera/opera.exe",
+            "LOCALAPPDATA/Programs/Opera/launcher.exe",
+            "ProgramFiles/Opera/opera.exe",
+            "ProgramFiles/Opera/launcher.exe",
+            "ProgramFiles(x86)/Opera/opera.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Opera Software\Opera GX Stable",
+        app_paths: &[
+            ("opera.exe", Some("opera gx"), None),
+            ("launcher.exe", Some("opera gx"), None),
+        ],
+        fallback_paths: &[
+            "LOCALAPPDATA/Programs/Opera GX/opera.exe",
+            "LOCALAPPDATA/Programs/Opera GX/launcher.exe",
+            "ProgramFiles/Opera GX/opera.exe",
+            "ProgramFiles/Opera GX/launcher.exe",
+            "ProgramFiles(x86)/Opera GX/opera.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\TheBrowserCompany\Arc",
+        app_paths: &[("Arc.exe", None, None)],
+        fallback_paths: &[
+            "LOCALAPPDATA/Programs/Arc/Arc.exe",
+            "ProgramFiles/Arc/Arc.exe",
+            "LOCALAPPDATA/Microsoft/WindowsApps/Arc.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\TheBrowserCompany\Dia",
+        app_paths: &[("Dia.exe", None, None)],
+        fallback_paths: &[
+            "LOCALAPPDATA/Programs/Dia/Dia.exe",
+            "ProgramFiles/Dia/Dia.exe",
+            "LOCALAPPDATA/Microsoft/WindowsApps/Dia.exe",
+        ],
+    },
+    WindowsBrowserInstallSpec {
+        domain: r"Software\Policies\Mozilla\Firefox\DNSOverHTTPS",
+        app_paths: &[("firefox.exe", None, None)],
+        fallback_paths: &[
+            "ProgramFiles/Mozilla Firefox/firefox.exe",
+            "ProgramFiles(x86)/Mozilla Firefox/firefox.exe",
+            "LOCALAPPDATA/Mozilla Firefox/firefox.exe",
+        ],
+    },
+];
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn windows_domain_installed_with<E, R, F>(
+    domain: &str,
+    env_var: &E,
+    reg_app_path: &R,
+    file_exists: &F,
+) -> bool
+where
+    E: Fn(&str) -> Option<String>,
+    R: Fn(&str) -> Option<String>,
+    F: Fn(&Path) -> bool,
+{
+    let Some(spec) = WINDOWS_BROWSER_INSTALL_SPECS
+        .iter()
+        .find(|s| s.domain == domain)
+    else {
+        return false;
+    };
+
+    for &(exe_name, required, forbidden) in spec.app_paths {
+        if let Some(raw_path) = reg_app_path(exe_name) {
+            let trimmed = raw_path.trim().trim_matches('"');
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_ascii_lowercase().replace('\\', "/");
+            if let Some(req) = required
+                && !lower.contains(req)
+            {
+                continue;
+            }
+            if let Some(forb) = forbidden
+                && lower.contains(forb)
+            {
+                continue;
+            }
+            if file_exists(Path::new(trimmed)) {
+                return true;
+            }
+        }
+    }
+
+    for template in spec.fallback_paths {
+        let Some((root_key, suffix)) = template.split_once('/') else {
+            continue;
+        };
+        let Some(root_val) = env_var(root_key) else {
+            continue;
+        };
+        if root_val.trim().is_empty() {
+            continue;
+        }
+        let mut candidate = PathBuf::from(root_val);
+        for part in suffix.split('/') {
+            candidate.push(part);
+        }
+        if file_exists(&candidate) {
+            return true;
+        }
+    }
+
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_app_path(exe_name: &str) -> Option<String> {
+    use crate::win_reg::{RootKey, get_string};
+    let subkey = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}");
+    if let Ok(Some(val)) = get_string(RootKey::HkeyLocalMachine, &subkey, "") {
+        return Some(val);
+    }
+    if let Ok(Some(val)) = get_string(RootKey::HkeyCurrentUser, &subkey, "") {
+        return Some(val);
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn windows_domain_installed(domain: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    const CACHE_TTL: Duration = Duration::from_secs(30);
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, bool)>>> = OnceLock::new();
+
+    let now = Instant::now();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(&(ts, installed)) = guard.get(domain)
+        && now.saturating_duration_since(ts) < CACHE_TTL
+    {
+        return installed;
+    }
+
+    let env_fn = |key: &str| std::env::var(key).ok();
+    let reg_fn = |exe: &str| read_windows_app_path(exe);
+    let exists_fn = |p: &Path| p.is_file();
+    let installed = windows_domain_installed_with(domain, &env_fn, &reg_fn, &exists_fn);
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(domain.to_string(), (now, installed));
+    }
+    installed
+}
 
 #[cfg(target_os = "macos")]
 pub(super) fn macos_app_bundles_for_domain(domain: &str) -> &'static [&'static str] {
@@ -75,8 +323,7 @@ impl PolicyStore for RealPolicyStore {
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = domain;
-            true
+            windows_domain_installed(domain)
         }
         #[cfg(target_os = "macos")]
         {

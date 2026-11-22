@@ -1,43 +1,35 @@
+//! 8-digit BIN X-Ray (Zero PCI-DSS Scope, Fail-Closed) with curated overlay and 7-day cache.
+
+pub mod cache;
+pub mod http_adapter;
+pub mod model;
+pub mod overlay;
+pub mod port;
+
+#[cfg(test)]
+mod tests;
+
+pub use model::{
+    BinAuditResult, BinReport, BinSource, CardFunding, ClaudeWebVerdict, sanitize_bin_input,
+    validate_strict_bin_prefix,
+};
+pub use overlay::BinOverlay;
+pub use port::{BinLookupError, BinLookupPort, RawBinInfo};
+
 use crate::auditor::geo_matrix::{CheckStatus, GUIDE_PAYMENT_CARDS};
-use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use crate::core::country::format_country_ru;
+use cache::BinCache;
+use http_adapter::HttpBinLookupAdapter;
+use std::path::Path;
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BinAuditResult {
-    pub bin: String,
-    pub country_code: Option<String>,
-    pub card_type: Option<String>,
-    pub bank_name: Option<String>,
-    pub is_prepaid: bool,
-    pub status: CheckStatus,
-    pub advisory: String,
-    pub guide_ref: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct HandyApiBinResponse {
-    #[serde(rename = "Status")]
-    status: Option<String>,
-    #[serde(rename = "Type")]
-    card_type: Option<String>,
-    #[serde(rename = "Country")]
-    country: Option<HandyApiCountry>,
-    #[serde(rename = "Issuer")]
-    issuer: Option<String>,
-    #[serde(rename = "CardTier")]
-    card_tier: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct HandyApiCountry {
-    #[serde(rename = "A2")]
-    a2: Option<String>,
-    #[serde(rename = "Name")]
-    _name: Option<String>,
-}
+const SANCTIONED_CARD_COUNTRIES: &[&str] = &[
+    "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU", "VE", "AF", "MM", "SD", "YE",
+];
 
 pub struct BinChecker {
-    client: reqwest::Client,
+    overlay: BinOverlay,
+    lookup_port: Arc<dyn BinLookupPort>,
 }
 
 impl Default for BinChecker {
@@ -48,216 +40,243 @@ impl Default for BinChecker {
 
 impl BinChecker {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(2500))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-
-        Self { client }
+        Self::with_port(Arc::new(HttpBinLookupAdapter::from_env()))
     }
 
-    /// Sanitizes and validates the BIN input. Rejects numbers < 6 or > 8 digits.
+    pub fn with_port(lookup_port: Arc<dyn BinLookupPort>) -> Self {
+        let overlay = BinOverlay::load_bundled().expect("bundled bin_overlay.json must be valid");
+        Self {
+            overlay,
+            lookup_port,
+        }
+    }
+
     pub fn sanitize_bin(raw_input: &str) -> Result<String, String> {
-        let cleaned: String = raw_input.chars().filter(|c| c.is_ascii_digit()).collect();
-
-        if cleaned.len() < 6 {
-            return Err("Введите минимум 6 первых цифр карты (BIN).".to_string());
-        }
-
-        if cleaned.len() > 8 {
-            return Err(
-                "Для вашей безопасности (For your privacy) НЕ вводите полный 16-значный номер карты! Достаточно первых 6–8 цифр (BIN)."
-                    .to_string(),
-            );
-        }
-
-        Ok(cleaned)
+        sanitize_bin_input(raw_input)
     }
 
-    /// Performs offline heuristic analysis on the BIN.
     pub fn evaluate_heuristics(bin: &str) -> Option<BinAuditResult> {
-        // Mir cards start with 2200..2204
-        if bin.starts_with("2200")
-            || bin.starts_with("2201")
-            || bin.starts_with("2202")
-            || bin.starts_with("2203")
-            || bin.starts_with("2204")
-        {
-            return Some(BinAuditResult {
-                bin: bin.to_string(),
-                country_code: Some("RU".to_string()),
-                card_type: Some("DEBIT".to_string()),
-                bank_name: Some("НСПК «Мир» (Mir / Банк РФ)".to_string()),
-                is_prepaid: false,
-                status: CheckStatus::Critical,
-                advisory: "Обнаружена карта «Мир» (Mir). Международные платформы не поддерживают карты этой платежной системы.".to_string(),
-                guide_ref: Some(GUIDE_PAYMENT_CARDS.to_string()),
-            });
-        }
-
-        // Belkart starts with 9112
-        if bin.starts_with("9112") {
-            return Some(BinAuditResult {
-                bin: bin.to_string(),
-                country_code: Some("BY".to_string()),
-                card_type: Some("DEBIT".to_string()),
-                bank_name: Some("Белкарт (Беларусь)".to_string()),
-                is_prepaid: false,
-                status: CheckStatus::Critical,
-                advisory: "Обнаружена локальная карта региона. Международные платежные системы не обслуживают карты этой юрисдикции.".to_string(),
-                guide_ref: Some(GUIDE_PAYMENT_CARDS.to_string()),
-            });
-        }
-
-        None
+        let overlay = BinOverlay::load_bundled().ok()?;
+        let mut matched = overlay.lookup(bin)?;
+        evaluate_report(
+            &mut matched.report,
+            matched.high_kyc_risk,
+            &matched.note,
+            None,
+        );
+        Some(BinAuditResult::from_report(
+            matched.report,
+            Some(GUIDE_PAYMENT_CARDS.to_string()),
+        ))
     }
 
-    /// Checks the BIN via heuristics and online lookup.
     pub async fn check_bin(
         &self,
         raw_bin: &str,
         current_vpn_country: Option<&str>,
     ) -> Result<BinAuditResult, String> {
-        let bin = Self::sanitize_bin(raw_bin)?;
-
-        // 1. Check offline heuristics first
-        if let Some(mut result) = Self::evaluate_heuristics(&bin) {
-            Self::apply_vpn_country_comparison(&mut result, current_vpn_country);
-            return Ok(result);
-        }
-
-        // 2. Perform online lookup via HandyAPI
-        let url = format!("https://data.handyapi.com/bin/{bin}");
-        match self.client.get(&url).send().await {
-            Ok(resp) => {
-                if let Ok(data) = resp.json::<HandyApiBinResponse>().await
-                    && data.status.as_deref() == Some("SUCCESS")
-                {
-                    let country_code = data.country.and_then(|c| c.a2).map(|s| s.to_uppercase());
-                    let card_type = data.card_type;
-                    let bank_name = data.issuer;
-                    let tier = data.card_tier.unwrap_or_default().to_uppercase();
-                    let is_prepaid = card_type
-                        .as_deref()
-                        .map(|t| t.eq_ignore_ascii_case("PREPAID"))
-                        .unwrap_or(false)
-                        || tier.contains("PREPAID")
-                        || tier.contains("VIRTUAL");
-
-                    let mut result = BinAuditResult {
-                            bin: bin.clone(),
-                            country_code,
-                            card_type,
-                            bank_name,
-                            is_prepaid,
-                            status: CheckStatus::Ok,
-                            advisory: "Карта успешно проверена. Банк-эмитент совместим со Stripe и подходит для оплаты подписки.".to_string(),
-                            guide_ref: None,
-                        };
-
-                    Self::apply_heuristics_and_advisories(&mut result, current_vpn_country);
-                    return Ok(result);
-                }
-            }
-            Err(e) => {
-                eprintln!("Online BIN lookup failed: {e}");
-            }
-        }
-
-        // 3. Fallback generic result if online API is unavailable
-        let mut fallback = BinAuditResult {
-            bin,
-            country_code: None,
-            card_type: None,
-            bank_name: None,
-            is_prepaid: false,
-            status: CheckStatus::Ok,
-            advisory: "Префикс BIN принят. Убедитесь, что платежный адрес и страна активного VPN совпадают со страной банка карты."
-                .to_string(),
-            guide_ref: Some(GUIDE_PAYMENT_CARDS.to_string()),
+        let report = self
+            .check_bin_report_with_cache_dir(raw_bin, current_vpn_country, None)
+            .await?;
+        let guide_ref = if report.status == CheckStatus::Ok {
+            None
+        } else {
+            Some(GUIDE_PAYMENT_CARDS.to_string())
         };
-        Self::apply_vpn_country_comparison(&mut fallback, current_vpn_country);
-        Ok(fallback)
+        Ok(BinAuditResult::from_report(report, guide_ref))
     }
 
-    fn apply_heuristics_and_advisories(
-        result: &mut BinAuditResult,
+    pub async fn check_bin_report_with_cache_dir(
+        &self,
+        raw_bin: &str,
         current_vpn_country: Option<&str>,
-    ) {
-        if let Some(country) = &result.country_code
-            && (country == "RU" || country == "BY")
-        {
-            result.status = CheckStatus::Critical;
-            result.advisory = format!(
-                "Карта выпущена в неподдерживаемой юрисдикции ({country}). Международные сервисы не принимают карты этого региона."
+        cache_dir: Option<&Path>,
+    ) -> Result<BinReport, String> {
+        let bin_prefix = sanitize_bin_input(raw_bin)?;
+
+        // 1. Curated local overlay (compile-time, priority #1 over any external API or cache)
+        if let Some(mut matched) = self.overlay.lookup(&bin_prefix) {
+            evaluate_report(
+                &mut matched.report,
+                matched.high_kyc_risk,
+                &matched.note,
+                current_vpn_country,
             );
-            result.guide_ref = Some(GUIDE_PAYMENT_CARDS.to_string());
-            return;
+            return Ok(matched.report);
         }
 
-        if result.is_prepaid {
-            result.status = CheckStatus::Warning;
-            result.advisory = "Виртуальная / предоплаченная (PREPAID) карта. Международные сервисы часто отклоняют предоплаченные BIN без подтверждения адреса (AVS). Рекомендуется именная Debit-карта или оплата через магазины приложений."
-                .to_string();
-            result.guide_ref = Some(GUIDE_PAYMENT_CARDS.to_string());
-        }
-
-        Self::apply_vpn_country_comparison(result, current_vpn_country);
-    }
-
-    fn apply_vpn_country_comparison(
-        result: &mut BinAuditResult,
-        current_vpn_country: Option<&str>,
-    ) {
-        if let (Some(card_country), Some(vpn_country)) = (&result.country_code, current_vpn_country)
+        // 2. 7-day local TTL cache
+        let cache = cache_dir.map(BinCache::in_dir);
+        if let Some(ref c) = cache
+            && let Some(mut cached) = c.get(&bin_prefix)
         {
-            let vpn_upper = vpn_country.trim().to_uppercase();
-            if !card_country.eq_ignore_ascii_case(&vpn_upper)
-                && result.status != CheckStatus::Critical
-            {
-                result.status = CheckStatus::Warning;
-                result.advisory = format!(
-                    "Несовпадение регионов: карта выпущена в {card_country}, а ваш текущий сетевой шлюз — {vpn_upper}. На момент проведения платежа рекомендуется синхронизировать регион шлюза с регионом карты.",
-                );
-                result.guide_ref = Some(GUIDE_PAYMENT_CARDS.to_string());
+            let high_risk = self
+                .overlay
+                .is_high_risk_issuer(cached.issuer_name.as_deref());
+            evaluate_report(&mut cached, high_risk, "", current_vpn_country);
+            return Ok(cached);
+        }
+
+        // 3. Remote lookup via BinLookupPort (ProxyApi -> FallbackPublicApi)
+        match self.lookup_port.lookup(&bin_prefix).await {
+            Ok(info) => {
+                let mut report = raw_info_to_report(&bin_prefix, info);
+                let high_risk = self
+                    .overlay
+                    .is_high_risk_issuer(report.issuer_name.as_deref());
+                evaluate_report(&mut report, high_risk, "", current_vpn_country);
+                if let Some(ref c) = cache
+                    && report.country_code.is_some()
+                    && report.status != CheckStatus::Unknown
+                {
+                    c.put(&report);
+                }
+                Ok(report)
             }
+            // 4. Fail-Closed: NEVER return CheckStatus::Ok on lookup failure
+            Err(err) => Ok(fail_closed_report(bin_prefix, err)),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn raw_info_to_report(bin_prefix: &str, info: RawBinInfo) -> BinReport {
+    BinReport {
+        bin_prefix: bin_prefix.to_string(),
+        status: CheckStatus::Ok,
+        scheme: info.scheme,
+        funding: info.funding,
+        is_prepaid: info.is_prepaid,
+        is_commercial: info.is_commercial,
+        is_reloadable: info.is_reloadable,
+        card_category: info.card_category,
+        country_code: info.country_code,
+        issuer_name: info.issuer_name,
+        known_fintech_label: None,
+        source: info.source,
+        claude_web_verdict: ClaudeWebVerdict::SafeAligned,
+        warnings: Vec::new(),
+    }
+}
 
-    #[test]
-    fn test_bin_checker_validation() {
-        // Valid 6 digits
-        let sanitized = BinChecker::sanitize_bin(" 4111 11 ").unwrap();
-        assert_eq!(sanitized, "411111");
+fn fail_closed_report(bin_prefix: String, err: BinLookupError) -> BinReport {
+    let warnings = vec![
+        "Не удалось проверить первые цифры карты — оплата вслепую несёт риск запроса паспорта и селфи. Проверьте карту позже или оплатите через App Store."
+            .to_string(),
+        err.user_reason_ru(),
+    ];
+    BinReport {
+        bin_prefix,
+        status: CheckStatus::Unknown,
+        scheme: None,
+        funding: CardFunding::Unknown,
+        is_prepaid: None,
+        is_commercial: None,
+        is_reloadable: None,
+        card_category: None,
+        country_code: None,
+        issuer_name: None,
+        known_fintech_label: None,
+        source: BinSource::FallbackUnknown,
+        claude_web_verdict: ClaudeWebVerdict::HighKycRisk,
+        warnings,
+    }
+}
 
-        // Reject too short (<6)
-        let too_short = BinChecker::sanitize_bin("12345");
-        assert!(too_short.is_err());
+fn evaluate_report(
+    report: &mut BinReport,
+    high_kyc_risk: bool,
+    overlay_note: &str,
+    current_vpn_country: Option<&str>,
+) {
+    report.warnings.clear();
+    if !overlay_note.is_empty() {
+        report.warnings.push(overlay_note.to_string());
+    }
 
-        // Reject 16 digits for privacy
-        let full_card = BinChecker::sanitize_bin("4111 1111 2222 3333");
-        assert!(full_card.is_err());
-        assert!(full_card.unwrap_err().contains("For your privacy"));
+    let country = report.country_code.as_deref().unwrap_or("");
+    if !country.is_empty() && SANCTIONED_CARD_COUNTRIES.contains(&country) {
+        report.status = CheckStatus::Critical;
+        report.claude_web_verdict = ClaudeWebVerdict::Blocked;
+        let country_label = format_country_ru(country);
+        report.warnings.push(format!(
+            "Карта выпущена в неподдерживаемой стране: {country_label}. Платёжная система сайта отклоняет карты этого региона."
+        ));
+        return;
+    }
 
-        // Heuristics for Russian Mir card (220220 and 220012)
-        let mir_220220 = BinChecker::evaluate_heuristics("220220").unwrap();
-        assert_eq!(mir_220220.status, CheckStatus::Critical);
-        assert_eq!(mir_220220.country_code.as_deref(), Some("RU"));
-        assert!(mir_220220.advisory.contains("Mir"));
+    if high_kyc_risk {
+        report.status = CheckStatus::Critical;
+        report.claude_web_verdict = ClaudeWebVerdict::HighKycRisk;
+        report.warnings.push(
+            "Высокий риск мгновенного запроса паспорта и селфи на claude.ai для этой карты."
+                .to_string(),
+        );
+        return;
+    }
 
-        let mir_res = BinChecker::evaluate_heuristics("220012").unwrap();
-        assert_eq!(mir_res.status, CheckStatus::Critical);
-        assert_eq!(mir_res.country_code.as_deref(), Some("RU"));
-        assert!(mir_res.advisory.contains("Mir"));
+    let is_prepaid = report.is_prepaid == Some(true) || report.funding == CardFunding::Prepaid;
+    let is_commercial = report.is_commercial == Some(true);
 
-        // Heuristics for Belkart
-        let by_res = BinChecker::evaluate_heuristics("911234").unwrap();
-        assert_eq!(by_res.status, CheckStatus::Critical);
-        assert_eq!(by_res.country_code.as_deref(), Some("BY"));
+    if is_prepaid {
+        report.status = CheckStatus::Warning;
+        report.claude_web_verdict = if is_commercial {
+            ClaudeWebVerdict::HighKycRisk
+        } else {
+            ClaudeWebVerdict::NeedsMatchingIpBilling
+        };
+        report.warnings.push(
+            "Предоплаченная (виртуальная) карта: антифрод оплаты часто отправляет такие карты на дополнительную проверку по паспорту и селфи."
+                .to_string(),
+        );
+    } else if is_commercial {
+        report.status = CheckStatus::Warning;
+        report.claude_web_verdict = ClaudeWebVerdict::NeedsMatchingIpBilling;
+        report.warnings.push(
+            "Корпоративная карта: требуется строгое совпадение страны карты, страны подключения и адреса оплаты."
+                .to_string(),
+        );
+    }
+
+    if country.is_empty() {
+        if report.status != CheckStatus::Critical {
+            report.status = CheckStatus::Unknown;
+        }
+        if !matches!(
+            report.claude_web_verdict,
+            ClaudeWebVerdict::Blocked | ClaudeWebVerdict::HighKycRisk
+        ) {
+            report.claude_web_verdict = ClaudeWebVerdict::HighKycRisk;
+        }
+        report.warnings.push(
+            "Страна выпуска карты не определена — такая проверка не может считаться безопасной."
+                .to_string(),
+        );
+    } else if let (Some(card_cc), Some(vpn_raw)) = (&report.country_code, current_vpn_country) {
+        let vpn_cc = crate::core::country::normalize_country_code(vpn_raw);
+        if vpn_cc.len() == 2
+            && vpn_cc.bytes().all(|b| b.is_ascii_alphabetic())
+            && !card_cc.eq_ignore_ascii_case(&vpn_cc)
+        {
+            if report.status != CheckStatus::Critical {
+                report.status = CheckStatus::Warning;
+            }
+            if !matches!(
+                report.claude_web_verdict,
+                ClaudeWebVerdict::Blocked | ClaudeWebVerdict::HighKycRisk
+            ) {
+                report.claude_web_verdict = ClaudeWebVerdict::NeedsMatchingIpBilling;
+            }
+            let card_label = format_country_ru(card_cc);
+            let vpn_label = format_country_ru(&vpn_cc);
+            report.warnings.push(format!(
+                "Несовпадение стран: карта из страны {card_label}, а текущее подключение — {vpn_label}. Выберите подключение и адрес оплаты в стране карты."
+            ));
+        } else if !is_prepaid && !is_commercial {
+            report.status = CheckStatus::Ok;
+            report.claude_web_verdict = ClaudeWebVerdict::SafeAligned;
+        }
+    } else if !is_prepaid && !is_commercial {
+        report.status = CheckStatus::Ok;
+        report.claude_web_verdict = ClaudeWebVerdict::SafeAligned;
     }
 }

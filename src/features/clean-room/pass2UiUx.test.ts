@@ -174,17 +174,17 @@ describe("Pass 2 UI/UX & Anti-Slop regressions", () => {
     expect(connectCopy.key.caption).toContain("socks5://host:port:user:pass");
   });
 
-  it("Final polish: ГБ-форматирование >= 1024 МБ, «Очистить хвосты», «Риск KYC и блокировки Claude» и stacked prompt-box", () => {
+  it("Final polish: ГБ-форматирование >= 1024 МБ, «Очистить локальные данные», «Риск проверки личности и блокировки Claude» и stacked prompt-box", () => {
     expect(formatBytesCompact(2189 * 1024 * 1024)).toBe("2.1 ГБ");
     expect(formatBytesCompact(1024 * 1024 * 1024)).toBe("1.0 ГБ");
 
-    expect(backupCopy.cache.section).toBe("Очистка хвостов");
-    expect(backupCopy.cache.title).toBe("Хвосты и метки устройства");
-    expect(backupCopy.cache.clean).toBe("Очистить хвосты");
+    expect(backupCopy.cache.section).toBe("Локальные данные");
+    expect(backupCopy.cache.title).toBe("Следы устройства и локальные данные");
+    expect(backupCopy.cache.clean).toBe("Очистить локальные данные");
     expect(backupCopy.profiles.section).toBe("Профили Claude Desktop");
 
-    expect(bunkerCopy.personaRisk.section).toBe("Риск KYC и блокировки Claude");
-    expect(bunkerCopy.personaRisk.title).toBe("Риск KYC и блокировки Claude");
+    expect(bunkerCopy.personaRisk.section).toBe("Риск проверки личности и блокировки Claude");
+    expect(bunkerCopy.personaRisk.title).toBe("Риск проверки личности и блокировки Claude");
 
     const fakeBackup = {
       claudeSummary: null,
@@ -209,9 +209,9 @@ describe("Pass 2 UI/UX & Anti-Slop regressions", () => {
         onToast: vi.fn(),
       }),
     );
-    expect(backupHtml).toContain("Очистить хвосты");
-    expect(backupHtml).toContain("Хвосты и метки устройства");
-    expect(backupHtml).toContain("Риск KYC и блокировки Claude");
+    expect(backupHtml).toContain("Очистить локальные данные");
+    expect(backupHtml).toContain("Следы устройства и локальные данные");
+    expect(backupHtml).toContain("Риск проверки личности и блокировки Claude");
     expect(backupHtml).not.toContain("Профили Claude Desktop и безопасный выход");
     expect(backupHtml).not.toContain("Сбросить кэш");
 

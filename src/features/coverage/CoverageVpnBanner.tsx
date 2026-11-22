@@ -34,7 +34,7 @@ export function CoverageVpnBanner({
           <div className="zs-banner__actions">
             <Button
               size="sm"
-              variant="primary"
+              variant="secondary"
               disabled={relaunchingBrowsers || linkingBrowsers || checking}
               aria-busy={relaunchingBrowsers}
               onClick={onRelaunchBrowsers}
@@ -85,7 +85,7 @@ export function CoverageVpnBanner({
           <div className="zs-banner__actions">
             <Button
               size="sm"
-              variant={vpn.pacPolicyActive ? "secondary" : "primary"}
+              variant="secondary"
               disabled={linkingBrowsers || checking}
               onClick={onLinkBrowsers}
             >

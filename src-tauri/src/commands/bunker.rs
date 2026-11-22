@@ -143,7 +143,7 @@ pub async fn open_bunker_folder(app: tauri::AppHandle) -> Result<(), String> {
     };
     #[cfg(target_os = "windows")]
     let mut cmd = {
-        let mut c = crate::sysproxy::silent_command("explorer");
+        let mut c = std::process::Command::new("explorer");
         c.arg(&snapshots_dir);
         c
     };
@@ -270,4 +270,49 @@ pub async fn clear_bunker_snapshots(
     }
 
     Ok(status)
+}
+
+#[tauri::command]
+pub async fn get_payment_passport(
+    profile_id: String,
+    app: tauri::AppHandle,
+) -> Result<Option<crate::bunker::payment_passport::PaymentPassport>, String> {
+    let data_dir = resolve_data_dir(&app)?;
+    tokio::task::spawn_blocking(move || {
+        crate::bunker::payment_passport::load_payment_passport_in(&data_dir, &profile_id)
+    })
+    .await
+    .map_err(|e| format!("Load PaymentPassport task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn save_payment_passport(
+    passport: crate::bunker::payment_passport::PaymentPassport,
+    app: tauri::AppHandle,
+) -> Result<crate::bunker::payment_passport::PaymentPassport, String> {
+    let data_dir = resolve_data_dir(&app)?;
+    tokio::task::spawn_blocking(move || {
+        crate::bunker::payment_passport::save_payment_passport_in(&data_dir, passport)
+    })
+    .await
+    .map_err(|e| format!("Save PaymentPassport task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn verify_payment_passport(
+    profile_id: String,
+    current: crate::bunker::payment_passport::RenewalCheckInput,
+    app: tauri::AppHandle,
+) -> Result<crate::bunker::payment_passport::PassportVerificationResult, String> {
+    let data_dir = resolve_data_dir(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let passport =
+            crate::bunker::payment_passport::load_payment_passport_in(&data_dir, &profile_id)?
+                .ok_or_else(|| {
+                    format!("Платёжный паспорт для профиля «{profile_id}» ещё не сохранён.")
+                })?;
+        Ok(crate::bunker::payment_passport::verify_renewal_against_passport(&passport, &current))
+    })
+    .await
+    .map_err(|e| format!("Verify PaymentPassport task failed: {e}"))?
 }

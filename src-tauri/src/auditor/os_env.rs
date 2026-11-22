@@ -106,9 +106,11 @@ pub fn evaluate_system_timezone_with(
     evaluate_system_timezone_with_sync(system, ip_timezone, synced_ai_tz, false)
 }
 
-/// Evaluates OS timezone vs provider exit IP timezone, treating active AI environment timezone
-/// sync (`cli_synced_to_ip`, or `sync_ai_tz_enabled && system.sync_ai_tz_active()`) as `Ok`
-/// (`TIMEZONE_SYNCED_AI`) for CLI, IDE, and desktop apps even when providers use different routes.
+/// Evaluates OS timezone vs provider exit IP timezone.
+/// When CLI/IDE timezone sync is active (`cli_synced_to_ip`, or
+/// `sync_ai_tz_enabled && system.sync_ai_tz_active()`) while the real OS timezone still differs
+/// from the exit IP timezone, emits [`CheckResult::warning`] with code `"TIMEZONE_SYNCED_CLI_ONLY"`
+/// so browsers and desktop apps are flagged for optional OS timezone sync.
 pub fn evaluate_system_timezone_with_sync(
     system: &dyn SystemInfo,
     ip_timezone: Option<&str>,
@@ -141,9 +143,10 @@ pub fn evaluate_system_timezone_with_sync(
     // 1. Check if OS system timezone is in Russia or Belarus.
     if is_russian_or_belarusian_timezone(&system_tz) {
         if ai_tz_synced {
-            return CheckResult::ok(
-                "TIMEZONE_SYNCED_AI",
+            return CheckResult::warning(
+                "TIMEZONE_SYNCED_CLI_ONLY",
                 format_ai_tz_synced_message(&system_tz, synced_clean, ip_tz),
+                Some(GUIDE_OS_PRIVACY.to_string()),
             );
         }
         return CheckResult::warning(
@@ -184,9 +187,10 @@ pub fn evaluate_system_timezone_with_sync(
         }
         (false, offsets) => {
             if ai_tz_synced {
-                return CheckResult::ok(
-                    "TIMEZONE_SYNCED_AI",
+                return CheckResult::warning(
+                    "TIMEZONE_SYNCED_CLI_ONLY",
                     format_ai_tz_synced_message(&system_tz, synced_clean, Some(target)),
+                    Some(GUIDE_OS_PRIVACY.to_string()),
                 );
             }
             let detail = match offsets {

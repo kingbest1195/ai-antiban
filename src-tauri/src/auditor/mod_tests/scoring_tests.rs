@@ -11,7 +11,7 @@ fn test_overall_status_allowed() {
 async fn test_auditor_initialization() {
     let auditor = Auditor::new().expect("Auditor initialization should succeed");
     let matrix = auditor.rules.provider_matrix.read().await;
-    assert_eq!(matrix.version, "1.0.0");
+    assert_eq!(matrix.version, "1.1.0");
 }
 
 #[test]

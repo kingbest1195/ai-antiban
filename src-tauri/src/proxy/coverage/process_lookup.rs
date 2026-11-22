@@ -13,8 +13,9 @@ pub fn lookup_process_name_by_port_sync(port: u16) -> Option<String> {
     lookup_process_with(&RealProbe, Os::current(), port, std::process::id())
 }
 
-/// Resolves the process that owns `port` using `probe` (`lsof` on macOS, `netstat` + `tasklist`
-/// on Windows, `ss` on Linux). `my_pid` (the gateway itself) is never returned.
+/// Resolves the process that owns `port` using `probe` (`lsof` on macOS, `ss` on Linux) or
+/// native Win32 `GetExtendedTcpTable` + `QueryFullProcessImageNameW` on Windows.
+/// `my_pid` (the gateway itself) is never returned.
 pub fn lookup_process_with(
     probe: &dyn SystemProbe,
     os: Os,
@@ -28,17 +29,62 @@ pub fn lookup_process_with(
             parse_lsof_owner(&text, my_pid)
         }
         Os::Windows => {
-            let text = probe.run("netstat", &["-ano", "-p", "tcp"])?;
-            let pid = parse_netstat_pid(&text, port, my_pid)?;
-            let filter = format!("PID eq {pid}");
-            let tasks = probe.run("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"])?;
-            parse_tasklist_name(&tasks)
+            if !crate::sysproxy::os_effects_enabled() {
+                return None;
+            }
+            let rows = crate::win_native::network::get_extended_tcp_table_ipv4().ok()?;
+            resolve_windows_tcp_owner(&rows, port, my_pid, |pid| {
+                crate::win_native::process::query_process_image_path(pid)
+                    .ok()
+                    .or_else(|| {
+                        crate::win_native::process::list_processes()
+                            .ok()?
+                            .into_iter()
+                            .find(|p| p.pid == pid)
+                            .map(|p| p.exe_name)
+                    })
+            })
         }
         Os::Linux => {
             let text = probe.run("ss", &["-t", "-p", "-H"])?;
             parse_ss_owner(&text, port, my_pid)
         }
     }
+}
+
+/// Resolves the executable basename owning `port` from native Win32 `GetExtendedTcpTable` rows
+/// and a PID-to-image-path resolver, skipping PID 0, `my_pid`, and `zastava*` executables.
+pub fn resolve_windows_tcp_owner<F>(
+    rows: &[crate::win_native::network::TcpOwnerRow],
+    port: u16,
+    my_pid: u32,
+    resolve_image_path: F,
+) -> Option<String>
+where
+    F: Fn(u32) -> Option<String>,
+{
+    for row in rows {
+        if row.local_port != port && row.remote_port != port {
+            continue;
+        }
+        let pid = row.owning_pid;
+        if pid == 0 || pid == my_pid {
+            continue;
+        }
+        let Some(image_path) = resolve_image_path(pid) else {
+            continue;
+        };
+        let basename = crate::win_native::extract_exe_basename(&image_path).trim();
+        if basename.is_empty()
+            || basename.eq_ignore_ascii_case("zastava.exe")
+            || basename.eq_ignore_ascii_case("zastava_lib.exe")
+            || basename.eq_ignore_ascii_case("zastava")
+        {
+            continue;
+        }
+        return Some(basename.to_string());
+    }
+    None
 }
 
 fn unescape_lsof(s: &str) -> String {

@@ -58,3 +58,35 @@ async fn reconcile_active_profile_clears_stale_anthropic_pin_even_when_route_mat
         Some("2.2.2.2")
     );
 }
+
+#[test]
+fn enable_default_protection_skips_sysproxy_and_cli_when_shutdown_started() {
+    let _lock = startup::GLOBAL_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    startup::reset_global_for_test();
+
+    // Case 1: shutdown started before enable_sysproxy -> neither step runs.
+    startup::note_shutdown_global();
+    let calls = std::cell::RefCell::new(Vec::new());
+    run_default_protection_with(
+        startup::is_shutting_down_global,
+        || calls.borrow_mut().push("sys"),
+        || calls.borrow_mut().push("cli"),
+    );
+    assert!(calls.borrow().is_empty());
+
+    // Case 2: shutdown begins during enable_sysproxy -> cli step is cancelled.
+    startup::reset_global_for_test();
+    let calls2 = std::cell::RefCell::new(Vec::new());
+    run_default_protection_with(
+        startup::is_shutting_down_global,
+        || {
+            calls2.borrow_mut().push("sys");
+            startup::note_shutdown_global();
+        },
+        || calls2.borrow_mut().push("cli"),
+    );
+    assert_eq!(*calls2.borrow(), vec!["sys"]);
+    startup::reset_global_for_test();
+}

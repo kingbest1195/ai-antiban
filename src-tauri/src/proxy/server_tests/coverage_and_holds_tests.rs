@@ -238,8 +238,10 @@ async fn pac_excludes_disabled_providers_and_disables_cache() {
     };
     assert!(resp.contains("Cache-Control: no-store"), "{resp}");
     assert!(resp.contains("anthropic.com"), "{resp}");
-    assert!(!resp.contains("gemini.google.com"), "{resp}");
-    assert!(!resp.contains("google.com"), "{resp}");
+    assert!(!resp.contains("\"gemini.google.com\""), "{resp}");
+    assert!(!resp.contains("\"www.google.com\""), "{resp}");
+    assert!(!resp.contains("\"accounts.google.com\""), "{resp}");
+    assert!(!resp.contains("\"play.google.com\""), "{resp}");
 }
 
 #[tokio::test]

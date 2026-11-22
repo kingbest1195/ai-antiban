@@ -306,3 +306,116 @@ fn validates_iana_names_strictly() {
     assert!(validate_iana_tz("/usr/share/zoneinfo/UTC").is_err());
     assert!(validate_iana_tz("").is_err());
 }
+
+#[test]
+fn keep_system_tz_on_exit_skips_exit_disable_and_startup_recovery_and_preserves_baseline() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeOsTzPlatform::new("Europe/Moscow", Some("Russian Standard Time"), Some(true));
+
+    // Sync with keep_on_exit = true: auto_restore_pending must be false and baseline must exist.
+    let status = sync_os_timezone_with_keep(&fake, dir.path(), "Europe/Amsterdam", true).unwrap();
+    assert!(status.synced);
+    assert!(!status.auto_restore_pending);
+    assert_eq!(status.current_os_tz.as_deref(), Some("Europe/Amsterdam"));
+    assert!(read_baseline(dir.path()).unwrap().is_some());
+
+    let polled = get_os_timezone_sync_status_with_keep(&fake, dir.path(), true).unwrap();
+    assert!(polled.synced);
+    assert!(!polled.auto_restore_pending);
+
+    // Exit restore, toggle_sysproxy(false), and startup recovery must all be no-ops and preserve baseline.
+    assert!(!restore_on_exit_once_with_keep(&fake, dir.path(), true).unwrap());
+    assert!(!restore_if_synced_on_disable_with_keep(&fake, dir.path(), true).unwrap());
+    recover_baseline_on_start_with_keep(&fake, dir.path(), true);
+
+    assert_eq!(fake.restore_calls.lock().unwrap().len(), 0);
+    assert_eq!(fake.current_iana_timezone().unwrap(), "Europe/Amsterdam");
+    let preserved = read_baseline(dir.path()).unwrap().unwrap();
+    assert_eq!(preserved.original_iana, "Europe/Moscow");
+    assert_eq!(
+        preserved.original_windows_id.as_deref(),
+        Some("Russian Standard Time")
+    );
+    assert_eq!(preserved.original_auto_tz, Some(true));
+
+    // When keep_on_exit is false: status shows auto_restore_pending=true, and disable/exit/startup restores.
+    let polled_false = get_os_timezone_sync_status_with_keep(&fake, dir.path(), false).unwrap();
+    assert!(polled_false.auto_restore_pending);
+
+    assert!(restore_if_synced_on_disable_with_keep(&fake, dir.path(), false).unwrap());
+    assert_eq!(fake.restore_calls.lock().unwrap().len(), 1);
+    assert_eq!(fake.current_iana_timezone().unwrap(), "Europe/Moscow");
+    assert!(read_baseline(dir.path()).unwrap().is_none());
+
+    // Also test exit restore when keep_on_exit = false.
+    sync_os_timezone_with_keep(&fake, dir.path(), "Europe/Berlin", false).unwrap();
+    assert!(restore_on_exit_once_with_keep(&fake, dir.path(), false).unwrap());
+    assert_eq!(fake.restore_calls.lock().unwrap().len(), 2);
+    assert_eq!(fake.current_iana_timezone().unwrap(), "Europe/Moscow");
+    assert!(read_baseline(dir.path()).unwrap().is_none());
+}
+
+#[test]
+fn keep_system_tz_on_exit_atomic_helper_roundtrips() {
+    let _g = crate::os_tz::KEEP_TZ_TEST_LOCK.blocking_lock();
+
+    let prev = keep_system_tz_on_exit();
+    set_keep_system_tz_on_exit(true);
+    assert!(keep_system_tz_on_exit());
+
+    let dir = TempDir::new().unwrap();
+    let fake = FakeOsTzPlatform::new("Europe/Moscow", None, None);
+    sync_os_timezone_with(&fake, dir.path(), "Europe/Paris").unwrap();
+    // Global atomic is true: public restore_on_exit_once must skip without touching baseline.
+    restore_on_exit_once(None);
+    assert!(read_baseline(dir.path()).unwrap().is_some());
+
+    set_keep_system_tz_on_exit(false);
+    assert!(!keep_system_tz_on_exit());
+    set_keep_system_tz_on_exit(prev);
+}
+
+#[test]
+fn reset_exit_restore_guard_clears_ran_flag_for_subsequent_exit() {
+    let _g = crate::os_tz::KEEP_TZ_TEST_LOCK.blocking_lock();
+    let prev = keep_system_tz_on_exit();
+    set_keep_system_tz_on_exit(false);
+    reset_exit_restore_guard();
+
+    // First call marks EXIT_RESTORE_RAN = true.
+    restore_on_exit_once(None);
+    assert!(EXIT_RESTORE_RAN.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Failed update install resets the guard so a later real quit still restores OS TZ.
+    reset_exit_restore_guard();
+    assert!(!EXIT_RESTORE_RAN.load(std::sync::atomic::Ordering::SeqCst));
+
+    set_keep_system_tz_on_exit(prev);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_auto_tz_missing_key_returns_none_instead_of_false() {
+    assert_eq!(macos::parse_defaults_auto_tz_output(false, ""), None);
+    assert_eq!(
+        macos::parse_defaults_auto_tz_output(false, "The domain/default pair does not exist"),
+        None
+    );
+    assert_eq!(
+        macos::parse_defaults_auto_tz_output(true, "1\n"),
+        Some(true)
+    );
+    assert_eq!(
+        macos::parse_defaults_auto_tz_output(true, "0\n"),
+        Some(false)
+    );
+    assert_eq!(
+        macos::parse_defaults_auto_tz_output(true, "YES\n"),
+        Some(true)
+    );
+    assert_eq!(
+        macos::parse_defaults_auto_tz_output(true, "NO\n"),
+        Some(false)
+    );
+    assert_eq!(macos::parse_defaults_auto_tz_output(true, "weird"), None);
+}

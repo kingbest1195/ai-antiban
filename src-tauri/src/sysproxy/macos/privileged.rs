@@ -1,5 +1,5 @@
 use super::super::EnableReport;
-use super::super::journal::{Journal, JournalError, Resource, Value};
+use super::super::journal::{Journal, JournalError, ReportItem, Resource, Value};
 use super::super::platform::{PacState, Platform, PlatformError, is_admin_auth_error};
 use super::MSG_ADMIN_AUTH_REQUIRED;
 use super::apply::note_changed;
@@ -283,4 +283,30 @@ where
         }
     }
     Ok(report)
+}
+
+/// Restores `Resource::Pac` and `Resource::Chain` entries in one elevated `osascript` session
+/// after unprivileged `networksetup` failed with `AdminAuthRequired` on interactive quit.
+pub(crate) fn disable_pac_privileged(
+    j: &mut Journal,
+    p: &dyn Platform,
+    resources: &[Resource],
+) -> Vec<ReportItem> {
+    disable_pac_privileged_with(j, p, resources, run_privileged_osascript)
+}
+
+pub(super) fn disable_pac_privileged_with<F>(
+    j: &mut Journal,
+    p: &dyn Platform,
+    resources: &[Resource],
+    exec_shell: F,
+) -> Vec<ReportItem>
+where
+    F: FnOnce(&str) -> Result<(), JournalError>,
+{
+    j.restore_batch_privileged(p, resources, |items| {
+        let script = build_privileged_networksetup_script(p, items)
+            .map_err(|_| JournalError::Platform(PlatformError::Failed("osascript")))?;
+        exec_shell(&script)
+    })
 }

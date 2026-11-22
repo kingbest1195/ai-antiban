@@ -197,7 +197,7 @@ async fn evaluate_all_zastava_key_coexists_with_foreign_vpn_fake_ip_and_doh_dnsb
     );
     assert_eq!(
         (report.checks[7].status, report.checks[7].code.as_str()),
-        (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
     );
     assert_eq!(
         (report.checks[12].status, report.checks[12].code.as_str()),

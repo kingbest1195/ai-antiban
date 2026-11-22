@@ -18,3 +18,4 @@
 .zs-alert-win .zs-btn--lg,.zs-alert-overlay .zs-btn--lg{height:40px}
 .zs-alert-win .zs-dialog__confirm,.zs-alert-overlay .zs-dialog__confirm{gap:var(--space-2);padding:10px var(--space-3)}
 .zs-alert-win .zs-dialog__confirm-text,.zs-alert-overlay .zs-dialog__confirm-text{font-size:12px;line-height:16px}
+.zs-tabular{font-variant-numeric:tabular-nums}

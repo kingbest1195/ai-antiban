@@ -28,10 +28,13 @@ pub use mapping::{
     windows_to_iana_tz,
 };
 pub use sync::{
-    get_os_timezone_sync_status, get_os_timezone_sync_status_with, recover_baseline_on_start,
-    recover_baseline_on_start_with, restore_if_synced_on_disable,
-    restore_if_synced_on_disable_with, restore_on_exit_once, restore_os_timezone,
-    restore_os_timezone_with, sync_os_timezone, sync_os_timezone_with,
+    get_os_timezone_sync_status, get_os_timezone_sync_status_with,
+    get_os_timezone_sync_status_with_keep, recover_baseline_on_start,
+    recover_baseline_on_start_with, recover_baseline_on_start_with_keep,
+    restore_if_synced_on_disable, restore_if_synced_on_disable_with,
+    restore_if_synced_on_disable_with_keep, restore_on_exit_once, restore_on_exit_once_with_keep,
+    restore_os_timezone, restore_os_timezone_with, sync_os_timezone, sync_os_timezone_with,
+    sync_os_timezone_with_keep,
 };
 
 pub const BASELINE_FILE_NAME: &str = "os_tz_baseline.json";
@@ -39,6 +42,25 @@ pub const BASELINE_FILE_NAME: &str = "os_tz_baseline.json";
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 static OS_TZ_OPS: Mutex<()> = Mutex::new(());
 static EXIT_RESTORE_RAN: AtomicBool = AtomicBool::new(false);
+static KEEP_SYSTEM_TZ_ON_EXIT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) static KEEP_TZ_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Updates the lock-free process-wide cache of `keep_system_tz_on_exit` so synchronous exit hooks
+/// and signal watchers never take async `AppState` locks.
+pub fn set_keep_system_tz_on_exit(keep: bool) {
+    KEEP_SYSTEM_TZ_ON_EXIT.store(keep, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Lock-free read of whether Zastava should keep the synced OS timezone across exit/update/disable.
+pub fn keep_system_tz_on_exit() -> bool {
+    KEEP_SYSTEM_TZ_ON_EXIT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Resets the one-shot exit restore guard (used when an update install fails and the app stays running).
+pub fn reset_exit_restore_guard() {
+    EXIT_RESTORE_RAN.store(false, std::sync::atomic::Ordering::SeqCst);
+}
 
 /// Pins the app data directory where `os_tz_baseline.json` lives.
 pub fn set_data_dir(dir: PathBuf) {

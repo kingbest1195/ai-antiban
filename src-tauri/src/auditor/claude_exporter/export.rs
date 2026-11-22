@@ -348,76 +348,80 @@ pub fn export_claude_dir_to(
     })
 }
 
-/// Packs export directory into .zip using native platform tools.
-fn pack_directory_to_zip(dir: &Path, zip_file: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        // Use macOS native ditto for cleanest zip preservation
-        let status = crate::sysproxy::silent_command("ditto")
-            .args([
-                "-c",
-                "-k",
-                "--sequesterRsrc",
-                "--keepParent",
-                &dir.to_string_lossy(),
-                &zip_file.to_string_lossy(),
-            ])
-            .status()
-            .map_err(|e| format!("ditto error: {e}"))?;
-        if status.success() {
-            return Ok(());
-        }
-        // Fallback to zip
-        let status2 = crate::sysproxy::silent_command("zip")
-            .args([
-                "-r",
-                "-q",
-                &zip_file.to_string_lossy(),
-                &dir.file_name().unwrap().to_string_lossy(),
-            ])
-            .current_dir(dir.parent().unwrap())
-            .status()
-            .map_err(|e| format!("zip error: {e}"))?;
-        if status2.success() {
-            return Ok(());
-        }
-        Err("macOS zip command failed".to_string())
+/// Packs export directory into `.zip` in-process using the `zip` crate (zero child processes).
+pub(super) fn pack_directory_to_zip(dir: &Path, zip_file: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!(
+            "Директория для упаковки не найдена: {}",
+            dir.display()
+        ));
+    }
+    let root_name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("Некорректное имя директории: {}", dir.display()))?;
+
+    let file =
+        fs::File::create(zip_file).map_err(|e| format!("Не удалось создать ZIP-файл: {e}"))?;
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    if let Err(err) = write_dir_to_zip(&mut writer, dir, &root_name, options) {
+        drop(writer);
+        let _ = fs::remove_file(zip_file);
+        return Err(err);
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        let cmd = format!(
-            "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
-            dir.display(),
-            zip_file.display()
-        );
-        let status = crate::sysproxy::silent_command("powershell")
-            .args(["-NoProfile", "-Command", &cmd])
-            .status()
-            .map_err(|e| format!("PowerShell Compress-Archive error: {e}"))?;
-        if status.success() {
-            return Ok(());
-        }
-        return Err("Windows zip compression failed".to_string());
-    }
+    writer
+        .finish()
+        .map_err(|e| format!("Не удалось финализировать ZIP-архив: {e}"))?;
+    Ok(())
+}
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let status = crate::sysproxy::silent_command("zip")
-            .args([
-                "-r",
-                "-q",
-                &zip_file.to_string_lossy(),
-                &dir.file_name().unwrap().to_string_lossy(),
-            ])
-            .current_dir(dir.parent().unwrap())
-            .status()
-            .map_err(|e| format!("zip error: {e}"))?;
-        if status.success() {
-            return Ok(());
+fn write_dir_to_zip(
+    writer: &mut zip::ZipWriter<fs::File>,
+    dir: &Path,
+    rel_prefix: &str,
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    writer
+        .add_directory(format!("{rel_prefix}/"), options)
+        .map_err(|e| format!("Ошибка добавления каталога в ZIP ({rel_prefix}): {e}"))?;
+
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("Ошибка чтения каталога {}: {e}", dir.display()))?
+        .filter_map(Result::ok)
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
         }
-        Err("Linux zip compression failed".to_string())
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.is_empty() {
+            continue;
+        }
+        let entry_zip_path = format!("{rel_prefix}/{name}");
+        let path = entry.path();
+        if ft.is_dir() {
+            write_dir_to_zip(writer, &path, &entry_zip_path, options)?;
+        } else if ft.is_file() {
+            writer
+                .start_file(&entry_zip_path, options)
+                .map_err(|e| format!("Ошибка записи файла в ZIP ({entry_zip_path}): {e}"))?;
+            let mut src = fs::File::open(&path)
+                .map_err(|e| format!("Не удалось открыть файл {}: {e}", path.display()))?;
+            std::io::copy(&mut src, writer)
+                .map_err(|e| format!("Ошибка сжатия файла {}: {e}", path.display()))?;
+        }
     }
+    Ok(())
 }
 
 /// Public API to export local Claude data onto the user's Desktop.

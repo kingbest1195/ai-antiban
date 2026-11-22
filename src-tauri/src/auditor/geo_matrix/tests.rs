@@ -436,3 +436,36 @@ fn test_unknown_constructor_and_serialization() {
     let t = CheckResult::unknown("C", "m", UnknownReason::Timeout);
     assert!(t.is_unknown() && !t.is_not_applicable());
 }
+
+#[test]
+fn test_payment_and_kyc_host_matching() {
+    for host in [
+        "stripe.com",
+        "checkout.stripe.com:443",
+        "m.stripe.network.",
+        "sub.stripe.com",
+        "withpersona.com",
+        "inquiry.withpersona.com",
+        "challenges.cloudflare.com",
+        "js.hcaptcha.com",
+        "api.arkoselabs.com",
+        "pay.google.com",
+        "payments.google.com",
+    ] {
+        assert!(
+            is_payment_or_kyc_host(host),
+            "expected payment/kyc match for {host}"
+        );
+    }
+    for non_payment in [
+        "example.com",
+        "notstripe.com",
+        "google.com",
+        "cloudflare.com",
+    ] {
+        assert!(
+            !is_payment_or_kyc_host(non_payment),
+            "did not expect payment/kyc match for {non_payment}"
+        );
+    }
+}

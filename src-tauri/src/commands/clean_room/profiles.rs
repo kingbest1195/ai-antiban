@@ -66,6 +66,7 @@ pub async fn create_clean_profile_in(
         warmup_started_at: None,
         launchpad_step: 1,
         completed_checklist: Vec::new(),
+        post_payment_quarantine: None,
     };
 
     {

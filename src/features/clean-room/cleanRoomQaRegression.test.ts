@@ -149,6 +149,7 @@ const apiMocks = vi.hoisted(() => ({
   discoverCleanBrowsers: vi.fn(async () => [
     { engine: "chrome", display_name: "Chrome", available: true, executable_path: "/Applications/Chrome.app" },
   ]),
+  updateCleanProfileRoute: vi.fn(async () => ({})),
 }));
 
 vi.mock("../../utils/api", async () => {
@@ -159,12 +160,20 @@ vi.mock("../../utils/api", async () => {
     createCleanProfile: apiMocks.createCleanProfile,
     runCleanRoomAudit: apiMocks.runCleanRoomAudit,
     discoverCleanBrowsers: apiMocks.discoverCleanBrowsers,
+    updateCleanProfileRoute: apiMocks.updateCleanProfileRoute,
   };
 });
 
 import type { CleanRoomAuditReport, CleanRoomProfile, RouteView } from "../../types";
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
+import { activatePostPaymentQuarantine } from "../../utils/api";
+import { resetMockPaymentState } from "../../utils/api/mocks/payment";
+import { mockState } from "../../utils/api/mocks/state";
 import { Button, Select } from "../../ui";
+import { QuarantineOverrideModal } from "../subscription/QuarantineOverrideModal";
+import { notifyQuarantineUpdated } from "../subscription/useQuarantineGuard";
+import { CleanRoomScreen } from "./CleanRoomScreen";
+import { LaunchpadPaymentStep } from "./LaunchpadPaymentStep";
 import { LaunchpadSteps } from "./LaunchpadSteps";
 import { SandboxProfilesCard } from "./SandboxProfilesCard";
 import { PreFlightAuditCard } from "./PreFlightAuditCard";
@@ -420,6 +429,141 @@ describe("Clean Room QA Regression (P1 #1, #2, #6 & P2 #1)", () => {
     expect(onAuditUpdated).toHaveBeenCalledTimes(1);
     expect(onAuditUpdated).toHaveBeenLastCalledWith(expect.objectContaining({ exit_ip: "2.2.2.2" }));
 
+    m.unmount();
+  });
+
+  it("Medium #6: SandboxProfilesCard синхронизирует 72ч карантин после активации без перезагрузки и смены activeProfileId", async () => {
+    resetMockPaymentState();
+    const profile = makeProfile({ id: "p-sync", bound_route_id: "r1" });
+    mockState.clean_room = {
+      profiles: [profile],
+      active_profile_id: "p-sync",
+      tainted_ips: {},
+      global_post_payment_quarantine: null,
+    };
+    const routes = [makeRoute("r1", "NL Route"), makeRoute("r2", "DE Route")];
+
+    const m = mountComponent(SandboxProfilesCard, {
+      profiles: [profile],
+      activeProfileId: "p-sync",
+      routes,
+      readyToLaunch: true,
+      initialBrowsers: [
+        { engine: "chrome", display_name: "Chrome", available: true, executable_path: "/Applications/Chrome.app" },
+      ],
+      onSelectProfile: vi.fn(),
+    });
+
+    await m.settle();
+
+    // Активируем карантин (как из PayShield / Шага 4 на том же экране) без смены activeProfileId
+    await activatePostPaymentQuarantine({ profileId: "p-sync", routeId: "r1", exitCountry: "NL" });
+    notifyQuarantineUpdated();
+    await m.settle();
+
+    // Попытка сменить маршрут профиля должна открыть QuarantineOverrideModal, а не вызвать updateCleanProfileRoute
+    const selects = findAllInTree(
+      m.result,
+      (el) => el.type === Select && (el.props as { label?: string }).label === copy.sandbox.profileCard.routeLabel,
+    );
+    expect(selects).toHaveLength(1);
+    (selects[0].props as { onChange: (e: { target: { value: string } }) => void }).onChange({
+      target: { value: "r2" },
+    });
+    await m.settle();
+
+    expect(apiMocks.updateCleanProfileRoute).not.toHaveBeenCalled();
+    const modals = findAllInTree(m.result, (el) => el.type === QuarantineOverrideModal);
+    expect(modals).toHaveLength(1);
+    expect((modals[0].props as { open: boolean }).open).toBe(true);
+
+    // Подтверждение override снимает карантин и применяет смену маршрута
+    await (modals[0].props as { onConfirm: () => Promise<void> }).onConfirm();
+    await m.settle();
+    expect(apiMocks.updateCleanProfileRoute).toHaveBeenCalledWith("p-sync", "r2");
+
+    resetMockPaymentState();
+    m.unmount();
+  });
+
+  it("Medium #7: CleanRoomScreen на Шаге 4 (включая «Картой на сайте») держит строго <= 1 primary CTA", async () => {
+    const profile = makeProfile({ id: "p-cta", launchpad_step: 4 });
+    const routes = [makeRoute("r1", "NL Route")];
+
+    const m = mountComponent(CleanRoomScreen, {
+      state: {
+        pinned_ip: "185.10.10.1",
+        strict_pinning_enabled: true,
+        ip_history: {},
+        session_allowed_providers: [],
+        blocked_providers: [],
+        dismissed_hints: [],
+        clean_room: {
+          profiles: [profile],
+          active_profile_id: "p-cta",
+          tainted_ips: {},
+        },
+      },
+      routesSnapshot: { routes, default_route_id: "r1", provider_routes: {}, effective: {}, dangling: [] },
+      initialTab: "launchpad",
+      initialStep: 4,
+      initialAudit: makeAudit("185.10.10.1"),
+      initialBrowsers: [
+        { engine: "chrome", display_name: "Chrome", available: true, executable_path: "/Applications/Chrome.app" },
+      ],
+    });
+    await m.settle();
+
+    // В дереве CleanRoomScreen проверяем SandboxProfilesCard (1 primary) и LaunchpadSteps -> PaymentFlowPanel (compactPrimary=false)
+    const sandboxEl = findAllInTree(m.result, (el) => el.type === SandboxProfilesCard)[0];
+    const launchpadEl = findAllInTree(m.result, (el) => el.type === LaunchpadSteps)[0];
+    expect(sandboxEl).toBeDefined();
+    expect(launchpadEl).toBeDefined();
+
+    const sandboxMount = mountComponent(
+      SandboxProfilesCard,
+      sandboxEl.props as Parameters<typeof SandboxProfilesCard>[0],
+    );
+    await sandboxMount.settle();
+    const sandboxPrimary = findAllInTree(
+      sandboxMount.result,
+      (el) => el.type === Button && (el.props as { variant?: string }).variant === "primary",
+    );
+    expect(sandboxPrimary).toHaveLength(1);
+
+    const launchpadMount = mountComponent(
+      LaunchpadSteps,
+      launchpadEl.props as Parameters<typeof LaunchpadSteps>[0],
+    );
+    await launchpadMount.settle();
+    const paymentStepEl = findAllInTree(
+      launchpadMount.result,
+      (el) => el.type === LaunchpadPaymentStep,
+    )[0];
+    expect(paymentStepEl).toBeDefined();
+    expect((paymentStepEl.props as { compactPrimary?: boolean }).compactPrimary).toBe(false);
+
+    const stepTree = LaunchpadPaymentStep({
+      ...(paymentStepEl.props as Parameters<typeof LaunchpadPaymentStep>[0]),
+      initialFlow: "card",
+    });
+    const flowProps = (stepTree as ReactElement<Record<string, unknown>>).props as Record<string, unknown>;
+    expect(flowProps.compactPrimary).toBe(false);
+
+    const flowMount = mountComponent(
+      (stepTree as ReactElement).type as (p: Record<string, unknown>) => ReactElement,
+      flowProps,
+    );
+    await flowMount.settle();
+    const cardPrimary = findAllInTree(
+      flowMount.result,
+      (el) => el.type === Button && (el.props as { variant?: string }).variant === "primary",
+    );
+    expect(cardPrimary).toHaveLength(0);
+
+    flowMount.unmount();
+    launchpadMount.unmount();
+    sandboxMount.unmount();
     m.unmount();
   });
 });

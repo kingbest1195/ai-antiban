@@ -38,6 +38,24 @@ pub enum CleanProfileStatus {
     Tainted,
 }
 
+/// 72-hour post-payment quarantine lock persisted on a Clean Room profile or global state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PostPaymentQuarantine {
+    pub started_at: u64,
+    pub expires_at: u64,
+    #[serde(default)]
+    pub pinned_route_id: Option<String>,
+    #[serde(default)]
+    pub pinned_exit_ip: Option<String>,
+    #[serde(default)]
+    pub pinned_asn: Option<u32>,
+    #[serde(default)]
+    pub pinned_country: Option<String>,
+    #[serde(default)]
+    pub overridden_at: Option<u64>,
+}
+
 /// Isolated browser sandbox profile persisted inside `AppStateData.clean_room`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CleanRoomProfile {
@@ -62,6 +80,8 @@ pub struct CleanRoomProfile {
     pub launchpad_step: u8,
     #[serde(default)]
     pub completed_checklist: Vec<String>,
+    #[serde(default)]
+    pub post_payment_quarantine: Option<PostPaymentQuarantine>,
 }
 
 /// Persistent Clean Room state (`profiles`, `active_profile_id`, and `tainted_ips`).
@@ -74,6 +94,9 @@ pub struct CleanRoomState {
     /// Exit IPs marked as tainted (ban / Persona trigger) with Unix timestamp (seconds).
     #[serde(default)]
     pub tainted_ips: HashMap<String, u64>,
+    /// Fallback 72h post-payment quarantine when no Clean Room profile is active.
+    #[serde(default)]
+    pub global_post_payment_quarantine: Option<PostPaymentQuarantine>,
 }
 
 /// Local Data Bunker backup settings and last snapshot metadata.

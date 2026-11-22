@@ -104,14 +104,14 @@ fn tz_unknown_offsets_and_different_names_stay_a_warning() {
 }
 
 #[test]
-fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_ru_os_tz() {
+fn tz_synced_ai_env_returns_cli_only_warning_when_os_tz_differs_from_ip() {
     let far = |applied: bool| FakeSystem {
         timezone: Ok("Asia/Tokyo".into()),
         local_offset: Some(9 * 3600),
         sync_ai_tz: applied,
         ..sys()
     };
-    // Applied AI env TZ sync while OS TZ is still mismatched: Ok (OS TZ is optional for web).
+    // Applied AI env TZ sync while OS TZ is still mismatched: Warning(TIMEZONE_SYNCED_CLI_ONLY).
     let r = evaluate_system_timezone_with(
         &far(true),
         Some("Europe/Amsterdam"),
@@ -119,7 +119,7 @@ fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_r
     );
     assert_eq!(
         (r.status, r.code.as_str()),
-        (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
     );
     assert!(r.message.contains("Asia/Tokyo"), "{}", r.message);
     assert!(
@@ -151,7 +151,7 @@ fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_r
     );
 
     // With sync_ai_tz_enabled=true & sync_ai_tz_active=true: cross-route provider ip_tz (Paris vs London)
-    // or None synced_ai_tz still yields Ok("TIMEZONE_SYNCED_AI").
+    // or None synced_ai_tz yields Warning("TIMEZONE_SYNCED_CLI_ONLY") while OS TZ stays Asia/Tokyo.
     let r_cross = evaluate_system_timezone_with_sync(
         &far(true),
         Some("Europe/Paris"),
@@ -160,16 +160,16 @@ fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_r
     );
     assert_eq!(
         (r_cross.status, r_cross.code.as_str()),
-        (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
     );
     let r_no_hint =
         evaluate_system_timezone_with_sync(&far(true), Some("Europe/Paris"), None, true);
     assert_eq!(
         (r_no_hint.status, r_no_hint.code.as_str()),
-        (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
     );
 
-    // OS TZ is RU + AI TZ synced -> Ok("TIMEZONE_SYNCED_AI"), never Warning.
+    // OS TZ is RU + AI TZ synced -> Warning("TIMEZONE_SYNCED_CLI_ONLY").
     let ru = |applied: bool| FakeSystem {
         timezone: Ok("Europe/Moscow".into()),
         local_offset: Some(3 * 3600),
@@ -183,7 +183,7 @@ fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_r
     );
     assert_eq!(
         (ru_synced.status, ru_synced.code.as_str()),
-        (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
     );
     assert!(
         ru_synced.message.contains("Europe/Moscow"),
@@ -204,7 +204,7 @@ fn tz_synced_ai_env_returns_ok_for_cli_ide_and_desktop_even_with_mismatched_or_r
     );
     assert_eq!(
         (ru_cross.status, ru_cross.code.as_str()),
-        (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
     );
 
     assert_eq!(
@@ -490,7 +490,7 @@ fn no_text_of_the_locale_or_time_zone_checks_mentions_lc_all_or_the_proxy_protec
 }
 
 #[test]
-fn the_synced_zone_note_follows_the_switch_and_returns_ok_when_active() {
+fn the_synced_zone_note_follows_the_switch_and_returns_cli_only_warning_when_active() {
     let far = |sync: bool| FakeSystem {
         timezone: Ok("Asia/Tokyo".into()),
         local_offset: Some(9 * 3600),
@@ -504,7 +504,7 @@ fn the_synced_zone_note_follows_the_switch_and_returns_ok_when_active() {
     );
     assert_eq!(
         (synced_ai.status, synced_ai.code.as_str()),
-        (CheckStatus::Ok, "TIMEZONE_SYNCED_AI")
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
     );
     assert!(
         synced_ai.message.contains("синхронизированы"),

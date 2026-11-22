@@ -467,6 +467,8 @@ describe("Clean Room UX & Privacy v3.0.1 (mounted + element tree)", () => {
     expect(text).not.toContain("45.32.11.22");
     expect(text).not.toContain("2001:db8::99");
     expect(text).toContain("••••:••••:…:7334");
+    expect(text).toContain("Соединенные Штаты");
+    expect(text).not.toContain("(US)");
     expect(text).toContain("•••.•••.•••.40");
     expect(text).toContain("••••:••••:…:1");
     expect(text).toContain("•••.•••.•••.22");

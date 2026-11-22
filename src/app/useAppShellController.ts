@@ -26,6 +26,7 @@ import {
   getPersonaRiskReport,
   markWhatsNewV3Seen,
   onDeepLink,
+  onOpenPaymentCheck,
   onRouteUnavailable,
   onShutdownProgress,
   setHideIpMode,
@@ -223,6 +224,29 @@ export function useAppShellController() {
       active = false;
       unlisten?.();
     };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    onOpenPaymentCheck((domain) => {
+      if (!active) return;
+      nav.push({ page: "clean-room", cleanRoomTab: "payment" });
+      if (domain) {
+        showToast("Проверка оплаты", `Домен ${domain} приостановлен для проверки готовности.`, "info");
+      }
+    })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

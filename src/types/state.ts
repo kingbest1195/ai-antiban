@@ -1,5 +1,6 @@
 import type { IpHistoryEntry, ProviderId, RiskReport } from "./audit";
 import type { CliMode } from "./coverage";
+import type { CheckoutRiskAlert, PostPaymentQuarantine } from "./payment";
 
 export type InterceptionBehavior = "ask_popup" | "auto_lock_silent" | "auto_allow_trusted";
 export type PopupPosition = "top_right" | "top_center";
@@ -31,12 +32,14 @@ export interface CleanRoomProfile {
   warmup_started_at: number | null;
   launchpad_step: number;
   completed_checklist: string[];
+  post_payment_quarantine?: PostPaymentQuarantine | null;
 }
 
 export interface CleanRoomState {
   profiles: CleanRoomProfile[];
   active_profile_id: string | null;
   tainted_ips: Record<string, number>;
+  global_post_payment_quarantine?: PostPaymentQuarantine | null;
 }
 
 export interface BunkerSettings {
@@ -75,6 +78,8 @@ export interface AppStateData {
   custom_ai_domains?: string[];
   /** Независимый тумблер «Подменять часовой пояс и локаль для ИИ в терминале/IDE». */
   sync_ai_tz_enabled?: boolean;
+  /** Сохранять системный часовой пояс ОС при выходе, обновлении и отключении защиты. */
+  keep_system_tz_on_exit?: boolean;
   /** Режим покрытия CLI. */
   cli_mode?: CliMode;
   /** Автозапуск Заставы при входе в систему (в трей). */
@@ -157,6 +162,8 @@ export interface RiskInterceptPayload {
   network_change?: NetworkChange | null;
   /** Понятная причина срабатывания перехвата из шлюза. */
   gate_reason?: string | null;
+  /** Данные PayShield при перехвате чекаута (scope === "checkout"). */
+  checkout_risk?: CheckoutRiskAlert | null;
   is_simulation?: boolean;
   /** Unix-время (мс), когда изменение сети обнаружено. */
   detected_at_ms: number;
@@ -198,6 +205,8 @@ export interface ShutdownProgressPayload {
   total: number;
   label: string;
   done: boolean;
+  /** Приложения (например, Antigravity или IDE), которые всё ещё держат адрес шлюза в памяти процесса. */
+  gateway_bound_apps?: string[];
 }
 
 export interface AutostartStatus {

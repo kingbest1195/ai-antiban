@@ -69,6 +69,20 @@ async fn test_tunnel_abort_notification() {
 }
 
 #[tokio::test]
+async fn test_abort_all_tunnels_on_shutdown_notifies_all_policies() {
+    let guard = NetworkGuard::new();
+    let mut abort_rx = guard.subscribe_tunnel_abort();
+    let mut shutdown_rx = guard.subscribe_shutdown_abort();
+    assert!(!*shutdown_rx.borrow_and_update());
+
+    guard.abort_all_tunnels_on_shutdown();
+    assert!(abort_rx.changed().await.is_ok());
+    assert_eq!(*abort_rx.borrow_and_update(), 1);
+    assert!(shutdown_rx.changed().await.is_ok());
+    assert!(*shutdown_rx.borrow_and_update());
+}
+
+#[tokio::test]
 async fn test_route_fingerprint_sync_detects_change() {
     let guard = NetworkGuard::new();
     {

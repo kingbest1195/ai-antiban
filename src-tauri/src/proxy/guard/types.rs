@@ -258,6 +258,8 @@ pub struct NetworkGuard {
     pub(super) tunnel_abort_tx: watch::Sender<u64>,
     /// Manual kill-switch. Unlike the automatic gate it also stops routed providers.
     pub(super) kill_tx: watch::Sender<bool>,
+    /// Process-exit tunnel abort flag: stops ALL tunnels (`FollowGate`, `KillSwitchOnly`, `transit_tunnel`).
+    pub(super) shutdown_abort_tx: watch::Sender<bool>,
     /// Serialises every gate write with the kill flag: while the manual kill-switch is engaged the
     /// gate can never be anything but `Blocked`, no matter which task (tick, accept, restore,
     /// popup resolution) races with it.

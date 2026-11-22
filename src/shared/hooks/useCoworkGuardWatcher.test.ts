@@ -139,6 +139,30 @@ describe("useCoworkGuardWatcher (Bug #7 global watcher)", () => {
     expect(isCoworkGuardNeedsRepair(current)).toBe(false);
   });
 
+  it("runCoworkGuardRepair выставляет error = updated.summary, если updated.needs_repair === true", async () => {
+    const stillBroken = makeStatus({
+      needs_repair: true,
+      start_type: 2,
+      summary: "Задача планировщика создана, но служба всё ещё на автозапуске.",
+    });
+    let current: CoworkGuardStatus | null = null;
+    const errors: (string | null)[] = [];
+    mockedRepair.mockResolvedValue(stillBroken);
+
+    const res = await runCoworkGuardRepair({
+      installOrRepair: mockedRepair,
+      onStatus: (next) => {
+        current = next;
+      },
+      onRepairingChange: vi.fn(),
+      onError: (msg) => errors.push(msg),
+    });
+
+    expect(res).toEqual(stillBroken);
+    expect(current).toEqual(stillBroken);
+    expect(errors).toEqual([null, stillBroken.summary]);
+  });
+
   it("хук useCoworkGuardWatcher возвращает ожидаемый интерфейс и repair() вызывает installOrRepairCoworkGuard", async () => {
     const fixed = makeStatus({ needs_repair: false, start_type: 4, task_healthy: true });
     mockedRepair.mockResolvedValue(fixed);

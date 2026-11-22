@@ -106,7 +106,7 @@ export function CoverageAppRow({
           <div className="zs-cov__actions">
             <Button
               size="sm"
-              variant="primary"
+              variant="secondary"
               icon="refresh"
               disabled={restarting || busy !== null}
               aria-busy={restarting}
@@ -128,7 +128,7 @@ export function CoverageAppRow({
           <div className="zs-cov__actions">
             <Button
               size="sm"
-              variant="primary"
+              variant="secondary"
               icon="power"
               disabled={control.busy || busy !== null}
               aria-busy={control.busy}

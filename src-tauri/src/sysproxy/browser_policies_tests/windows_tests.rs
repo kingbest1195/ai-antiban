@@ -175,3 +175,99 @@ fn windows_detect_browser_pac_status_uses_hkcu_policies_and_wininet() {
     );
     assert!(s2.browsers_needing_restart.is_empty());
 }
+
+#[test]
+fn windows_install_detection_skips_absent_browsers_and_disambiguates_variants() {
+    use super::store::windows_domain_installed_with;
+    use std::collections::BTreeSet;
+
+    let mut files = BTreeSet::new();
+    files.insert(PathBuf::from(
+        r"/win/ProgramFiles(x86)/Microsoft/Edge/Application/msedge.exe",
+    ));
+    files.insert(PathBuf::from(
+        r"/win/ProgramFiles/Google/Chrome/Application/chrome.exe",
+    ));
+    files.insert(PathBuf::from(r"/win/LocalAppData/Programs/Opera/opera.exe"));
+
+    let env = |k: &str| match k {
+        "ProgramFiles" => Some("/win/ProgramFiles".to_string()),
+        "ProgramFiles(x86)" => Some("/win/ProgramFiles(x86)".to_string()),
+        "LOCALAPPDATA" => Some("/win/LocalAppData".to_string()),
+        _ => None,
+    };
+    let app_path = |exe: &str| match exe {
+        "chrome.exe" => {
+            Some(r#""/win/ProgramFiles/Google/Chrome/Application/chrome.exe""#.to_string())
+        }
+        "opera.exe" => Some("/win/LocalAppData/Programs/Opera/opera.exe".to_string()),
+        _ => None,
+    };
+    let exists = |p: &Path| files.contains(p);
+
+    // Installed browsers return true; Chromium and Opera GX must NOT falsely match Chrome/Opera.
+    assert!(windows_domain_installed_with(
+        r"Software\Policies\Google\Chrome",
+        &env,
+        &app_path,
+        &exists
+    ));
+    assert!(windows_domain_installed_with(
+        r"Software\Policies\Microsoft\Edge",
+        &env,
+        &app_path,
+        &exists
+    ));
+    assert!(windows_domain_installed_with(
+        r"Software\Policies\Opera Software\Opera Stable",
+        &env,
+        &app_path,
+        &exists
+    ));
+
+    for absent in [
+        r"Software\Policies\Chromium",
+        r"Software\Policies\Opera Software\Opera GX Stable",
+        r"Software\Policies\BraveSoftware\Brave",
+        r"Software\Policies\Vivaldi",
+        r"Software\Policies\YandexBrowser",
+        r"Software\Policies\Yandex\YandexBrowser",
+        r"Software\Policies\Perplexity\Comet",
+        r"Software\Policies\TheBrowserCompany\Arc",
+        r"Software\Policies\TheBrowserCompany\Dia",
+        r"Software\Policies\Mozilla\Firefox\DNSOverHTTPS",
+        r"Software\Policies\Unknown\Browser",
+    ] {
+        assert!(
+            !windows_domain_installed_with(absent, &env, &app_path, &exists),
+            "absent browser {absent} must not be marked applicable"
+        );
+    }
+
+    // Dry-run RealPolicyStore always reports false and never touches host registry.
+    assert!(!RealPolicyStore.is_domain_applicable(r"Software\Policies\Google\Chrome"));
+
+    // Native Win32 process list detects running Chromium browsers without spawning tasklist.
+    let mut running_map = std::collections::BTreeMap::new();
+    super::super::process::record_windows_running_browsers(
+        &[
+            crate::win_native::process::ProcessEntry {
+                pid: 100,
+                parent_pid: 1,
+                exe_name: "msedge.exe".into(),
+            },
+            crate::win_native::process::ProcessEntry {
+                pid: 101,
+                parent_pid: 1,
+                exe_name: "notepad.exe".into(),
+            },
+        ],
+        &mut running_map,
+    );
+    assert!(
+        running_map
+            .get("com.microsoft.edgemac")
+            .is_some_and(|i| i.running)
+    );
+    assert!(!running_map.contains_key("com.google.Chrome"));
+}

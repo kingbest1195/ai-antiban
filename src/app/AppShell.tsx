@@ -373,6 +373,12 @@ export function AppShell() {
               onSimulate={intercept.handleSimulate}
               onPinCurrentIp={pinning.handlePinIp}
               onSyncTimezone={() => tz.handleSyncTz()}
+              syncingTimezone={tz.syncingTz}
+              osTzStatus={tz.osTzStatus}
+              osTzLoading={tz.osTzLoading}
+              osTzError={tz.osTzError}
+              onSyncOsTimezone={() => tz.syncOsTimezone(gw.activeReport?.telemetry?.timezone)}
+              onRestoreOsTimezone={tz.restoreOsTimezone}
               onOpenCrashTest={() => setCrashTestOpen(true)}
               onRecheck={() => runFullAudit(true)}
               rechecking={gw.refreshing}
@@ -390,7 +396,10 @@ export function AppShell() {
               currentCountry={
                 gw.currentCountry && gw.currentCountry !== "--"
                   ? gw.currentCountry
-                  : gw.activeReport?.telemetry.country_code || "NL"
+                  : gw.activeReport?.telemetry.country_code &&
+                      gw.activeReport.telemetry.country_code !== "--"
+                    ? gw.activeReport.telemetry.country_code
+                    : undefined
               }
               currentTimezone={gw.activeReport?.telemetry?.timezone}
               onPinIp={pinning.handlePinIp}

@@ -6,6 +6,7 @@ export * from "./api/diagnostics";
 export * from "./api/events";
 export * from "./api/gateway";
 export * from "./api/interception";
+export * from "./api/payment";
 export * from "./api/profiles";
 export * from "./api/routes";
 export * from "./api/sos";

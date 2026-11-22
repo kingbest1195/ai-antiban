@@ -265,3 +265,64 @@ async fn pending_gate_keeps_direct_streams_and_new_transit_but_holds_ai_hosts() 
     }
     assert_eq!(got, 6 * 64 * 1024);
 }
+
+#[tokio::test]
+async fn abort_all_tunnels_on_shutdown_cuts_transit_and_routed_tunnels() {
+    let echo = spawn_echo().await;
+    let env = start(echo, &[PUBLIC_V4], None).await;
+
+    // 1. Open a transit tunnel and verify it works.
+    let (mut transit_stream, _) = open_tunnel(env.addr(), "ghcr.io:443").await;
+    ping(&mut transit_stream, b"transit-ok").await;
+
+    // 2. Open a routed (KillSwitchOnly) tunnel through `tunnel::pump`.
+    let client_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client_addr = client_l.local_addr().unwrap();
+    let target_addr = target_l.local_addr().unwrap();
+    let guard = Arc::clone(&env.server.guard);
+    tokio::spawn(async move {
+        let (mut srv_client, _) = client_l.accept().await.unwrap();
+        let srv_target = TcpStream::connect(target_addr).await.unwrap();
+        let mut upstream = crate::proxy::upstream::UpstreamStream::Plain(srv_target);
+        let _ = super::super::tunnel::pump(
+            &mut srv_client,
+            &mut upstream,
+            &guard,
+            TunnelPolicy::KillSwitchOnly,
+            None,
+            None,
+        )
+        .await;
+    });
+    tokio::spawn(async move {
+        let (mut t, _) = target_l.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = t.read(&mut buf).await {
+            if n == 0 || t.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut routed_stream = TcpStream::connect(client_addr).await.unwrap();
+    ping(&mut routed_stream, b"routed-ok").await;
+
+    // Normal `abort_active_tunnels()` must NOT cut transit or KillSwitchOnly tunnels.
+    env.server.guard.abort_active_tunnels();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    ping(&mut transit_stream, b"still-live").await;
+    ping(&mut routed_stream, b"still-routed").await;
+
+    // Shutdown abort must close BOTH transit_tunnel and routed KillSwitchOnly tunnels.
+    env.server.guard.abort_all_tunnels_on_shutdown();
+
+    let mut buf = [0u8; 8];
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), transit_stream.read(&mut buf)).await,
+        Ok(Ok(0)) | Ok(Err(_))
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), routed_stream.read(&mut buf)).await,
+        Ok(Ok(0)) | Ok(Err(_))
+    ));
+}

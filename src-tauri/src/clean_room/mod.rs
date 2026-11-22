@@ -5,10 +5,13 @@ pub mod browser_discovery;
 pub mod browser_sandbox;
 pub mod detector;
 pub mod detector_env;
+pub mod quarantine;
 pub mod sandbox_prefs;
 pub mod sandbox_proc;
 pub mod tz_guard;
 
+#[cfg(test)]
+mod quarantine_tests;
 #[cfg(test)]
 mod tests;
 

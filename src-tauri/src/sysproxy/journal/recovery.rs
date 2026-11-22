@@ -232,12 +232,77 @@ impl Journal {
                             }
                             return Outcome::Failed("notify");
                         }
+                        Err(PlatformError::AdminAuthRequired(_)) => {
+                            return Outcome::Failed("admin_auth");
+                        }
                         Err(_) => return Outcome::Failed("write"),
                     }
                 }
             }
         };
         self.release(platform, res, outcome, report)
+    }
+
+    /// Batch-restores `Pac` / `Chain` entries in one elevated OS operation after unprivileged
+    /// `networksetup` failed with `AdminAuthRequired`. Releases restored entries on success.
+    pub(crate) fn restore_batch_privileged<F>(
+        &mut self,
+        platform: &dyn Platform,
+        resources: &[Resource],
+        exec_batch: F,
+    ) -> Vec<ReportItem>
+    where
+        F: FnOnce(&[(Resource, super::entry::Value)]) -> Result<(), JournalError>,
+    {
+        let mut items_to_apply = Vec::new();
+        for res in resources {
+            let Some(i) = self.index_of(res) else {
+                continue;
+            };
+            let baseline = match (res, &self.entries[i].baseline) {
+                (Resource::Pac { .. }, super::entry::Value::Pac(p)) => {
+                    super::entry::Value::Pac(crate::sysproxy::platform::PacState {
+                        url: Some(p.url.clone().unwrap_or_default()),
+                        enabled: p.enabled.or(Some(false)),
+                    })
+                }
+                (Resource::Chain { .. }, val) => val.clone(),
+                _ => continue,
+            };
+            items_to_apply.push((res.clone(), baseline));
+        }
+        if items_to_apply.is_empty() {
+            return Vec::new();
+        }
+        match exec_batch(&items_to_apply) {
+            Ok(()) => {
+                let mut report = RecoveryReport::default();
+                items_to_apply
+                    .into_iter()
+                    .map(|(res, _)| {
+                        let outcome = self.release(platform, &res, Outcome::Restored, &mut report);
+                        ReportItem {
+                            resource: res.id(),
+                            outcome,
+                        }
+                    })
+                    .collect()
+            }
+            Err(JournalError::Platform(PlatformError::AdminAuthRequired(_))) => items_to_apply
+                .into_iter()
+                .map(|(res, _)| ReportItem {
+                    resource: res.id(),
+                    outcome: Outcome::Failed("admin_auth"),
+                })
+                .collect(),
+            Err(_) => items_to_apply
+                .into_iter()
+                .map(|(res, _)| ReportItem {
+                    resource: res.id(),
+                    outcome: Outcome::Failed("write"),
+                })
+                .collect(),
+        }
     }
 }
 

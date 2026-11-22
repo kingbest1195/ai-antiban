@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import type { AppStateData, CoverageSnapshot, PartialAudit, ProviderId, RiskReport } from "../../types";
+import type { AppStateData, CoverageSnapshot, OsTzSyncStatus, PartialAudit, ProviderId, RiskReport } from "../../types";
 import { Badge, Banner, Button, Card, EmptyState, ExpandRow, HintCard, Row, Rows, Section, Segmented, cx } from "../../ui";
 import type { Tone } from "../../ui";
 import { checks as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
 import type { ProtectionActions, ShowToast } from "../../shared/hooks";
+import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
 import { CoverageSection } from "../coverage/CoverageSection";
 import { CheckRow, LEAK_CHECKS, UNKNOWN_ICON, needsLook, statusOf } from "./CheckRow";
 import {
@@ -50,6 +51,12 @@ export interface ChecksScreenProps {
   /** Показывать ли секцию «Покрытие приложений» внизу экрана (в Shell v3 она живёт в «Нейросети и защита»). */
   showCoverage?: boolean;
   onDismissHint?: (hintId: string) => Promise<unknown> | void;
+  syncingTimezone?: boolean;
+  osTzStatus?: OsTzSyncStatus | null;
+  osTzLoading?: boolean;
+  osTzError?: string | null;
+  onSyncOsTimezone?: () => Promise<unknown> | void;
+  onRestoreOsTimezone?: () => Promise<unknown> | void;
 }
 
 const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform || navigator.userAgent || "");
@@ -77,6 +84,12 @@ export function ChecksScreen({
   dataAgeMinutes,
   showCoverage = true,
   onDismissHint,
+  syncingTimezone,
+  osTzStatus: propOsTzStatus,
+  osTzLoading: propOsTzLoading,
+  osTzError: propOsTzError,
+  onSyncOsTimezone,
+  onRestoreOsTimezone,
 }: ChecksScreenProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [passedOpen, setPassedOpen] = useState(false);
@@ -110,6 +123,19 @@ export function ChecksScreen({
     ? (resolvedReports[activeProvider] ?? (report?.provider === activeProvider ? report : null))
     : (report ?? null);
   const providerName = providerCopy[activeProvider].name;
+  const targetTz = activeReport?.telemetry?.timezone ?? null;
+  const sharedOsTz = useOsTimezoneSync(targetTz ?? undefined);
+  const resolvedOsTzStatus = propOsTzStatus !== undefined ? propOsTzStatus : sharedOsTz.osTzStatus;
+  const resolvedOsTzLoading = propOsTzLoading ?? sharedOsTz.osTzLoading;
+  const resolvedOsTzError = propOsTzError !== undefined ? propOsTzError : sharedOsTz.osTzError;
+  const handleSyncOsTz = () => {
+    if (onSyncOsTimezone) void onSyncOsTimezone();
+    else void sharedOsTz.syncOsTimezone(targetTz ?? undefined);
+  };
+  const handleRestoreOsTz = () => {
+    if (onRestoreOsTimezone) void onRestoreOsTimezone();
+    else void sharedOsTz.restoreOsTimezone();
+  };
 
   const switcher = (
     <Segmented
@@ -191,9 +217,17 @@ export function ChecksScreen({
 
   const runAction = (item: CheckItem) => {
     if (item.action === "pin") onPinCurrentIp(ip, activeProvider);
-    else if (item.action === "sync-timezone") onSyncTimezone();
+    else if (item.action === "sync-timezone" || item.id === "timezone") onSyncTimezone();
     else if (item.action === "guide") onNavigateToGuide(item.result.guide_ref || undefined);
   };
+  const cliTzSynced =
+    state?.sync_ai_tz_enabled === false
+      ? false
+      : Boolean(
+          state?.synced_ai_timezone ||
+            activeReport?.timezone_result?.code === "TIMEZONE_SYNCED_CLI_ONLY" ||
+            activeReport?.timezone_result?.code === "TIMEZONE_SYNCED_AI",
+        );
 
   return (
     <div className="zs-stack">
@@ -292,6 +326,15 @@ export function ChecksScreen({
               onRetry={onRecheck}
               retrying={rechecking}
               onGuide={() => onNavigateToGuide(item.result.guide_ref || undefined)}
+              targetTz={targetTz}
+              cliTzSynced={cliTzSynced}
+              cliSyncedZone={state?.synced_ai_timezone}
+              syncingCliTz={syncingTimezone}
+              osTzStatus={resolvedOsTzStatus}
+              osTzLoading={resolvedOsTzLoading}
+              osTzError={resolvedOsTzError}
+              onSyncOsTimezone={handleSyncOsTz}
+              onRestoreOsTimezone={handleRestoreOsTz}
             />
           ))}
           {passedItems.length > 0 && (
@@ -323,6 +366,15 @@ export function ChecksScreen({
                     onRetry={onRecheck}
                     retrying={rechecking}
                     onGuide={() => onNavigateToGuide(item.result.guide_ref || undefined)}
+                    targetTz={targetTz}
+                    cliTzSynced={cliTzSynced}
+                    cliSyncedZone={state?.synced_ai_timezone}
+                    syncingCliTz={syncingTimezone}
+                    osTzStatus={resolvedOsTzStatus}
+                    osTzLoading={resolvedOsTzLoading}
+                    osTzError={resolvedOsTzError}
+                    onSyncOsTimezone={handleSyncOsTz}
+                    onRestoreOsTimezone={handleRestoreOsTz}
                   />
                 ))}
               </Rows>

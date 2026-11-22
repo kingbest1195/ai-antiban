@@ -71,6 +71,23 @@ pub struct RiskInterceptPayload {
     /// Human-readable reason explaining why traffic was held or gated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_reason: Option<String>,
+    /// Populated when `scope == "checkout"` by Zero-MITM `checkout_guard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout_risk: Option<CheckoutRiskAlert>,
+}
+
+/// PayShield checkout risk summary attached to `RiskInterceptPayload` when `scope == "checkout"`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutRiskAlert {
+    pub domain: String,
+    pub score: u8,
+    pub tier: crate::auditor::payment_readiness::ReadinessTier,
+    pub reason: String,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_action: Option<String>,
 }
 
 /// `interceptor://enriched`: data that arrives after the window was already shown.
@@ -333,22 +350,67 @@ impl HoldQueue {
         w.remove(id);
     }
 
-    /// Resolves and drains all currently pending holds as [`HoldResolution::Superseded`]
-    /// so orphaned 60s hold timers cannot fire and block providers after network recovery.
+    /// Resolves and drains all currently pending network/provider holds as
+    /// [`HoldResolution::Superseded`] so orphaned 60s hold timers cannot fire and block providers
+    /// after network recovery. Pending `checkout:*` holds are preserved so PayShield checkout
+    /// alerts cannot be bypassed by background guard transitions.
     pub async fn cancel_all_superseded(&self) -> usize {
         let mut w = self.entries.write().await;
-        let drained: Vec<(String, HoldEntry)> = w.drain().collect();
+        let keys_to_drain: Vec<String> = w
+            .iter()
+            .filter(|(k, entry)| !is_checkout_entry(k, entry))
+            .map(|(k, _)| k.clone())
+            .collect();
         let mut resolved = 0;
-        for (key, entry) in drained {
+        for key in keys_to_drain {
             self.clear_alert_if(&key);
-            for tx in entry.senders {
-                let _ = tx.send(HoldResolution::Superseded);
-                resolved += 1;
+            if let Some(entry) = w.remove(&key) {
+                for tx in entry.senders {
+                    let _ = tx.send(HoldResolution::Superseded);
+                    resolved += 1;
+                }
             }
         }
-        *self.alert_slot() = None;
+        {
+            let mut slot = self.alert_slot();
+            if slot.as_ref().is_some_and(|a| a.scope != "checkout") {
+                *slot = None;
+            }
+        }
         resolved
     }
+
+    /// Blocks and drains all pending `checkout:*` holds (e.g. when `alert-popup` is closed at the
+    /// OS window level so connections fail closed immediately instead of waiting for `hold_ttl`).
+    pub async fn block_all_checkout_holds(&self) -> usize {
+        let mut w = self.entries.write().await;
+        let keys_to_remove: Vec<String> = w
+            .iter()
+            .filter(|(k, entry)| is_checkout_entry(k, entry))
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut resolved = 0;
+        for key in keys_to_remove {
+            self.clear_alert_if(&key);
+            if let Some(entry) = w.remove(&key) {
+                for tx in entry.senders {
+                    let _ = tx.send(HoldResolution::Block);
+                    resolved += 1;
+                }
+            }
+        }
+        {
+            let mut slot = self.alert_slot();
+            if slot.as_ref().is_some_and(|a| a.scope == "checkout") {
+                *slot = None;
+            }
+        }
+        resolved
+    }
+}
+
+fn is_checkout_entry(key: &str, entry: &HoldEntry) -> bool {
+    key.starts_with("checkout:") || entry.provider_id.starts_with("checkout:")
 }
 
 #[cfg(test)]

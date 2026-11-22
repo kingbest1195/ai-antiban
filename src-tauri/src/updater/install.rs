@@ -251,6 +251,7 @@ async fn run_install_pipeline(
         |u, bytes| u.install(bytes),
         move || {
             crate::sysproxy::reset_shutdown_cleanup_guard();
+            crate::os_tz::reset_exit_restore_guard();
             let snap = snap_restore.lock().ok().and_then(|mut g| g.take());
             restore_protection(snap, pac_url, mode, tz)
         },

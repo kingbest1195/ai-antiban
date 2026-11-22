@@ -28,8 +28,8 @@ pub use schema::{
     CleanRoomState, CliMode, DEFAULT_BUNKER_INTERVAL_HOURS, DEFAULT_BUNKER_RETENTION_COUNT,
     DEFAULT_IP_CHANGE_COOLDOWN_SECS, InterceptionBehavior, IpHistoryEntry, KNOWN_PROVIDERS,
     MAX_HISTORY_ENTRIES_PER_PROVIDER, PROVIDER_ANTHROPIC, PROVIDER_GEMINI, PROVIDER_OPENAI,
-    PersonaSelfCheck, PopupPosition, STATE_FILE_NAME, STATE_V1_BACKUP_NAME, STATE_V2_BACKUP_NAME,
-    StateError, UpstreamProxyConfig,
+    PersonaSelfCheck, PopupPosition, PostPaymentQuarantine, STATE_FILE_NAME, STATE_V1_BACKUP_NAME,
+    STATE_V2_BACKUP_NAME, StateError, UpstreamProxyConfig,
 };
 pub use stats::{GatewayStatsSnapshot, GatewayStatsTracker, RecentGatewayEvent, TunnelGuard};
 

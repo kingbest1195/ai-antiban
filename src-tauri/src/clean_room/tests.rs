@@ -314,6 +314,7 @@ fn detector_blocks_on_claude_traces_tainted_ip_and_killswitch() {
         warmup_started_at: None,
         launchpad_step: 1,
         completed_checklist: vec![],
+        post_payment_quarantine: None,
     });
     state.ip_history.insert(
         "anthropic".to_string(),
@@ -425,6 +426,37 @@ fn windows_detector_ignores_claude_code_cli_and_flags_desktop() {
             "Cursor.exe".to_string(),
             "claude.exe".to_string(),
         ]
+    );
+
+    let win_entries = vec![
+        crate::win_native::process::ProcessEntry {
+            pid: 101,
+            parent_pid: 1,
+            exe_name: "claude.exe".into(),
+        },
+        crate::win_native::process::ProcessEntry {
+            pid: 202,
+            parent_pid: 1,
+            exe_name: "claude.exe".into(),
+        },
+        crate::win_native::process::ProcessEntry {
+            pid: 303,
+            parent_pid: 1,
+            exe_name: "ChatGPT.exe".into(),
+        },
+    ];
+    let classified =
+        super::detector_env::classify_windows_process_entries(&win_entries, |pid| match pid {
+            101 => Some(r"C:\Users\dev\.local\bin\claude.exe".into()),
+            202 => Some(
+                r"C:\Program Files\WindowsApps\Claude_1.0.0_x64__pzs8sxrjxfjjc\app\Claude.exe"
+                    .into(),
+            ),
+            _ => None,
+        });
+    assert_eq!(
+        classified,
+        vec!["ChatGPT.exe".to_string(), "claude.exe".to_string()]
     );
 }
 

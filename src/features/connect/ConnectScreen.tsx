@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import type { AppStateData, ProviderId, RouteView, RoutesSnapshot } from "../../types";
+import type { AppStateData, ProviderId, RoutesSnapshot } from "../../types";
 import {
-  DIRECT_ROUTE_ID,
   bindProviderRoute,
   bindRouteToClaudeProfile,
   clearUpstreamProxy,
@@ -27,10 +26,13 @@ import {
   getAffectedProvidersForRoute,
   inspectRouteUsageForDisable,
   resetProfileRouteAndDisable,
+  resolveProviderExitCountry,
   type PendingDisableRoute,
 } from "./routeDisableModel";
+import { QuarantineBanner, QuarantineOverrideModal } from "../subscription/QuarantineOverrideModal";
+import { useQuarantineGuard } from "../subscription/useQuarantineGuard";
 
-export { getAffectedProvidersForRoute };
+export { getAffectedProvidersForRoute, resolveProviderExitCountry };
 
 export interface ConnectScreenProps {
   state: AppStateData | null;
@@ -46,23 +48,6 @@ export interface ConnectScreenProps {
   onDismissHint?: (hintId: string) => Promise<unknown> | void;
   /** default — классический порядок; sales — карточка «ВПН Заставы» первой, «Свой сервер» второй. */
   layout?: "default" | "sales";
-}
-
-/** Определяет страну выхода для сервиса по выбранной привязке маршрута или текущему VPN. */
-export function resolveProviderExitCountry(
-  providerId: ProviderId,
-  snapshot: RoutesSnapshot | null | undefined,
-  routes: RouteView[],
-  currentCountry: string,
-): string {
-  const explicitBinding = snapshot?.provider_routes[providerId];
-  if (explicitBinding === DIRECT_ROUTE_ID) return currentCountry;
-  const routeId = explicitBinding || snapshot?.default_route_id || "";
-  if (routeId) {
-    const bound = routes.find((r) => r.id === routeId);
-    if (bound) return bound.country ?? "";
-  }
-  return currentCountry;
 }
 
 /** Экран «Подключение»: личный VPN, ключ Заставы, маршруты и привязки по сервисам. */
@@ -92,6 +77,7 @@ export function ConnectScreen({
   const [pendingDisable, setPendingDisable] = useState<PendingDisableRoute | null>(null);
   const [confirmProfileReset, setConfirmProfileReset] = useState<PendingDisableRoute | null>(null);
   const [disablingAction, setDisablingAction] = useState<boolean>(false);
+  const quarantine = useQuarantineGuard({ profileId: state?.clean_room?.active_profile_id ?? null });
 
   const snapshot = propSnapshot ?? localSnapshot;
 
@@ -186,19 +172,18 @@ export function ConnectScreen({
   };
 
   const handleToggleRoute = async (routeId: string, enabled: boolean) => {
-    if (!enabled) {
-      const usage = inspectRouteUsageForDisable(routeId, snapshot, routes);
-      if (usage.inUse) {
-        const route = routes.find((r) => r.id === routeId);
-        setPendingDisable({
-          routeId,
-          routeLabel: route?.label || copy.key.defaultLabel,
-          usage,
-        });
-        return;
+    const execute = async () => {
+      if (!enabled) {
+        const usage = inspectRouteUsageForDisable(routeId, snapshot, routes);
+        if (usage.inUse) {
+          const route = routes.find((r) => r.id === routeId);
+          setPendingDisable({ routeId, routeLabel: route?.label || copy.key.defaultLabel, usage });
+          return;
+        }
       }
-    }
-    await performToggleRoute(routeId, enabled, getAffectedProvidersForRoute(routeId, snapshot));
+      await performToggleRoute(routeId, enabled, getAffectedProvidersForRoute(routeId, snapshot));
+    };
+    quarantine.guardRouteSwitch(execute);
   };
 
   const handleChooseStopAndBlock = async () => {
@@ -272,47 +257,49 @@ export function ConnectScreen({
   };
 
   const handleRemoveRoute = async (routeId: string) => {
-    setDeletingId(routeId);
-    const affected = routes.length <= 1 ? "all" : getAffectedProvidersForRoute(routeId, snapshot);
-    try {
-      await removeRoute(routeId);
-      if (routes.length <= 1) {
-        try {
-          await clearUpstreamProxy();
-        } catch {
-          // Игнорируем
+    quarantine.guardRouteSwitch(async () => {
+      setDeletingId(routeId);
+      const affected = routes.length <= 1 ? "all" : getAffectedProvidersForRoute(routeId, snapshot);
+      try {
+        await removeRoute(routeId);
+        if (routes.length <= 1) {
+          await clearUpstreamProxy().catch(() => {});
         }
+        await refresh(affected);
+        onToast(copy.key.toast.disconnected, copy.key.toast.disconnectedText, "info");
+      } catch (err: unknown) {
+        onToast(copy.key.toast.disconnectError, err instanceof Error ? err.message : String(err), "error");
+      } finally {
+        setDeletingId(null);
       }
-      await refresh(affected);
-      onToast(copy.key.toast.disconnected, copy.key.toast.disconnectedText, "info");
-    } catch (err: unknown) {
-      onToast(copy.key.toast.disconnectError, err instanceof Error ? err.message : String(err), "error");
-    } finally {
-      setDeletingId(null);
-    }
+    });
   };
 
   const handleSetDefaultRoute = async (routeId: string) => {
-    try {
-      await setDefaultRoute(routeId);
-      await refresh();
-    } catch (err: unknown) {
-      onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
-    }
+    quarantine.guardRouteSwitch(async () => {
+      try {
+        await setDefaultRoute(routeId);
+        await refresh();
+      } catch (err: unknown) {
+        onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
+      }
+    });
   };
 
   const handleBindProvider = async (provider: ProviderId, target: string) => {
-    try {
-      await bindProviderRoute(provider, target);
-      await refresh(provider);
-      onToast(
-        copy.routes.toast.boundSuccess,
-        copy.routes.toast.boundSuccessText(copy.routes.services[provider]),
-        "success",
-      );
-    } catch (err: unknown) {
-      onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
-    }
+    quarantine.guardRouteSwitch(async () => {
+      try {
+        await bindProviderRoute(provider, target);
+        await refresh(provider);
+        onToast(
+          copy.routes.toast.boundSuccess,
+          copy.routes.toast.boundSuccessText(copy.routes.services[provider]),
+          "success",
+        );
+      } catch (err: unknown) {
+        onToast(copy.routes.toast.boundError, err instanceof Error ? err.message : String(err), "error");
+      }
+    });
   };
 
   const handleResetActiveProfileRoute = async () => {
@@ -355,30 +342,34 @@ export function ConnectScreen({
     }
   };
 
-  const handleLegacyToggle = async () => {
+  const handleLegacyToggle = () => {
     if (!upstream) return;
-    try {
-      const next = !upstream.enabled;
-      await toggleUpstreamProxy(next);
-      await refresh();
-      onToast(
-        next ? copy.key.toast.on : copy.key.toast.off,
-        next ? copy.key.toast.onText : copy.key.toast.offText,
-        "info",
-      );
-    } catch (err: unknown) {
-      onToast(copy.key.toast.toggleError, err instanceof Error ? err.message : String(err), "error");
-    }
+    quarantine.guardRouteSwitch(async () => {
+      try {
+        const next = !upstream.enabled;
+        await toggleUpstreamProxy(next);
+        await refresh();
+        onToast(
+          next ? copy.key.toast.on : copy.key.toast.off,
+          next ? copy.key.toast.onText : copy.key.toast.offText,
+          "info",
+        );
+      } catch (err: unknown) {
+        onToast(copy.key.toast.toggleError, err instanceof Error ? err.message : String(err), "error");
+      }
+    });
   };
 
-  const handleLegacyDisconnect = async () => {
-    try {
-      await clearUpstreamProxy();
-      await refresh();
-      onToast(copy.key.toast.disconnected, copy.key.toast.disconnectedText, "info");
-    } catch (err: unknown) {
-      onToast(copy.key.toast.disconnectError, err instanceof Error ? err.message : String(err), "error");
-    }
+  const handleLegacyDisconnect = () => {
+    quarantine.guardRouteSwitch(async () => {
+      try {
+        await clearUpstreamProxy();
+        await refresh();
+        onToast(copy.key.toast.disconnected, copy.key.toast.disconnectedText, "info");
+      } catch (err: unknown) {
+        onToast(copy.key.toast.disconnectError, err instanceof Error ? err.message : String(err), "error");
+      }
+    });
   };
 
   const hasDangling = Boolean(snapshot?.dangling && snapshot.dangling.length > 0);
@@ -386,6 +377,7 @@ export function ConnectScreen({
 
   return (
     <>
+      <QuarantineBanner status={quarantine.quarantineStatus} />
       <HintCard
         hintId="connect_intro"
         body="Подключите ключ Заставы или свой сервер (VPS) — отдельные маршруты для каждого ИИ."
@@ -494,6 +486,13 @@ export function ConnectScreen({
         onChooseStopAndBlock={() => void handleChooseStopAndBlock()}
         onCancelProfileReset={() => setConfirmProfileReset(null)}
         onConfirmProfileReset={() => void handleConfirmProfileReset()}
+      />
+      <QuarantineOverrideModal
+        open={quarantine.overrideModalOpen}
+        remainingHours={quarantine.quarantineStatus?.remainingHours ?? 72}
+        busy={quarantine.overriding}
+        onCancel={quarantine.cancelOverride}
+        onConfirm={() => void quarantine.confirmOverrideAndRun()}
       />
     </>
   );

@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 
 use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::network::current_timestamp;
-use crate::proxy::guard::Gate;
+use crate::proxy::guard::{Gate, shutdown_aborted};
 use crate::proxy::http_forward::{ParsedRequest, RequestForm, relay_exchange};
 use crate::proxy::upstream::{UpstreamStream, connect_via_route_with_chained};
 use crate::routing::{DIRECT_ROUTE_ID, Route, RouteDownReason, RouteSelection};
@@ -62,6 +62,10 @@ impl ProxyServer {
                 "Network kill-switch is engaged in Zastava: alias traffic is stopped.",
             )
             .await;
+        }
+
+        if !self.check_checkout_guard(client, host).await? {
+            return Ok(());
         }
 
         let provider = provider_opt.unwrap_or(ProviderId::Anthropic);
@@ -204,7 +208,8 @@ impl ProxyServer {
         body_prefix: &[u8],
     ) -> Result<(), std::io::Error> {
         let mut kill_rx = self.guard.subscribe_killswitch();
-        if *kill_rx.borrow_and_update() {
+        let mut shutdown_rx = self.guard.subscribe_shutdown_abort();
+        if *kill_rx.borrow_and_update() || *shutdown_rx.borrow_and_update() {
             return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
         }
         let mut routing_rx = self.state.subscribe_routing();
@@ -300,6 +305,7 @@ impl ProxyServer {
                 tokio::select! {
                     res = relay => res,
                     _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+                    _ = shutdown_aborted(&mut shutdown_rx) => Err(alias_route_changed()),
                     _ = wait_optional_alias_route_stale(&self.state, route_snapshot.as_ref(), &mut routing_rx) => {
                         Err(alias_route_changed())
                     }
@@ -319,6 +325,7 @@ impl ProxyServer {
                 tokio::select! {
                     res = relay => res,
                     _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+                    _ = shutdown_aborted(&mut shutdown_rx) => Err(alias_route_changed()),
                     _ = wait_optional_alias_route_stale(&self.state, route_snapshot.as_ref(), &mut routing_rx) => {
                         Err(alias_route_changed())
                     }

@@ -3,8 +3,7 @@ import type { AppStateData, RiskReport } from "../../types";
 import { Segmented } from "../../ui";
 import { subscription as copy } from "../../shared/copy/ru";
 import type { ShowToast } from "../../shared/hooks";
-import { AddressCard } from "./AddressCard";
-import { CardCheck } from "./CardCheck";
+import { PaymentFlowPanel, type PaymentScenarioFlow } from "./PaymentFlowPanel";
 import { Warmup, warmupProgress } from "./Warmup";
 import "./subscription.css";
 
@@ -13,6 +12,7 @@ export interface SubscriptionScreenProps {
   activeReport?: RiskReport | null;
   state?: AppStateData | null;
   initialTab?: SubTab;
+  initialFlow?: PaymentScenarioFlow;
   warmupStartedAt?: number | null;
   onStartWarmup?: () => Promise<unknown> | void;
   onStateChange?: () => void;
@@ -22,12 +22,13 @@ export interface SubscriptionScreenProps {
 
 export type SubTab = "card" | "warmup";
 
-/** Экран «Подписка» (меню «Ещё»): проверка карты и адрес для оплаты, прогрев аккаунта и чеклист. */
+/** Экран «Подписка» (меню «Ещё»): выбор сценария оплаты, адрес, защита маршрута и прогрев. */
 export function SubscriptionScreen({
-  vpnCountry = "NL",
+  vpnCountry,
   activeReport,
   state,
   initialTab = "card",
+  initialFlow = "app_store",
   warmupStartedAt,
   onStartWarmup,
   onStateChange,
@@ -36,10 +37,22 @@ export function SubscriptionScreen({
 }: SubscriptionScreenProps) {
   const [tab, setTab] = useState<SubTab>(initialTab);
 
-  const country =
-    vpnCountry && vpnCountry !== "--" ? vpnCountry : activeReport?.telemetry.country_code || "NL";
+  const rawCountry =
+    vpnCountry && vpnCountry !== "--" ? vpnCountry : activeReport?.telemetry.country_code;
+  const country = rawCountry && rawCountry !== "--" ? rawCountry : "";
+  const exitIp = activeReport?.telemetry.ip ?? state?.pinned_ip ?? null;
+  const exitAsn = activeReport?.telemetry.asn ?? null;
+  const profileId = state?.clean_room?.active_profile_id ?? null;
+  const activeProfile = profileId
+    ? state?.clean_room?.profiles.find((p) => p.id === profileId) ?? null
+    : null;
+  const inCleanRoom = Boolean(profileId);
+  const effectiveWarmupStartedAt =
+    warmupStartedAt !== undefined
+      ? warmupStartedAt
+      : (activeProfile?.warmup_started_at ?? state?.warmup_started_at ?? null);
 
-  const warm = warmupProgress(warmupStartedAt !== undefined ? warmupStartedAt : state?.warmup_started_at);
+  const warm = warmupProgress(effectiveWarmupStartedAt);
   const warmupLabel = warm.started
     ? warm.done
       ? copy.tabs.warmupDone
@@ -59,14 +72,24 @@ export function SubscriptionScreen({
       />
 
       {tab === "card" ? (
-        <>
-          <CardCheck exitCountry={country} onToast={onToast} onNavigateToPaymentGuide={onNavigateToPaymentGuide} />
-          <AddressCard onToast={onToast} />
-        </>
+        <PaymentFlowPanel
+          initialFlow={initialFlow}
+          profileId={profileId}
+          routeId={activeProfile?.bound_route_id ?? state?.default_route_id ?? null}
+          exitIp={exitIp}
+          exitAsn={exitAsn}
+          exitCountry={country}
+          hideIpMode={Boolean(state?.hide_ip_mode)}
+          inCleanRoom={inCleanRoom}
+          warmupStartedAt={effectiveWarmupStartedAt}
+          onNavigateToPaymentGuide={onNavigateToPaymentGuide}
+          onStateUpdated={onStateChange}
+          onToast={onToast}
+        />
       ) : (
         <Warmup
           state={state}
-          warmupStartedAt={warmupStartedAt}
+          warmupStartedAt={effectiveWarmupStartedAt}
           onStartWarmup={onStartWarmup}
           onStateChange={onStateChange}
           onNavigateToPaymentGuide={onNavigateToPaymentGuide}

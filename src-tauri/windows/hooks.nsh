@@ -46,7 +46,7 @@
 
   ; Clean up OS autostart entry and CoworkVMService boot-guard scheduled task if installed.
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Zastava"
-  ExecWait '"$SYSDIR\schtasks.exe" /Delete /TN "\Zastava\CoworkVMServiceManualGuard" /F'
+  ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall-cowork-guard'
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

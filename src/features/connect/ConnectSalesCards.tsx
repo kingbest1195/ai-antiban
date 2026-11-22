@@ -104,12 +104,10 @@ export function ConnectSalesCards({
 
 /** Классическая карточка «Свой сервер» для layout="default". */
 export function ConnectDefaultVpnCard({
-  hasRoutes,
-  isLegacyConfigured,
   onOpenGuide,
 }: {
-  hasRoutes: boolean;
-  isLegacyConfigured: boolean;
+  hasRoutes?: boolean;
+  isLegacyConfigured?: boolean;
   onOpenGuide: (guideId: string) => void;
 }) {
   return (
@@ -131,7 +129,7 @@ export function ConnectDefaultVpnCard({
         ))}
       </Rows>
       <Button
-        variant={hasRoutes || isLegacyConfigured ? "secondary" : "primary"}
+        variant="secondary"
         block
         className="mt-3"
         onClick={() => onOpenGuide("01-personal-vpn-15min")}

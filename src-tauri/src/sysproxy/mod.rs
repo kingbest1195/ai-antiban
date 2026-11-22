@@ -33,8 +33,8 @@ pub use cleanup::{
     ShutdownProgressPayload, cleaned_components, cleanup_all_persistent_settings,
     cleanup_on_shutdown_after_step1, cleanup_on_shutdown_once, force_clean_all_os_proxy_traces,
     is_shutdown_cleanup_completed, legacy_env_plan, legacy_env_plan_with_gateway,
-    register_clean_exit_guard, reset_shutdown_cleanup_guard, spawn_signal_cleanup_watcher,
-    try_claim_async_shutdown,
+    record_gateway_launched_app, register_clean_exit_guard, reset_shutdown_cleanup_guard,
+    spawn_signal_cleanup_watcher, try_claim_async_shutdown,
 };
 pub use cli_protection::{
     CliApplied, apply_cli_settings, disable_cli_and_ide_runtime_settings, disable_cli_protection,
@@ -106,7 +106,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     if !os_effects_enabled() {
         note_dry_run_blocked(&program.as_ref().to_string_lossy());
-        #[cfg(target_os = "windows")]
+        #[cfg(all(target_os = "windows", any(test, feature = "test-support")))]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -115,6 +115,8 @@ pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Co
                 .creation_flags(CREATE_NO_WINDOW);
             return cmd;
         }
+        #[cfg(all(target_os = "windows", not(any(test, feature = "test-support"))))]
+        return std::process::Command::new("zastava-dry-run-noop");
         #[cfg(not(target_os = "windows"))]
         return std::process::Command::new("true");
     }
@@ -322,11 +324,7 @@ pub fn open_os_datetime_settings() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        silent_command("cmd")
-            .args(["/C", "start", "ms-settings:dateandtime"])
-            .spawn()
-            .map_err(|e| format!("Failed to open Windows date & time settings: {e}"))?;
-        Ok(())
+        open_windows_settings_uri("ms-settings:dateandtime", "date & time")
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -349,16 +347,57 @@ pub fn open_os_network_settings() -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        silent_command("cmd")
-            .args(["/C", "start", "ms-settings:network"])
-            .spawn()
-            .map_err(|e| format!("Failed to open Windows network settings: {e}"))?;
-        Ok(())
+        open_windows_settings_uri("ms-settings:network", "network")
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_settings_uri(uri: &str, label: &str) -> Result<(), String> {
+    use core::ffi::c_void;
+
+    if !os_effects_enabled() {
+        note_dry_run_blocked(uri);
+        return Ok(());
+    }
+
+    const SW_SHOWNORMAL: i32 = 1;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut c_void,
+            lp_operation: *const u16,
+            lp_file: *const u16,
+            lp_parameters: *const u16,
+            lp_directory: *const u16,
+            n_show_cmd: i32,
+        ) -> isize;
+    }
+
+    let op = crate::win_reg::encode_utf16_nul("open");
+    let file = crate::win_reg::encode_utf16_nul(uri);
+    // SAFETY: `op` and `file` are NUL-terminated UTF-16 buffers valid for the duration of the call.
+    let rc = unsafe {
+        ShellExecuteW(
+            core::ptr::null_mut(),
+            op.as_ptr(),
+            file.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if rc > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to open Windows {label} settings (ShellExecuteW code {rc})"
+        ))
     }
 }
 

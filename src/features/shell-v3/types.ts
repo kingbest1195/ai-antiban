@@ -3,6 +3,7 @@ import type { Route } from "../../shared/hooks";
 import type {
   AppStateData,
   GatewayStatsSnapshot,
+  OsTzSyncStatus,
   PersonaRiskReport,
   ProviderId,
   RouteUnavailablePayload,
@@ -33,10 +34,18 @@ export interface ShellV3HeaderProps {
   menuItems: MenuEntry[];
 }
 
+export interface OsTzControlProps {
+  osTzStatus: OsTzSyncStatus | null;
+  osTzLoading: boolean;
+  syncOsTimezone: (targetTz?: string) => Promise<unknown> | void;
+  restoreOsTimezone: () => Promise<unknown> | void;
+}
+
 export interface AlertStripProps {
   view: OverviewView;
   overview: OverviewScreenProps;
   coworkGuard: CoworkGuardWatcherState;
+  osTz?: OsTzControlProps;
   ipChangeCooldownUntil?: number | null;
   routeUnavailableBanner: RouteUnavailablePayload | null;
   routesSnapshot?: RoutesSnapshot | null;
@@ -53,6 +62,7 @@ export interface HomeHubProps {
   view: OverviewView;
   togglingSysproxy: boolean;
   coworkGuard: CoworkGuardWatcherState;
+  osTz?: OsTzControlProps;
   personaRisk: PersonaRiskReport | null;
   gatewayStats: GatewayStatsSnapshot | null;
   state: AppStateData | null;

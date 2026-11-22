@@ -6,11 +6,17 @@ mod restore;
 mod shutdown;
 mod signatures;
 
-pub(super) use restore::{cleanup_cli_files, restore_and_migrate_with, restore_user_env};
+pub(super) use restore::{
+    RestoreOptions, cleanup_cli_files, restore_and_migrate_with, restore_and_migrate_with_options,
+    restore_user_env,
+};
+use shutdown::collect_gateway_bound_apps;
+#[cfg(test)]
+pub(super) use shutdown::collect_gateway_bound_apps_with;
 pub use shutdown::{
     SHUTDOWN_PROGRESS_EVENT, SHUTDOWN_PROGRESS_TOTAL, ShutdownCleanupGuard,
-    ShutdownProgressPayload, is_shutdown_cleanup_completed, reset_shutdown_cleanup_guard,
-    try_claim_async_shutdown,
+    ShutdownProgressPayload, is_shutdown_cleanup_completed, record_gateway_launched_app,
+    reset_shutdown_cleanup_guard, try_claim_async_shutdown,
 };
 #[allow(unused_imports)]
 pub(super) use signatures::{
@@ -20,7 +26,9 @@ pub use signatures::{legacy_env_plan, legacy_env_plan_with_gateway};
 
 use super::journal::{self, RecoveryReport};
 use super::{Run, state, with_journal};
-use restore::{cleanup_cli_files as restore_cleanup_cli_files, restore_and_migrate};
+use restore::cleanup_cli_files as restore_cleanup_cli_files;
+#[cfg(test)]
+use restore::restore_and_migrate;
 use shutdown::SHUTDOWN_GUARD;
 use std::sync::Once;
 use tauri::{Emitter, Manager};
@@ -73,15 +81,22 @@ pub fn spawn_signal_cleanup_watcher() {
         }
 
         eprintln!("Termination signal received! Restoring system settings...");
-        let _ = cleanup_on_shutdown_once(None, "quit");
+        let _ = tauri::async_runtime::spawn_blocking(|| {
+            crate::core::shutdown::notify_shutdown();
+            crate::core::shutdown::terminate_sandboxes_on_exit();
+            let _ = cleanup_on_shutdown_once(None, "quit");
+        })
+        .await;
         std::process::exit(0);
     });
 }
 
-fn cleanup_os_and_policies_pass() -> RecoveryReport {
+fn cleanup_os_and_policies_pass_with(opts: RestoreOptions) -> RecoveryReport {
     match with_journal("ownership_cleanup", |j, p| {
         // The PAC flag goes down before the restore, under the same lock (see `restore_pass`).
-        super::restore_pass(state(), j, p, restore_and_migrate)
+        super::restore_pass(state(), j, p, |j, p| {
+            restore_and_migrate_with_options(j, p, false, opts)
+        })
     }) {
         Run::Done(r) => r,
         Run::Blocked => RecoveryReport {
@@ -95,6 +110,10 @@ fn cleanup_os_and_policies_pass() -> RecoveryReport {
     }
 }
 
+fn cleanup_os_and_policies_pass() -> RecoveryReport {
+    cleanup_os_and_policies_pass_with(RestoreOptions::default())
+}
+
 fn cleanup_cli_and_reset_state() -> RecoveryReport {
     let files = restore_cleanup_cli_files();
     state().reset();
@@ -106,32 +125,51 @@ fn run_shutdown_cleanup_inner(
     mode: &str,
     emit_step1: bool,
 ) -> Option<RecoveryReport> {
-    SHUTDOWN_GUARD.run_once_with(
+    let allow_privileged_quit_fallback = mode == "quit" && app.is_some();
+    let keep_tz = crate::os_tz::keep_system_tz_on_exit();
+    SHUTDOWN_GUARD.run_once_full(
         mode,
         emit_step1,
+        keep_tz,
         |payload| {
             if let Some(handle) = app {
                 let _ = handle.emit(SHUTDOWN_PROGRESS_EVENT, payload);
             }
         },
         || {
-            if let Some(handle) = app {
-                if mode != "update" {
-                    crate::core::shutdown::notify_shutdown();
-                }
-                if let Some(guard) =
+            if mode != "update" {
+                crate::core::shutdown::notify_shutdown();
+            }
+            let _ =
+                crate::core::shutdown::wait_for_startup_drain(std::time::Duration::from_secs(2));
+            if mode != "update" {
+                crate::core::shutdown::abort_tunnels_on_shutdown();
+                crate::core::shutdown::terminate_sandboxes_on_exit();
+            }
+            if let Some(handle) = app
+                && let Some(guard) =
                     handle.try_state::<std::sync::Arc<crate::proxy::NetworkGuard>>()
-                {
+            {
+                if mode == "update" {
                     guard.abort_active_tunnels();
+                } else {
+                    guard.abort_all_tunnels_on_shutdown();
                 }
             }
             state().set_sys_proxy_active(false);
         },
-        cleanup_os_and_policies_pass,
+        || {
+            cleanup_os_and_policies_pass_with(RestoreOptions {
+                allow_privileged_quit_fallback,
+            })
+        },
         cleanup_cli_and_reset_state,
         || {
-            crate::os_tz::restore_on_exit_once(app);
+            if !keep_tz {
+                crate::os_tz::restore_on_exit_once(app);
+            }
         },
+        || collect_gateway_bound_apps(state().cli_protection_active()),
     )
 }
 
@@ -209,7 +247,7 @@ pub(super) use migration::{
     migrate_legacy_pac,
 };
 #[cfg(test)]
-pub(super) use restore::{Scope, restore_with, restore_with_probe};
+pub(super) use restore::{Scope, restore_with, restore_with_probe, restore_with_probe_options};
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::collections::BTreeMap;

@@ -132,3 +132,82 @@ export function isCountryBlockedForProvider(provider: ProviderId, country: strin
   if (!normalized) return false;
   return BLOCKED_COUNTRIES_BY_PROVIDER[provider].includes(normalized);
 }
+
+export const COMMON_COUNTRY_CODES = [
+  "US",
+  "TR",
+  "KZ",
+  "DE",
+  "NL",
+  "SE",
+  "GB",
+  "FR",
+  "FI",
+  "PL",
+  "CH",
+  "ES",
+  "IT",
+  "AT",
+  "CZ",
+  "EE",
+  "LV",
+  "LT",
+  "PT",
+  "IE",
+  "NO",
+  "CA",
+  "AU",
+  "SG",
+  "JP",
+  "KR",
+  "HK",
+  "AE",
+  "IL",
+  "GE",
+  "AM",
+  "AZ",
+  "KG",
+  "UZ",
+  "TJ",
+  "MD",
+  "UA",
+  "BY",
+  "RU",
+  "RS",
+  "ME",
+  "CY",
+  "TH",
+  "VN",
+  "ID",
+  "BR",
+  "MX",
+  "AR",
+  "IN",
+] as const;
+
+export interface CountrySelectOption {
+  value: string;
+  label: string;
+}
+
+/** Собирает отсортированный по-русски список стран для `<select>` с включением текущих/определённых кодов. */
+export function buildCountryOptions(
+  extraCodes: Array<string | null | undefined> = [],
+  emptyLabel?: string,
+): CountrySelectOption[] {
+  const codes = new Set<string>(COMMON_COUNTRY_CODES);
+  for (const raw of extraCodes) {
+    const cc = normalizeCountryCode(raw);
+    if (cc && /^[A-Z]{2}$/.test(cc)) codes.add(cc);
+  }
+  const items = Array.from(codes)
+    .map((code) => ({
+      value: code,
+      label: countryName(code) || code,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label, "ru"));
+  if (emptyLabel !== undefined) {
+    return [{ value: "", label: emptyLabel }, ...items];
+  }
+  return items;
+}

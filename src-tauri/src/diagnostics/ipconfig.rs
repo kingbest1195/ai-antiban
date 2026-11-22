@@ -183,6 +183,74 @@ pub fn parse_windows_ipconfig_snapshot(output: &str) -> Vec<String> {
     lines
 }
 
+/// Formats native Win32 `GetNetworkParams` + `GetAdaptersAddresses` snapshots without leaking
+/// host interface IP addresses.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn format_windows_adapters_snapshot(
+    params: Option<&crate::win_native::network::NetworkParamsInfo>,
+    adapters: &[crate::win_native::network::AdapterInfo],
+) -> Vec<String> {
+    let mut active_summaries = Vec::new();
+    let mut all_dns = Vec::new();
+
+    if let Some(p) = params {
+        for dns in &p.dns_servers {
+            if let Some(ip) = extract_ip_token(dns)
+                && !all_dns.contains(&ip)
+            {
+                all_dns.push(ip);
+            }
+        }
+    }
+
+    for a in adapters {
+        if !a.is_up {
+            continue;
+        }
+        let desc = (!a.description.trim().is_empty()).then_some(a.description.trim());
+        let tun_vpn = is_tun_vpn_adapter(&a.friendly_name, desc);
+        let has_ip = !a.ipv4_addrs.is_empty() || !a.ipv6_addrs.is_empty();
+        let mut adapter_dns = Vec::new();
+        for dns in &a.dns_servers {
+            if let Some(ip) = extract_ip_token(dns) {
+                if !adapter_dns.contains(&ip) {
+                    adapter_dns.push(ip.clone());
+                }
+                if !all_dns.contains(&ip) {
+                    all_dns.push(ip);
+                }
+            }
+        }
+        if !has_ip && adapter_dns.is_empty() && !tun_vpn {
+            continue;
+        }
+        let mut details = Vec::new();
+        if let Some(d) = desc {
+            details.push(format!("desc={d}"));
+        }
+        if tun_vpn {
+            details.push("TUN/VPN".to_string());
+        }
+        if !adapter_dns.is_empty() {
+            details.push(format!("dns=[{}]", adapter_dns.join(", ")));
+        }
+        if details.is_empty() {
+            active_summaries.push(a.friendly_name.clone());
+        } else {
+            active_summaries.push(format!("{}({})", a.friendly_name, details.join(", ")));
+        }
+    }
+
+    let mut lines = Vec::new();
+    if !active_summaries.is_empty() {
+        lines.push(format!("active_adapters: {}", active_summaries.join("; ")));
+    }
+    if !all_dns.is_empty() {
+        lines.push(format!("dns_servers: {}", all_dns.join(", ")));
+    }
+    lines
+}
+
 pub fn collect_unproxied_os_network_snapshot() -> Vec<String> {
     if !sysproxy::os_effects_enabled() {
         return Vec::new();
@@ -191,12 +259,9 @@ pub fn collect_unproxied_os_network_snapshot() -> Vec<String> {
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(out) = sysproxy::silent_command("ipconfig").arg("/all").output()
-            && out.status.success()
-        {
-            let text = String::from_utf8_lossy(&out.stdout);
-            lines.extend(parse_windows_ipconfig_snapshot(&text));
-        }
+        let params = crate::win_native::network::get_network_params().ok();
+        let adapters = crate::win_native::network::get_adapters_addresses().unwrap_or_default();
+        lines.extend(format_windows_adapters_snapshot(params.as_ref(), &adapters));
     }
 
     if let Ok((cfg, _)) = hickory_resolver::system_conf::read_system_conf() {

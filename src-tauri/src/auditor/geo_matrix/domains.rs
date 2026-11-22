@@ -2,6 +2,32 @@
 
 use super::ProviderId;
 
+/// Payment, KYC, antifraud, and wallet checkout domains that must share the active
+/// AI egress route (closing checkout Split-IP between AI app and Stripe/Persona/Captcha).
+pub const PAYMENT_AND_KYC_DOMAINS: &[&str] = &[
+    "stripe.com",
+    "js.stripe.com",
+    "api.stripe.com",
+    "checkout.stripe.com",
+    "billing.stripe.com",
+    "m.stripe.com",
+    "m.stripe.network",
+    "r.stripe.com",
+    "q.stripe.com",
+    "hooks.stripe.com",
+    "link.com",
+    "b.stripecdn.com",
+    "withpersona.com",
+    "inquiry.withpersona.com",
+    "challenges.cloudflare.com",
+    "hcaptcha.com",
+    "js.hcaptcha.com",
+    "newassets.hcaptcha.com",
+    "arkoselabs.com",
+    "pay.google.com",
+    "payments.google.com",
+];
+
 const ANTHROPIC_DOMAINS: &[&str] = &[
     "canary-test.anthropic.zastava.local",
     "claude.ai",
@@ -117,6 +143,16 @@ fn matches_domain(host: &str, domain: &str) -> bool {
         || (host.len() > domain.len()
             && host.ends_with(domain)
             && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
+}
+
+pub fn is_payment_or_kyc_host(raw_host: &str) -> bool {
+    let host = normalize_host(raw_host);
+    if host.is_empty() {
+        return false;
+    }
+    PAYMENT_AND_KYC_DOMAINS
+        .iter()
+        .any(|d| matches_domain(&host, d))
 }
 
 pub(super) fn match_provider_host(raw_host: &str) -> Option<ProviderId> {

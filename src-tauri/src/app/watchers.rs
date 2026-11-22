@@ -297,16 +297,7 @@ fn is_claude_process_running() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        let Ok(out) = crate::sysproxy::silent_command("tasklist.exe")
-            .args(["/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"])
-            .output()
-        else {
-            return false;
-        };
-        out.status.success()
-            && cowork_guard::parse_tasklist_has_claude(&cowork_guard::decode_windows_cmd_text(
-                &out.stdout,
-            ))
+        crate::win_native::process::is_process_running_by_name("claude.exe")
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -329,6 +320,7 @@ pub(super) fn spawn_cowork_guard_watcher(app: &tauri::App) {
                 let os_effects = crate::sysproxy::os_effects_enabled();
                 let claude_running = if os_effects
                     && status.supported
+                    && status.service_present
                     && status.task_installed
                     && status.start_type != Some(2)
                     && status.service_running

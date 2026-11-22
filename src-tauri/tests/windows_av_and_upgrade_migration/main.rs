@@ -5,9 +5,9 @@ use zastava_lib::auditor::profile_switcher::{
 };
 use zastava_lib::autostart::windows_run_value;
 use zastava_lib::cowork_guard::{
-    COWORK_ERROR_FILE_ARG, COWORK_TASK_FULL_NAME, INSTALL_COWORK_GUARD_ARG,
-    build_elevated_cli_params, build_schtasks_create_args, build_windows_summary,
-    build_windows_task_xml_with_system_root, cowork_guard_inline_ps, decode_windows_cmd_text,
+    APPLY_COWORK_GUARD_ONCE_ARG, COWORK_ERROR_FILE_ARG, COWORK_TASK_FULL_NAME, COWORK_TASK_SDDL,
+    INSTALL_COWORK_GUARD_ARG, build_elevated_cli_params, build_schtasks_create_args,
+    build_windows_summary, build_windows_task_xml_with_exe, decode_windows_cmd_text,
     encode_utf16_le_with_bom, is_task_xml_healthy, parse_install_cli_args, parse_reg_start_dword,
     parse_sc_running, parse_tasklist_has_claude, validate_windows_task_xml,
 };
@@ -20,8 +20,7 @@ use zastava_lib::win_reg::{
 
 #[test]
 fn windows_artifacts_avoid_defender_and_bropass_av_heuristics() {
-    let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
-    let inline_ps = cowork_guard_inline_ps();
+    let xml = build_windows_task_xml_with_exe(r"C:\Program Files\Zastava\zastava.exe");
     let elevated_params = build_elevated_cli_params(Some(std::path::Path::new(
         r"C:\Users\Ivan\AppData\Local\Temp\zastava-cowork-err.txt",
     )));
@@ -47,7 +46,7 @@ fn windows_artifacts_avoid_defender_and_bropass_av_heuristics() {
 
     for (label, text) in [
         ("task_xml", xml.as_str()),
-        ("inline_ps", inline_ps),
+        ("task_sddl", COWORK_TASK_SDDL),
         ("elevated_params", elevated_params.as_str()),
         ("ps_profile_block", ps_profile_block.as_str()),
     ] {
@@ -60,13 +59,14 @@ fn windows_artifacts_avoid_defender_and_bropass_av_heuristics() {
         }
     }
 
-    // Task XML must never launch user-writable binaries (LPE / BroPass heuristic guard)
+    // Task XML must invoke native zastava.exe --apply-cowork-guard-once with ZERO shells
     let xml_lower = xml.to_ascii_lowercase();
     assert!(!xml_lower.contains("%localappdata%"));
-    assert!(!xml_lower.contains(r"appdata\local"));
-    assert!(!xml_lower.contains("zastava.exe"));
+    assert!(!xml_lower.contains("powershell"));
+    assert!(!xml_lower.contains("pwsh"));
+    assert!(!xml_lower.contains("cmd.exe"));
+    assert!(xml.contains(APPLY_COWORK_GUARD_ONCE_ARG));
     assert!(!xml_lower.contains("logontype"));
-    assert!(xml.contains("Manual"));
     assert!(!xml.contains("Disabled"));
 
     // Elevated CLI params roundtrip preserves paths with spaces cleanly
@@ -113,56 +113,25 @@ async fn upgrade_from_v2_2_0_state_json_migrates_cleanly_without_data_loss() {
     // - has `pinned_ip`, stale `session_allowed_providers`, persisted `blocked_providers`
     // - has `routes`, `provider_routes`, `ip_history` (with both string "AS..." and numeric ASN)
     let legacy_v220_json = r#"{
-      "schema_version": 2,
-      "pinned_ip": "185.10.20.30",
-      "strict_pinning_enabled": true,
-      "onboarding_v2_2_done": true,
-      "hide_ip_mode": false,
+      "schema_version": 2, "pinned_ip": "185.10.20.30", "strict_pinning_enabled": true,
+      "onboarding_v2_2_done": true, "hide_ip_mode": false,
       "ip_history": {
-        "anthropic": [
-          { "ip": "185.10.20.30", "country_code": "nl", "asn": "AS20473", "timestamp": 1700000000 }
-        ],
-        "openai": [
-          { "ip": "198.51.100.7", "country_code": "DE", "asn": 24940, "timestamp": 1700000100 }
-        ]
+        "anthropic": [{ "ip": "185.10.20.30", "country_code": "nl", "asn": "AS20473", "timestamp": 1700000000 }],
+        "openai": [{ "ip": "198.51.100.7", "country_code": "DE", "asn": 24940, "timestamp": 1700000100 }]
       },
-      "session_allowed_providers": ["anthropic", "openai"],
-      "blocked_providers": ["gemini"],
-      "synced_ai_timezone": "Europe/Amsterdam",
-      "sync_ai_tz_enabled": true,
-      "cli_mode": "ai_only",
-      "auto_update_enabled": true,
-      "autostart_enabled": true,
-      "cowork_guard_enabled": true,
-      "interception_behavior": "ask_popup",
-      "popup_position": "top_right",
+      "session_allowed_providers": ["anthropic", "openai"], "blocked_providers": ["gemini"],
+      "synced_ai_timezone": "Europe/Amsterdam", "sync_ai_tz_enabled": true, "cli_mode": "ai_only",
+      "auto_update_enabled": true, "autostart_enabled": true, "cowork_guard_enabled": true,
+      "interception_behavior": "ask_popup", "popup_position": "top_right",
       "custom_ai_domains": ["my-ai.example.com"],
-      "routes": [
-        {
-          "id": "route-eu-1",
-          "label": "Amsterdam VPS",
-          "raw_key": "socks5://alice:s3cret@185.10.20.30:1080#NL",
-          "enabled": true,
-          "entries": [
-            {
-              "proto": "socks5",
-              "host": "185.10.20.30",
-              "port": 1080,
-              "username": "alice",
-              "password": "s3cret",
-              "sni": null
-            }
-          ],
-          "added_at": 1700000000
-        }
-      ],
-      "provider_routes": {
-        "anthropic": "route-eu-1"
-      },
-      "default_route_id": null,
-      "profile_route_id": null,
-      "legacy_route_id": null,
-      "profile_route_invalid": null,
+      "routes": [{
+        "id": "route-eu-1", "label": "Amsterdam VPS",
+        "raw_key": "socks5://alice:s3cret@185.10.20.30:1080#NL", "enabled": true,
+        "entries": [{ "proto": "socks5", "host": "185.10.20.30", "port": 1080, "username": "alice", "password": "s3cret", "sni": null }],
+        "added_at": 1700000000
+      }],
+      "provider_routes": { "anthropic": "route-eu-1" },
+      "default_route_id": null, "profile_route_id": null, "legacy_route_id": null, "profile_route_invalid": null,
       "manual_killswitch": true
     }"#;
 
@@ -223,40 +192,18 @@ async fn upgrade_from_v2_2_1_state_json_handles_pinned_ips_stale_blocks_and_unkn
     // - has stale `session_allowed_providers` and `blocked_providers`
     // - includes one valid route and one future/unrecognized route entry
     let legacy_v221_json = r#"{
-      "schema_version": 2,
-      "pinned_ip": "1.1.1.1",
-      "pinned_ips": {
-        "default": "1.1.1.1",
-        "anthropic": "5.6.7.8"
-      },
-      "session_allowed_providers": ["gemini"],
-      "blocked_providers": ["openai"],
+      "schema_version": 2, "pinned_ip": "1.1.1.1",
+      "pinned_ips": { "default": "1.1.1.1", "anthropic": "5.6.7.8" },
+      "session_allowed_providers": ["gemini"], "blocked_providers": ["openai"],
       "routes": [
         {
-          "id": "route-valid",
-          "label": "DE",
-          "raw_key": "http://198.51.100.10:8080#DE",
-          "enabled": true,
-          "entries": [
-            {
-              "proto": "http",
-              "host": "198.51.100.10",
-              "port": 8080,
-              "username": null,
-              "password": null,
-              "sni": null
-            }
-          ],
+          "id": "route-valid", "label": "DE", "raw_key": "http://198.51.100.10:8080#DE", "enabled": true,
+          "entries": [{ "proto": "http", "host": "198.51.100.10", "port": 8080, "username": null, "password": null, "sni": null }],
           "added_at": 1700000200
         },
-        {
-          "id": "route-future",
-          "entries": "not-an-array-in-future-schema"
-        }
+        { "id": "route-future", "entries": "not-an-array-in-future-schema" }
       ],
-      "provider_routes": {
-        "openai": "route-valid"
-      }
+      "provider_routes": { "openai": "route-valid" }
     }"#;
 
     fs::write(&state_path, legacy_v221_json).unwrap();
@@ -327,27 +274,14 @@ fn upgrade_from_legacy_profiles_json_without_bound_route_id_migrates_cleanly() {
         r#"{{
           "profiles": [
             {{
-              "id": "default",
-              "name": "Основной аккаунт",
-              "bound_ip": "198.51.100.2",
-              "bound_country": "NL",
-              "bound_upstream_key": "{work_key}",
-              "isolated_device_id": "dev-work-111",
-              "created_at": 1700000000,
-              "last_used_at": 1700000500,
-              "is_active": true,
-              "has_saved_session": true
+              "id": "default", "name": "Основной аккаунт", "bound_ip": "198.51.100.2", "bound_country": "NL",
+              "bound_upstream_key": "{work_key}", "isolated_device_id": "dev-work-111",
+              "created_at": 1700000000, "last_used_at": 1700000500, "is_active": true, "has_saved_session": true
             }},
             {{
-              "id": "profile-personal",
-              "name": "Личный",
-              "bound_ip": null,
-              "bound_country": null,
-              "isolated_device_id": "dev-pers-222",
-              "created_at": 1700000100,
-              "last_used_at": 1700000200,
-              "is_active": false,
-              "has_saved_session": false
+              "id": "profile-personal", "name": "Личный", "bound_ip": null, "bound_country": null,
+              "isolated_device_id": "dev-pers-222", "created_at": 1700000100, "last_used_at": 1700000200,
+              "is_active": false, "has_saved_session": false
             }}
           ]
         }}"#
@@ -409,51 +343,31 @@ async fn upgrade_from_v2_3_0_state_json_migrates_to_v3_with_backup_and_zero_data
     let v2_bak_path = dir.path().join(STATE_V2_BACKUP_NAME);
 
     let v230_json = r#"{
-      "schema_version": 2,
-      "pinned_ip": "185.10.20.30",
+      "schema_version": 2, "pinned_ip": "185.10.20.30",
       "pinned_ips": { "default": "185.10.20.30", "openai": "198.51.100.7" },
-      "strict_pinning_enabled": true,
-      "onboarding_v2_2_done": true,
-      "hide_ip_mode": true,
+      "strict_pinning_enabled": true, "onboarding_v2_2_done": true, "hide_ip_mode": true,
       "ip_history": {
-        "anthropic": [
-          { "ip": "185.10.20.30", "country_code": "NL", "asn": 20473, "timestamp": 1730000000 }
-        ]
+        "anthropic": [{ "ip": "185.10.20.30", "country_code": "NL", "asn": 20473, "timestamp": 1730000000 }]
       },
-      "trusted_exceptions": { "anthropic": ["185.10.20.30"] },
-      "disabled_providers": ["gemini"],
-      "warmup_started_at": 1730001234,
-      "synced_ai_timezone": "Europe/Amsterdam",
-      "sync_ai_tz_enabled": false,
-      "cli_mode": "global_terminal",
+      "trusted_exceptions": { "anthropic": ["185.10.20.30"] }, "disabled_providers": ["gemini"],
+      "warmup_started_at": 1730001234, "synced_ai_timezone": "Europe/Amsterdam",
+      "sync_ai_tz_enabled": false, "cli_mode": "global_terminal",
       "custom_ai_domains": ["my-ai.example.com"],
       "routes": [
         {
-          "id": "route-nl",
-          "label": "NL Node",
-          "raw_key": "socks5://alice:s3cret@185.10.20.30:1080#NL",
-          "enabled": true,
-          "entries": [
-            { "proto": "socks5", "host": "185.10.20.30", "port": 1080, "username": "alice", "password": "s3cret", "sni": null }
-          ],
+          "id": "route-nl", "label": "NL Node", "raw_key": "socks5://alice:s3cret@185.10.20.30:1080#NL", "enabled": true,
+          "entries": [{ "proto": "socks5", "host": "185.10.20.30", "port": 1080, "username": "alice", "password": "s3cret", "sni": null }],
           "added_at": 1730000000
         },
         {
-          "id": "route-de",
-          "label": "DE Node",
-          "raw_key": "http://198.51.100.7:8080#DE",
-          "enabled": true,
-          "entries": [
-            { "proto": "http", "host": "198.51.100.7", "port": 8080, "username": null, "password": null, "sni": null }
-          ],
+          "id": "route-de", "label": "DE Node", "raw_key": "http://198.51.100.7:8080#DE", "enabled": true,
+          "entries": [{ "proto": "http", "host": "198.51.100.7", "port": 8080, "username": null, "password": null, "sni": null }],
           "added_at": 1730000100
         }
       ],
       "provider_routes": { "openai": "route-de" },
-      "default_route_id": "route-nl",
-      "profile_route_id": "route-nl",
-      "ip_change_cooldown_until": 1730014400,
-      "last_safe_logout_at": 1730000000
+      "default_route_id": "route-nl", "profile_route_id": "route-nl",
+      "ip_change_cooldown_until": 1730014400, "last_safe_logout_at": 1730000000
     }"#;
 
     fs::write(&state_path, v230_json).unwrap();
@@ -553,21 +467,20 @@ fn cowork_guard_handles_v2_2_0_and_v2_2_1_upgrade_repair_and_windows_encodings()
         ]
     );
 
-    // 2. Newly generated v2.2.2 Task XML passes schema & health checks and encodes to UTF-16LE BOM
-    let v222_xml = build_windows_task_xml_with_system_root(r"C:\Windows");
-    assert!(validate_windows_task_xml(&v222_xml).is_ok());
-    assert!(is_task_xml_healthy(&v222_xml));
-    let utf16_bom = encode_utf16_le_with_bom(&v222_xml);
+    // 2. Newly generated v3.1.0 Zero-LOLBin Task XML passes schema & health checks and encodes to UTF-16LE BOM
+    let v310_xml = build_windows_task_xml_with_exe(r"C:\Program Files\Zastava\zastava.exe");
+    assert!(validate_windows_task_xml(&v310_xml).is_ok());
+    assert!(is_task_xml_healthy(&v310_xml));
+    let utf16_bom = encode_utf16_le_with_bom(&v310_xml);
     assert_eq!(&utf16_bom[..2], &[0xFF, 0xFE]);
-    assert_eq!(decode_windows_cmd_text(&utf16_bom), v222_xml.trim());
+    assert_eq!(decode_windows_cmd_text(&utf16_bom), v310_xml.trim());
 
     // 3. v2.2.1 XML had encoding="UTF-8", which validate_windows_task_xml rejects for new installs
-    let v221_utf8_xml = v222_xml.replace("encoding=\"UTF-16\"", "encoding=\"UTF-8\"");
+    let v221_utf8_xml = v310_xml.replace("encoding=\"UTF-16\"", "encoding=\"UTF-8\"");
     assert!(validate_windows_task_xml(&v221_utf8_xml).is_err());
 
-    // 4. v2.2.0 Task Scheduler exported XML (SYSTEM + BootTrigger + System32 powershell.exe)
-    //    decoded from Windows UTF-16LE BOM stdout is recognized cleanly, while legacy/LPE tasks
-    //    targeting AppData\Local\Zastava\zastava.exe are flagged for repair.
+    // 4. Legacy v2.2.0 PowerShell Task Scheduler XML is flagged unhealthy so upgrade repairs it to Zero-LOLBin,
+    //    while native UTF-16LE BOM exported XML passes cleanly and unexpanded %LOCALAPPDATA% is rejected.
     let v220_exported_xml = r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
@@ -577,11 +490,15 @@ fn cowork_guard_handles_v2_2_0_and_v2_2_1_upgrade_repair_and_windows_encodings()
     let mut exported_utf16 = encode_utf16_le_with_bom(v220_exported_xml);
     exported_utf16.extend([0, 0]); // Simulate trailing NUL from console tool output
     let decoded = decode_windows_cmd_text(&exported_utf16);
-    assert!(is_task_xml_healthy(&decoded));
+    assert!(!is_task_xml_healthy(&decoded));
     assert!(validate_windows_task_xml(&decoded).is_err());
 
-    let legacy_localappdata_xml = v220_exported_xml.replace(
-        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+    let mut native_utf16 = encode_utf16_le_with_bom(&v310_xml);
+    native_utf16.extend([0, 0]);
+    assert!(is_task_xml_healthy(&decode_windows_cmd_text(&native_utf16)));
+
+    let legacy_localappdata_xml = v310_xml.replace(
+        r"C:\Program Files\Zastava\zastava.exe",
         r"%LOCALAPPDATA%\Zastava\zastava.exe",
     );
     assert!(!is_task_xml_healthy(&legacy_localappdata_xml));
@@ -609,3 +526,5 @@ fn cowork_guard_handles_v2_2_0_and_v2_2_1_upgrade_repair_and_windows_encodings()
         "\"claude.exe\",\"4242\",\"Console\",\"1\",\"90,000 K\""
     ));
 }
+
+mod lolbin_scan;

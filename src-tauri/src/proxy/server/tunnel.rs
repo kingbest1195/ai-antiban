@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::auditor::geo_matrix::ProviderId;
-use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, wait_open};
+use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, shutdown_aborted, wait_open};
 use crate::proxy::route_watch::RouteWatch;
 use crate::proxy::upstream::{
     ChainedError, UpstreamStream, connect_via_chained_proxy, connect_via_route_with_chained,
@@ -89,7 +89,8 @@ impl ProxyServer {
         // The manual kill-switch ("СТОП СЕТИ") stops transit traffic too; subscribe first so a
         // switch-on during the connect is noticed.
         let mut kill_rx = self.guard.subscribe_killswitch();
-        if *kill_rx.borrow_and_update() {
+        let mut shutdown_rx = self.guard.subscribe_shutdown_abort();
+        if *kill_rx.borrow_and_update() || *shutdown_rx.borrow_and_update() {
             return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
         }
         let connected = if let Some(redirect_addr) = self.upstream_redirect {
@@ -128,6 +129,7 @@ impl ProxyServer {
         let res = tokio::select! {
             res = tokio::io::copy_bidirectional(client, &mut target) => res.map(|_| ()),
             _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+            _ = shutdown_aborted(&mut shutdown_rx) => Err(tunnel_stalled()),
         };
         match res {
             Err(e) if is_peer_gone(&e) => Ok(()),
@@ -425,10 +427,11 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut kill_rx = guard.subscribe_killswitch();
+    let mut shutdown_rx = guard.subscribe_shutdown_abort();
     let mut buf = vec![0u8; 16 * 1024];
 
     loop {
-        if *kill_rx.borrow_and_update() {
+        if *kill_rx.borrow_and_update() || *shutdown_rx.borrow_and_update() {
             return Err(tunnel_stalled());
         }
         let n = tokio::select! {
@@ -439,12 +442,15 @@ where
                 }
                 continue;
             }
+            _ = shutdown_aborted(&mut shutdown_rx) => {
+                return Err(tunnel_stalled());
+            }
         };
         if n == 0 {
             let _ = writer.shutdown().await;
             return Ok(());
         }
-        if guard.is_manual_killswitch() {
+        if guard.is_manual_killswitch() || *shutdown_rx.borrow_and_update() {
             return Err(tunnel_stalled());
         }
         writer.write_all(&buf[..n]).await?;

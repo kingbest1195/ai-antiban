@@ -1,9 +1,9 @@
 import { useState } from "react";
-import type { ChangeEvent, FormEvent } from "react";
-import type { BinAuditResult } from "../../types";
-import { checkPaymentBin } from "../../utils/api";
-import { Badge, Banner, Button, Card, Field, InfoTip, Mono, Row, Rows, Section } from "../../ui";
-import type { BannerTone } from "../../ui";
+import type { ChangeEvent, ClipboardEvent, FormEvent } from "react";
+import type { BinReport, ClaudeWebVerdict } from "../../types";
+import { checkCardBin } from "../../utils/api";
+import { Badge, Banner, Button, Card, Field, Row, Rows } from "../../ui";
+import type { BannerTone, RowTone } from "../../ui";
 import { subscription } from "../../shared/copy/ru";
 import { countryName } from "../../shared/lib/country";
 import type { ShowToast } from "../../shared/hooks";
@@ -12,54 +12,107 @@ import { detectBrand } from "./binBrand";
 const copy = subscription.card;
 
 export interface CardCheckProps {
-  /** Страна выхода: BIN проверяется относительно неё. */
+  /** Страна выхода: карта проверяется относительно неё. */
   country?: string;
-  /** Явный код страны выхода (алиас для встраивания в «Чистую комнату»). */
+  /** Явный код страны выхода (алиас для встраивания в «Чистую комнату» и экран оплаты). */
   exitCountry?: string;
   ctaVariant?: "primary" | "secondary";
   onToast?: ShowToast;
   onNavigateToPaymentGuide?: () => void;
+  onBinChecked?: (report: BinReport) => void;
 }
 
-/** Как и раньше: ok — совместимо, warning — внимание, всё остальное — отклонено. */
-function verdictTone(status: BinAuditResult["status"]): BannerTone {
-  if (status === "ok") return "ok";
-  if (status === "warning") return "warn";
+export interface BinInputDecision {
+  accepted: boolean;
+  nextValue: string;
+  error: string | null;
+}
+
+/**
+ * Безопасная валидация ввода первых 6–8 цифр карты на UI-уровне:
+ * допускает строго до 8 цифр, жёстко отклоняет >8 цифр и нецифровые символы
+ * без обрезки номера и без передачи в IPC/логи.
+ */
+export function evaluateBinInput(rawValue: string, previousValue: string): BinInputDecision {
+  const withoutSeparators = rawValue.replace(/[\s-]+/g, "");
+  if (!withoutSeparators) {
+    return { accepted: true, nextValue: "", error: null };
+  }
+  if (!/^\d+$/.test(withoutSeparators)) {
+    return { accepted: false, nextValue: previousValue, error: copy.errors.nonDigit };
+  }
+  if (withoutSeparators.length > 8) {
+    return { accepted: false, nextValue: previousValue, error: copy.errors.tooLong };
+  }
+  return { accepted: true, nextValue: withoutSeparators, error: null };
+}
+
+function verdictTone(report: BinReport): BannerTone {
+  if (report.status === "ok") return "ok";
+  if (report.status === "warning" || report.status === "unknown") return "warn";
   return "danger";
 }
 
-/** Проверка BIN: поле и кнопка, вердикт словом (Banner нужного тона) и детали строками. */
+function claudeVerdictLabel(verdict: ClaudeWebVerdict): string {
+  return copy.claudeVerdicts[verdict] ?? copy.claudeVerdicts.highKycRisk;
+}
+
+function claudeVerdictTone(verdict: ClaudeWebVerdict): RowTone {
+  if (verdict === "safeAligned") return "ok";
+  if (verdict === "needsMatchingIpBilling") return "warn";
+  return "danger";
+}
+
+/** Проверка карты по первым 6–8 цифрам без полного номера, срока и CVV. */
 export function CardCheck({
   country,
   exitCountry,
   ctaVariant = "primary",
   onToast,
   onNavigateToPaymentGuide,
+  onBinChecked,
 }: CardCheckProps) {
+  // Не подставляем молча «NL», если страна не передана или равна «--».
+  const rawCountry = exitCountry !== undefined ? exitCountry : country;
+  const trimmedCountry = rawCountry?.trim();
   const resolvedCountry =
-    exitCountry && exitCountry !== "--"
-      ? exitCountry
-      : country && country !== "--"
-        ? country
-        : "NL";
+    trimmedCountry && trimmedCountry !== "--" ? trimmedCountry : "";
+
   const [binInput, setBinInput] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
-  const [result, setResult] = useState<BinAuditResult | null>(null);
+  const [result, setResult] = useState<BinReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
-    setBinInput(e.target.value.replace(/\D/g, "").slice(0, 8));
+    const decision = evaluateBinInput(e.target.value, binInput);
+    if (!decision.accepted) {
+      setError(decision.error);
+      return;
+    }
+    setBinInput(decision.nextValue);
     setError(null);
   };
 
-  const runBinAudit = async (rawBin: string) => {
-    const clean = rawBin.replace(/\D/g, "");
+  const handlePaste = (e: ClipboardEvent<HTMLInputElement>) => {
+    const pasted = e.clipboardData?.getData("text") ?? "";
+    const decision = evaluateBinInput(pasted, binInput);
+    if (!decision.accepted) {
+      e.preventDefault();
+      setError(decision.error);
+    }
+  };
 
-    if (clean.length < 6) {
+  const runBinAudit = async (rawBin: string) => {
+    const cleaned = rawBin.replace(/[\s-]+/g, "");
+    if (!/^\d+$/.test(cleaned)) {
+      setError(copy.errors.nonDigit);
+      return;
+    }
+    if (cleaned.length < 6) {
       setError(copy.errors.tooShort);
       return;
     }
-    if (clean.length > 8) {
+    if (cleaned.length > 8) {
       setError(copy.errors.tooLong);
       return;
     }
@@ -68,15 +121,18 @@ export function CardCheck({
     setError(null);
 
     try {
-      const res = await checkPaymentBin(clean, resolvedCountry);
-      setResult(res);
+      const report = await checkCardBin(cleaned, resolvedCountry || null);
+      setResult(report);
+      onBinChecked?.(report);
       if (onToast) {
-        if (res.status === "ok") {
-          onToast(copy.toast.ok, copy.toast.okText(res.bank_name || copy.toast.okBank, res.country_code ?? ""), "success");
-        } else if (res.status === "warning") {
-          onToast(copy.toast.warn, res.advisory, "warning");
+        const bank = report.knownFintechLabel || report.issuerName || copy.toast.okBank;
+        const cardCountryText = report.countryCode ? countryName(report.countryCode) || report.countryCode : "";
+        if (report.status === "ok") {
+          onToast(copy.toast.ok, copy.toast.okText(bank, cardCountryText), "success");
+        } else if (report.status === "warning" || report.status === "unknown") {
+          onToast(copy.toast.warn, report.warnings[0] ?? claudeVerdictLabel(report.claudeWebVerdict), "warning");
         } else {
-          onToast(copy.toast.danger, res.advisory, "error");
+          onToast(copy.toast.danger, report.warnings[0] ?? claudeVerdictLabel(report.claudeWebVerdict), "error");
         }
       }
     } catch (err: unknown) {
@@ -91,24 +147,11 @@ export function CardCheck({
     void runBinAudit(binInput);
   };
 
-  const pickExample = (bin: string) => {
-    setBinInput(bin);
-    void runBinAudit(bin);
-  };
-
   return (
     <>
       <Card
         title={copy.title}
-        aside={
-          <span className="zs-field-row">
-            <Badge>{copy.gateway(resolvedCountry)}</Badge>
-            <InfoTip
-              title="Проверка BIN и IP"
-              text="BIN (первые 6–8 цифр карты) определяет страну банка-эмитента и тип карты. Для Stripe важно, чтобы страна IP выхода совпадала со страной карты (IP ≈ Card)."
-            />
-          </span>
-        }
+        aside={<Badge>{copy.gateway(resolvedCountry)}</Badge>}
       >
         <p className="zs-t-body subs-lead">{copy.text}</p>
 
@@ -117,11 +160,11 @@ export function CardCheck({
             label={copy.fieldLabel}
             value={binInput}
             onChange={handleInputChange}
+            onPaste={handlePaste}
             placeholder={copy.placeholder}
             inputMode="numeric"
             autoComplete="off"
             spellCheck={false}
-            maxLength={8}
             help={binInput ? copy.help(detectBrand(binInput)) : copy.helpEmpty}
             error={error ?? undefined}
             action={
@@ -131,91 +174,86 @@ export function CardCheck({
             }
           />
         </form>
-
-        <div className="subs-examples">
-          <span className="zs-t-caption subs-examples__label">{copy.examples}</span>
-          {copy.exampleList.map((ex) => (
-            <Button key={ex.bin} size="sm" disabled={loading} onClick={() => pickExample(ex.bin)}>
-              <Mono>{ex.bin}</Mono> {ex.label}
-            </Button>
-          ))}
-        </div>
       </Card>
 
-      {result && <Verdict result={result} onNavigateToPaymentGuide={onNavigateToPaymentGuide} />}
+      {result && <Verdict report={result} onNavigateToPaymentGuide={onNavigateToPaymentGuide} />}
     </>
   );
 }
 
 export function Verdict({
-  result,
+  report,
   onNavigateToPaymentGuide,
 }: {
-  result: BinAuditResult;
+  report: BinReport;
   onNavigateToPaymentGuide?: () => void;
 }) {
-  const tone = verdictTone(result.status);
-  const word = tone === "ok" ? copy.verdict.ok : tone === "warn" ? copy.verdict.warn : copy.verdict.danger;
+  const tone = verdictTone(report);
+  const word =
+    report.status === "unknown"
+      ? copy.verdict.unknown
+      : tone === "ok"
+        ? copy.verdict.ok
+        : tone === "warn"
+          ? copy.verdict.warn
+          : copy.verdict.danger;
   const d = copy.detail;
-  const type = result.card_type || d.typeFallback;
-  const country = result.country_code;
+  const isUnknown = report.status === "unknown" || report.source === "fallbackUnknown";
+  const isPrepaid = Boolean(report.isPrepaid) || report.funding === "prepaid";
+  const isCommercial = Boolean(report.isCommercial);
+  const countryLabel = report.countryCode ? countryName(report.countryCode) || d.none : d.none;
+  const fundingText = copy.fundingLabels[report.funding] ?? d.typeFallback;
+  const typeWithCorporate = isCommercial
+    ? `${fundingText} (${d.corporateNote})`
+    : fundingText;
+  const bankHeader = report.knownFintechLabel || report.issuerName || copy.bankUnknown;
+  const summaryText = report.warnings[0] ?? claudeVerdictLabel(report.claudeWebVerdict);
 
   return (
-    <Section title={copy.analysis}>
+    <Card title={copy.resultTitle(report.binPrefix)} aside={bankHeader}>
       <Banner
         tone={tone}
         icon={tone === "ok" ? "check" : "alert"}
         role={tone === "danger" ? "alert" : "status"}
-        title={word}
+        title={isUnknown ? copy.failClosedTitle : word}
         action={
-          result.status !== "ok" && onNavigateToPaymentGuide ? (
+          report.status !== "ok" && onNavigateToPaymentGuide ? (
             <Button variant="quiet" size="sm" className="subs-banner-action" onClick={onNavigateToPaymentGuide}>
               {copy.guideLink}
             </Button>
           ) : undefined
         }
       >
-        {result.advisory}
+        {isUnknown ? copy.failClosedText : summaryText}
       </Banner>
 
-      <Card title={copy.resultTitle(result.bin)} aside={result.bank_name || copy.bankUnknown}>
+      <div className="subs-block-gap">
         <Rows>
-          <Row
-            icon="globe"
-            title={country ? <Mono>{country}</Mono> : d.none}
-            sub={countryName(country) ? `${d.country} · ${countryName(country)}` : d.country}
-          />
+          <Row icon="globe" title={countryLabel} sub={d.country} />
           <Row
             icon="key"
-            tone={result.is_prepaid ? "warn" : "neutral"}
-            title={<Mono>{type}</Mono>}
-            sub={d.type}
+            tone={isPrepaid || isCommercial ? "warn" : "neutral"}
+            title={typeWithCorporate}
+            sub={isCommercial ? d.type : `${d.type} · ${d.personalNote}`}
             trail={
-              result.is_prepaid ? (
+              isPrepaid ? (
                 <Badge tone="warn" icon="alert">
-                  {d.prepaid}
+                  {d.virtualBadge}
                 </Badge>
               ) : undefined
             }
           />
+          {report.knownFintechLabel && (
+            <Row icon="info" title={report.knownFintechLabel} sub={d.fintech} />
+          )}
           <Row
-            icon="lock"
-            tone={result.is_prepaid ? "danger" : "ok"}
-            title={d.virtual}
-            trail={
-              result.is_prepaid ? (
-                <Badge tone="danger" icon="alert">
-                  {d.virtualYes}
-                </Badge>
-              ) : (
-                <Badge tone="ok" icon="check">
-                  {d.virtualNo}
-                </Badge>
-              )
-            }
+            icon="shield"
+            tone={claudeVerdictTone(report.claudeWebVerdict)}
+            title={claudeVerdictLabel(report.claudeWebVerdict)}
+            sub={d.claudeVerdict}
           />
         </Rows>
-      </Card>
-    </Section>
+      </div>
+    </Card>
   );
 }

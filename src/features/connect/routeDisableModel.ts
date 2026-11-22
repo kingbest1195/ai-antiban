@@ -193,3 +193,20 @@ export async function switchUnavailableBannerToDirect(
 
   return "switched";
 }
+
+/** Определяет страну выхода для сервиса по выбранной привязке маршрута или текущему VPN. */
+export function resolveProviderExitCountry(
+  providerId: ProviderId,
+  snapshot: RoutesSnapshot | null | undefined,
+  routes: RouteView[],
+  currentCountry: string,
+): string {
+  const explicitBinding = snapshot?.provider_routes[providerId];
+  if (explicitBinding === DIRECT_ROUTE_ID) return currentCountry;
+  const routeId = explicitBinding || snapshot?.default_route_id || "";
+  if (routeId) {
+    const bound = routes.find((r) => r.id === routeId);
+    if (bound) return bound.country ?? "";
+  }
+  return currentCountry;
+}

@@ -640,6 +640,7 @@ async fn superseded_hold_drain_emits_resolved_and_hides_popup_on_disable_and_all
         detected_at_ms: 1,
         phase: PHASE_READY.to_string(),
         gate_reason: None,
+        checkout_risk: None,
     });
     let hides_before = h.io.hides.load(Ordering::SeqCst);
     let resolved_before = h.io.count("interceptor://resolved");

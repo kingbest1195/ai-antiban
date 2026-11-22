@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { Banner, Button } from "../../ui";
 import { overview as copy } from "../../shared/copy/ru";
+import { useOsTimezoneSync } from "../../shared/hooks/useTimezoneSync";
 import { getRouteExpiryUrgency } from "../../shared/lib/zastavaKey";
 import { openZastavaBot } from "../../utils/opener";
 import { RouteUnavailableBanner } from "../connect/RouteUnavailableBanner";
@@ -39,6 +40,7 @@ export function AlertStrip({
   view,
   overview,
   coworkGuard,
+  osTz: osTzProp,
   ipChangeCooldownUntil,
   routeUnavailableBanner,
   routesSnapshot,
@@ -49,6 +51,9 @@ export function AlertStrip({
   onAuditRefresh,
 }: AlertStripProps) {
   const [expanded, setExpanded] = useState(false);
+  const [repairFallbackError, setRepairFallbackError] = useState<string | null>(null);
+  const sharedOsTz = useOsTimezoneSync(overview.activeReport?.telemetry?.timezone);
+  const osTz = osTzProp ?? sharedOsTz;
 
   const hasProblem = Boolean(!view.loading && !view.failed && view.model.banner && view.model.banner !== "update");
   const hasCooldown = Boolean(ipChangeCooldownUntil && ipChangeCooldownUntil * 1000 > Date.now());
@@ -71,10 +76,10 @@ export function AlertStrip({
           kind={view.model.banner}
           targetTz={overview.activeReport?.telemetry?.timezone}
           tzCode={overview.activeReport?.timezone_result?.code}
-          osTzStatus={null}
-          osTzLoading={false}
-          onSyncOsTimezone={overview.onOpenTimezone ?? (() => {})}
-          onRestoreOsTimezone={() => {}}
+          osTzStatus={osTz.osTzStatus}
+          osTzLoading={osTz.osTzLoading}
+          onSyncOsTimezone={() => void osTz.syncOsTimezone(overview.activeReport?.telemetry?.timezone)}
+          onRestoreOsTimezone={() => void osTz.restoreOsTimezone()}
           {...overview}
           onOpenChecks={() => onPushRoute({ page: "checks" })}
           onOpenConnect={() => onPushRoute({ page: "connect" })}
@@ -84,19 +89,21 @@ export function AlertStrip({
   }
 
   if (coworkGuard.needsRepair) {
+    const displayedCoworkError = coworkGuard.error || repairFallbackError;
     items.push({
       id: "cowork",
       priority: 2,
       render: () => (
         <Banner
           tone="warn"
-          title="Требуется защита фоновой службы Claude"
+          title="Фоновая служба Claude не защищена"
           action={
             <Button
               size="sm"
               variant="secondary"
               disabled={coworkGuard.repairing}
               onClick={() => {
+                setRepairFallbackError(null);
                 void coworkGuard.repair().then((updated) => {
                   if (!updated) {
                     overview.onToast?.(
@@ -104,6 +111,18 @@ export function AlertStrip({
                       "Запрос прав администратора отменён или планировщик вернул ошибку. Попробуйте снова или проверьте настройки.",
                       "error",
                     );
+                  } else if (updated.needs_repair) {
+                    const summary =
+                      updated.summary ||
+                      "Защита фоновой службы Claude настроена не полностью. Откройте настройки или проверьте права администратора.";
+                    setRepairFallbackError(summary);
+                    overview.onToast?.(
+                      "Не удалось завершить защиту фоновой службы Claude",
+                      summary,
+                      "warning",
+                    );
+                  } else {
+                    setRepairFallbackError(null);
                   }
                 });
               }}
@@ -113,13 +132,10 @@ export function AlertStrip({
           }
         >
           <>
-            <span>
-              {coworkGuard.status?.summary ||
-                "Фоновая служба Claude на Windows (CoworkVMService) может запускаться в обход прокси. Нажмите «Починить в 1 клик»."}
-            </span>
-            {coworkGuard.error && (
+            <span>Может запускаться в обход прокси до старта Заставы.</span>
+            {displayedCoworkError && (
               <p className="zs-v3-alert-error" role="alert">
-                {coworkGuard.error}
+                {displayedCoworkError}
               </p>
             )}
           </>
@@ -133,18 +149,11 @@ export function AlertStrip({
       id: "cooldown",
       priority: 3,
       render: () => (
-        <div className="zs-stack">
-          <CooldownBanner
-            cooldownUntil={ipChangeCooldownUntil}
-            onCleared={overview.onRetry}
-            onToast={overview.onToast}
-          />
-          <div>
-            <Button size="sm" variant="quiet" onClick={() => onPushRoute({ page: "backup" })}>
-              Открыть профили и SOS
-            </Button>
-          </div>
-        </div>
+        <CooldownBanner
+          cooldownUntil={ipChangeCooldownUntil}
+          onCleared={overview.onRetry}
+          onToast={overview.onToast}
+        />
       ),
     });
   }

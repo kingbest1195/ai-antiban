@@ -184,12 +184,56 @@ fn lookup_goes_through_the_probe_on_every_os() {
     assert!(p.calls.lock().unwrap()[0].contains("-iTCP:50000"));
 
     let p = FakeProbe::answering(NETSTAT_SAMPLE);
-    // The same canned text answers `tasklist` too: its first quoted token is not present, so
-    // the lookup ends with nothing, but both tools were asked.
+    // Windows process lookup uses native Win32 APIs (never spawns `netstat` or `tasklist` via probe).
     assert_eq!(lookup_process_with(&*p, Os::Windows, 50000, 4242), None);
-    let calls = p.calls.lock().unwrap().clone();
-    assert!(calls[0].starts_with("netstat "));
-    assert!(calls[1].starts_with("tasklist ") && calls[1].contains("PID eq 222"));
+    assert!(p.calls.lock().unwrap().is_empty());
+
+    let win_rows = vec![
+        crate::win_native::network::TcpOwnerRow {
+            state: 5,
+            local_ip: std::net::Ipv4Addr::LOCALHOST,
+            local_port: 8899,
+            remote_ip: std::net::Ipv4Addr::LOCALHOST,
+            remote_port: 50000,
+            owning_pid: 4242,
+        },
+        crate::win_native::network::TcpOwnerRow {
+            state: 5,
+            local_ip: std::net::Ipv4Addr::LOCALHOST,
+            local_port: 18899,
+            remote_ip: std::net::Ipv4Addr::LOCALHOST,
+            remote_port: 40000,
+            owning_pid: 111,
+        },
+        crate::win_native::network::TcpOwnerRow {
+            state: 5,
+            local_ip: std::net::Ipv4Addr::LOCALHOST,
+            local_port: 50000,
+            remote_ip: std::net::Ipv4Addr::LOCALHOST,
+            remote_port: 8899,
+            owning_pid: 0,
+        },
+        crate::win_native::network::TcpOwnerRow {
+            state: 5,
+            local_ip: std::net::Ipv4Addr::LOCALHOST,
+            local_port: 50000,
+            remote_ip: std::net::Ipv4Addr::LOCALHOST,
+            remote_port: 8899,
+            owning_pid: 222,
+        },
+    ];
+    let resolved = resolve_windows_tcp_owner(&win_rows, 50000, 4242, |pid| match pid {
+        222 => Some(r"C:\Program Files\Google\Chrome\Application\chrome.exe".to_string()),
+        111 => Some(r"C:\Program Files\Zastava\zastava.exe".to_string()),
+        _ => None,
+    });
+    assert_eq!(resolved.as_deref(), Some("chrome.exe"));
+    assert_eq!(
+        resolve_windows_tcp_owner(&win_rows[..3], 8899, 4242, |_| Some(
+            "other.exe".to_string()
+        )),
+        None
+    );
 
     let p = FakeProbe::answering(
         "ESTAB 0 0 127.0.0.1:50000 127.0.0.1:8899 users:((\"node\",pid=9,fd=5))\n",

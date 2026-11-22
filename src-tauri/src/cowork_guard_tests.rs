@@ -32,14 +32,23 @@ fn validates_task_xml_security_and_triggers() {
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
-  <Actions Context="Author"><Exec><Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command><Arguments>-NoProfile -Command "..."</Arguments></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>C:\Program Files\Zastava\zastava.exe</Command><Arguments>--apply-cowork-guard-once</Arguments></Exec></Actions>
 </Task>"#;
     assert!(is_task_xml_healthy(good_xml));
 
-    // Reject user-writable %LOCALAPPDATA% execution (LPE guard)
+    // Reject legacy PowerShell tasks so upgrades repair them to Zero-LOLBin
+    let legacy_ps_xml = good_xml
+        .replace(
+            r"C:\Program Files\Zastava\zastava.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        )
+        .replace("--apply-cowork-guard-once", "-NoProfile -Command \"...\"");
+    assert!(!is_task_xml_healthy(&legacy_ps_xml));
+
+    // Reject unexpanded %LOCALAPPDATA% execution
     let lpe_xml = good_xml.replace(
-        "powershell.exe",
-        r"C:\Users\alice\AppData\Local\Zastava\zastava.exe",
+        r"C:\Program Files\Zastava\zastava.exe",
+        r"%LOCALAPPDATA%\Zastava\zastava.exe",
     );
     assert!(!is_task_xml_healthy(&lpe_xml));
 
@@ -58,19 +67,17 @@ fn validates_task_xml_security_and_triggers() {
 }
 
 #[test]
-fn task_xml_uses_manual_never_disabled_no_encoded_command_and_no_localappdata() {
-    let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+fn task_xml_uses_native_cli_no_powershell_and_no_encoded_command() {
+    let xml = build_windows_task_xml_with_exe(r"C:\Program Files\Zastava\zastava.exe");
     assert!(is_task_xml_healthy(&xml));
-    assert!(xml.contains("Manual"));
-    assert!(xml.contains("3"));
+    assert!(xml.contains(APPLY_COWORK_GUARD_ONCE_ARG));
     assert!(!xml.contains("Disabled"));
     assert!(!xml.contains("LOCALAPPDATA"));
+    assert!(!xml.to_ascii_lowercase().contains("powershell"));
     assert!(!xml.contains("-EncodedCommand"));
     assert!(!xml.contains("-ExecutionPolicy"));
     assert!(!xml.contains("Bypass"));
-    assert!(xml.contains("CoworkVMService"));
-    assert!(xml.contains("cowork-svc.exe"));
-    assert!(!cowork_guard_inline_ps().contains('"'));
+    assert!(xml.contains("CoworkVMService Manual Guard"));
     assert_eq!(
         build_schtasks_create_args(r"C:\Temp\task.xml"),
         [
@@ -146,7 +153,7 @@ fn dry_run_cowork_guard_is_safe() {
 
 #[test]
 fn task_xml_has_utf16_encoding_and_omits_invalid_logontype() {
-    let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+    let xml = build_windows_task_xml_with_exe(r"C:\Program Files\Zastava\zastava.exe");
     assert!(xml.starts_with(r#"<?xml version="1.0" encoding="UTF-16"?>"#));
     assert!(!xml.contains("<LogonType>"));
     assert!(!xml.to_ascii_lowercase().contains("serviceaccount"));
@@ -177,7 +184,7 @@ fn task_xml_has_utf16_encoding_and_omits_invalid_logontype() {
 
 #[test]
 fn encodes_task_xml_as_utf16_le_with_bom() {
-    let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+    let xml = build_windows_task_xml_with_exe(r"C:\Program Files\Zastava\zastava.exe");
     let bytes = encode_utf16_le_with_bom(&xml);
     assert!(bytes.len() > 2);
     assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
@@ -230,7 +237,7 @@ fn parses_install_cli_args_and_error_file_roundtrip() {
 
 #[test]
 fn decodes_utf16_le_without_bom_and_classifies_schtasks_errors() {
-    let xml = build_windows_task_xml_with_system_root(r"C:\Windows");
+    let xml = build_windows_task_xml_with_exe(r"C:\Program Files\Zastava\zastava.exe");
     let no_bom_xml: Vec<u8> = xml.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     assert_eq!(decode_windows_cmd_text(&no_bom_xml), xml.trim());
 
@@ -268,4 +275,89 @@ fn decodes_utf16_le_without_bom_and_classifies_schtasks_errors() {
     let (_, summary_auto) = build_windows_summary(true, Some(2), true, true, true);
     assert!(!summary_ok.contains("Start="));
     assert!(!summary_auto.contains("Start="));
+    assert!(!summary_ok.contains("CoworkVMService"));
+    assert!(!summary_auto.contains("CoworkVMService"));
+    assert!(summary_ok.contains("фоновая служба Claude"));
+    assert!(summary_auto.contains("Фоновая служба Claude"));
+}
+
+fn encode_cp866(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|ch| match ch {
+            '\u{0000}'..='\u{007F}' => ch as u8,
+            'А'..='Я' => 0x80 + (ch as u32 - 'А' as u32) as u8,
+            'а'..='п' => 0xA0 + (ch as u32 - 'а' as u32) as u8,
+            'р'..='я' => 0xE0 + (ch as u32 - 'р' as u32) as u8,
+            'Ё' => 0xF0,
+            'ё' => 0xF1,
+            other => panic!("unexpected char in CP866 test fixture: {other}"),
+        })
+        .collect()
+}
+
+#[test]
+fn decodes_raw_cp866_access_denied_and_localized_system_xml() {
+    let raw_cp866_err = encode_cp866("ОШИБКА: Отказано в доступе.");
+    // Sanity-check raw bytes match OEM CP866 ("ОШИБКА" starts with 0x8E, 0x98, 0x88, 0x81, 0x8A, 0x80).
+    assert_eq!(&raw_cp866_err[..6], &[0x8E, 0x98, 0x88, 0x81, 0x8A, 0x80]);
+    let decoded_err = decode_windows_cmd_text(&raw_cp866_err);
+    assert_eq!(decoded_err, "ОШИБКА: Отказано в доступе.");
+    assert_eq!(
+        classify_schtasks_query_error(&decoded_err, ""),
+        SchtasksQueryError::AccessDenied
+    );
+    assert_eq!(
+        classify_schtasks_query_error("", "Error: 0x80070005"),
+        SchtasksQueryError::AccessDenied
+    );
+
+    let xml_ru = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>NT AUTHORITY\СИСТЕМА</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Actions Context="Author"><Exec><Command>C:\Program Files\Zastava\zastava.exe</Command><Arguments>--apply-cowork-guard-once</Arguments></Exec></Actions>
+</Task>"#;
+    let raw_cp866_xml = encode_cp866(xml_ru);
+    let decoded_xml = decode_windows_cmd_text(&raw_cp866_xml);
+    assert!(
+        decoded_xml.contains(r"NT AUTHORITY\СИСТЕМА"),
+        "{decoded_xml}"
+    );
+    assert!(is_task_xml_healthy(&decoded_xml));
+}
+
+#[test]
+fn post_install_check_returns_err_when_needs_repair_is_true() {
+    let broken_status = CoworkGuardStatus {
+        platform: "windows".to_string(),
+        supported: true,
+        service_present: true,
+        start_type: Some(2),
+        service_running: true,
+        task_installed: false,
+        task_healthy: false,
+        needs_repair: true,
+        summary: "Фоновая служба Claude стоит на автозапуске".to_string(),
+        detected_ai_apps: Vec::new(),
+    };
+    let err = install_or_repair_cowork_guard_with(|| Ok(()), || broken_status.clone()).unwrap_err();
+    assert!(err.contains("task_installed=false"), "{err}");
+    assert!(err.contains("task_healthy=false"), "{err}");
+    assert!(err.contains("start_type=2"), "{err}");
+    assert!(err.contains("needs_repair=true"), "{err}");
+
+    let healthy_status = CoworkGuardStatus {
+        platform: "windows".to_string(),
+        supported: true,
+        service_present: true,
+        start_type: Some(3),
+        service_running: false,
+        task_installed: true,
+        task_healthy: true,
+        needs_repair: false,
+        summary: "Защита активна".to_string(),
+        detected_ai_apps: Vec::new(),
+    };
+    let ok = install_or_repair_cowork_guard_with(|| Ok(()), || healthy_status.clone()).unwrap();
+    assert_eq!(ok, healthy_status);
 }

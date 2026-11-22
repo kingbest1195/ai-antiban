@@ -20,6 +20,7 @@ import {
   getCoworkGuardStatus,
   getCustomAiDomains,
   getInterceptionBehavior,
+  getKeepSystemTzOnExit,
   getPopupPosition,
   getSplitTunnelMode,
   installOrRepairCoworkGuard,
@@ -29,6 +30,7 @@ import {
   setAutostartEnabled,
   setCliMode,
   setInterceptionBehavior,
+  setKeepSystemTzOnExit,
   setPopupPosition,
   setSplitTunnelMode,
   setSyncAiTzEnabled,
@@ -83,6 +85,8 @@ export function useSettingsController({
   const [cleaningProxy, setCleaningProxy] = useState(false);
   const [cliMode, setCliModeState] = useState<CliMode>("ai_only");
   const [syncTz, setSyncTz] = useState(false);
+  const [keepOsTzOnExit, setKeepOsTzOnExit] = useState(false);
+  const [keepOsTzBusy, setKeepOsTzBusy] = useState(false);
   const [terminalBusy, setTerminalBusy] = useState(false);
   const [splitTunnelMode, setSplitTunnelModeState] = useState(false);
   const [splitTunnelBusy, setSplitTunnelBusy] = useState(false);
@@ -137,6 +141,7 @@ export function useSettingsController({
       })
       .catch(() => {});
     getSplitTunnelMode().then(setSplitTunnelModeState).catch(() => {});
+    getKeepSystemTzOnExit().then(setKeepOsTzOnExit).catch(() => {});
     void osTz.refreshOsTzStatus();
     getAutostartStatus().then(setAutostartStatus).catch(() => {});
     getCoworkGuardStatus().then(setCoworkStatus).catch(() => {});
@@ -274,6 +279,27 @@ export function useSettingsController({
     }
   };
 
+  const handleToggleKeepOsTzOnExit = async () => {
+    if (keepOsTzBusy) return;
+    const next = !keepOsTzOnExit;
+    setKeepOsTzBusy(true);
+    try {
+      const saved = await setKeepSystemTzOnExit(next);
+      setKeepOsTzOnExit(saved);
+      await osTz.refreshOsTzStatus();
+      onStateUpdated?.();
+      if (saved) {
+        onToast?.(copy.terminal.keepOsTzOnExit.toastOnTitle, copy.terminal.keepOsTzOnExit.toastOnText, "success");
+      } else {
+        onToast?.(copy.terminal.keepOsTzOnExit.toastOffTitle, copy.terminal.keepOsTzOnExit.toastOffText, "info");
+      }
+    } catch (err) {
+      onToast?.(copy.terminal.keepOsTzOnExit.error, errText(err), "warning");
+    } finally {
+      setKeepOsTzBusy(false);
+    }
+  };
+
   const applyCliMode = async (next: CliMode) => {
     setTerminalBusy(true);
     try {
@@ -366,6 +392,8 @@ export function useSettingsController({
     cleaningProxy,
     cliMode,
     syncTz,
+    keepOsTzOnExit,
+    keepOsTzBusy,
     terminalBusy,
     splitTunnelMode,
     splitTunnelBusy,
@@ -394,6 +422,7 @@ export function useSettingsController({
     handleToggleAutoUpdate,
     handleToggleSplitTunnel,
     handleToggleSyncTz,
+    handleToggleKeepOsTzOnExit,
     applyCliMode,
     handleCliModeChange,
     handleBehaviorChange,

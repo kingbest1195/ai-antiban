@@ -67,14 +67,14 @@ export function ProblemBanner({
               ) : (
                 <Button
                   size="sm"
-                  variant="primary"
+                  variant="secondary"
                   disabled={osTzLoading || !targetTz}
                   onClick={onSyncOsTimezone}
                 >
                   {osTzLoading ? copy.banner.timezone.syncingOs : copy.banner.timezone.syncOs}
                 </Button>
               )}
-              <Button size="sm" variant="secondary" onClick={props.onOpenTimezone}>
+              <Button size="sm" variant="quiet" onClick={props.onOpenTimezone}>
                 {copy.banner.timezone.action}
               </Button>
             </div>

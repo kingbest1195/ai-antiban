@@ -12,11 +12,103 @@
 //! it does not know yet. Fail closed: nothing here loosens a guarantee, it only moves work.
 
 use serde::Serialize;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// Event with the current [`StartupSnapshot`].
 pub const STARTUP_EVENT: &str = "startup://phase";
+
+/// Bounded wait for `zastava-startup` to drain when shutdown begins mid-startup.
+pub const STARTUP_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+static GLOBAL_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static STARTUP_ACTIVE_LOCK: Mutex<usize> = Mutex::new(0);
+static STARTUP_DRAIN_CV: Condvar = Condvar::new();
+
+#[cfg(test)]
+pub(crate) static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Marks globally (lock-free, independent of `AppHandle`) that the application is shutting down.
+pub fn note_shutdown_global() {
+    GLOBAL_SHUTTING_DOWN.store(true, Ordering::SeqCst);
+}
+
+/// Returns `true` once [`note_shutdown_global`] has been called in this process.
+pub fn is_shutting_down_global() -> bool {
+    GLOBAL_SHUTTING_DOWN.load(Ordering::SeqCst)
+}
+
+/// Registers an active startup worker / step. Pair with [`mark_startup_finished`] or prefer
+/// [`StartupActivityGuard::enter`].
+pub fn mark_startup_started() {
+    let mut count = STARTUP_ACTIVE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *count += 1;
+}
+
+/// Unregisters an active startup worker / step and wakes any [`wait_for_startup_drain`] waiter
+/// once the count drops to zero.
+pub fn mark_startup_finished() {
+    let mut count = STARTUP_ACTIVE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        STARTUP_DRAIN_CV.notify_all();
+    }
+}
+
+/// RAII guard registering startup activity for the lifetime of a startup sequence / thread.
+pub struct StartupActivityGuard {
+    _private: (),
+}
+
+impl StartupActivityGuard {
+    pub fn enter() -> Self {
+        mark_startup_started();
+        Self { _private: () }
+    }
+}
+
+impl Drop for StartupActivityGuard {
+    fn drop(&mut self) {
+        mark_startup_finished();
+    }
+}
+
+/// Waits up to `timeout` for all active startup guards to finish. Returns `true` if drained.
+pub fn wait_for_startup_drain(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut count = STARTUP_ACTIVE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    while *count > 0 {
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let (guard, wait_res) = STARTUP_DRAIN_CV
+            .wait_timeout(count, deadline.saturating_duration_since(now))
+            .unwrap_or_else(|e| e.into_inner());
+        count = guard;
+        if wait_res.timed_out() && *count > 0 {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+pub(crate) fn reset_global_for_test() {
+    GLOBAL_SHUTTING_DOWN.store(false, Ordering::SeqCst);
+    let mut count = STARTUP_ACTIVE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *count = 0;
+    STARTUP_DRAIN_CV.notify_all();
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -116,6 +208,7 @@ impl StartupState {
 /// The app begins to quit: the sequence must not enable protection any more.
 pub fn note_shutdown(app: &tauri::AppHandle) {
     use tauri::Manager;
+    note_shutdown_global();
     if let Some(state) = app.try_state::<std::sync::Arc<StartupState>>() {
         state.begin_shutdown();
     }
@@ -132,6 +225,7 @@ pub fn note_user_off(app: &tauri::AppHandle) {
 /// Runs the sequence on the calling thread. Always ends in [`Phase::Ready`] (even when it stops
 /// early) so the interface never waits for ever.
 pub fn run_sequence(steps: &dyn StartupSteps, state: &StartupState, sink: &dyn StartupSink) {
+    let _activity = StartupActivityGuard::enter();
     sequence(steps, state, sink);
     state.set(sink, Phase::Ready, None);
 }
@@ -139,7 +233,7 @@ pub fn run_sequence(steps: &dyn StartupSteps, state: &StartupState, sink: &dyn S
 fn sequence(steps: &dyn StartupSteps, state: &StartupState, sink: &dyn StartupSink) {
     state.set(sink, Phase::Starting, Some("recovery"));
     steps.recover();
-    if state.is_shutting_down() {
+    if state.is_shutting_down() || is_shutting_down_global() {
         return;
     }
 
@@ -151,12 +245,15 @@ fn sequence(steps: &dyn StartupSteps, state: &StartupState, sink: &dyn StartupSi
         state.set(sink, Phase::Starting, Some("protection"));
         steps.enable_protection();
         // A quit that began during the writes ran its own restore before they finished: do it again.
-        if state.is_shutting_down() {
+        if state.is_shutting_down() || is_shutting_down_global() {
             steps.undo_protection();
             return;
         }
     }
 
+    if state.is_shutting_down() || is_shutting_down_global() {
+        return;
+    }
     state.set(sink, Phase::Starting, Some("guard"));
     steps.start_guard();
 }
@@ -167,164 +264,15 @@ pub fn spawn(
     state: std::sync::Arc<StartupState>,
     sink: std::sync::Arc<dyn StartupSink>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let guard = StartupActivityGuard::enter();
     std::thread::Builder::new()
         .name("zastava-startup".into())
-        .spawn(move || run_sequence(&*steps, &state, &*sink))
+        .spawn(move || {
+            let _guard = guard;
+            run_sequence(&*steps, &state, &*sink);
+        })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default)]
-    struct Recorder {
-        calls: Mutex<Vec<&'static str>>,
-        snaps: Mutex<Vec<StartupSnapshot>>,
-    }
-
-    impl Recorder {
-        fn calls(&self) -> Vec<&'static str> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl StartupSink for Recorder {
-        fn publish(&self, s: &StartupSnapshot) {
-            self.snaps.lock().unwrap().push(s.clone());
-        }
-    }
-
-    /// Fake steps: record the order; `enable` may wait for a go-ahead and may flag a hook.
-    struct Fake {
-        rec: Arc<Recorder>,
-        gate: Mutex<Option<mpsc::Receiver<()>>>,
-        on_enable: Option<Box<dyn Fn() + Send + Sync>>,
-    }
-
-    impl Fake {
-        fn new(rec: &Arc<Recorder>) -> Self {
-            Self {
-                rec: rec.clone(),
-                gate: Mutex::new(None),
-                on_enable: None,
-            }
-        }
-    }
-
-    impl StartupSteps for Fake {
-        fn recover(&self) {
-            self.rec.calls.lock().unwrap().push("recover");
-        }
-        fn enable_protection(&self) {
-            self.rec.calls.lock().unwrap().push("enable");
-            if let Some(rx) = self.gate.lock().unwrap().take() {
-                let _ = rx.recv();
-            }
-            if let Some(f) = &self.on_enable {
-                f();
-            }
-        }
-        fn start_guard(&self) {
-            self.rec.calls.lock().unwrap().push("guard");
-        }
-        fn undo_protection(&self) {
-            self.rec.calls.lock().unwrap().push("undo");
-        }
-    }
-
-    #[test]
-    fn order_is_recovery_then_protection_then_guard_and_ends_ready() {
-        let rec = Arc::new(Recorder::default());
-        let state = StartupState::new();
-        assert_eq!(state.snapshot().phase, Phase::Starting);
-        run_sequence(&Fake::new(&rec), &state, &*rec);
-        assert_eq!(rec.calls(), ["recover", "enable", "guard"]);
-        assert!(state.is_ready());
-        let steps: Vec<_> = rec
-            .snaps
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|s| (s.phase, s.step))
-            .collect();
-        assert_eq!(
-            steps,
-            [
-                (Phase::Starting, Some("recovery")),
-                (Phase::Starting, Some("protection")),
-                (Phase::Starting, Some("guard")),
-                (Phase::Ready, None),
-            ]
-        );
-    }
-
-    #[test]
-    fn spawning_does_not_wait_for_the_slow_step_and_starting_turns_ready() {
-        let rec = Arc::new(Recorder::default());
-        let (tx, rx) = mpsc::channel();
-        let fake = Fake::new(&rec);
-        *fake.gate.lock().unwrap() = Some(rx);
-        let state = Arc::new(StartupState::new());
-        let handle = spawn(Arc::new(fake), state.clone(), rec.clone()).unwrap();
-        // The enable step is blocked, yet `spawn` returned and the state answers "starting".
-        assert_eq!(state.snapshot().phase, Phase::Starting);
-        assert!(!handle.is_finished());
-        tx.send(()).unwrap();
-        handle.join().unwrap();
-        assert!(state.is_ready());
-        assert_eq!(rec.calls(), ["recover", "enable", "guard"]);
-    }
-
-    #[test]
-    fn a_user_who_switched_protection_off_is_not_overridden() {
-        let rec = Arc::new(Recorder::default());
-        let state = StartupState::new();
-        state.user_took_over();
-        run_sequence(&Fake::new(&rec), &state, &*rec);
-        // Recovery and the guard still run; the automatic enable does not.
-        assert_eq!(rec.calls(), ["recover", "guard"]);
-        assert!(state.is_ready());
-    }
-
-    #[test]
-    fn quitting_during_the_start_never_leaves_protection_on() {
-        // Quit before anything: nothing is enabled.
-        let rec = Arc::new(Recorder::default());
-        let state = StartupState::new();
-        state.begin_shutdown();
-        run_sequence(&Fake::new(&rec), &state, &*rec);
-        assert_eq!(rec.calls(), ["recover"]);
-        assert!(state.is_ready());
-
-        // Quit while the writes are going on: they are undone and the guard never starts.
-        let rec = Arc::new(Recorder::default());
-        let state = Arc::new(StartupState::new());
-        let mut fake = Fake::new(&rec);
-        let s2 = state.clone();
-        fake.on_enable = Some(Box::new(move || s2.begin_shutdown()));
-        run_sequence(&fake, &state, &*rec);
-        assert_eq!(rec.calls(), ["recover", "enable", "undo"]);
-        assert!(state.is_ready());
-    }
-
-    #[test]
-    fn snapshot_serialises_for_the_interface() {
-        let json = serde_json::to_value(StartupSnapshot {
-            phase: Phase::Starting,
-            step: Some("protection"),
-        })
-        .unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"phase": "starting", "step": "protection"})
-        );
-        let ready = serde_json::to_value(StartupSnapshot {
-            phase: Phase::Ready,
-            step: None,
-        })
-        .unwrap();
-        assert_eq!(ready, serde_json::json!({"phase": "ready", "step": null}));
-    }
-}
+#[path = "startup_tests.rs"]
+mod tests;

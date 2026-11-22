@@ -109,7 +109,10 @@ fn test_edge_case_bin_checker_strict_privacy_and_lengths() {
     // > 8 digits (e.g. 16-digit card number) is strictly rejected to prevent card leaks
     let card_leak = BinChecker::sanitize_bin("4111 2222 3333 4444");
     assert!(card_leak.is_err());
-    assert!(card_leak.unwrap_err().contains("For your privacy"));
+    let leak_err = card_leak.unwrap_err();
+    assert!(leak_err.contains("Для безопасности") && leak_err.contains("6–8"));
+    assert!(!leak_err.contains("4444"));
+    assert!(!leak_err.contains("For your privacy"));
 
     // Letters only is rejected
     assert!(BinChecker::sanitize_bin("abcdef").is_err());

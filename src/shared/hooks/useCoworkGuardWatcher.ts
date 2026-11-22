@@ -80,6 +80,12 @@ export async function runCoworkGuardRepair({
   try {
     const updated = await installOrRepair();
     onStatus(updated);
+    if (updated.needs_repair) {
+      onError(
+        updated.summary ||
+          "Не удалось завершить защиту фоновой службы Claude. Проверьте права администратора или откройте настройки.",
+      );
+    }
     return updated;
   } catch (err: unknown) {
     onError(err instanceof Error ? err.message : String(err));
@@ -107,7 +113,9 @@ export function useCoworkGuardWatcher(): CoworkGuardWatcherState {
       onStatus: (next) => {
         if (mountedRef.current) {
           setStatus(next);
-          setError(null);
+          if (!next.needs_repair) {
+            setError(null);
+          }
         }
       },
     });
@@ -122,7 +130,9 @@ export function useCoworkGuardWatcher(): CoworkGuardWatcherState {
       const next = await getCoworkGuardStatus();
       if (mountedRef.current) {
         setStatus(next);
-        setError(null);
+        if (!next.needs_repair) {
+          setError(null);
+        }
       }
       return next;
     } catch (err: unknown) {

@@ -154,13 +154,14 @@
 /* ExpandRow: раскрывающаяся строка списка. Заголовок — кнопка на всю ширину, подробности на слое bg-2 */
 .zs-xrow{border-top:1px solid var(--line)}
 .zs-xrow:first-child{border-top:0}
-.zs-xrow__head{display:flex;align-items:center;gap:var(--space-3);width:100%;margin:0;padding:var(--space-3) 0;border:0;background:none;color:inherit;font:inherit;text-align:left;cursor:pointer;border-radius:var(--radius-md)}
+.zs-xrow__head{display:flex;align-items:center;gap:var(--space-3);width:100%;margin:0;padding:var(--space-3) 0;border:0;background:none;color:inherit;font:inherit;text-align:left;border-radius:var(--radius-md)}
 .zs-xrow:first-child .zs-xrow__head{padding-top:var(--space-1)}
 .zs-xrow:last-child .zs-xrow__head{padding-bottom:var(--space-1)}
 .zs-xrow__head .zs-row__title{display:block;margin:0;font-weight:500}
 .zs-xrow__head .zs-row__sub{display:block}
-.zs-xrow__chev{transition:transform .12s ease}
-.zs-xrow__head[aria-expanded=true] .zs-xrow__chev{transform:rotate(90deg)}
+.zs-xrow__head .zs-row__trail button,.zs-xrow__head .zs-row__trail a{pointer-events:auto;position:relative;z-index:1}
+.zs-xrow__chev{transition:transform .12s cubic-bezier(.22,1,.36,1)}
+.zs-xrow__head[data-open] .zs-xrow__chev,.zs-xrow__head[aria-expanded=true] .zs-xrow__chev{transform:rotate(90deg)}
 @media (prefers-reduced-motion:reduce){.zs-xrow__chev{transition:none}}
 .zs-xrow__detail{display:flex;flex-direction:column;gap:var(--space-3);min-width:0;margin:var(--space-1) 0 var(--space-3) calc(32px + var(--space-3));padding:var(--space-3);border-radius:var(--radius-md);background:var(--bg-2)}
 

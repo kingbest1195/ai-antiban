@@ -362,4 +362,49 @@ describe("Bug #6: Route Toggle OFF UX, profile_route_id guard и Disabled banner
     expect(directOutcome).toBe("switched");
     expect(actions.bindProvider).toHaveBeenCalledWith("openai", DIRECT_ROUTE_ID);
   });
+
+  it("Low #7: ConnectScreen в layout='default' держит не более 1 primary CTA даже при нескольких истекающих маршрутах", () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expiringRoutes: RouteView[] = [
+      { ...makeRoute("exp-1", "NL", "185.212.102.40", "Амстердам"), expires_at: nowSec + 3600 },
+      { ...makeRoute("exp-2", "DE", "145.241.12.8", "Франкфурт"), expires_at: nowSec - 60, status: "expired" },
+    ];
+    const htmlWithExpiring = renderToStaticMarkup(
+      createElement(ConnectScreen, {
+        state: null,
+        routesSnapshot: {
+          routes: expiringRoutes,
+          default_route_id: "exp-1",
+          provider_routes: {},
+          effective: {},
+          dangling: [],
+        },
+        currentIp: "95.165.10.22",
+        currentCountry: "RU",
+        onRefreshState: vi.fn(async () => {}),
+        onOpenGuide: vi.fn(),
+        onToast: vi.fn(),
+      }),
+    );
+    expect((htmlWithExpiring.match(/zs-btn--primary/g) ?? []).length).toBeLessThanOrEqual(1);
+
+    const htmlEmpty = renderToStaticMarkup(
+      createElement(ConnectScreen, {
+        state: null,
+        routesSnapshot: {
+          routes: [],
+          default_route_id: null,
+          provider_routes: {},
+          effective: {},
+          dangling: [],
+        },
+        currentIp: "95.165.10.22",
+        currentCountry: "RU",
+        onRefreshState: vi.fn(async () => {}),
+        onOpenGuide: vi.fn(),
+        onToast: vi.fn(),
+      }),
+    );
+    expect((htmlEmpty.match(/zs-btn--primary/g) ?? []).length).toBeLessThanOrEqual(1);
+  });
 });

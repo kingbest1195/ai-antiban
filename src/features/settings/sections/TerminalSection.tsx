@@ -1,7 +1,9 @@
+import { useEffect, useState } from "react";
 import type { CliMode, OsTzSyncStatus } from "../../../types";
 import { Button, Row, Rows, Section, Segmented, Switch } from "../../../ui";
 import type { SegmentedOption } from "../../../ui";
 import { settings as copy } from "../../../shared/copy/ru";
+import { getKeepSystemTzOnExit, setKeepSystemTzOnExit } from "../../../utils/api";
 
 const CLI_MODE_OPTIONS: SegmentedOption<CliMode>[] = (
   ["ai_only", "global_terminal"] as const
@@ -13,12 +15,15 @@ const CLI_MODE_OPTIONS: SegmentedOption<CliMode>[] = (
 interface TerminalSectionProps {
   cliMode: CliMode;
   syncTz: boolean;
+  keepOsTzOnExit?: boolean;
+  keepOsTzBusy?: boolean;
   terminalBusy: boolean;
   osTzStatus: OsTzSyncStatus | null;
   osTzLoading: boolean;
   osTzError: string | null;
   onCliModeChange: (next: CliMode) => void;
   onToggleSyncTz: () => void;
+  onToggleKeepOsTzOnExit?: () => void;
   onSyncOsTimezone: () => Promise<unknown>;
   onRestoreOsTimezone: () => Promise<unknown>;
 }
@@ -26,15 +31,52 @@ interface TerminalSectionProps {
 export function TerminalSection({
   cliMode,
   syncTz,
+  keepOsTzOnExit,
+  keepOsTzBusy = false,
   terminalBusy,
   osTzStatus,
   osTzLoading,
   osTzError,
   onCliModeChange,
   onToggleSyncTz,
+  onToggleKeepOsTzOnExit,
   onSyncOsTimezone,
   onRestoreOsTimezone,
 }: TerminalSectionProps) {
+  const isControlledKeep = keepOsTzOnExit !== undefined && onToggleKeepOsTzOnExit !== undefined;
+  const [localKeep, setLocalKeep] = useState(false);
+  const [localKeepBusy, setLocalKeepBusy] = useState(false);
+
+  useEffect(() => {
+    if (isControlledKeep) return;
+    let active = true;
+    getKeepSystemTzOnExit()
+      .then((val) => {
+        if (active) setLocalKeep(val);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isControlledKeep]);
+
+  const resolvedKeep = keepOsTzOnExit !== undefined ? keepOsTzOnExit : localKeep;
+  const resolvedKeepBusy = isControlledKeep ? keepOsTzBusy : localKeepBusy;
+
+  const handleToggleKeep = () => {
+    if (onToggleKeepOsTzOnExit) {
+      onToggleKeepOsTzOnExit();
+      return;
+    }
+    if (localKeepBusy) return;
+    const next = !localKeep;
+    setLocalKeepBusy(true);
+    void setKeepSystemTzOnExit(next)
+      .then((saved) => setLocalKeep(saved))
+      .catch(() => {})
+      .finally(() => setLocalKeepBusy(false));
+  };
+
   return (
     <Section title={copy.terminal.section}>
       <p className="zs-settings__label">{copy.terminal.mode.title}</p>
@@ -89,6 +131,19 @@ export function TerminalSection({
                 {osTzLoading ? copy.terminal.osTz.syncingAction : copy.terminal.osTz.syncAction}
               </Button>
             )
+          }
+        />
+        <Row
+          icon="lock"
+          title={copy.terminal.keepOsTzOnExit.title}
+          sub={copy.terminal.keepOsTzOnExit.sub}
+          trail={
+            <Switch
+              checked={resolvedKeep}
+              disabled={resolvedKeepBusy}
+              onChange={handleToggleKeep}
+              aria-label={copy.terminal.keepOsTzOnExit.label}
+            />
           }
         />
       </Rows>

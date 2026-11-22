@@ -136,8 +136,8 @@ export function Warmup({
         )}
         {disclaimer && (
           <div className="subs-note">
-            <p className="zs-t-caption" style={{ margin: 0 }}>
-              <strong>Честно о прогреве 96 часов:</strong> {disclaimer}
+            <p className="zs-t-caption subs-note__text">
+              {copy.disclaimerTitle} {disclaimer}
             </p>
           </div>
         )}

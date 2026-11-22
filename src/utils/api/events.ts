@@ -13,6 +13,7 @@ import {
   MOCK_AUDIT_REFRESHED_EVENT,
   MOCK_STARTUP_EVENT,
 } from "./mocks/audit";
+import { MOCK_OPEN_PAYMENT_CHECK_EVENT } from "./mocks/payment";
 
 /** Как доставляются куски аудита: событие Tauri или событие окна в браузере. */
 export async function onAuditProgress(
@@ -97,4 +98,16 @@ export async function onInterceptorResolved(
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   return await tauriListen<unknown>("interceptor://resolved", () => handler());
+}
+
+/** Событие PayShield из alert-popup: открыть экран проверки оплаты в главном окне. */
+export async function onOpenPaymentCheck(
+  handler: (domain: string) => void,
+): Promise<() => void> {
+  if (isTauri()) {
+    return await tauriListen<string>("payshield://open-payment-check", handler);
+  }
+  const listener = (e: Event) => handler((e as CustomEvent<string>).detail ?? "");
+  window.addEventListener(MOCK_OPEN_PAYMENT_CHECK_EVENT, listener);
+  return () => window.removeEventListener(MOCK_OPEN_PAYMENT_CHECK_EVENT, listener);
 }

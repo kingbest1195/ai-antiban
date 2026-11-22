@@ -25,4 +25,5 @@ pub(super) fn env_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 mod migration_tests;
 mod restore_tests;
+mod shutdown_tests;
 mod vpn_tests;

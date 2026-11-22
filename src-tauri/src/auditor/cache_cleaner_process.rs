@@ -78,76 +78,56 @@ pub fn soft_close_ai_client(provider: ProviderId) -> usize {
 
 #[cfg(target_os = "windows")]
 fn query_windows_claude_desktop_pids() -> Vec<u32> {
-    let script = r#"Get-CimInstance Win32_Process -Filter "Name='claude.exe'" | ForEach-Object { "$($_.ProcessId)|$($_.ExecutablePath)" }"#;
-    let Ok(out) = crate::sysproxy::silent_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-    else {
+    let Ok(entries) = crate::win_native::process::list_processes() else {
         return Vec::new();
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    filter_windows_claude_desktop_pids(&String::from_utf8_lossy(&out.stdout))
+    let mut pids: Vec<u32> = entries
+        .into_iter()
+        .filter(|p| p.pid > 0 && p.exe_name.eq_ignore_ascii_case("claude.exe"))
+        .filter_map(|p| {
+            let exe_path = crate::win_native::process::query_process_image_path(p.pid).ok()?;
+            is_windows_claude_desktop_exe(&exe_path).then_some(p.pid)
+        })
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    pids
 }
 
 #[cfg(target_os = "windows")]
-fn soft_close_claude_desktop() -> usize {
-    let initial = query_windows_claude_desktop_pids();
+fn terminate_windows_pids_and_wait<F>(query_pids: F) -> usize
+where
+    F: Fn() -> Vec<u32>,
+{
+    let initial = query_pids();
     if initial.is_empty() {
         return 0;
     }
     for pid in &initial {
-        let _ = crate::sysproxy::silent_command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T"])
-            .output();
+        let _ = crate::win_native::process::terminate_process_by_pid(*pid, 1);
     }
     for _ in 0..8 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if query_windows_claude_desktop_pids().is_empty() {
+        if query_pids().is_empty() {
             return initial.len();
         }
     }
-    for pid in query_windows_claude_desktop_pids() {
-        let _ = crate::sysproxy::silent_command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .output();
+    for pid in query_pids() {
+        let _ = crate::win_native::process::terminate_process_by_pid(pid, 1);
     }
     initial.len()
 }
 
 #[cfg(target_os = "windows")]
-fn has_windows_chatgpt_process() -> bool {
-    let Ok(out) = crate::sysproxy::silent_command("tasklist")
-        .args(["/FI", "IMAGENAME eq ChatGPT.exe", "/FO", "CSV", "/NH"])
-        .output()
-    else {
-        return false;
-    };
-    out.status.success()
-        && String::from_utf8_lossy(&out.stdout)
-            .to_ascii_lowercase()
-            .contains("chatgpt.exe")
+fn soft_close_claude_desktop() -> usize {
+    terminate_windows_pids_and_wait(query_windows_claude_desktop_pids)
 }
 
 #[cfg(target_os = "windows")]
 fn soft_close_chatgpt_desktop() -> usize {
-    if !has_windows_chatgpt_process() {
-        return 0;
-    }
-    let _ = crate::sysproxy::silent_command("taskkill")
-        .args(["/IM", "ChatGPT.exe", "/T"])
-        .output();
-    for _ in 0..8 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if !has_windows_chatgpt_process() {
-            return 1;
-        }
-    }
-    let _ = crate::sysproxy::silent_command("taskkill")
-        .args(["/IM", "ChatGPT.exe", "/T", "/F"])
-        .output();
-    1
+    terminate_windows_pids_and_wait(|| {
+        crate::win_native::process::find_pids_by_exe_name("ChatGPT.exe").unwrap_or_default()
+    })
 }
 
 #[cfg(target_os = "macos")]

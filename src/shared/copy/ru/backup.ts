@@ -31,21 +31,21 @@ export const backup = {
     loading: "Ищем данные Claude…",
   },
   cache: {
-    section: "Очистка хвостов",
-    title: "Хвосты и метки устройства",
+    section: "Локальные данные",
+    title: "Следы устройства и локальные данные",
     text: "Удаляет только локальные файлы входа (cookies), кэш сессий и локальный идентификатор устройства. Серверный ID организации и статус оплаты хранятся у провайдера и с диска не сбрасываются. Приложение попросит войти заново.",
     claude: "Claude Desktop",
     chatgpt: "ChatGPT Desktop",
-    clean: "Очистить хвосты",
+    clean: "Очистить локальные данные",
     cleaning: "Очищаем…",
-    confirmTitle: (client: string) => `Очистить хвосты ${client}?`,
+    confirmTitle: (client: string) => `Очистить локальные данные ${client}?`,
     confirmText:
       "Будут удалены локальные файлы входа, кэш сессий и локальный идентификатор устройства; серверный ID организации при этом не меняется. Это нельзя отменить, придётся войти заново.",
-    confirmAction: "Очистить хвосты",
+    confirmAction: "Очистить локальные данные",
     notFoundTitle: (client: string) => `Данные ${client} не найдены`,
     notFoundText: (client: string) =>
-      `Папка локальных данных ${client} не обнаружена — хвосты, cookies и идентификатор устройства уже отсутствуют.`,
-    alreadyCleanTitle: (client: string) => `Хвосты ${client} уже очищены`,
+      `Папка локальных данных ${client} не обнаружена — следы устройства, cookies и идентификатор уже отсутствуют.`,
+    alreadyCleanTitle: (client: string) => `Локальные данные ${client} уже очищены`,
     alreadyCleanText: (client: string) =>
       `Новых локальных cookies, сессий и записей устройства для ${client} не найдено.`,
     lockedTitle: (client: string) => `${client} всё ещё открыт`,

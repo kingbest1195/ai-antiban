@@ -1,6 +1,6 @@
 [package]
 name = "zastava"
-version = "3.0.1"
+version = "3.1.0"
 description = "Zastava - AI Network Gateway & Privacy Guardian"
 authors = ["Zastava Team"]
 edition = "2024"
@@ -36,6 +36,28 @@ tauri-plugin-updater = "2"
 hickory-resolver = { version = "0.26.3", default-features = false, features = ["tokio", "system-config"] }
 socket2 = "0.6"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Services",
+    "Win32_System_Time",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Wdk_Foundation",
+    "Wdk_System_Threading",
+] }
 
 [features]
 # Debug-only tray stress test (ZASTAVA_TRAY_STRESS=1). Never enabled in release builds.

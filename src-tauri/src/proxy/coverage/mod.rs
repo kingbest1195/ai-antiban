@@ -8,7 +8,7 @@
 //! * `unknown`    - the app is there but there is nothing reliable to read (or reading failed);
 //! * `not_installed`.
 //!
-//! Everything that touches the OS (`lsof` / `netstat` / `tasklist` / `ss`, `Platform`, files)
+//! Everything that touches the OS (`lsof` / `ss` / native Win32 APIs, `Platform`, files)
 //! goes through a seam, so the tests feed canned output and fakes instead of starting processes.
 
 mod catalog;
@@ -30,6 +30,7 @@ use ide_scanners::{AntigravityKind, antigravity_kind, jetbrains_fact, listing_ha
 pub use process_lookup::{
     lookup_process_name_by_port, lookup_process_name_by_port_sync, lookup_process_with,
     parse_lsof_owner, parse_netstat_pid, parse_ss_owner, parse_tasklist_name,
+    resolve_windows_tcp_owner,
 };
 pub use tracker::CoverageTracker;
 #[cfg(test)]

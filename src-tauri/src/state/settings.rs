@@ -174,6 +174,19 @@ impl AppState {
         self.save_async().await
     }
 
+    pub async fn get_keep_system_tz_on_exit(&self) -> bool {
+        self.inner.read().await.keep_system_tz_on_exit
+    }
+
+    pub async fn set_keep_system_tz_on_exit(&self, keep: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.keep_system_tz_on_exit = keep;
+        }
+        crate::os_tz::set_keep_system_tz_on_exit(keep);
+        self.save_async().await
+    }
+
     pub async fn get_cli_mode(&self) -> CliMode {
         self.inner.read().await.cli_mode
     }

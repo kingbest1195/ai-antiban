@@ -1,4 +1,4 @@
-import type { AppStateData, ProviderId, SourceView } from "../../types";
+import type { AppStateData, OsTzSyncStatus, ProviderId, SourceView } from "../../types";
 import { Badge, Button, ExpandRow, Link, Mono, cx } from "../../ui";
 import type { IconName, Tone } from "../../ui";
 import { checks as copy, status as words } from "../../shared/copy/ru";
@@ -79,6 +79,15 @@ interface CheckRowProps {
   onGuide: () => void;
   onRetry?: () => void;
   retrying?: boolean;
+  targetTz?: string | null;
+  cliTzSynced?: boolean;
+  cliSyncedZone?: string | null;
+  syncingCliTz?: boolean;
+  osTzStatus?: OsTzSyncStatus | null;
+  osTzLoading?: boolean;
+  osTzError?: string | null;
+  onSyncOsTimezone?: () => void;
+  onRestoreOsTimezone?: () => void;
 }
 
 export function CheckRow({
@@ -93,13 +102,25 @@ export function CheckRow({
   onGuide,
   onRetry,
   retrying,
+  targetTz,
+  cliTzSynced,
+  cliSyncedZone,
+  syncingCliTz,
+  osTzStatus,
+  osTzLoading,
+  osTzError,
+  onSyncOsTimezone,
+  onRestoreOsTimezone,
 }: CheckRowProps) {
+  const isTimezoneRow = item.id === "timezone";
+
   const actionLabel =
     item.action === "pin" ? copy.actions.pin : item.action === "sync-timezone" ? copy.actions.syncTimezone : copy.actions.openGuide;
   const showGuideLink = item.result.guide_ref && item.action !== "guide";
   const sources = item.pending ? [] : (item.result.detail?.sources ?? []);
   const showNetworkSettings = Boolean(item.help?.canOpenNetworkSettings) && CAN_OPEN_NETWORK_SETTINGS;
   const priorityTone = item.tier === 1 ? "tier1" : item.tier === 2 ? "tier2" : item.advisory ? "advisory" : "tier3";
+  const showGenericAction = Boolean(item.action) && !isTimezoneRow;
 
   return (
     <ExpandRow
@@ -198,7 +219,91 @@ export function CheckRow({
           })}
         </dl>
       )}
-      {(item.action || showGuideLink || (item.cls === "unknown" && onRetry) || showNetworkSettings) && (
+      {isTimezoneRow && !item.pending && (
+        <div className="zs-check__tz-split">
+          <div className="zs-check__tz-row">
+            <div className="zs-check__tz-info">
+              <p className="zs-check__tz-title">Редакторы и терминал</p>
+              <p className="zs-check__tz-sub">
+                {cliTzSynced && (cliSyncedZone || targetTz) ? (
+                  <>
+                    Синхронизирован: <Mono>{cliSyncedZone || targetTz}</Mono>
+                  </>
+                ) : cliTzSynced === false ? (
+                  "Отключено в настройках"
+                ) : (
+                  "Не синхронизирован"
+                )}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon="refresh"
+              disabled={Boolean(syncingCliTz)}
+              onClick={onAction}
+            >
+              {syncingCliTz ? "Синхронизируем…" : "Синхронизировать редакторы"}
+            </Button>
+          </div>
+          <div className="zs-check__tz-row">
+            <div className="zs-check__tz-info">
+              <p className="zs-check__tz-title">Часовой пояс системы</p>
+              <p className="zs-check__tz-sub">
+                {osTzStatus?.synced ? (
+                  <>
+                    Синхронизирован:{" "}
+                    {osTzStatus.original_os_tz ? (
+                      <>
+                        <Mono>{osTzStatus.original_os_tz}</Mono>
+                        {" → "}
+                      </>
+                    ) : null}
+                    <Mono>{osTzStatus.synced_target_tz || osTzStatus.current_os_tz}</Mono>
+                  </>
+                ) : osTzStatus?.current_os_tz ? (
+                  <>
+                    Текущий пояс системы: <Mono>{osTzStatus.current_os_tz}</Mono>
+                    {targetTz && osTzStatus.current_os_tz !== targetTz ? (
+                      <>
+                        {" · для IP: "}
+                        <Mono>{targetTz}</Mono>
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  "Часовой пояс системы не синхронизирован"
+                )}
+              </p>
+              {osTzError && (
+                <p className="zs-check__tz-err" role="alert">
+                  {osTzError}
+                </p>
+              )}
+            </div>
+            {osTzStatus?.synced ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={Boolean(osTzLoading)}
+                onClick={() => onRestoreOsTimezone?.()}
+              >
+                {osTzLoading ? "Возвращаем…" : "Вернуть пояс"}
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={Boolean(osTzLoading)}
+                onClick={() => onSyncOsTimezone?.()}
+              >
+                {osTzLoading ? "Синхронизируем…" : "Синхронизировать пояс"}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      {(showGenericAction || showGuideLink || (item.cls === "unknown" && onRetry) || showNetworkSettings) && (
         <div className="zs-check__actions">
           {item.cls === "unknown" && onRetry && (
             <Button size="sm" icon="refresh" onClick={onRetry} disabled={retrying}>
@@ -210,7 +315,7 @@ export function CheckRow({
               {copy.dnsHelp.openSettings}
             </Button>
           )}
-          {item.action && (
+          {showGenericAction && item.action && (
             <Button size="sm" icon={item.action === "guide" ? undefined : item.action === "pin" ? "lock" : "refresh"} onClick={onAction}>
               {actionLabel}
             </Button>

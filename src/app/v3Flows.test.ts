@@ -218,7 +218,7 @@ describe("v3 Flows: P0/P1/P2 fixes & contract verification", () => {
     expect(html).not.toContain('role="button"');
     expect(html).toContain(overviewCopy.banner.cooldown.title);
     expect(html).toContain(overviewCopy.banner.cooldown.clear);
-    expect(html).toContain("Открыть профили и SOS");
+    expect(html).not.toContain("Открыть профили и SOS");
   });
 
   it("P1 #9: completeAndRefreshOnboarding awaits onboarding persistence before calling refreshState", async () => {

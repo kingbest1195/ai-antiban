@@ -130,7 +130,7 @@ export function useOverviewModel({
       return k === "warn" || k === "crit";
     };
     const ipv6Leak = bad(effectiveActiveReport?.ipv6_result);
-    const tzMismatch = bad(effectiveActiveReport?.timezone_result);
+    const tzMismatch = bad(effectiveActiveReport?.timezone_result ?? effectiveActiveReport?.checks?.[7]);
     const dnsblBad = bad(effectiveActiveReport?.dnsbl_result);
 
     const checks = checksOf(effectiveActiveReport);

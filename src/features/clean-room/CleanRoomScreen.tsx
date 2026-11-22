@@ -17,10 +17,9 @@ import { Segmented, HintCard } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
 import { CooldownBanner } from "../overview/CooldownBanner";
-import { AddressCard } from "../subscription/AddressCard";
-import { CardCheck } from "../subscription/CardCheck";
 import { Warmup } from "../subscription/Warmup";
 import "../subscription/subscription.css";
+import { LaunchpadPaymentStep } from "./LaunchpadPaymentStep";
 import { LaunchpadSteps } from "./LaunchpadSteps";
 import { PreFlightAuditCard, isCleanRoomReadyToLaunch } from "./PreFlightAuditCard";
 import { SandboxProfilesCard } from "./SandboxProfilesCard";
@@ -86,6 +85,12 @@ export function CleanRoomScreen({
     () => state?.dismissed_hints ?? [],
   );
   const [createTrigger, setCreateTrigger] = useState<number>(0);
+  const [quarantineRefreshKey, setQuarantineRefreshKey] = useState<number>(0);
+
+  const handleStateAndQuarantineUpdated = useCallback(async () => {
+    setQuarantineRefreshKey((k) => k + 1);
+    await onStateUpdated?.();
+  }, [onStateUpdated]);
 
   useEffect(() => {
     setTab(initialTab);
@@ -94,6 +99,7 @@ export function CleanRoomScreen({
   useEffect(() => {
     if (state?.clean_room) {
       setCleanState(state.clean_room);
+      setQuarantineRefreshKey((k) => k + 1);
       setSelectedProfileId((prev) =>
         prev && state.clean_room?.profiles.some((p) => p.id === prev)
           ? prev
@@ -180,7 +186,7 @@ export function CleanRoomScreen({
     auditReport?.exit_country ||
     (report?.telemetry.country_code && report.telemetry.country_code !== "--"
       ? report.telemetry.country_code
-      : "NL");
+      : "");
 
   const handlePaymentTabWarmup = async () => {
     if (!activeProfile) return;
@@ -244,6 +250,7 @@ export function CleanRoomScreen({
             onSelectProfile={setSelectedProfileId}
             onProfilesChanged={refreshCleanProfiles}
             openCreateTrigger={createTrigger}
+            quarantineRefreshKey={quarantineRefreshKey}
             toast={toast}
           />
 
@@ -257,7 +264,7 @@ export function CleanRoomScreen({
             navKey={navKey}
             onNavigateToGuide={onNavigateToGuide}
             onProfilesChanged={() => refreshCleanProfiles()}
-            onStateUpdated={onStateUpdated}
+            onStateUpdated={handleStateAndQuarantineUpdated}
             toast={toast}
           />
         </div>
@@ -265,15 +272,21 @@ export function CleanRoomScreen({
         <div className="cr-stack">
           <p className="zs-t-body cr-lead">{copy.paymentQuickNote}</p>
 
-          <CardCheck
+          <LaunchpadPaymentStep
+            profileId={activeProfile?.id ?? null}
+            routeId={activeProfile?.bound_route_id ?? null}
+            exitIp={auditReport?.exit_ip ?? report?.telemetry.ip ?? state?.pinned_ip ?? null}
+            exitAsn={report?.telemetry.asn ?? null}
             exitCountry={exitCountry}
-            onToast={toast}
+            hideIpMode={hideIpMode}
+            inCleanRoom={Boolean(activeProfile)}
+            warmupStartedAt={activeProfile?.warmup_started_at ?? state?.warmup_started_at ?? null}
             onNavigateToPaymentGuide={
               onNavigateToGuide ? () => onNavigateToGuide("payment") : undefined
             }
+            onStateUpdated={handleStateAndQuarantineUpdated}
+            onToast={toast}
           />
-
-          <AddressCard onToast={toast} />
 
           <Warmup
             state={state}

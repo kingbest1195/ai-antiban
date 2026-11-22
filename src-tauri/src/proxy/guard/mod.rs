@@ -30,7 +30,7 @@ mod session_confirm;
 mod types;
 mod waiter;
 
-pub use killswitch::{gate_closed, wait_open};
+pub use killswitch::{gate_closed, shutdown_aborted, wait_open};
 pub(crate) use policy::{
     effective_tray_report, is_report_pinned_travel_only, report_allowed_for_state,
     report_no_critical_and_geo_ok,

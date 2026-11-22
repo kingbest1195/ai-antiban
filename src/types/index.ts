@@ -2,6 +2,7 @@ export * from "./audit";
 export * from "./bunker";
 export * from "./cleanRoom";
 export * from "./coverage";
+export * from "./payment";
 export * from "./profiles";
 export * from "./routes";
 export * from "./sos";

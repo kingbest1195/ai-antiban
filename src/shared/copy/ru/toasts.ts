@@ -25,12 +25,12 @@ export const toast = {
     error: "Не удалось переключить защиту",
   },
   cli: {
-    onTitle: "Защита VS Code, Cursor и CLI включена",
+    onTitle: "Защита VS Code, Cursor и терминала включена",
     onText: (targets: string) => `Настроено: ${targets}. При выходе из Заставы прокси отключается сам.`,
     onFallbackTargets: "терминал и редакторы",
-    offTitle: "Защита CLI выключена",
+    offTitle: "Защита редакторов и терминала выключена",
     offText: "Маршрутизация удалена из настроек редакторов и терминала.",
-    error: "Не удалось настроить CLI",
+    error: "Не удалось настроить редакторы и терминал",
   },
   killswitch: {
     onTitle: "Сеть ИИ остановлена",
@@ -84,8 +84,8 @@ export const toast = {
     promptCopied: "Промпт скопирован",
     promptCopiedText: "Вставьте его в Antigravity, Cursor, Windsurf или новый Claude.",
     promptError: "Не удалось скопировать промпт",
-    cacheCleaned: (client: string) => `Хвосты ${client} очищены`,
-    cacheCleanedText: (files: number, mb: string) => `Удалено файлов: ${files} (${mb} МБ). Cookies и антифрод-реестры очищены.`,
-    cacheError: "Не удалось очистить хвосты",
+    cacheCleaned: (client: string) => `Локальные данные ${client} очищены`,
+    cacheCleanedText: (files: number, mb: string) => `Удалено файлов: ${files} (${mb} МБ). Cookies и локальные записи входа очищены.`,
+    cacheError: "Не удалось очистить локальные данные",
   },
 } as const;

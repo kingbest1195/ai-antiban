@@ -1,4 +1,5 @@
 mod alias;
+pub mod checkout_guard;
 mod connect;
 mod connect_hold;
 mod http_handler;
@@ -6,6 +7,8 @@ mod responses;
 mod route_guard;
 mod ssrf;
 mod tunnel;
+
+pub use checkout_guard::CheckoutGuardState;
 
 pub use ssrf::{
     DEFAULT_PROXY_PORT, FALLBACK_PROXY_PORT, embedded_ipv4, is_forbidden_ip, is_internal_hostname,
@@ -88,6 +91,7 @@ pub struct ProxyServer {
     pub hold_queue: Arc<HoldQueue>,
     pub guard: Arc<NetworkGuard>,
     pub coverage: Arc<crate::proxy::CoverageTracker>,
+    pub checkout_guard: Arc<CheckoutGuardState>,
     app_handle: Option<tauri::AppHandle>,
     pub upstream_redirect: Option<SocketAddr>,
     conn_limiter: Arc<Semaphore>,
@@ -138,6 +142,7 @@ impl ProxyServer {
             hold_queue,
             guard: Arc::new(NetworkGuard::new()),
             coverage,
+            checkout_guard: Arc::new(CheckoutGuardState::new()),
             app_handle,
             upstream_redirect: None,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
@@ -172,6 +177,7 @@ impl ProxyServer {
             hold_queue,
             guard: Arc::new(NetworkGuard::new()),
             coverage,
+            checkout_guard: Arc::new(CheckoutGuardState::new()),
             app_handle: None,
             upstream_redirect,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
@@ -185,8 +191,8 @@ impl ProxyServer {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_hold_ttl(mut self, ttl: Duration) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_hold_ttl(mut self, ttl: Duration) -> Self {
         self.hold_ttl = ttl;
         self
     }
@@ -223,6 +229,7 @@ impl ProxyServer {
             hold_queue: Arc::clone(&self.hold_queue),
             guard: Arc::clone(&self.guard),
             coverage: Arc::clone(&self.coverage),
+            checkout_guard: Arc::clone(&self.checkout_guard),
             app_handle: self.app_handle.clone(),
             upstream_redirect: self.upstream_redirect,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
