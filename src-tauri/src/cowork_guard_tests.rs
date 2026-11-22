@@ -300,8 +300,13 @@ fn decodes_raw_cp866_access_denied_and_localized_system_xml() {
     let raw_cp866_err = encode_cp866("ОШИБКА: Отказано в доступе.");
     // Sanity-check raw bytes match OEM CP866 ("ОШИБКА" starts with 0x8E, 0x98, 0x88, 0x81, 0x8A, 0x80).
     assert_eq!(&raw_cp866_err[..6], &[0x8E, 0x98, 0x88, 0x81, 0x8A, 0x80]);
-    let decoded_err = decode_windows_cmd_text(&raw_cp866_err);
+    let decoded_err = task_xml::decode_cp866(&raw_cp866_err);
     assert_eq!(decoded_err, "ОШИБКА: Отказано в доступе.");
+    #[cfg(not(target_os = "windows"))]
+    assert_eq!(
+        decode_windows_cmd_text(&raw_cp866_err),
+        "ОШИБКА: Отказано в доступе."
+    );
     assert_eq!(
         classify_schtasks_query_error(&decoded_err, ""),
         SchtasksQueryError::AccessDenied
@@ -318,12 +323,21 @@ fn decodes_raw_cp866_access_denied_and_localized_system_xml() {
   <Actions Context="Author"><Exec><Command>C:\Program Files\Zastava\zastava.exe</Command><Arguments>--apply-cowork-guard-once</Arguments></Exec></Actions>
 </Task>"#;
     let raw_cp866_xml = encode_cp866(xml_ru);
-    let decoded_xml = decode_windows_cmd_text(&raw_cp866_xml);
+    let decoded_xml = task_xml::decode_cp866(&raw_cp866_xml);
     assert!(
         decoded_xml.contains(r"NT AUTHORITY\СИСТЕМА"),
         "{decoded_xml}"
     );
+    #[cfg(not(target_os = "windows"))]
+    assert!(
+        decode_windows_cmd_text(&raw_cp866_xml).contains(r"NT AUTHORITY\СИСТЕМА"),
+        "non-Windows fallback must decode raw CP866 XML"
+    );
     assert!(is_task_xml_healthy(&decoded_xml));
+    assert_eq!(
+        decode_windows_cmd_text("ОШИБКА: Отказано в доступе.".as_bytes()),
+        "ОШИБКА: Отказано в доступе."
+    );
 }
 
 #[test]

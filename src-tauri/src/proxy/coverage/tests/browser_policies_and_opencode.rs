@@ -1,4 +1,3 @@
-use super::super::*;
 use super::*;
 use crate::state::CliMode;
 use crate::sysproxy::browser_policies::{

@@ -153,10 +153,7 @@ fn strip_rust_comments(src: &str) -> String {
 /// Folds `concat!("a", "b", ...)` string-literal calls so split LOLBin literals cannot hide.
 fn fold_literal_concats(src: &str) -> String {
     let mut out = src.to_string();
-    loop {
-        let Some(pos) = out.find("concat!(") else {
-            break;
-        };
+    while let Some(pos) = out.find("concat!(") {
         let args_start = pos + "concat!(".len();
         let bytes = out.as_bytes();
         let mut i = args_start;

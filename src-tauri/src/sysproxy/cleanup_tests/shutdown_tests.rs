@@ -1,9 +1,7 @@
 use super::*;
 use crate::sysproxy::fs::FakeFs;
-use crate::sysproxy::journal::{EntryState, Outcome, Resource, Value};
-use crate::sysproxy::platform::{
-    ChainState, FakePlatform, PacState, PlatOp, ProxyEndpoint, ServiceId,
-};
+use crate::sysproxy::journal::{Outcome, Resource, Value};
+use crate::sysproxy::platform::{ChainState, FakePlatform, PacState, ProxyEndpoint, ServiceId};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -175,8 +173,12 @@ fn restore_clears_physical_zastava_pac_and_chain_when_utun_vpn_causes_temp_dns()
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn admin_auth_required_during_interactive_quit_triggers_privileged_fallback_only_after_refusal() {
+    use crate::sysproxy::journal::EntryState;
+    use crate::sysproxy::platform::PlatOp;
+
     let fs = FakeFs::new();
     let p = FakePlatform::new();
     p.add_service(wifi());

@@ -1,4 +1,3 @@
-use super::super::*;
 use super::*;
 use crate::auditor::CheckResult;
 use crate::state::InterceptionBehavior;
@@ -358,11 +357,25 @@ async fn test_real_ticker_pinned_a_to_vpn2_to_vpn3_to_pinned_a_within_4h_recover
         let cache = audit_cache.clone();
         Box::pin(async move {
             // Simulate transient `utun` stabilization failure on the first verification call(s).
-            if ip == pinned_ip
-                && fail_ctr
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
-                    .is_ok()
-            {
+            if ip == pinned_ip && {
+                let mut prev = fail_ctr.load(Ordering::SeqCst);
+                let mut decremented = false;
+                while let Some(next) = prev.checked_sub(1) {
+                    match fail_ctr.compare_exchange_weak(
+                        prev,
+                        next,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => {
+                            decremented = true;
+                            break;
+                        }
+                        Err(cur) => prev = cur,
+                    }
+                }
+                decremented
+            } {
                 return Err("transient utun stabilization timeout".to_string());
             }
 
