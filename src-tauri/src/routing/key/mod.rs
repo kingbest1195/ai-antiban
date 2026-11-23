@@ -25,6 +25,7 @@ use serde::Deserialize;
 use super::{Entry, EntryProto, MAX_ENTRIES, Route, route_id_for_raw_key};
 use crate::proxy::server::is_forbidden_ip;
 use proxy_url::parse_proxy_url;
+pub use validate::validate_sub_url;
 use validate::{build_entry, clean_label, decode_base64_flexible, json_error, validate_id};
 
 /// Prefix of keys that come from outside.
@@ -74,6 +75,8 @@ struct KeyV2 {
     exit_ip: Option<String>,
     #[serde(default)]
     expires_at: Option<u64>,
+    #[serde(default)]
+    sub_url: Option<String>,
     entry: Vec<EntryV2>,
 }
 
@@ -90,6 +93,8 @@ fn single_entry_route(
         country: None,
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![entry],
         raw_key: raw_key.to_string(),
         enabled: true,
@@ -155,6 +160,7 @@ fn parse_v2(value: serde_json::Value, raw_key: &str, now: u64) -> Result<Route, 
             Some(ip.to_string())
         }
     };
+    let sub_url = validate_sub_url(key.sub_url)?;
     let label = clean_label(key.label, &entries[0].host)?;
     Ok(Route {
         id,
@@ -162,6 +168,8 @@ fn parse_v2(value: serde_json::Value, raw_key: &str, now: u64) -> Result<Route, 
         country,
         exit_ip,
         expires_at: key.expires_at,
+        sub_url,
+        grace_extended: false,
         entries,
         raw_key: raw_key.to_string(),
         enabled: true,

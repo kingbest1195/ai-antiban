@@ -88,10 +88,9 @@ async fn handshake_on_tcp(
                         io::Error::new(e.kind(), format!("TLS handshake failed: {e}")),
                     )
                 })?;
-            let leftover =
-                http_connect_handshake(&mut tls_stream, entry, target_host, target_port)
-                    .await
-                    .map_err(|e| PhaseError::new(RoutePhase::Connect, e))?;
+            let leftover = http_connect_handshake(&mut tls_stream, entry, target_host, target_port)
+                .await
+                .map_err(|e| PhaseError::new(RoutePhase::Connect, e))?;
             Ok(UpstreamStream::Tls(Box::new(tls_stream)).with_prefix(leftover))
         }
     }

@@ -54,7 +54,8 @@ pub use process::inspect_running_browsers;
 #[allow(unused_imports)]
 pub use reconcile::{
     any_non_running_browser_needs_pac_sync_in, clear_stale_browser_pac_prefs_in,
-    detect_browser_pac_status_in, detect_browser_pac_status_with, is_wininet_pac_active,
+    detect_browser_pac_status_in, detect_browser_pac_status_with,
+    detect_browser_pac_status_with_confirmed, is_wininet_pac_active,
     reconcile_browser_pac_prefs_in,
 };
 #[allow(unused_imports)]

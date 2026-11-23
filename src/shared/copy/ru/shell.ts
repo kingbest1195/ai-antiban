@@ -75,6 +75,13 @@ export const timezone = {
   osCurrent: "Текущий пояс ОС",
   osSyncedBadge: (orig: string | null, target: string | null) =>
     orig && target ? `${orig} -> ${target}` : target || "Синхронизирован",
+  osAlreadyMatchesTitle: "Часовой пояс ОС уже совпадает с IP",
+  osAlreadyMatchesText: (zone: string | null) =>
+    zone
+      ? `Текущий часовой пояс системы (${zone}) уже совпадает с текущим IP.`
+      : "Текущий часовой пояс системы уже совпадает с текущим IP.",
+  osAlreadyMatchesBadge: (current: string | null) =>
+    current ? `Совпадает с IP (${current})` : "Совпадает с IP",
   osRestartHint: "Перезапустите браузер и Claude Desktop, чтобы они применили новый часовой пояс.",
   syncOs: "Синхронизировать системное время ОС",
   syncingOs: "Синхронизируем ОС…",

@@ -105,5 +105,14 @@ where
         fallback_fn,
     };
     let cache = EntryDnsCache::default();
-    resolve_entry_checked_with(entry, allow_local, gateway_port, &backend, &cache, false, false).await
+    resolve_entry_checked_with(
+        entry,
+        allow_local,
+        gateway_port,
+        &backend,
+        &cache,
+        false,
+        false,
+    )
+    .await
 }

@@ -200,11 +200,10 @@ async fn sec7_6_allow_network_alert_respects_persist_flag_and_manual_killswitch(
     // 1. persist_exception=true writes confirmed fresh tel.ip to trusted_exceptions.
     let h = harness(asn_jump_audit("95.217.2.2", "NL"), "95.217.2.2").await;
     h.change("95.217.2.2").await;
-    let ev = h
-        .io
-        .wait_for("interceptor://enriched", 2000)
-        .await
-        .expect("enriched alert");
+    let ev =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("enriched alert");
     let id = ev.0["id"].as_str().unwrap().to_string();
 
     h.guard

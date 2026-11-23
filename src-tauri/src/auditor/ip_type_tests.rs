@@ -179,7 +179,14 @@ async fn mass_vpn_pool_is_a_warning_and_pinning_does_not_mask_it() {
         (CheckStatus::Ok, "ASN_VERIFIED_PINNED")
     );
     // Cloudflare WARP (AS13335) and keyword-detected VPN are also caught even when pinned.
-    let warp = verdict(&probe, OTHER_IP, Some(13335), Some("Cloudflare, Inc."), true).await;
+    let warp = verdict(
+        &probe,
+        OTHER_IP,
+        Some(13335),
+        Some("Cloudflare, Inc."),
+        true,
+    )
+    .await;
     assert_eq!(
         (warp.status, warp.code.as_str()),
         (CheckStatus::Warning, "HIGH_RISK_MASS_VPN_ASN")
@@ -271,7 +278,10 @@ async fn an_ipv6_exit_continues_classification_without_downloading_tor_list() {
     );
     assert_eq!(type_of(&hosting), Some(IpType::Hosting));
     assert_eq!(probe.calls(), 0);
-    assert_eq!(crate::auditor::score_checks(&[hosting], false).trust_score, 100);
+    assert_eq!(
+        crate::auditor::score_checks(&[hosting], false).trust_score,
+        100
+    );
 
     let residential = verdict(
         &probe,
@@ -287,7 +297,14 @@ async fn an_ipv6_exit_continues_classification_without_downloading_tor_list() {
     );
     assert_eq!(type_of(&residential), Some(IpType::Residential));
 
-    let clean = verdict(&probe, "2001:db8::11", Some(64500), Some("Example Net"), false).await;
+    let clean = verdict(
+        &probe,
+        "2001:db8::11",
+        Some(64500),
+        Some("Example Net"),
+        false,
+    )
+    .await;
     assert_eq!(
         (clean.status, clean.code.as_str()),
         (CheckStatus::Ok, "ASN_CLEAN")

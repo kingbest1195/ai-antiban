@@ -18,8 +18,8 @@ fn is_osascript_permission_denied(stderr: &str) -> bool {
     stderr.contains("-1743") || stderr.to_ascii_lowercase().contains("not authorized")
 }
 
-/// Default quit wait budget for graceful browser relaunch (~3.5s).
-pub const BROWSER_QUIT_TIMEOUT: Duration = Duration::from_millis(3500);
+/// Default quit wait budget for graceful browser relaunch (~9s).
+pub const BROWSER_QUIT_TIMEOUT: Duration = Duration::from_millis(9000);
 pub const BROWSER_QUIT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Gracefully quits running Chromium browsers that still need PAC, injects `"proxy"` into all

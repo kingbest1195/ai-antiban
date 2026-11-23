@@ -382,10 +382,7 @@ impl NetworkGuard {
             }
         }
 
-        let baseline_changed = inner
-            .baseline
-            .as_ref()
-            .is_some_and(|b| b.ip != new_ip);
+        let baseline_changed = inner.baseline.as_ref().is_some_and(|b| b.ip != new_ip);
         if all_excepted(&st, &enabled_unrouted, &new_ip) {
             if baseline_changed {
                 let _ = env.state.clear_session_allowed_providers().await;

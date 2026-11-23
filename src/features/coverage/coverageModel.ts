@@ -172,6 +172,17 @@ export function relaunchBrowsersResult(res: RelaunchBrowsersResult): ProtectionR
     }
     return { tone: "danger", title: t.failedTitle, text: t.failedText(failed) };
   }
+  if (res.skipped.length > 0) {
+    const skipped = res.skipped.join(", ");
+    if (res.restarted.length > 0) {
+      return {
+        tone: "warn",
+        title: t.partialTitle,
+        text: t.skippedPartialText(res.restarted.join(", "), skipped),
+      };
+    }
+    return { tone: "warn", title: t.skippedTitle, text: t.skippedText(skipped) };
+  }
   if (res.restarted.length > 0) {
     return { tone: "ok", title: t.restartedTitle, text: t.restartedText(res.restarted.join(", ")) };
   }

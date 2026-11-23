@@ -74,6 +74,33 @@ pub(super) fn clean_label(label: Option<String>, fallback: &str) -> Result<Strin
     }
 }
 
+pub fn validate_sub_url(sub_url: Option<String>) -> Result<Option<String>, String> {
+    let Some(raw) = sub_url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    if raw.len() > 2048 || has_control(&raw) {
+        return Err("Поле sub_url слишком длинное или содержит недопустимые символы".to_string());
+    }
+    let parsed = url::Url::parse(&raw)
+        .map_err(|_| "Поле sub_url должно быть корректным HTTPS-адресом".to_string())?;
+    if !parsed.scheme().eq_ignore_ascii_case("https") {
+        return Err("Поле sub_url должно использовать протокол https://".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Поле sub_url не должно содержать логин или пароль".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Поле sub_url должно содержать публичный домен или IP".to_string())?;
+    validate_host(host, false).map_err(|_| {
+        "Поле sub_url должно указывать на публичный домен или публичный IP-адрес".to_string()
+    })?;
+    Ok(Some(parsed.to_string()))
+}
+
 pub(super) fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > MAX_ID_LEN {
         return Err(format!(

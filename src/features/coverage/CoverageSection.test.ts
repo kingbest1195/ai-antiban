@@ -188,6 +188,7 @@ vi.mock("../../utils/api", async (importOriginal) => {
 import { coverage as copy } from "../../shared/copy/ru";
 import { ConfirmModal } from "../../ui";
 import { CoverageSection } from "./CoverageSection";
+import { CoverageVpnBanner } from "./CoverageVpnBanner";
 
 function findInTree(node: ReactNode, predicate: (el: ReactElement) => boolean): ReactElement | null {
   if (!node || typeof node !== "object") return null;
@@ -284,6 +285,74 @@ describe("CoverageSection: тост при перезапуске IDE через
       "success",
     );
     expect(copy.restart.result.restarted.text).toContain("После выхода из Заставы это приложение понадобится перезапустить.");
+
+    hookRuntime.unmount();
+  });
+
+  it("§7.3: CoverageSection прокидывает обновлённый снимок в onSnapshotChange (gw.setCoverageSnapshot) при recheck и relaunch", async () => {
+    const onSnapshotChange = vi.fn();
+    const updatedSnap = {
+      sysproxy_enabled: true,
+      cli_protection_enabled: true,
+      chained_proxy: null,
+      gateway_addr: "127.0.0.1:40111",
+      pac_url: "http://127.0.0.1:40111/proxy.pac",
+      generated_at_ms: 99,
+      cli_mode: "ai_only" as const,
+      apps: [],
+      system_proxy_effective: false,
+      vpn_connected: ["V2BOX Pro"],
+      browser_pac_policy_active: true,
+      browsers_pac_active: ["Google Chrome"],
+      browsers_needing_restart: [],
+    };
+    apiMocks.recheckCoverage.mockResolvedValueOnce(updatedSnap);
+    apiMocks.relaunchBrowsersWithPac.mockResolvedValueOnce({
+      restarted: ["Google Chrome"],
+      skipped: [],
+      failed: [],
+      needs_automation_permission: false,
+      unsupported: false,
+      snapshot: { ...updatedSnap, generated_at_ms: 100 },
+    });
+
+    let tree: ReactNode = null;
+    const render = () => {
+      hookRuntime.beginRender();
+      tree = CoverageSection({
+        variant: "overview",
+        pending: false,
+        onSnapshotChange,
+        initialSnapshot: {
+          ...updatedSnap,
+          generated_at_ms: 1,
+          browser_pac_policy_active: false,
+          browsers_pac_active: [],
+          browsers_needing_restart: ["Google Chrome"],
+        },
+      });
+    };
+    hookRuntime.reset(render);
+    render();
+    hookRuntime.flushEffects();
+    await Promise.resolve();
+
+    const recheckBtn = findInTree(
+      tree,
+      (el) => typeof el.props === "object" && el.props !== null && (el.props as { children?: unknown }).children === copy.recheck,
+    );
+    expect(recheckBtn).not.toBeNull();
+    (recheckBtn!.props as { onClick: () => void }).onClick();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onSnapshotChange).toHaveBeenCalledWith(expect.objectContaining({ generated_at_ms: 99 }));
+
+    const banner = findInTree(tree, (el) => el.type === CoverageVpnBanner);
+    expect(banner).not.toBeNull();
+    (banner!.props as { onRelaunchBrowsers: () => void }).onRelaunchBrowsers();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onSnapshotChange).toHaveBeenCalledWith(expect.objectContaining({ generated_at_ms: 100 }));
 
     hookRuntime.unmount();
   });

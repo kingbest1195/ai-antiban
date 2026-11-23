@@ -213,8 +213,10 @@ pub fn evaluate_ip_reputation(
         };
         return CheckResult::warning(
             "HIGH_RISK_MASS_VPN_ASN",
-            format!("Адрес из пула, который часто используют многие люди: {title}. {reason} {hint}")
-                .replace("  ", " "),
+            format!(
+                "Адрес из пула, который часто используют многие люди: {title}. {reason} {hint}"
+            )
+            .replace("  ", " "),
             Some(GUIDE_PERSONAL_VPN.to_string()),
         )
         .with_ip_type(ip_type);

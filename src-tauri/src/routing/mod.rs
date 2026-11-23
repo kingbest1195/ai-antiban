@@ -151,6 +151,12 @@ pub struct Route {
     /// Unix seconds; the route is fail-closed once this moment has passed.
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// Optional HTTPS subscription metadata URL for auto-refreshing `expires_at` / key payload.
+    #[serde(default)]
+    pub sub_url: Option<String>,
+    /// Legacy key without `sub_url` that passed a live handshake test after local `expires_at`.
+    #[serde(default)]
+    pub grace_extended: bool,
     /// Entry nodes tried in order.
     pub entries: Vec<Entry>,
     pub raw_key: String,
@@ -168,6 +174,8 @@ impl std::fmt::Debug for Route {
             .field("country", &self.country)
             .field("exit_ip", &self.exit_ip)
             .field("expires_at", &self.expires_at)
+            .field("sub_url", &self.sub_url)
+            .field("grace_extended", &self.grace_extended)
             .field("entries", &self.entries)
             .field("raw_key", &"***")
             .field("enabled", &self.enabled)
@@ -243,8 +251,16 @@ impl Route {
             .starts_with(key::ZASTAVA_SCHEME)
     }
 
-    pub fn is_expired_at(&self, now: u64) -> bool {
+    /// Returns `true` when the raw `expires_at` timestamp has passed, ignoring grace extension.
+    pub fn is_raw_expired_at(&self, now: u64) -> bool {
         self.expires_at.map(|e| e <= now).unwrap_or(false)
+    }
+
+    pub fn is_expired_at(&self, now: u64) -> bool {
+        if self.grace_extended && self.sub_url.is_none() {
+            return false;
+        }
+        self.is_raw_expired_at(now)
     }
 
     /// Static checks (no network): enabled, not expired, has entries.
@@ -282,6 +298,8 @@ impl Route {
             country: None,
             exit_ip: None,
             expires_at: None,
+            sub_url: None,
+            grace_extended: false,
             entries: vec![Entry {
                 proto,
                 host,

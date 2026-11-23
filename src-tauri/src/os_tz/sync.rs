@@ -14,8 +14,10 @@ fn build_status_with_keep(
     platform: &dyn OsTzPlatform,
     baseline: Option<&OsTzBaseline>,
     keep_on_exit: bool,
+    target_iana: Option<&str>,
 ) -> OsTzSyncStatus {
     let current_os_tz = platform.current_iana_timezone().ok();
+    let clean_target = target_iana.and_then(|t| validate_iana_tz(t).ok());
     match baseline {
         Some(b) => OsTzSyncStatus {
             synced: true,
@@ -23,24 +25,52 @@ fn build_status_with_keep(
             original_os_tz: Some(b.original_iana.clone()),
             synced_target_tz: Some(b.synced_iana.clone()),
             auto_restore_pending: !keep_on_exit,
+            already_matches_target: false,
+            target_tz: clean_target.or_else(|| Some(b.synced_iana.clone())),
         },
-        None => OsTzSyncStatus {
-            synced: false,
-            current_os_tz,
-            original_os_tz: None,
-            synced_target_tz: None,
-            auto_restore_pending: false,
-        },
+        None => {
+            let already_matches_target = match (current_os_tz.as_deref(), clean_target.as_deref()) {
+                (Some(cur), Some(tgt)) => zones_equivalent(cur, tgt),
+                _ => false,
+            };
+            OsTzSyncStatus {
+                synced: false,
+                current_os_tz,
+                original_os_tz: None,
+                synced_target_tz: None,
+                auto_restore_pending: false,
+                already_matches_target,
+                target_tz: clean_target,
+            }
+        }
     }
 }
 
 fn build_status(platform: &dyn OsTzPlatform, baseline: Option<&OsTzBaseline>) -> OsTzSyncStatus {
-    build_status_with_keep(platform, baseline, keep_system_tz_on_exit())
+    build_status_with_keep(platform, baseline, keep_system_tz_on_exit(), None)
 }
 
 /// Returns the current OS timezone sync status using `RealOsTzPlatform`.
 pub fn get_os_timezone_sync_status(data_dir: &Path) -> Result<OsTzSyncStatus, String> {
-    get_os_timezone_sync_status_with_keep(&RealOsTzPlatform, data_dir, keep_system_tz_on_exit())
+    get_os_timezone_sync_status_with_keep_and_target(
+        &RealOsTzPlatform,
+        data_dir,
+        keep_system_tz_on_exit(),
+        None,
+    )
+}
+
+/// Returns the current OS timezone sync status compared against an optional `target_iana`.
+pub fn get_os_timezone_sync_status_for_target(
+    data_dir: &Path,
+    target_iana: Option<&str>,
+) -> Result<OsTzSyncStatus, String> {
+    get_os_timezone_sync_status_with_keep_and_target(
+        &RealOsTzPlatform,
+        data_dir,
+        keep_system_tz_on_exit(),
+        target_iana,
+    )
 }
 
 /// Returns the current OS timezone sync status using an injectable `OsTzPlatform`.
@@ -48,7 +78,12 @@ pub fn get_os_timezone_sync_status_with(
     platform: &dyn OsTzPlatform,
     data_dir: &Path,
 ) -> Result<OsTzSyncStatus, String> {
-    get_os_timezone_sync_status_with_keep(platform, data_dir, keep_system_tz_on_exit())
+    get_os_timezone_sync_status_with_keep_and_target(
+        platform,
+        data_dir,
+        keep_system_tz_on_exit(),
+        None,
+    )
 }
 
 /// Returns the current OS timezone sync status with an explicit `keep_on_exit` flag.
@@ -57,12 +92,23 @@ pub fn get_os_timezone_sync_status_with_keep(
     data_dir: &Path,
     keep_on_exit: bool,
 ) -> Result<OsTzSyncStatus, String> {
+    get_os_timezone_sync_status_with_keep_and_target(platform, data_dir, keep_on_exit, None)
+}
+
+/// Returns the current OS timezone sync status with explicit `keep_on_exit` and `target_iana`.
+pub fn get_os_timezone_sync_status_with_keep_and_target(
+    platform: &dyn OsTzPlatform,
+    data_dir: &Path,
+    keep_on_exit: bool,
+    target_iana: Option<&str>,
+) -> Result<OsTzSyncStatus, String> {
     let _guard = OS_TZ_OPS.lock().unwrap_or_else(|e| e.into_inner());
     let baseline = read_baseline(data_dir)?;
     Ok(build_status_with_keep(
         platform,
         baseline.as_ref(),
         keep_on_exit,
+        target_iana,
     ))
 }
 
@@ -112,6 +158,8 @@ pub fn sync_os_timezone_with_keep(
             original_os_tz: None,
             synced_target_tz: None,
             auto_restore_pending: false,
+            already_matches_target: true,
+            target_tz: Some(clean_target),
         });
     }
 
@@ -160,6 +208,7 @@ pub fn sync_os_timezone_with_keep(
         platform,
         Some(&baseline),
         keep_on_exit,
+        Some(&clean_target),
     ))
 }
 

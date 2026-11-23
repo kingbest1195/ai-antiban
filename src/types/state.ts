@@ -127,6 +127,8 @@ export interface OsTzSyncStatus {
   original_os_tz: string | null;
   synced_target_tz: string | null;
   auto_restore_pending: boolean;
+  already_matches_target?: boolean;
+  target_tz?: string | null;
 }
 
 export type AppStateSnapshot = AppStateData;

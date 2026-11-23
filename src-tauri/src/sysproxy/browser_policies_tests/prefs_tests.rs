@@ -392,3 +392,68 @@ fn relaunch_browsers_with_pac_returns_unsupported_on_windows() {
     assert!(summary.failed.is_empty());
     assert!(launcher.calls.lock().unwrap().is_empty());
 }
+
+#[test]
+fn browser_quit_timeout_is_9s_skipped_when_unclosed_and_guest_profiles_ignored() {
+    assert_eq!(BROWSER_QUIT_TIMEOUT, Duration::from_millis(9000));
+
+    let pac = "http://127.0.0.1:8899/proxy.pac";
+    let fs = Arc::new(FakeFs::new());
+    let plat = FakePlatform::new();
+    let store = FakePolicyStore::new();
+    let ctx = test_ctx(&fs);
+
+    let chrome_dir = ctx.home.join("Library/Application Support/Google/Chrome");
+    put_prefs(
+        &fs,
+        &chrome_dir.join("Default/Preferences"),
+        r#"{"profile":{"name":"Main"},"proxy":{"mode":"pac_script","pac_url":"http://127.0.0.1:8899/proxy.pac","pac_mandatory":false}}"#,
+    );
+    put_prefs(
+        &fs,
+        &chrome_dir.join("Guest Profile/Preferences"),
+        r#"{"profile":{"name":"Guest"}}"#,
+    );
+    put_prefs(
+        &fs,
+        &chrome_dir.join("System Profile/Preferences"),
+        r#"{"profile":{"name":"System"}}"#,
+    );
+    put_prefs(&fs, &chrome_dir.join("Profile 2/Preferences"), "{}");
+
+    let probe = StubProbe::fixed(Some(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n",
+    ));
+    let status = detect_browser_pac_status_in(&ctx, Os::Macos, &probe, Some(pac));
+    assert!(status.browsers_needing_restart.is_empty());
+    assert_eq!(
+        status.browsers_pac_active,
+        vec!["Google Chrome".to_string()]
+    );
+
+    // When Chrome doesn't have PAC and refuses to quit within timeout -> lands in summary.skipped.
+    put_prefs(
+        &fs,
+        &chrome_dir.join("Default/Preferences"),
+        r#"{"profile":{"name":"Main"}}"#,
+    );
+    let launcher = StubLauncher::default();
+    let mut j = Journal::open(fs.clone(), Path::new(DIR))
+        .unwrap()
+        .with_policy_store(store);
+    let summary = relaunch_browsers_with_pac_with(
+        &mut j,
+        &plat,
+        pac,
+        &ctx,
+        Os::Macos,
+        &probe,
+        &launcher,
+        QuitTiming {
+            timeout: Duration::from_millis(15),
+            interval: Duration::from_millis(5),
+        },
+    );
+    assert_eq!(summary.skipped, vec!["Google Chrome".to_string()]);
+    assert!(summary.restarted.is_empty());
+}

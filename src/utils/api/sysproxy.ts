@@ -89,21 +89,32 @@ export async function syncAiAgentsTimezone(timezone: string): Promise<string> {
   return `Таймзона ${timezone} и английская локаль (en_US.UTF-8) синхронизированы для: терминала и редакторов кода (браузеры и Claude Desktop используют системный пояс ОС).`;
 }
 
-function currentMockOsTzStatus(): OsTzSyncStatus {
+function currentMockOsTzStatus(targetTz?: string): OsTzSyncStatus {
+  const synced = Boolean(mockFlags.osTzOriginal);
+  const cleanTarget = targetTz?.trim() || null;
+  const alreadyMatches =
+    !synced &&
+    Boolean(cleanTarget) &&
+    Boolean(mockFlags.osTzCurrent) &&
+    mockFlags.osTzCurrent === cleanTarget;
   return {
-    synced: Boolean(mockFlags.osTzOriginal),
+    synced,
     current_os_tz: mockFlags.osTzCurrent,
     original_os_tz: mockFlags.osTzOriginal,
     synced_target_tz: mockFlags.osTzTarget,
-    auto_restore_pending: Boolean(mockFlags.osTzOriginal),
+    auto_restore_pending: synced,
+    already_matches_target: alreadyMatches,
+    target_tz: cleanTarget ?? mockFlags.osTzTarget,
   };
 }
 
-export async function getOsTimezoneSyncStatus(): Promise<OsTzSyncStatus> {
+export async function getOsTimezoneSyncStatus(targetTz?: string): Promise<OsTzSyncStatus> {
   if (isTauri()) {
-    return await tauriInvoke<OsTzSyncStatus>("get_os_timezone_sync_status_cmd");
+    return await tauriInvoke<OsTzSyncStatus>("get_os_timezone_sync_status_cmd", {
+      targetTz: targetTz ?? null,
+    });
   }
-  return currentMockOsTzStatus();
+  return currentMockOsTzStatus(targetTz);
 }
 
 export async function syncOsTimezone(targetTz?: string): Promise<OsTzSyncStatus> {
@@ -124,6 +135,9 @@ export async function syncOsTimezone(targetTz?: string): Promise<OsTzSyncStatus>
       "Текущий выходной IP относится к заблокированной стране (RU). Подключите безопасный VPN перед синхронизацией системного часового пояса.",
     );
   }
+  if (!mockFlags.osTzOriginal && mockFlags.osTzCurrent === cleanTarget) {
+    return currentMockOsTzStatus(cleanTarget);
+  }
   if (!mockFlags.osTzOriginal && mockFlags.osTzCurrent !== cleanTarget) {
     mockFlags.osTzOriginal = mockFlags.osTzCurrent;
   }
@@ -131,7 +145,7 @@ export async function syncOsTimezone(targetTz?: string): Promise<OsTzSyncStatus>
     mockFlags.osTzCurrent = cleanTarget;
     mockFlags.osTzTarget = cleanTarget;
   }
-  return currentMockOsTzStatus();
+  return currentMockOsTzStatus(cleanTarget);
 }
 
 export async function restoreOsTimezone(): Promise<OsTzSyncStatus> {

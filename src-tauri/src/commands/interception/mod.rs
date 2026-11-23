@@ -10,9 +10,9 @@ use helpers::{ResolveInterceptionParams, resolve_interception_with_params};
 use sim::build_simulated_risk_report;
 use tauri::{Emitter, Manager};
 
+pub(crate) use helpers::toggle_or_clear_stop_core;
 #[cfg(test)]
 pub(crate) use helpers::{resolve_interception_core, resolve_interception_core_with};
-pub(crate) use helpers::toggle_or_clear_stop_core;
 pub(crate) use sim::build_simulation_network_change;
 
 #[allow(clippy::too_many_arguments)]

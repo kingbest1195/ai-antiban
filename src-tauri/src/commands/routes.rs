@@ -26,6 +26,8 @@ pub struct RouteTestResult {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_reputation: Option<auditor::CheckResult>,
+    #[serde(default)]
+    pub grace_extended: bool,
 }
 
 async fn snapshot(state: &AppContext) -> RoutesSnapshot {
@@ -222,10 +224,22 @@ pub async fn test_route(
                 .to_string(),
         );
     }
-    let route = state
+    let mut route = state
         .get_route(&id)
         .await
         .ok_or_else(|| format!("Маршрут не найден: {id}"))?;
+
+    if route.sub_url.is_some()
+        && matches!(
+            super::routes_sub::refresh_route_subscription_inner(&state, &id, None, None).await,
+            Ok(true)
+        )
+    {
+        auditor.resolver.invalidate_route(&id).await;
+        if let Some(refreshed) = state.get_route(&id).await {
+            route = refreshed;
+        }
+    }
 
     let started = Instant::now();
     let tunnel = proxy::upstream::connect_via_route(
@@ -248,11 +262,25 @@ pub async fn test_route(
             exit_ip_matches: None,
             error: Some(msg),
             ip_reputation: None,
+            grace_extended: false,
         });
     }
     drop(tunnel);
     state.route_health().mark_reachable(&id);
     state.route_health().record_latency(&id, latency_ms);
+
+    let now = current_timestamp();
+    let mut grace_extended = route.grace_extended;
+    if route.sub_url.is_none()
+        && route.is_raw_expired_at(now)
+        && !route.grace_extended
+        && matches!(state.mark_route_grace_extended(&id, true).await, Ok(true))
+    {
+        grace_extended = true;
+        if let Some(updated) = state.get_route(&id).await {
+            route = updated;
+        }
+    }
 
     match auditor.resolve_route(&route, &state, true).await {
         Ok(tel) => {
@@ -268,6 +296,7 @@ pub async fn test_route(
                 latency_ms: Some(latency_ms),
                 error: None,
                 ip_reputation: Some(reputation),
+                grace_extended,
             })
         }
         // The tunnel works but the geo lookup through it failed: report it, keep the route reachable.
@@ -279,6 +308,7 @@ pub async fn test_route(
             exit_ip_matches: None,
             error: Some(e),
             ip_reputation: None,
+            grace_extended,
         }),
     }
 }

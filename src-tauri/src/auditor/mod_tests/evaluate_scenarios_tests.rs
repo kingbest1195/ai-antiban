@@ -80,6 +80,8 @@ async fn evaluate_all_zastava_key_coexists_with_foreign_vpn_fake_ip_and_doh_dnsb
         country: Some("FR".into()),
         exit_ip: Some("136.244.114.42".into()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![Entry {
             proto: EntryProto::Http,
             host: "127.0.0.1".into(),
@@ -243,6 +245,8 @@ async fn evaluate_all_force_refresh_clears_os_check_cache() {
         country: None,
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![crate::routing::Entry {
             proto: crate::routing::EntryProto::Http,
             host: "127.0.0.1".into(),

@@ -351,6 +351,8 @@ mod pin_tests {
             country: Some("FR".to_string()),
             exit_ip: Some("136.244.114.42".to_string()),
             expires_at: None,
+            sub_url: None,
+            grace_extended: false,
             entries: vec![Entry {
                 proto: EntryProto::Http,
                 host: "136.244.114.42".to_string(),

@@ -32,6 +32,7 @@ export interface ChecksScreenProps {
   provider?: ProviderId;
   state: AppStateData | null;
   coverageSnapshot?: CoverageSnapshot | null;
+  onCoverageSnapshot?: (snapshot: CoverageSnapshot) => void;
   hideIpMode?: boolean;
   /** Явные «включить» и «выключить» защиты для карточек «Покрытия»; без них кнопка скрыта. */
   protection?: ProtectionActions;
@@ -71,6 +72,7 @@ export function ChecksScreen({
   provider,
   state,
   coverageSnapshot,
+  onCoverageSnapshot,
   hideIpMode = false,
   protection,
   onToast,
@@ -390,6 +392,7 @@ export function ChecksScreen({
           pending={startupPending}
           protection={protection}
           onToast={onToast}
+          onSnapshotChange={onCoverageSnapshot}
         />
       )}
 

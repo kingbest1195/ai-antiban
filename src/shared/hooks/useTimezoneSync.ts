@@ -47,9 +47,10 @@ function updateSharedState(patch: Partial<SharedOsTzState>) {
   }
 }
 
-export async function refreshSharedOsTzStatus(): Promise<OsTzSyncStatus | null> {
+export async function refreshSharedOsTzStatus(targetTz?: string): Promise<OsTzSyncStatus | null> {
   try {
-    const status = await getOsTimezoneSyncStatus();
+    const tz = targetTz || registeredContext.targetTz;
+    const status = await getOsTimezoneSyncStatus(tz);
     updateSharedState({ osTzStatus: status });
     return status;
   } catch {
@@ -63,6 +64,14 @@ export async function runSharedSyncOsTimezone(targetTz?: string): Promise<OsTzSy
     const tz = targetTz || registeredContext.targetTz;
     const status = await apiSyncOsTimezone(tz);
     updateSharedState({ osTzStatus: status, osTzLoading: false, osTzError: null });
+    if (!status.synced && status.already_matches_target) {
+      registeredContext.showToast?.(
+        timezoneCopy.osAlreadyMatchesTitle,
+        timezoneCopy.osAlreadyMatchesText(status.current_os_tz ?? tz ?? null),
+        "info",
+      );
+      return status;
+    }
     registeredContext.showToast?.(
       t.timezone.done,
       timezoneCopy.osRestartHint,
@@ -129,7 +138,10 @@ export function useOsTimezoneSync(defaultTargetTz?: string) {
     };
   }, []);
 
-  const refreshOsTzStatus = useCallback(() => refreshSharedOsTzStatus(), []);
+  const refreshOsTzStatus = useCallback(
+    () => refreshSharedOsTzStatus(defaultTargetTz),
+    [defaultTargetTz],
+  );
   const syncOsTimezone = useCallback(
     (targetTz?: string) => runSharedSyncOsTimezone(targetTz ?? defaultTargetTz),
     [defaultTargetTz],
@@ -162,6 +174,9 @@ export function useTimezoneSync({ activeReport, runFullAudit, showToast }: Optio
 
   useEffect(() => {
     registeredContext = { targetTz, runFullAudit, showToast };
+    if (targetTz) {
+      void refreshSharedOsTzStatus(targetTz);
+    }
     return () => {
       registeredContext = {};
     };

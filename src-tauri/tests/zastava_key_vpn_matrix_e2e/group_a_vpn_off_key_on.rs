@@ -327,6 +327,8 @@ async fn e2e_vpn_off_key_unreachable_or_poisoned_ssrf_fail_closed() {
         exit_ip: None,
         country: Some("DE".to_string()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         enabled: true,
         added_at: 0,
     };
@@ -349,6 +351,8 @@ async fn e2e_vpn_off_key_unreachable_or_poisoned_ssrf_fail_closed() {
         exit_ip: None,
         country: Some("DE".to_string()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         enabled: true,
         added_at: 0,
     };

@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use zastava_lib::auditor::{
-    Auditor, CheckStatus, ExitIdentity, TorLookup, evaluate_ip_reputation,
-};
+use zastava_lib::auditor::{Auditor, CheckStatus, ExitIdentity, TorLookup, evaluate_ip_reputation};
 use zastava_lib::proxy::upstream::connect_via_route_with_chained;
 use zastava_lib::proxy::{HoldQueue, ProxyServer};
 use zastava_lib::routing::{Entry, EntryProto, Route};
@@ -25,6 +23,8 @@ fn route_with_entries(id: &str, entries: Vec<Entry>) -> Route {
         country: Some("NL".to_string()),
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries,
         raw_key,
         enabled: true,
@@ -89,10 +89,30 @@ async fn sec7_4_embedded_rules_block_mass_vpn_even_when_pinned_and_classify_ipv6
     // 1. Mass VPN ASNs (including Cloudflare WARP AS13335, M247 AS9009, NordVPN AS136787) and VPN ISP keywords
     // must ALWAYS return Warning HIGH_RISK_MASS_VPN_ASN even if is_pinned=true.
     for (ip, asn, isp, org) in [
-        ("104.28.1.10", Some(13335), Some("Cloudflare, Inc."), Some("Cloudflare WARP")),
-        ("185.220.101.4", Some(9009), Some("M247 Europe SRL"), Some("M247 Ltd")),
-        ("194.36.25.8", Some(136787), Some("TEFINCOM S.A."), Some("NordVPN")),
-        ("91.90.44.12", Some(999999), Some("ProtonVPN AG"), Some("ProtonVPN")),
+        (
+            "104.28.1.10",
+            Some(13335),
+            Some("Cloudflare, Inc."),
+            Some("Cloudflare WARP"),
+        ),
+        (
+            "185.220.101.4",
+            Some(9009),
+            Some("M247 Europe SRL"),
+            Some("M247 Ltd"),
+        ),
+        (
+            "194.36.25.8",
+            Some(136787),
+            Some("TEFINCOM S.A."),
+            Some("NordVPN"),
+        ),
+        (
+            "91.90.44.12",
+            Some(999999),
+            Some("ProtonVPN AG"),
+            Some("ProtonVPN"),
+        ),
     ] {
         let res = evaluate_ip_reputation(
             &ExitIdentity {
@@ -215,7 +235,9 @@ async fn sec7_5_http_connect_bufreader_preserves_pipelined_payload() {
             let mut req = [0u8; 512];
             let _ = s.read(&mut req).await;
             let _ = s
-                .write_all(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: test\r\n\r\nEARLY_BYTES")
+                .write_all(
+                    b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: test\r\n\r\nEARLY_BYTES",
+                )
                 .await;
             let mut buf = [0u8; 64];
             if let Ok(n) = s.read(&mut buf).await {

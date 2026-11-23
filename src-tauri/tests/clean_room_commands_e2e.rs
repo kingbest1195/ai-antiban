@@ -40,7 +40,7 @@ use zastava_lib::commands::clean_room::{
 use zastava_lib::core::net_safety::is_alias_port;
 use zastava_lib::proxy::hold_queue::HoldQueue;
 use zastava_lib::proxy::{ProxyManager, ProxyServer};
-use zastava_lib::routing::{DIRECT_ROUTE_ID, Entry, EntryProto, Route, RouteSelection};
+use zastava_lib::routing::{DIRECT_ROUTE_ID, Route, RouteSelection, parse_route_key};
 use zastava_lib::state::AppState;
 use zastava_lib::sysproxy::force_os_dry_run;
 
@@ -151,24 +151,13 @@ fn clean_us_auditor() -> Auditor {
 }
 
 fn socks_route(id: &str, port: u16, enabled: bool) -> Route {
-    Route {
-        id: id.to_string(),
-        label: format!("Route {id}"),
-        country: Some("US".to_string()),
-        exit_ip: Some("198.51.100.42".to_string()),
-        expires_at: None,
-        entries: vec![Entry {
-            proto: EntryProto::Socks5,
-            host: "127.0.0.1".to_string(),
-            port,
-            username: None,
-            password: None,
-            sni: None,
-        }],
-        raw_key: format!("socks5://127.0.0.1:{port}"),
-        enabled,
-        added_at: 0,
-    }
+    let mut r = parse_route_key(&format!("socks5://127.0.0.1:{port}"), 0).unwrap();
+    r.id = id.to_string();
+    r.label = format!("Route {id}");
+    r.country = Some("US".to_string());
+    r.exit_ip = Some("198.51.100.42".to_string());
+    r.enabled = enabled;
+    r
 }
 
 async fn spawn_direct_echo() -> (std::net::SocketAddr, Arc<AtomicU64>) {

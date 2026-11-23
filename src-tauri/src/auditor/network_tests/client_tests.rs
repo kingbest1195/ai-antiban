@@ -38,10 +38,7 @@ fn parse_as_org_handles_lowercase_and_missing_name() {
         parse_as_org("as13335 Cloudflare, Inc."),
         (Some(13335), Some("Cloudflare, Inc.".to_string()))
     );
-    assert_eq!(
-        parse_as_org("  As20473  "),
-        (Some(20473), None)
-    );
+    assert_eq!(parse_as_org("  As20473  "), (Some(20473), None));
     assert_eq!(
         parse_as_org("No Prefix Org"),
         (None, Some("No Prefix Org".to_string()))
@@ -62,9 +59,15 @@ fn has_provider_metadata_requires_asn_isp_or_org() {
         resolved_at: current_timestamp(),
     };
     assert!(!base.has_provider_metadata());
-    let with_asn = NetworkTelemetry { asn: Some(13335), ..base.clone() };
+    let with_asn = NetworkTelemetry {
+        asn: Some(13335),
+        ..base.clone()
+    };
     assert!(with_asn.has_provider_metadata());
-    let with_isp = NetworkTelemetry { isp: Some("NordVPN".into()), ..base };
+    let with_isp = NetworkTelemetry {
+        isp: Some("NordVPN".into()),
+        ..base
+    };
     assert!(with_isp.has_provider_metadata());
 }
 
@@ -378,6 +381,8 @@ async fn test_resolver_cache_keyed_by_route_id() {
         country: None,
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![],
         raw_key: String::new(),
         enabled: true,

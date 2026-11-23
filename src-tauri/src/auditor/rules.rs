@@ -324,12 +324,12 @@ mod tests {
             asns.keyword_kind("Example VPN Hosting"),
             Some(NetworkKind::Vpn)
         );
-        assert_eq!(
-            asns.keyword_kind("NordVPN Server"),
-            Some(NetworkKind::Vpn)
-        );
+        assert_eq!(asns.keyword_kind("NordVPN Server"), Some(NetworkKind::Vpn));
         // Substrings inside larger words must not falsely trigger VPN or hosting.
-        assert_eq!(asns.keyword_kind("Vector Telecom"), Some(NetworkKind::Residential));
+        assert_eq!(
+            asns.keyword_kind("Vector Telecom"),
+            Some(NetworkKind::Residential)
+        );
         assert_eq!(asns.keyword_kind("Subvpnware Ltd"), None);
         assert_eq!(asns.keyword_kind("Cloudflare Inc."), None);
     }

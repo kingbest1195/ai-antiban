@@ -44,6 +44,11 @@ export const connect = {
     connecting: "Подключаем…",
     get: "Получить ВПН",
     renew: "Продлить",
+    refreshSub: "Обновить статус",
+    refreshingSub: "Обновляем…",
+    graceExtendedBadge: "Активен на сервере",
+    graceExtendedHint:
+      "Ключ продлён на сервере и работает. При необходимости получите свежий ключ для точной даты.",
     expiringSoon: (remaining: string) => `Истекает (${remaining})`,
     empty: "Введите ключ или адрес прокси.",
     defaultLabel: "Выделенный шлюз Заставы",
@@ -81,7 +86,13 @@ export const connect = {
       testSuccess: "Маршрут доступен",
       testSuccessText: (ip: string, latency?: number | null) =>
         `Выходной IP: ${ip}${latency !== undefined && latency !== null ? ` (${latency} мс)` : ""}`,
+      graceExtendedText: (ip: string, latency?: number | null) =>
+        `Ключ активен на сервере, блокировка снята. Выходной IP: ${ip}${latency !== undefined && latency !== null ? ` (${latency} мс)` : ""}`,
       testError: "Ошибка проверки маршрута",
+      refreshSubSuccess: "Срок действия обновлён",
+      refreshSubSuccessText: (date?: string | null) =>
+        date ? `Ключ действителен до ${date}.` : "Метаданные подписки обновлены.",
+      refreshSubError: "Не удалось обновить статус подписки",
     },
   },
   routes: {

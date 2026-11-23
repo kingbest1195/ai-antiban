@@ -59,7 +59,7 @@ export function AlertStrip({
   const hasCooldown = Boolean(ipChangeCooldownUntil && ipChangeCooldownUntil * 1000 > Date.now());
 
   const expiringRoute = (routesSnapshot?.routes ?? []).find((r) => {
-    if (!r.enabled || !r.expires_at) return false;
+    if (!r.enabled || !r.expires_at || r.grace_extended) return false;
     const u = getRouteExpiryUrgency(r.expires_at);
     return u === "expired" || u === "critical" || u === "soon";
   });

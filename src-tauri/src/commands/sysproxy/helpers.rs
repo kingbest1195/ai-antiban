@@ -167,3 +167,23 @@ pub(super) async fn resolve_os_tz_target(
 
     Err("Не удалось определить часовой пояс выходного IP. Проверьте подключение или обновите аудит.".to_string())
 }
+
+pub(super) async fn resolve_os_tz_target_cached(
+    state: &state::AppState,
+    target_tz: Option<String>,
+) -> Option<String> {
+    if let Some(tz) = target_tz
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| os_tz::validate_iana_tz(s).ok())
+    {
+        return Some(tz);
+    }
+    state
+        .get_data()
+        .await
+        .synced_ai_timezone
+        .as_deref()
+        .and_then(|s| os_tz::validate_iana_tz(s).ok())
+}

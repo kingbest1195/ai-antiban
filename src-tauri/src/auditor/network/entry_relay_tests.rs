@@ -54,7 +54,10 @@ async fn spawn_entry_relay_accepts_ip_literal_https_entry() {
     let res = spawn_entry_relay(&entry, "http://127.0.0.1:18080", false, 0)
         .await
         .expect("relay spawn should not reject public IP literal HTTPS entry");
-    assert!(res.is_some(), "§7.5: IP-literal EntryProto::Https must use entry_relay instead of skipping");
+    assert!(
+        res.is_some(),
+        "§7.5: IP-literal EntryProto::Https must use entry_relay instead of skipping"
+    );
 }
 
 #[tokio::test]

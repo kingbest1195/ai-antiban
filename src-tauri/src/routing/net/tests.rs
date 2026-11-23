@@ -266,10 +266,9 @@ async fn test_resolve_uses_fresh_cache_and_stale_on_error_fallback() {
 
     // 4. Past normal stale TTL (900s) but within emergency stale TTL (7200s) -> emergency fallback + stale flag.
     tokio::time::advance(Duration::from_secs(900)).await;
-    let emergency =
-        resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false, false)
-            .await
-            .unwrap();
+    let emergency = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false, false)
+        .await
+        .unwrap();
     assert_eq!(emergency, vec![addr]);
     assert!(
         cache

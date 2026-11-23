@@ -338,7 +338,7 @@ pub fn validate_iana_tz(raw: &str) -> Result<String, String> {
     Ok(clean)
 }
 
-pub(super) fn zones_equivalent(a: &str, b: &str) -> bool {
+pub fn zones_equivalent(a: &str, b: &str) -> bool {
     let ca = canonicalize_iana_tz(a);
     let cb = canonicalize_iana_tz(b);
     ca.eq_ignore_ascii_case(cb)

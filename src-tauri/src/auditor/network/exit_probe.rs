@@ -37,15 +37,8 @@ impl NetworkResolver {
         matrix: &ProviderMatrix,
         direct_probe: Option<&dyn IpProbe>,
     ) -> CheckResult {
-        self.probe_provider_exit_with_client(
-            provider,
-            route,
-            telemetry,
-            matrix,
-            direct_probe,
-            None,
-        )
-        .await
+        self.probe_provider_exit_with_client(provider, route, telemetry, matrix, direct_probe, None)
+            .await
     }
 
     /// Variant of [`Self::probe_provider_exit_with_probe`] reusing a keep-alive `route_client`.

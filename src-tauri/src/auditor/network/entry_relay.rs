@@ -8,11 +8,13 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::routing::{Entry, EntryProto};
 use crate::routing::net::resolve_entry_checked;
+use crate::routing::{Entry, EntryProto};
 
 const DIRECT_HEADSTART: Duration = Duration::from_millis(700);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
@@ -87,10 +89,7 @@ pub(super) async fn spawn_entry_relay(
         .map_err(|e| format!("Failed to inspect audit entry relay address: {e}"))?;
 
     let wrap_tls = entry.proto == EntryProto::Https
-        && entry
-            .tls_server_name()
-            .parse::<std::net::IpAddr>()
-            .is_ok();
+        && entry.tls_server_name().parse::<std::net::IpAddr>().is_ok();
     let entry = entry.clone();
     tokio::spawn(async move {
         while let Ok(Ok((mut inbound, _))) =
@@ -105,17 +104,14 @@ pub(super) async fn spawn_entry_relay(
                     let mut outbound = MaybePrefixed::new(tcp, leftover);
                     if wrap_tls {
                         if let Ok(tls_cfg) = crate::proxy::upstream::production_tls_config()
-                            && let Ok(sni) =
-                                tokio_rustls::rustls::pki_types::ServerName::try_from(
-                                    e.tls_server_name().to_string(),
-                                )
-                            && let Ok(mut tls_out) =
-                                tokio_rustls::TlsConnector::from(tls_cfg)
-                                    .connect(sni, outbound)
-                                    .await
+                            && let Ok(sni) = tokio_rustls::rustls::pki_types::ServerName::try_from(
+                                e.tls_server_name().to_string(),
+                            )
+                            && let Ok(mut tls_out) = tokio_rustls::TlsConnector::from(tls_cfg)
+                                .connect(sni, outbound)
+                                .await
                         {
-                            let _ =
-                                tokio::io::copy_bidirectional(&mut inbound, &mut tls_out).await;
+                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut tls_out).await;
                         }
                     } else {
                         let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;

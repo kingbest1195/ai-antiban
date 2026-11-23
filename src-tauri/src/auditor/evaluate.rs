@@ -158,35 +158,38 @@ impl Auditor {
                     Duration::from_secs(5)
                 },
                 {
-                let (cache, asns, ip, label, dns) = (
-                    cache.clone(),
-                    dangerous_asns.clone(),
-                    telemetry.ip.clone(),
-                    dnsbl_label.clone(),
-                    env.dns.clone(),
-                );
-                let doh_dns = if self.use_env_probe_for_direct {
-                    Some(Arc::new(dnsbl::DohDns::with_probe(env.probe.clone()))
-                        as Arc<dyn seams::DnsLookup>)
-                } else if let Some(client) = route_client.clone() {
-                    Some(Arc::new(dnsbl::DohDns::with_client(client)) as Arc<dyn seams::DnsLookup>)
-                } else {
-                    dnsbl::DohDns::real()
-                        .ok()
-                        .map(|d| Arc::new(d) as Arc<dyn seams::DnsLookup>)
-                };
-                async move {
-                    let (result, summary) = cache
-                        .dnsbl
-                        .get_or_compute(&ip, DNSBL_TTL, |(r, _)| !r.is_unknown(), async {
-                            let report = check_all_dnsbl_with_doh(dns, doh_dns, &ip, &asns).await;
-                            (evaluate_dnsbl_report(&report), report.summary_label)
-                        })
-                        .await;
-                    *label.lock().unwrap_or_else(|e| e.into_inner()) = summary;
-                    result
-                }
-            }),
+                    let (cache, asns, ip, label, dns) = (
+                        cache.clone(),
+                        dangerous_asns.clone(),
+                        telemetry.ip.clone(),
+                        dnsbl_label.clone(),
+                        env.dns.clone(),
+                    );
+                    let doh_dns = if self.use_env_probe_for_direct {
+                        Some(Arc::new(dnsbl::DohDns::with_probe(env.probe.clone()))
+                            as Arc<dyn seams::DnsLookup>)
+                    } else if let Some(client) = route_client.clone() {
+                        Some(Arc::new(dnsbl::DohDns::with_client(client))
+                            as Arc<dyn seams::DnsLookup>)
+                    } else {
+                        dnsbl::DohDns::real()
+                            .ok()
+                            .map(|d| Arc::new(d) as Arc<dyn seams::DnsLookup>)
+                    };
+                    async move {
+                        let (result, summary) = cache
+                            .dnsbl
+                            .get_or_compute(&ip, DNSBL_TTL, |(r, _)| !r.is_unknown(), async {
+                                let report =
+                                    check_all_dnsbl_with_doh(dns, doh_dns, &ip, &asns).await;
+                                (evaluate_dnsbl_report(&report), report.summary_label)
+                            })
+                            .await;
+                        *label.lock().unwrap_or_else(|e| e.into_inner()) = summary;
+                        result
+                    }
+                },
+            ),
         );
         let asn = tracked(
             &sink,

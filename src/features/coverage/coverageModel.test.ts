@@ -527,6 +527,34 @@ describe("browserPacStatus, relaunchBrowsersResult и честный стату�
     });
     expect(failed.tone).toBe("danger");
     expect(failed.text).toContain("Google Chrome");
+
+    const skippedOnly = relaunchBrowsersResult({
+      restarted: [],
+      skipped: ["Google Chrome"],
+      failed: [],
+      needs_automation_permission: false,
+      unsupported: false,
+      snapshot: emptySnap,
+    });
+    expect(skippedOnly.tone).toBe("warn");
+    expect(skippedOnly.title).toBe(copy.vpn.restartNeeded.skippedTitle);
+    expect(skippedOnly.text).toContain("Google Chrome");
+    expect(skippedOnly.text).toContain("Cmd+Q");
+    expect(skippedOnly.text).toContain("Перепроверить");
+    expect(skippedOnly.title).not.toBe(copy.vpn.restartNeeded.nothingToRestartTitle);
+
+    const skippedPartial = relaunchBrowsersResult({
+      restarted: ["Comet"],
+      skipped: ["Google Chrome"],
+      failed: [],
+      needs_automation_permission: false,
+      unsupported: false,
+      snapshot: emptySnap,
+    });
+    expect(skippedPartial.tone).toBe("warn");
+    expect(skippedPartial.text).toContain("Comet");
+    expect(skippedPartial.text).toContain("Google Chrome");
+    expect(skippedPartial.text).toContain("Cmd+Q");
   });
 
   it("CoverageSection показывает warn с кнопкой «Перезапустить браузеры» при browsers_needing_restart и info с именами при browsers_pac_active", () => {

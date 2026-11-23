@@ -322,3 +322,60 @@ fn opencode_in_global_terminal_is_configured_and_traffic_confirms() {
     assert_eq!(oc2.status, CoverageStatus::Confirmed);
     assert!(!oc2.bypass_suspected);
 }
+
+#[test]
+fn macos_policy_store_plus_confirmed_traffic_and_guest_profiles_clear_needing_restart() {
+    let rig = Rig::new();
+    rig.seed_wifi_pac(OUR_PAC, true);
+    let _vpn = rig.platform.add_vpn_service("V2Box Pro", true);
+    rig.platform.set_effective_pac(None, false);
+
+    // Chrome is running without --proxy-pac-url and Default Preferences has no proxy yet,
+    // while Guest Profile & System Profile exist.
+    put_browser_prefs(
+        &rig,
+        "Google/Chrome/Default",
+        r#"{"profile":{"name":"Main"}}"#,
+    );
+    put_browser_prefs(
+        &rig,
+        "Google/Chrome/Guest Profile",
+        r#"{"profile":{"name":"Guest"}}"#,
+    );
+    put_browser_prefs(
+        &rig,
+        "Google/Chrome/System Profile",
+        r#"{"profile":{"name":"System"}}"#,
+    );
+
+    let domain = MACOS_CHROMIUM_DOMAIN_NAMES[0];
+    rig.policy_store.set_domain_applicable(domain, true);
+    rig.policy_store.preset(
+        domain,
+        KEY_PROXY_MODE,
+        PolicyValue::Sz(PROXY_MODE_PAC_SCRIPT.into()),
+    );
+    rig.policy_store
+        .preset(domain, KEY_PROXY_PAC_URL, PolicyValue::Sz(OUR_PAC.into()));
+
+    let (_, t) = tracker(FakeProbe::answering(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n",
+    ));
+    t.set_gateway_addr(gw(8899));
+    let env = rig.env(PacSource::Services, false);
+
+    // Before live traffic: plist-only still keeps Chrome in needing_restart.
+    let before = t.snapshot(&env, false);
+    assert!(!before.browser_pac_policy_active);
+    assert_eq!(
+        before.browsers_needing_restart,
+        vec!["Google Chrome".to_string()]
+    );
+
+    // Live browser traffic is Confirmed -> PolicyStore + Confirmed immediately clears needing_restart.
+    t.record_hit("Google Chrome", None);
+    let after = t.snapshot(&env, false);
+    assert!(after.browser_pac_policy_active);
+    assert!(after.browsers_needing_restart.is_empty());
+    assert_eq!(after.browsers_pac_active, vec!["Google Chrome".to_string()]);
+}
