@@ -172,3 +172,37 @@ async fn test_cancel_all_superseded_preserves_checkout_holds_and_block_all_check
     assert!(!queue.is_active(&chk_id).await);
     assert!(queue.current_alert().is_none());
 }
+
+#[tokio::test]
+async fn test_has_active_non_checkout_alerts_or_holds_ignores_checkout_scope_and_entries() {
+    let queue = HoldQueue::new();
+    assert!(!queue.has_active_non_checkout_alerts_or_holds().await);
+
+    let (chk_id, _rx_chk, _) = queue
+        .register_or_coalesce_provider("checkout:stripe.com".to_string(), "checkout:stripe.com")
+        .await;
+    queue.set_alert(RiskInterceptPayload {
+        id: chk_id.clone(),
+        provider: ProviderId::Anthropic,
+        host: "checkout.stripe.com".to_string(),
+        report: None,
+        ttl_seconds: DEFAULT_HOLD_TTL_SECS,
+        scope: "checkout".to_string(),
+        network_change: None,
+        is_simulation: false,
+        detected_at_ms: 0,
+        phase: PHASE_READY.to_string(),
+        gate_reason: Some("PayShield check".to_string()),
+        checkout_risk: None,
+    });
+    assert!(queue.has_active_non_sim_holds().await);
+    assert!(
+        !queue.has_active_non_checkout_alerts_or_holds().await,
+        "checkout-only alert and hold must not count as non-checkout guard hold"
+    );
+
+    let _rx_net = queue.register("net-hold-1".to_string(), "anthropic").await;
+    assert!(queue.has_active_non_checkout_alerts_or_holds().await);
+    queue.remove("net-hold-1").await;
+    assert!(!queue.has_active_non_checkout_alerts_or_holds().await);
+}

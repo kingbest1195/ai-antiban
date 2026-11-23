@@ -177,15 +177,18 @@ describe("AlertStrip click-to-repair error toast & OS TZ sync", () => {
     osTzApiMocks.restoreOsTimezone.mockClear();
   });
 
-  it("вызывает overview.onToast, когда «Починить в 1 клик» завершается неудачей (repair() -> null)", async () => {
+  it("вызывает overview.onToast с реальной ошибкой бэкенда уже при первом сбое ремонта (когда до клика error === null)", async () => {
     const onToast = vi.fn();
-    const repair = vi.fn(async () => null);
+    const repair = vi.fn(async () => ({
+      status: null,
+      error: "Доступ запрещён",
+    }));
     const tree = AlertStrip({
       view: baseView(),
       overview: baseOverview({ onToast }),
       coworkGuard: baseCoworkGuard({
         needsRepair: true,
-        error: "Доступ запрещён",
+        error: null,
         repair,
       }),
       ipChangeCooldownUntil: null,
@@ -205,30 +208,67 @@ describe("AlertStrip click-to-repair error toast & OS TZ sync", () => {
     (buttons[0].props.onClick as () => void)();
     await new Promise((r) => setTimeout(r, 0));
     expect(repair).toHaveBeenCalledTimes(1);
-    expect(onToast).toHaveBeenCalledWith("Не удалось защитить фоновую службу Claude", expect.any(String), "error");
+    expect(onToast).toHaveBeenCalledWith("Не удалось защитить фоновую службу Claude", "Доступ запрещён", "error");
   });
 
-  it("вызывает overview.onToast(..., 'warning') когда repair() возвращает { needs_repair: true, summary }", async () => {
+  it("использует текст об отмене UAC только когда свежая ошибка бэкенда действительно про отмену или пуста", async () => {
     const onToast = vi.fn();
-    const summary = "Планировщик не дал права: служба остаётся в автозапуске.";
     const repair = vi.fn(async () => ({
-      platform: "windows",
-      supported: true,
-      service_present: true,
-      start_type: 2,
-      service_running: true,
-      task_installed: false,
-      task_healthy: false,
-      needs_repair: true,
-      summary,
-      detected_ai_apps: [],
+      status: null,
+      error: "ELEVATION_CANCELLED",
     }));
     const tree = AlertStrip({
       view: baseView(),
       overview: baseOverview({ onToast }),
       coworkGuard: baseCoworkGuard({
         needsRepair: true,
-        error: summary,
+        error: null,
+        repair,
+      }),
+      ipChangeCooldownUntil: null,
+      routeUnavailableBanner: null,
+      routesSnapshot: null,
+      onPushRoute: vi.fn(),
+      onDismissRouteUnavailable: vi.fn(),
+      onRefreshRoutes: vi.fn(async () => {}),
+      onRefreshState: vi.fn(async () => {}),
+      onAuditRefresh: vi.fn(),
+    });
+
+    const buttons = collectButtons(tree).filter((b) => String(b.props.children ?? "").includes("Починить в 1 клик"));
+    (buttons[0].props.onClick as () => void)();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(onToast).toHaveBeenCalledWith(
+      "Не удалось защитить фоновую службу Claude",
+      expect.stringContaining("отменён"),
+      "error",
+    );
+  });
+
+  it("вызывает overview.onToast(..., 'warning') когда repair() возвращает { status: { needs_repair: true, summary }, error }", async () => {
+    const onToast = vi.fn();
+    const summary = "Планировщик не дал права: служба остаётся в автозапуске.";
+    const repair = vi.fn(async () => ({
+      status: {
+        platform: "windows",
+        supported: true,
+        service_present: true,
+        start_type: 2,
+        service_running: true,
+        task_installed: false,
+        task_healthy: false,
+        needs_repair: true,
+        summary,
+        detected_ai_apps: [],
+      },
+      error: summary,
+    }));
+    const tree = AlertStrip({
+      view: baseView(),
+      overview: baseOverview({ onToast }),
+      coworkGuard: baseCoworkGuard({
+        needsRepair: true,
+        error: null,
         repair,
       }),
       ipChangeCooldownUntil: null,

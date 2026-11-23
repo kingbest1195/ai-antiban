@@ -97,6 +97,7 @@ export function useSettingsController({
   const [autostartBusy, setAutostartBusy] = useState(false);
   const [coworkStatus, setCoworkStatus] = useState<CoworkGuardStatus | null>(null);
   const [coworkBusy, setCoworkBusy] = useState(false);
+  const [coworkError, setCoworkError] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
   const [previewItems, setPreviewItems] = useState<ProtectionChangePreviewItem[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -153,6 +154,7 @@ export function useSettingsController({
       .catch((err) => setPreviewError(errText(err)))
       .finally(() => setPreviewLoading(false));
     setProxyResult(null);
+    setCoworkError(null);
     setConfirmRollbackVersion(null);
     if (!rollbackLoaded && !rollbackLoading && onLoadRollbackVersions) {
       void onLoadRollbackVersions();
@@ -161,7 +163,12 @@ export function useSettingsController({
     let unlisten: (() => void) | undefined;
     let active = true;
     onCoworkGuardStatus((status) => {
-      if (active) setCoworkStatus(status);
+      if (active) {
+        setCoworkStatus(status);
+        if (!status.needs_repair) {
+          setCoworkError(null);
+        }
+      }
     })
       .then((fn) => {
         if (active) unlisten = fn;
@@ -210,13 +217,21 @@ export function useSettingsController({
   const handleInstallCoworkGuard = async () => {
     if (coworkBusy) return;
     setCoworkBusy(true);
+    setCoworkError(null);
     try {
       const updated = await installOrRepairCoworkGuard();
       setCoworkStatus(updated);
       onStateUpdated?.();
-      onToast?.(copy.coworkGuard.toastOkTitle, updated.summary, updated.needs_repair ? "warning" : "success");
+      if (updated.needs_repair) {
+        setCoworkError(updated.summary);
+        onToast?.(copy.coworkGuard.statusNeedsRepair, updated.summary, "warning");
+      } else {
+        onToast?.(copy.coworkGuard.toastOkTitle, updated.summary, "success");
+      }
     } catch (err) {
-      onToast?.(copy.coworkGuard.toastErrTitle, errText(err), "warning");
+      const msg = errText(err);
+      setCoworkError(msg);
+      onToast?.(copy.coworkGuard.toastErrTitle, msg, "warning");
     } finally {
       setCoworkBusy(false);
     }
@@ -225,11 +240,21 @@ export function useSettingsController({
   const handleRefreshCoworkGuard = async () => {
     if (coworkBusy) return;
     setCoworkBusy(true);
+    setCoworkError(null);
     try {
       const updated = await getCoworkGuardStatus();
       setCoworkStatus(updated);
-    } catch {
-      // ignore
+      if (updated.needs_repair) {
+        onToast?.(copy.coworkGuard.statusNeedsRepair, updated.summary, "warning");
+      } else if (!updated.service_present) {
+        onToast?.(copy.coworkGuard.statusInfo, updated.summary, "info");
+      } else {
+        onToast?.(copy.coworkGuard.statusHealthy, updated.summary, "success");
+      }
+    } catch (err) {
+      const msg = errText(err);
+      setCoworkError(msg);
+      onToast?.(copy.coworkGuard.toastErrTitle, msg, "warning");
     } finally {
       setCoworkBusy(false);
     }
@@ -405,6 +430,7 @@ export function useSettingsController({
     autostartBusy,
     coworkStatus,
     coworkBusy,
+    coworkError,
     exportBusy,
     previewItems,
     previewLoading,

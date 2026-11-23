@@ -193,24 +193,23 @@ async fn test_transient_route_flicker_on_non_pinned_warning_network_recovers_and
         inner.last_route_fp = Some(compute_local_route_fingerprint(None));
     }
 
-    // 1. Transient route flicker where probe returns None: stays recoverable (not Blocked)
-    //    and preserves session_allowed_providers.
+    // 1. Transient route flicker where probe returns None: window-first freezes Gate::Pending
+    //    immediately and preserves session_allowed_providers; background probe retries and
+    //    recovers Gate::Open + hides popup once unchanged baseline IP "8.8.8.8" returns.
     guard.inner.lock().await.route_dirty = true;
     guard.check_route_and_tick(&env).await;
     assert_eq!(guard.gate(), Gate::Pending);
     assert!(state.is_provider_session_allowed("anthropic").await);
     assert!(state.get_data().await.blocked_providers.is_empty());
+    assert_eq!(io.count("interceptor://risk-detected"), 1);
 
-    // 2. Next regular probe gets unchanged IP "8.8.8.8" on non-pinned warning network:
-    //    restores Gate::Open and keeps session allowance.
-    guard.inner.lock().await.last_probe =
-        Instant::now().checked_sub(Duration::from_millis(PROBE_MIN_GAP_MS + 10));
-    guard.check_route_and_tick(&env).await;
+    guard.wait_probe_settled_for_test().await;
     assert_eq!(probe_calls.load(Ordering::SeqCst), 2);
     assert_eq!(guard.gate(), Gate::Open);
     assert!(state.is_provider_session_allowed("anthropic").await);
     assert!(state.get_data().await.blocked_providers.is_empty());
-    assert_eq!(io.count("interceptor://risk-detected"), 0);
+    assert!(io.hides.load(Ordering::SeqCst) >= 1);
+    assert!(env.hold_queue.current_alert().is_none());
 }
 
 #[tokio::test(start_paused = true)]

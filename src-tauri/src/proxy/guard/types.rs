@@ -226,14 +226,39 @@ pub(super) struct Inner {
     pub(super) dirty_since: Option<Instant>,
     /// Background audit of the current alert (cancelled when the alert is superseded).
     pub(super) audit_abort: Option<AbortHandle>,
+    /// True while a `ProbeChanged` background probe task is actively resolving the egress IP.
+    pub(super) probe_in_flight: bool,
+    /// Background probe+audit task for `ProbeChanged` (cancelled on newer route change or kill-switch).
+    pub(super) probe_abort: Option<AbortHandle>,
     /// Exit IP on which `PauseMode::UntilNetworkChange` was engaged (unchanged ticks stay paused).
     pub(super) paused_ip: Option<String>,
+    /// True when `PauseMode::UntilNetworkChange` was engaged during `phase: "detecting"` before
+    /// the new route's egress IP was resolved; the first completed probe on `paused_route_fp`
+    /// binds `paused_ip = Some(probed_ip)` without clearing the pause or re-opening the popup.
+    pub(super) pending_pause_ip_bind: bool,
+    /// Route fingerprint active when `pending_pause_ip_bind` was armed.
+    pub(super) paused_route_fp: Option<String>,
 }
 
 impl Inner {
-    /// Withdraws the current alert: its id and epoch stop being valid, its audit is cancelled.
+    /// Withdraws the current alert: its id and epoch stop being valid, its probe/audit is cancelled.
     /// The caller removes the returned alert from the hold queue.
     pub(super) fn invalidate_alert(&mut self) -> Option<Pending> {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.probe_in_flight = false;
+        if let Some(abort) = self.probe_abort.take() {
+            abort.abort();
+        }
+        if let Some(abort) = self.audit_abort.take() {
+            abort.abort();
+        }
+        self.pending.take()
+    }
+
+    /// Withdraws the current alert and cancels any in-flight audit while allowing an already
+    /// running `ProbeChanged` IP probe to finish so it can bind `paused_ip` for
+    /// `PauseMode::UntilNetworkChange`.
+    pub(super) fn invalidate_alert_keep_probe(&mut self) -> Option<Pending> {
         self.epoch = self.epoch.wrapping_add(1);
         if let Some(abort) = self.audit_abort.take() {
             abort.abort();
@@ -274,6 +299,9 @@ pub struct NetworkGuard {
     pub(super) self_weak: OnceLock<Weak<NetworkGuard>>,
     pub(super) wake_notify: Arc<tokio::sync::Notify>,
     pub(super) loop_running: AtomicBool,
+    /// Prevents overlapping background `refresh_if_services_changed` / `reconcile_browser_pac_prefs` runs.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(super) sysproxy_sync_in_flight: AtomicBool,
     /// Lock-free re-audit flag set by `kick_reaudit` / `sync_provider_route_change` /
     /// `sync_provider_monitoring_enabled` so signals are never dropped when `inner` is locked.
     pub(super) force_reaudit: AtomicBool,
@@ -285,6 +313,8 @@ pub struct NetworkGuard {
     /// from an earlier network cannot re-block after recovery.
     pub(super) restore_epoch: AtomicU64,
     pub(super) client: reqwest::Client,
+    /// Cached client configured with the current `chained_proxy` so ticks do not rebuild it.
+    pub(super) chained_client: std::sync::Mutex<Option<(String, reqwest::Client)>>,
 }
 
 /// Computes the local default-route network interface fingerprint in < 0.05ms

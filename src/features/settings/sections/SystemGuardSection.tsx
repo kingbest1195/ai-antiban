@@ -10,6 +10,7 @@ interface SystemGuardSectionProps {
   autoUpdateEnabled?: boolean;
   coworkStatus: CoworkGuardStatus | null;
   coworkBusy: boolean;
+  coworkError?: string | null;
   onInstallCoworkGuard: () => void;
   onRefreshCoworkGuard: () => void;
   exportBusy: boolean;
@@ -31,6 +32,7 @@ export function SystemGuardSection({
   autoUpdateEnabled = true,
   coworkStatus,
   coworkBusy,
+  coworkError = null,
   onInstallCoworkGuard,
   onRefreshCoworkGuard,
   exportBusy,
@@ -149,6 +151,16 @@ export function SystemGuardSection({
                 {copy.coworkGuard.actionRecheck}
               </Button>
             </div>
+            {coworkError && (
+              <Banner
+                className="zs-settings__result"
+                tone="danger"
+                role="alert"
+                title={copy.coworkGuard.toastErrTitle}
+              >
+                {coworkError}
+              </Banner>
+            )}
           </>
         )}
       </Section>

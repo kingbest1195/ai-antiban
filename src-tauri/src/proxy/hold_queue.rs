@@ -303,6 +303,24 @@ impl HoldQueue {
             .any(|k| !k.starts_with("sim-"))
     }
 
+    /// Returns `true` when any real (non-simulation, non-checkout) alert or hold entry is active.
+    /// Used by [`crate::proxy::guard::NetworkGuard`] so background route ticks when all AI
+    /// providers are routed/disabled never hide an active PayShield `checkout:*` popup.
+    pub async fn has_active_non_checkout_alerts_or_holds(&self) -> bool {
+        if self
+            .alert_slot()
+            .as_ref()
+            .is_some_and(|a| !a.is_simulation && a.scope != "checkout")
+        {
+            return true;
+        }
+        self.entries
+            .read()
+            .await
+            .iter()
+            .any(|(k, entry)| !k.starts_with("sim-") && !is_checkout_entry(k, entry))
+    }
+
     /// Resolves a single held connection (and any coalesced waiters on the same hold ID).
     pub async fn resolve(&self, id: &str, resolution: HoldResolution) -> bool {
         let mut w = self.entries.write().await;

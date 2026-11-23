@@ -50,10 +50,12 @@ impl NetworkGuard {
             self_weak: OnceLock::new(),
             wake_notify: Arc::new(tokio::sync::Notify::new()),
             loop_running: AtomicBool::new(false),
+            sysproxy_sync_in_flight: AtomicBool::new(false),
             force_reaudit: AtomicBool::new(false),
             pending_route_sync: std::sync::Mutex::new(HashMap::new()),
             restore_epoch: AtomicU64::new(0),
             client,
+            chained_client: std::sync::Mutex::new(None),
         }
     }
 
@@ -211,6 +213,8 @@ impl NetworkGuard {
                 }
                 g.route_dirty = true;
                 g.paused_ip = None;
+                g.pending_pause_ip_bind = false;
+                g.paused_route_fp = None;
                 if !self.is_manual_killswitch() {
                     let mut pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
                     if *pm == PauseMode::UntilNetworkChange {

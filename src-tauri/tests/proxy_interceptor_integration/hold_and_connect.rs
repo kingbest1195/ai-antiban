@@ -367,3 +367,105 @@ async fn test_connect_yellow_passes_without_hold_or_block() {
         mock_handle.abort();
     }
 }
+
+/// Integration Test 3c: `connect.rs` passes active `chained_proxy` into `check_route_fingerprint_sync`
+/// so CONNECT requests while an external system proxy (Clash/v2rayN/Happ) is active do NOT
+/// falsely trigger a `route_dirty` / `Gate::Pending` stall.
+#[tokio::test]
+async fn test_connect_with_active_chained_proxy_does_not_trip_route_fingerprint_sync() {
+    zastava_lib::sysproxy::force_os_dry_run();
+
+    let mock_target = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock target");
+    let mock_addr = mock_target.local_addr().unwrap();
+    let mock_handle = tokio::spawn(async move {
+        if let Ok((mut stream, _)) = mock_target.accept().await {
+            let mut buf = [0u8; 128];
+            if let Ok(n) = stream.read(&mut buf).await
+                && n > 0
+            {
+                let _ = stream.write_all(&buf[..n]).await;
+            }
+        }
+    });
+
+    let auditor = offline_test_auditor();
+    auditor
+        .resolver
+        .set_cached(NetworkTelemetry {
+            ip: "185.100.10.2".to_string(),
+            country_code: "DE".to_string(),
+            hostname: None,
+            asn: Some(20473),
+            org: Some("Choopa".to_string()),
+            isp: Some("Choopa".to_string()),
+            timezone: Some("Europe/Berlin".to_string()),
+            resolved_at: current_timestamp(),
+        })
+        .await;
+
+    let state = AppState::new_in_memory();
+    let hold_queue = Arc::new(HoldQueue::new());
+    let cp_str = "127.0.0.1:41999".to_string();
+    let cp_str_for_transit = cp_str.clone();
+    let transit = zastava_lib::proxy::transit::Transit::system()
+        .with_chained(Arc::new(move || Some(cp_str_for_transit.clone())));
+
+    let server = Arc::new(
+        ProxyServer::bind_ephemeral(auditor, state, Arc::clone(&hold_queue), Some(mock_addr))
+            .await
+            .expect("Proxy server bind failed")
+            .with_transit(transit),
+    );
+
+    // Seed guard with a trusted baseline and a route fingerprint matching `chained_proxy`.
+    server
+        .guard
+        .seed_baseline_for_test("185.100.10.2", "DE", Some(&cp_str))
+        .await;
+    assert_eq!(server.guard.gate(), zastava_lib::proxy::guard::Gate::Open);
+
+    let bound_addr = server.bound_addr;
+    let srv_clone = Arc::clone(&server);
+    let srv_handle = tokio::spawn(async move {
+        srv_clone.run().await;
+    });
+
+    let mut client = match TcpStream::connect(bound_addr).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("Skipping test due to sandbox network restrictions: {e}");
+            return;
+        }
+        Err(e) => panic!("Failed to connect to proxy: {e}"),
+    };
+
+    let req = "CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n";
+    client.write_all(req.as_bytes()).await.unwrap();
+    client.flush().await.unwrap();
+
+    let mut resp_buf = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(4), client.read(&mut resp_buf))
+        .await
+        .expect("CONNECT timed out (false route_dirty stall?)")
+        .unwrap();
+    let resp_str = String::from_utf8_lossy(&resp_buf[..n]);
+    assert!(
+        resp_str.contains("HTTP/1.1 200 Connection Established"),
+        "Expected 200 Connection Established, got: {resp_str}"
+    );
+    assert_eq!(server.guard.gate(), zastava_lib::proxy::guard::Gate::Open);
+    assert!(!server.guard.check_route_fingerprint_sync(Some(&cp_str)));
+    assert!(hold_queue.current_alert().is_none());
+
+    let msg = b"CHAINED_FP_OK\n";
+    client.write_all(msg).await.unwrap();
+    client.flush().await.unwrap();
+    let mut echo = [0u8; 64];
+    let en = client.read(&mut echo).await.unwrap();
+    assert_eq!(&echo[..en], msg);
+
+    srv_handle.abort();
+    mock_handle.abort();
+}

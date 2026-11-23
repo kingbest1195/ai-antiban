@@ -322,3 +322,7 @@ fn single_source(
 #[cfg(test)]
 #[path = "../whoami_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../whoami_geo_tests.rs"]
+mod geo_tests;

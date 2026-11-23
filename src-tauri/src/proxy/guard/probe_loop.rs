@@ -14,8 +14,7 @@ use crate::state::KNOWN_PROVIDERS;
 #[cfg(any(test, feature = "test-support"))]
 use super::types::{AUDIT_TIMEOUT_SECS, AuditFn, GuardIo, ProbeFn, ResolveFn};
 use super::types::{
-    Env, Gate, GuardCtx, Inner, NetworkGuard, PROBE_MIN_GAP_MS, ROUTE_CHECK_INTERVAL_MS, TickPlan,
-    compute_local_route_fingerprint,
+    Env, Gate, GuardCtx, NetworkGuard, PROBE_MIN_GAP_MS, ROUTE_CHECK_INTERVAL_MS, TickPlan,
 };
 
 impl NetworkGuard {
@@ -81,6 +80,7 @@ impl NetworkGuard {
         self.inner.lock().await.last_probe = None;
         if let Some(env) = self.env.get() {
             self.check_route_and_tick(env).await;
+            self.wait_probe_settled_for_test().await;
         }
     }
 
@@ -99,30 +99,52 @@ impl NetworkGuard {
                     guard.check_route_and_tick(env).await;
                     #[cfg(not(test))]
                     {
-                        let chained = crate::sysproxy::get_chained_proxy();
-                        let current_fp = compute_local_route_fingerprint(chained.as_deref());
+                        let current_fp = guard.current_local_route_fingerprint();
                         let sysproxy_active = crate::sysproxy::is_sysproxy_active();
                         let os_pac_deferred = crate::sysproxy::is_os_pac_deferred();
-                        let needs_refresh = sync_tracker.should_refresh(
-                            &current_fp,
-                            sysproxy_active,
-                            os_pac_deferred,
-                        );
+                        let sync_busy = guard.sysproxy_sync_in_flight.load(Ordering::SeqCst);
+                        let needs_refresh = !sync_busy
+                            && sync_tracker.should_refresh(
+                                &current_fp,
+                                sysproxy_active,
+                                os_pac_deferred,
+                            );
                         let should_reconcile_prefs =
-                            !cfg!(target_os = "windows") && n.is_multiple_of(20);
+                            !sync_busy && !cfg!(target_os = "windows") && n.is_multiple_of(20);
 
                         if needs_refresh || should_reconcile_prefs {
-                            let _ = tokio::task::spawn_blocking(move || {
-                                if needs_refresh {
-                                    crate::sysproxy::refresh_if_services_changed();
-                                }
-                                if should_reconcile_prefs {
-                                    crate::sysproxy::reconcile_browser_pac_prefs(None);
-                                }
-                            })
-                            .await;
-                        }
-                        if needs_refresh || should_reconcile_prefs || n.is_multiple_of(20) {
+                            if !guard.sysproxy_sync_in_flight.swap(true, Ordering::SeqCst) {
+                                let guard_sync = Arc::clone(&guard);
+                                let env_sync = env.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    struct ResetFlag<'a>(&'a std::sync::atomic::AtomicBool);
+                                    impl Drop for ResetFlag<'_> {
+                                        fn drop(&mut self) {
+                                            self.0.store(false, Ordering::SeqCst);
+                                        }
+                                    }
+                                    let _reset = ResetFlag(&guard_sync.sysproxy_sync_in_flight);
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        if needs_refresh {
+                                            crate::sysproxy::refresh_if_services_changed();
+                                        }
+                                        if should_reconcile_prefs {
+                                            crate::sysproxy::reconcile_browser_pac_prefs(None);
+                                        }
+                                    })
+                                    .await;
+                                    env_sync.auditor.set_protection_flags(
+                                        crate::auditor::AuditProtectionFlags {
+                                            sysproxy_active: crate::sysproxy::is_sysproxy_active(),
+                                            cli_or_sandbox_protection_active:
+                                                crate::sysproxy::is_cli_protection_enabled()
+                                                    || crate::sysproxy::is_browser_pac_policy_active(),
+                                            os_pac_deferred: crate::sysproxy::is_os_pac_deferred(),
+                                        },
+                                    );
+                                });
+                            }
+                        } else if n.is_multiple_of(20) {
                             env.auditor.set_protection_flags(
                                 crate::auditor::AuditProtectionFlags {
                                     sysproxy_active: crate::sysproxy::is_sysproxy_active(),
@@ -165,16 +187,49 @@ impl NetworkGuard {
     }
 
     /// Fetches the current egress IP (Cloudflare trace, falls back to ipify),
-    /// honoring an active external `chained_proxy` when configured.
+    /// honoring an active external `chained_proxy` when configured (caching its `reqwest::Client`).
     async fn probe_ip(&self) -> Option<String> {
-        let proxied = crate::sysproxy::get_chained_proxy().and_then(|cp| {
-            let proxy = reqwest::Proxy::all(&cp).ok()?;
-            reqwest::Client::builder()
-                .proxy(proxy)
-                .timeout(Duration::from_secs(5))
-                .build()
-                .ok()
-        });
+        let proxied = match crate::sysproxy::get_chained_proxy() {
+            Some(cp) => {
+                let cached = {
+                    let cache = self
+                        .chained_client
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    cache
+                        .as_ref()
+                        .filter(|(cached_cp, _)| *cached_cp == cp)
+                        .map(|(_, client)| client.clone())
+                };
+                if let Some(client) = cached {
+                    Some(client)
+                } else {
+                    reqwest::Proxy::all(&cp).ok().and_then(|proxy| {
+                        let client = reqwest::Client::builder()
+                            .proxy(proxy)
+                            .timeout(Duration::from_millis(3000))
+                            .pool_max_idle_per_host(0)
+                            .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
+                            .build()
+                            .ok()?;
+                        let mut cache = self
+                            .chained_client
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        *cache = Some((cp, client.clone()));
+                        Some(client)
+                    })
+                }
+            }
+            None => {
+                let mut cache = self
+                    .chained_client
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                *cache = None;
+                None
+            }
+        };
         let client = proxied.as_ref().unwrap_or(&self.client);
         if let Ok(resp) = client.get("https://1.1.1.1/cdn-cgi/trace").send().await
             && let Ok(text) = resp.text().await
@@ -253,13 +308,22 @@ impl NetworkGuard {
             if self.gate() != Gate::Open
                 || self.any_provider_gate_closed()
                 || inner.pending.is_some()
-                || env.hold_queue.has_active_non_sim_holds().await
+                || env
+                    .hold_queue
+                    .has_active_non_checkout_alerts_or_holds()
+                    .await
             {
+                let had_non_checkout = inner.invalidate_alert().is_some()
+                    || env
+                        .hold_queue
+                        .has_active_non_checkout_alerts_or_holds()
+                        .await;
                 self.restore_epoch.fetch_add(1, Ordering::SeqCst);
-                inner.invalidate_alert();
-                env.hold_queue.cancel_all_superseded().await;
+                let cancelled = env.hold_queue.cancel_all_superseded().await;
                 self.set_gate(Gate::Open);
-                self.hide_popup(env);
+                if had_non_checkout || cancelled > 0 {
+                    self.hide_popup(env);
+                }
             }
             return TickPlan::Done;
         }
@@ -305,34 +369,24 @@ impl NetworkGuard {
 
         inner.last_route_fp = Some(current_fp.clone());
 
+        if inner.probe_in_flight {
+            return TickPlan::Done;
+        }
         if let Some(t) = inner.last_probe
             && t.elapsed() < Duration::from_millis(PROBE_MIN_GAP_MS)
         {
             return TickPlan::Done;
         }
+        inner.last_probe = Some(Instant::now());
         TickPlan::ProbeRegular(current_fp)
-    }
-
-    /// True when the route moved (or a CONNECT flagged it) while a probe was in flight. Such a
-    /// probe may have travelled over the old route, so it must never open the gate: the gate is
-    /// kept closed and the next tick (fingerprint differs / `route_dirty`) handles the change.
-    pub(super) fn probe_is_stale(&self, inner: &Inner, planned_fp: &str) -> bool {
-        let chained = crate::sysproxy::get_chained_proxy();
-        let stale =
-            inner.route_dirty || compute_local_route_fingerprint(chained.as_deref()) != planned_fp;
-        if stale && self.gate() == Gate::Open {
-            self.set_gate(Gate::Pending);
-        }
-        stale
     }
 
     pub(super) async fn check_route_and_tick(self: &Arc<Self>, env: &Env) {
         self.register_self_weak();
-        let _tick = self.tick_lock.lock().await;
+        let tick_guard = self.tick_lock.lock().await;
         // Include external system proxy (`chained_proxy`) so switching Clash/v2rayN/Happ
         // triggers immediate re-audit and DNS cache invalidation even if local IP is unchanged.
-        let chained = crate::sysproxy::get_chained_proxy();
-        let current_fp = compute_local_route_fingerprint(chained.as_deref());
+        let current_fp = self.current_local_route_fingerprint();
         let st_data = env.state.get_data().await;
         let enabled_unrouted = st_data.enabled_unrouted_providers();
         if !self.is_manual_killswitch() {
@@ -351,45 +405,17 @@ impl NetworkGuard {
         {
             TickPlan::Done => {}
             TickPlan::ProbeChanged(t0, planned_fp) => {
-                crate::routing::net::clear_entry_dns_cache();
-                crate::proxy::transit::invalidate_all_dns_caches();
-                let already_blocked = self.currently_blocked_set(&st_data);
-                self.freeze_providers_pending(&st_data, &enabled_unrouted, &already_blocked);
-                // 2. Probe external IP (no lock held: other tasks keep working meanwhile)
-                let probed = self.probe(env).await;
-                let mut inner = self.inner.lock().await;
-                self.apply_changed_probe(env, &mut inner, probed, t0, &planned_fp, was_blocked)
+                // Window-first: freeze gates, abort tunnels, emit risk-detected (`phase: detecting`),
+                // and spawn the background probe + audit without holding `tick_lock` or `inner`.
+                self.begin_changed_probe(env, t0, planned_fp, was_blocked)
                     .await;
             }
             TickPlan::ProbeRegular(planned_fp) => {
+                drop(tick_guard);
                 let probed = self.probe(env).await;
-                let mut inner = self.inner.lock().await;
-                self.apply_regular_probe(env, &mut inner, probed, &planned_fp, was_blocked)
+                self.apply_regular_probe_unlocked(env, probed, &planned_fp, was_blocked)
                     .await;
             }
-        }
-    }
-
-    pub(super) async fn unblock_disabled_and_routed(
-        &self,
-        env: &Env,
-        st: &crate::state::AppStateData,
-    ) {
-        if self.is_manual_killswitch() {
-            return;
-        }
-        let enabled_unrouted = st.enabled_unrouted_providers();
-        for p in KNOWN_PROVIDERS {
-            if st.blocked_providers.contains(p) && !enabled_unrouted.contains(&p) {
-                let _ = env.state.unblock_provider(p).await;
-            }
-        }
-    }
-
-    pub async fn tick(self: &Arc<Self>, ctx: &GuardCtx) {
-        match self.env.get() {
-            Some(env) => self.check_route_and_tick(env).await,
-            None => self.check_route_and_tick(&Env::from_ctx(ctx.clone())).await,
         }
     }
 }

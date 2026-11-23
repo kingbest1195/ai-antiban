@@ -1,16 +1,61 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use tokio::sync::MutexGuard;
 
 use super::policy::{all_excepted, all_unrouted_session_or_excepted, is_blocked_geo_code};
 use super::types::{Baseline, Env, Inner, NetworkGuard, PauseMode};
 
+const OFFLINE_PROBE_RETRY_DELAYS_MS: &[u64] = &[350, 500, 750, 1000, 1000];
+const OFFLINE_PROBE_MAX_BUDGET_SECS: u64 = 6;
+
 impl NetworkGuard {
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_same_baseline_locked(
+    pub(super) async fn probe_with_offline_retries(
         self: &Arc<Self>,
         env: &Env,
-        inner: &mut Inner,
+        alert_id: &Option<String>,
+        epoch: u64,
+        planned_fp: &str,
+    ) -> Option<String> {
+        let mut probed = self.probe(env).await;
+        if probed.is_some() {
+            return probed;
+        }
+        let retry_start = tokio::time::Instant::now();
+        let max_budget = Duration::from_secs(OFFLINE_PROBE_MAX_BUDGET_SECS);
+        for &delay_ms in OFFLINE_PROBE_RETRY_DELAYS_MS {
+            if retry_start.elapsed() >= max_budget {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            {
+                let inner = self.inner.lock().await;
+                let pause_waiting = self.pause_mode() == PauseMode::UntilNetworkChange
+                    && inner.pending_pause_ip_bind
+                    && inner.paused_route_fp.as_deref() == Some(planned_fp);
+                if self.is_manual_killswitch()
+                    || (!pause_waiting
+                        && (inner.epoch != epoch
+                            || alert_id
+                                .as_ref()
+                                .is_some_and(|id| !inner.is_current(id, epoch))))
+                {
+                    return None;
+                }
+            }
+            probed = self.probe(env).await;
+            if probed.is_some() {
+                break;
+            }
+        }
+        probed
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_same_baseline(
+        self: &Arc<Self>,
+        env: &Env,
+        mut inner: MutexGuard<'_, Inner>,
         ip: &str,
         baseline_trusted: bool,
         baseline_country: Option<&str>,
@@ -25,7 +70,9 @@ impl NetworkGuard {
                 || inner.pending.is_some()
                 || was_blocked
             {
-                if self.probe_is_stale(inner, planned_fp) {
+                if self.probe_is_stale(&inner, planned_fp) {
+                    inner.last_probe = None;
+                    inner.route_dirty = true;
                     return true;
                 }
                 let country_ok = baseline_country.is_some_and(|c| !is_blocked_geo_code(c));
@@ -34,12 +81,12 @@ impl NetworkGuard {
                     && country_ok
                     && !self.is_manual_killswitch()
                 {
-                    self.restore_locked(env, inner).await;
+                    self.restore_locked(env, &mut inner).await;
                     let epoch = inner.epoch;
                     self.spawn_verify_restored_baseline(env, ip.to_string(), epoch);
                 } else {
-                    self.verify_and_restore_baseline_locked(env, inner, ip, was_blocked)
-                        .await;
+                    drop(inner);
+                    self.verify_and_restore_baseline(env, ip, was_blocked).await;
                 }
             } else {
                 inner.handled_ip = None;
@@ -57,20 +104,22 @@ impl NetworkGuard {
             }
             inner.handled_ip = None;
             if self.any_provider_gate_closed() || inner.pending.is_some() || was_blocked {
-                if self.probe_is_stale(inner, planned_fp) {
+                if self.probe_is_stale(&inner, planned_fp) {
+                    inner.last_probe = None;
+                    inner.route_dirty = true;
                     return true;
                 }
-                self.restore_locked(env, inner).await;
+                self.restore_locked(env, &mut inner).await;
             }
             return true;
         }
 
         if needs_reaudit || was_blocked {
-            if self.probe_is_stale(inner, planned_fp) {
+            if self.probe_is_stale(&inner, planned_fp) {
                 return true;
             }
-            self.verify_and_restore_baseline_locked(env, inner, ip, was_blocked)
-                .await;
+            drop(inner);
+            self.verify_and_restore_baseline(env, ip, was_blocked).await;
             return true;
         }
 
@@ -80,110 +129,35 @@ impl NetworkGuard {
         !returning_from_other_ip
     }
 
-    /// The route fingerprint changed: decide what the probed IP means.
-    pub(super) async fn apply_changed_probe(
-        self: &Arc<Self>,
-        env: &Env,
-        inner: &mut Inner,
-        probed: Option<String>,
-        t0: Instant,
-        planned_fp: &str,
-        was_blocked: bool,
-    ) {
-        inner.last_probe = Some(Instant::now());
-        let Some(new_ip) = probed else {
-            self.abort_active_tunnels();
-            env.auditor.resolver.invalidate_direct_cache().await;
-            let old_country = inner
-                .baseline
-                .as_ref()
-                .and_then(|b| b.country.clone())
-                .unwrap_or_else(|| "??".to_string());
-            env.state
-                .stats()
-                .record_intercepted("all", "NetworkGuard", "HELD", &old_country);
-            return;
-        };
-
-        let needs_reaudit = std::mem::take(&mut inner.needs_reaudit);
-        if inner
-            .pending
-            .as_ref()
-            .is_some_and(|p| p.target_ip == new_ip)
-            && !needs_reaudit
-        {
-            let st = env.state.get_data().await;
-            self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
-            return;
-        }
-
-        let prev_observed_ip = inner.observed_ip.replace(new_ip.clone());
-        let prev_paused_ip = inner.paused_ip.clone();
-        // Local network interface / route changed: clear temporary pause-until-network-change.
-        let pause_cleared = self.clear_until_network_change_locked(inner);
-        if pause_cleared {
-            inner.handled_ip = None;
-        }
-
-        if let Some((baseline_ip, baseline_trusted, baseline_country)) = inner
-            .baseline
-            .as_ref()
-            .map(|b| (b.ip.clone(), b.trusted, b.country.clone()))
-            && baseline_ip == new_ip
-        {
-            let pending_other_ip = inner
-                .pending
-                .as_ref()
-                .is_some_and(|p| p.target_ip != new_ip);
-            let observed_other_ip = prev_observed_ip
-                .as_deref()
-                .is_some_and(|prev| prev != new_ip.as_str());
-            let paused_other_ip = prev_paused_ip
-                .as_deref()
-                .is_some_and(|prev| prev != new_ip.as_str());
-            let returning_from_other_ip =
-                pending_other_ip || observed_other_ip || paused_other_ip || pause_cleared;
-            if self
-                .handle_same_baseline_locked(
-                    env,
-                    inner,
-                    &new_ip,
-                    baseline_trusted,
-                    baseline_country.as_deref(),
-                    planned_fp,
-                    was_blocked,
-                    needs_reaudit,
-                    returning_from_other_ip,
-                )
-                .await
-            {
-                return;
-            }
-        }
-
-        if inner.handled_ip.as_deref() == Some(new_ip.as_str()) && !needs_reaudit {
-            let st = env.state.get_data().await;
-            self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
-            return;
-        }
-
-        self.handle_change_locked(env, inner, new_ip, t0).await;
-    }
-
     /// Periodic probe without a route change.
-    pub(super) async fn apply_regular_probe(
+    pub(super) async fn apply_regular_probe_unlocked(
         self: &Arc<Self>,
         env: &Env,
-        inner: &mut Inner,
         probed: Option<String>,
         planned_fp: &str,
         was_blocked: bool,
     ) {
+        let mut inner = self.inner.lock().await;
         inner.last_probe = Some(Instant::now());
         let t0 = Instant::now();
         let Some(ip) = probed else {
             return; // offline: nothing to compare
         };
+        if inner.probe_in_flight {
+            return;
+        }
+
+        if self.pause_mode() == PauseMode::UntilNetworkChange && inner.pending_pause_ip_bind {
+            let route_still_same = !inner.route_dirty
+                && (inner.paused_route_fp.is_none()
+                    || inner.paused_route_fp == inner.last_route_fp)
+                && !self.probe_is_stale(&inner, planned_fp);
+            if route_still_same {
+                inner.paused_ip = Some(ip.clone());
+                inner.handled_ip = Some(ip.clone());
+                inner.pending_pause_ip_bind = false;
+            }
+        }
 
         let prev_paused_ip = inner.paused_ip.clone();
         let mut pinned_untrapped = false;
@@ -213,7 +187,7 @@ impl NetworkGuard {
             inner.needs_reaudit = true;
         }
         let prev_observed_ip = inner.observed_ip.replace(ip.clone());
-        let pause_cleared = self.clear_until_network_change_locked(inner) || pinned_untrapped;
+        let pause_cleared = self.clear_until_network_change_locked(&mut inner) || pinned_untrapped;
         if pause_cleared {
             inner.handled_ip = None;
         }
@@ -238,7 +212,7 @@ impl NetworkGuard {
                 && (ip_changed || pause_cleared || needs_reaudit)
                 && (was_blocked || self.any_provider_gate_closed() || inner.pending.is_some())
             {
-                self.restore_locked(env, inner).await;
+                self.restore_locked(env, &mut inner).await;
             } else {
                 if let Some(p) = inner.invalidate_alert() {
                     env.hold_queue.remove(&p.id).await;
@@ -286,8 +260,8 @@ impl NetworkGuard {
             let still_blocked =
                 !st_after.blocked_providers.is_empty() || self.any_provider_gate_blocked();
             if still_blocked && !self.is_manual_killswitch() {
-                self.verify_and_restore_baseline_locked(env, inner, &ip, true)
-                    .await;
+                drop(inner);
+                self.verify_and_restore_baseline(env, &ip, true).await;
             }
             return;
         };
@@ -311,7 +285,7 @@ impl NetworkGuard {
             let returning_from_other_ip =
                 pending_other_ip || observed_other_ip || paused_other_ip || pause_cleared;
             if self
-                .handle_same_baseline_locked(
+                .handle_same_baseline(
                     env,
                     inner,
                     &ip,
@@ -326,12 +300,19 @@ impl NetworkGuard {
             {
                 return;
             }
+            // Re-acquire lock when falling through from untrusted baseline return.
+            let mut inner = self.inner.lock().await;
+            if inner.handled_ip.as_deref() == Some(ip.as_str()) && !needs_reaudit {
+                return;
+            }
+            self.handle_change_locked(env, &mut inner, ip, t0).await;
+            return;
         }
 
         if inner.handled_ip.as_deref() == Some(ip.as_str()) && !needs_reaudit {
             return; // user already decided about this network
         }
 
-        self.handle_change_locked(env, inner, ip, t0).await;
+        self.handle_change_locked(env, &mut inner, ip, t0).await;
     }
 }

@@ -35,7 +35,17 @@ impl NetworkGuard {
             if !inner.is_current(&id, epoch) {
                 return; // superseded by a newer change or already accepted/restored
             }
-            let pending = inner.invalidate_alert();
+            let was_detecting_unresolved = inner.probe_in_flight
+                || inner.route_dirty
+                || inner
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| p.target_ip.is_empty());
+            let pending = if !allow && was_detecting_unresolved {
+                inner.invalidate_alert_keep_probe()
+            } else {
+                inner.invalidate_alert()
+            };
             env.hold_queue.remove(&id).await;
             let (tel, target_ip, clear_old_state, affected, already_blocked, healthy) =
                 match pending {
@@ -141,11 +151,11 @@ impl NetworkGuard {
                         "Запросы на паузе до следующей смены сети".to_string(),
                     ));
                 }
-                inner.paused_ip = inner
-                    .observed_ip
-                    .clone()
-                    .or_else(|| (!target_ip.is_empty()).then_some(target_ip.clone()))
-                    .or_else(|| inner.handled_ip.clone());
+                guard.bind_pause_ip_locked(
+                    &mut inner,
+                    Some(target_ip.as_str()),
+                    was_detecting_unresolved,
+                );
             } else if to_block.is_empty() && !guard.is_manual_killswitch() {
                 guard.clear_until_network_change_locked(&mut inner);
                 if remaining_open.len() == enabled_unrouted.len() {
@@ -171,6 +181,13 @@ impl NetworkGuard {
     }
 
     pub(super) fn hide_popup(&self, env: &Env) {
+        if env
+            .hold_queue
+            .current_alert()
+            .is_some_and(|a| a.scope == "checkout")
+        {
+            return;
+        }
         env.io.hide_alert_popup();
         env.io.emit(
             "interceptor://resolved",

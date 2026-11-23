@@ -181,6 +181,6 @@ describe("useCoworkGuardWatcher (Bug #7 global watcher)", () => {
 
     const updated = await hookState!.repair();
     expect(mockedRepair).toHaveBeenCalledTimes(1);
-    expect(updated).toEqual(fixed);
+    expect(updated).toEqual({ status: fixed, error: null });
   });
 });

@@ -5,20 +5,14 @@ use super::{APPLY_COWORK_GUARD_ONCE_ARG, COWORK_TASK_FULL_NAME};
 /// Parses `reg query ... /v Start` stdout and extracts the `REG_DWORD` value (e.g. `0x2` -> `2`).
 pub fn parse_reg_start_dword(output: &str) -> Option<u32> {
     for line in output.lines() {
-        let trimmed = line.trim();
-        let mut parts = trimmed.split_whitespace();
-        let Some(name) = parts.next() else {
+        let mut parts = line.split_whitespace();
+        let (Some(name), Some(_), Some(raw_val)) = (parts.next(), parts.next(), parts.next())
+        else {
             continue;
         };
         if !name.eq_ignore_ascii_case("Start") {
             continue;
         }
-        let Some(_reg_type) = parts.next() else {
-            continue;
-        };
-        let Some(raw_val) = parts.next() else {
-            continue;
-        };
         if let Some(hex) = raw_val
             .strip_prefix("0x")
             .or_else(|| raw_val.strip_prefix("0X"))
@@ -41,27 +35,106 @@ pub fn parse_sc_running(output: &str) -> bool {
     })
 }
 
-/// Verifies Task Scheduler XML for `\Zastava\CoworkVMServiceManualGuard`:
-/// - Boot trigger (`<BootTrigger>`)
-/// - Principal is `SYSTEM` (`S-1-5-18`, `NT AUTHORITY\SYSTEM`, `NT AUTHORITY\СИСТЕМА`, `<UserId>SYSTEM</UserId>`)
-/// - Highest privileges (`<RunLevel>HighestAvailable</RunLevel>`)
-/// - Runs `zastava.exe` with `--apply-cowork-guard-once` (no unexpanded `%LOCALAPPDATA%` or shells)
-pub fn is_task_xml_healthy(xml: &str) -> bool {
+fn extract_tag_slice<'a>(lower: &'a str, tag: &str) -> Option<&'a str> {
+    let prefix = format!("<{tag}");
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find(&prefix) {
+        let start = from + rel;
+        let after = start + prefix.len();
+        let next = lower.as_bytes().get(after).copied()?;
+        if !matches!(next, b'>' | b'/' | b' ' | b'\t' | b'\r' | b'\n') {
+            from = after;
+            continue;
+        }
+        let close_open = lower[after..].find('>')? + after;
+        if lower.as_bytes().get(close_open.saturating_sub(1)) == Some(&b'/') {
+            return Some("");
+        }
+        let end_tag = format!("</{tag}>");
+        if let Some(end_rel) = lower[close_open + 1..].find(&end_tag) {
+            return Some(&lower[close_open + 1..close_open + 1 + end_rel]);
+        }
+        return Some(&lower[close_open + 1..]);
+    }
+    None
+}
+
+fn has_enabled_false(fragment: &str) -> bool {
+    extract_tag_slice(fragment, "enabled").is_some_and(|val| val.trim() == "false")
+}
+
+fn has_system_userid(principals_body: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = principals_body[from..].find("<userid") {
+        let start = from + rel + "<userid".len();
+        let Some(next) = principals_body.as_bytes().get(start).copied() else {
+            break;
+        };
+        if !matches!(next, b'>' | b' ' | b'\t' | b'\r' | b'\n') {
+            from = start;
+            continue;
+        }
+        let Some(gt_rel) = principals_body[start..].find('>') else {
+            break;
+        };
+        let content_start = start + gt_rel + 1;
+        let Some(end_rel) = principals_body[content_start..].find("</userid>") else {
+            break;
+        };
+        let val = principals_body[content_start..content_start + end_rel].trim();
+        if matches!(
+            val,
+            "s-1-5-18" | "nt authority\\system" | "nt authority\\система" | "system" | "система"
+        ) {
+            return true;
+        }
+        from = content_start + end_rel + "</userid>".len();
+    }
+    false
+}
+
+/// Diagnoses Task Scheduler XML for `\Zastava\CoworkVMServiceManualGuard`, returning a concrete
+/// reason when any security, trigger, principal, setting, or action requirement fails.
+/// Note: Windows COM `ITaskFolder::RegisterTask` for `S-1-5-18` + `TASK_LOGON_SERVICE_ACCOUNT`
+/// omits `<RunLevel>` when serializing `task.Xml()`.
+pub fn diagnose_task_xml(xml: &str) -> Result<(), String> {
     let lower = xml.to_lowercase();
-    let has_boot = lower.contains("<boottrigger>");
-    let is_system = lower.contains("s-1-5-18")
-        || lower.contains("nt authority\\system")
-        || lower.contains("nt authority\\система")
-        || lower.contains("<userid>system</userid>")
-        || lower.contains("<userid>система</userid>");
-    let is_highest = lower.contains("<runlevel>highestavailable</runlevel>");
-    let uses_native_guard =
-        lower.contains("zastava.exe") && lower.contains(APPLY_COWORK_GUARD_ONCE_ARG);
-    let no_shell = !lower.contains("powershell")
-        && !lower.contains("pwsh")
-        && !lower.contains("cmd.exe")
-        && !lower.contains("%localappdata%");
-    has_boot && is_system && is_highest && uses_native_guard && no_shell
+    let Some(boot_body) = extract_tag_slice(&lower, "boottrigger") else {
+        return Err("missing <BootTrigger>".to_string());
+    };
+    if has_enabled_false(boot_body) {
+        return Err("<BootTrigger> is disabled (<Enabled>false</Enabled>)".to_string());
+    }
+    if extract_tag_slice(&lower, "settings").is_some_and(has_enabled_false) {
+        return Err("task <Settings> is disabled (<Enabled>false</Enabled>)".to_string());
+    }
+    if !extract_tag_slice(&lower, "principals").is_some_and(has_system_userid) {
+        return Err("task Principal is not SYSTEM (S-1-5-18)".to_string());
+    }
+    let exec_body = extract_tag_slice(&lower, "actions")
+        .and_then(|actions| extract_tag_slice(actions, "exec"))
+        .or_else(|| extract_tag_slice(&lower, "exec"));
+    let exec_ok = exec_body.is_some_and(|exec| {
+        extract_tag_slice(exec, "command").is_some_and(|c| c.contains("zastava.exe"))
+            && extract_tag_slice(exec, "arguments")
+                .is_some_and(|a| a.contains(APPLY_COWORK_GUARD_ONCE_ARG))
+    });
+    if !exec_ok {
+        return Err("task Exec action must run zastava.exe --apply-cowork-guard-once".to_string());
+    }
+    if lower.contains("powershell")
+        || lower.contains("pwsh")
+        || lower.contains("cmd.exe")
+        || lower.contains("%localappdata%")
+    {
+        return Err("task uses forbidden shell or unexpanded %LOCALAPPDATA% path".to_string());
+    }
+    Ok(())
+}
+
+/// Verifies Task Scheduler XML for `\Zastava\CoworkVMServiceManualGuard`.
+pub fn is_task_xml_healthy(xml: &str) -> bool {
+    diagnose_task_xml(xml).is_ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,22 +170,14 @@ pub fn classify_schtasks_query_error(stderr: &str, stdout: &str) -> SchtasksQuer
 /// Validates task metadata text output when inspected as a list.
 pub fn is_task_list_healthy(output: &str) -> bool {
     let lower = output.to_lowercase();
-    let has_task_name = lower.contains("coworkvmservicemanualguard");
-    let no_unexpanded = !lower.contains("%localappdata%");
-    has_task_name && no_unexpanded
+    lower.contains("coworkvmservicemanualguard") && !lower.contains("%localappdata%")
 }
 
 fn xml_escape_text(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-    out
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Builds the Task Scheduler 1.2 XML for `\Zastava\CoworkVMServiceManualGuard` (`AtStartup` as
@@ -123,14 +188,8 @@ pub fn build_windows_task_xml_with_exe(exe_path: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo>
-    <Description>Zastava CoworkVMService Manual Guard</Description>
-  </RegistrationInfo>
-  <Triggers>
-    <BootTrigger>
-      <Enabled>true</Enabled>
-    </BootTrigger>
-  </Triggers>
+  <RegistrationInfo><Description>Zastava CoworkVMService Manual Guard</Description></RegistrationInfo>
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
   <Principals>
     <Principal id="Author">
       <UserId>S-1-5-18</UserId>
@@ -144,10 +203,7 @@ pub fn build_windows_task_xml_with_exe(exe_path: &str) -> String {
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
     <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
-    <IdleSettings>
-      <StopOnIdleEnd>false</StopOnIdleEnd>
-      <RestartOnIdle>false</RestartOnIdle>
-    </IdleSettings>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
@@ -157,10 +213,7 @@ pub fn build_windows_task_xml_with_exe(exe_path: &str) -> String {
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
-    <Exec>
-      <Command>{escaped_exe}</Command>
-      <Arguments>{escaped_arg}</Arguments>
-    </Exec>
+    <Exec><Command>{escaped_exe}</Command><Arguments>{escaped_arg}</Arguments></Exec>
   </Actions>
 </Task>
 "#
@@ -191,43 +244,37 @@ pub fn build_windows_summary(
 
     let summary = if !service_present && !task_installed {
         "Фоновая служба Claude не обнаружена — приложение из Microsoft Store не установлено."
-            .to_string()
     } else if !service_present && task_ok {
-        "Защита настроена. Фоновая служба Claude сейчас не установлена.".to_string()
+        "Защита настроена. Фоновая служба Claude сейчас не установлена."
     } else if start_type == Some(3) && task_ok {
         if service_running {
             "Защита активна: фоновая служба Claude запускается только вручную, задача защиты исправна. Сейчас служба работает для открытого Claude."
-                .to_string()
         } else {
             "Защита активна: фоновая служба Claude переведена в ручной режим и не стартует до входа в систему."
-                .to_string()
         }
     } else if start_type == Some(2) {
         "Фоновая служба Claude стоит на автозапуске и может стартовать до входа в систему и до запуска Заставы. Нажмите «Починить в 1 клик», чтобы перевести её в ручной режим."
-            .to_string()
     } else if start_type == Some(4) {
         "Фоновая служба Claude полностью отключена — режим Cowork в приложении не запустится. Нажмите «Починить в 1 клик», чтобы вернуть ручной запуск."
-            .to_string()
     } else if !task_ok {
         "Служба сейчас запускается вручную, но защитная задача планировщика не настроена или повреждена: обновление Claude может вернуть автозапуск."
-            .to_string()
     } else {
         "Состояние фоновой службы Claude определено частично. Нажмите «Починить в 1 клик»."
-            .to_string()
     };
 
-    (needs_repair, summary)
+    (needs_repair, summary.to_string())
 }
 
 /// Parses CSV process listing output to check whether `claude.exe` is running.
 pub fn parse_tasklist_has_claude(output: &str) -> bool {
     output.lines().any(|line| {
-        let trimmed = line.trim();
-        let Some(first) = trimmed.split(',').next() else {
-            return false;
-        };
-        let exe = first.trim().trim_matches('"').trim();
-        exe.eq_ignore_ascii_case("claude.exe")
+        line.trim().split(',').next().is_some_and(|first| {
+            first
+                .trim()
+                .trim_matches('"')
+                .trim()
+                .eq_ignore_ascii_case("claude.exe")
+        })
     })
 }
 
@@ -246,8 +293,7 @@ pub fn build_schtasks_create_args(xml_path: &str) -> [&str; 6] {
 /// Encodes XML text as little-endian UTF-16 with BOM (`0xFF, 0xFE`).
 pub fn encode_utf16_le_with_bom(text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(2 + text.len() * 2);
-    bytes.push(0xFF);
-    bytes.push(0xFE);
+    bytes.extend_from_slice(&[0xFF, 0xFE]);
     for unit in text.encode_utf16() {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
@@ -350,15 +396,16 @@ const CP866_HIGH: [char; 128] = [
 
 /// Decodes raw OEM CP866 bytes (Russian Windows console default) into UTF-8 `String`.
 pub fn decode_cp866(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if b < 0x80 {
-            out.push(b as char);
-        } else {
-            out.push(CP866_HIGH[(b - 0x80) as usize]);
-        }
-    }
-    out
+    bytes
+        .iter()
+        .map(|&b| {
+            if b < 0x80 {
+                b as char
+            } else {
+                CP866_HIGH[(b - 0x80) as usize]
+            }
+        })
+        .collect()
 }
 
 /// Decodes Windows text buffers in strict order:

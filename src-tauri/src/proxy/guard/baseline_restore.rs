@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::state::IpHistoryEntry;
@@ -9,7 +10,7 @@ use super::policy::{
     all_pinned_or_excepted_for, is_pinned_transient_unknown_geo, is_report_pinned_travel_only,
     report_no_critical_and_geo_ok,
 };
-use super::types::{Baseline, Env, Gate, Inner, NetworkGuard, PauseMode};
+use super::types::{Baseline, Env, Gate, NetworkGuard, PauseMode};
 
 impl NetworkGuard {
     /// Re-audits the baseline IP after a prior block, recovery, route unbind, or monitoring toggle.
@@ -18,35 +19,89 @@ impl NetworkGuard {
     /// on allowed geo, or present in `trusted_exceptions[(provider, exit_ip)]`.
     /// Never pops up an alert when all violated enabled providers are already blocked, and never
     /// latches `handled_ip` or pops a failed-audit alert on transient audit errors.
-    pub(super) async fn verify_and_restore_baseline_locked(
+    /// Releases `self.inner` before awaiting `audit_enabled()` so `check_route_fingerprint_sync`
+    /// (`try_lock`) never misses route changes during the audit.
+    pub(super) async fn verify_and_restore_baseline(
         self: &Arc<Self>,
         env: &Env,
-        inner: &mut Inner,
         baseline_ip: &str,
         was_blocked: bool,
     ) {
-        if self.is_manual_killswitch() {
-            self.set_gate(Gate::Blocked);
-            return;
-        }
-        self.clear_until_network_change_locked(inner);
-        inner.needs_reaudit = false;
-        self.drain_pending_route_sync_locked(Some(env), inner).await;
-        env.auditor.resolver.invalidate_direct_cache().await;
-        let st_before = env.state.get_data().await;
-        self.unblock_disabled_and_routed(env, &st_before).await;
-        let enabled_unrouted = st_before.enabled_unrouted_providers();
-        if enabled_unrouted.is_empty() {
-            self.restore_locked(env, inner).await;
-            return;
-        }
-        let was_blocked_set = self.currently_blocked_set(&st_before);
+        let (
+            st_before,
+            enabled_unrouted,
+            was_blocked_set,
+            epoch_before,
+            route_fp_before,
+            local_fp_before,
+        ) = {
+            let mut inner = self.inner.lock().await;
+            if self.is_manual_killswitch() {
+                self.set_gate(Gate::Blocked);
+                return;
+            }
+            self.clear_until_network_change_locked(&mut inner);
+            inner.needs_reaudit = false;
+            self.force_reaudit.store(false, Ordering::SeqCst);
+            self.drain_pending_route_sync_locked(Some(env), &mut inner)
+                .await;
+            env.auditor.resolver.invalidate_direct_cache().await;
+            let st_before = env.state.get_data().await;
+            self.unblock_disabled_and_routed(env, &st_before).await;
+            let enabled_unrouted = st_before.enabled_unrouted_providers();
+            if enabled_unrouted.is_empty() {
+                self.restore_locked(env, &mut inner).await;
+                return;
+            }
+            let was_blocked_set = self.currently_blocked_set(&st_before);
+            let route_fp_before = inner.last_route_fp.clone();
+            let local_fp_before = self.current_local_route_fingerprint();
+            (
+                st_before,
+                enabled_unrouted,
+                was_blocked_set,
+                inner.epoch,
+                route_fp_before,
+                local_fp_before,
+            )
+        };
 
         let audited = tokio::time::timeout(
             env.audit_timeout,
             audit_enabled(&env.audit, &st_before.disabled_providers),
         )
         .await;
+
+        let mut inner_guard = self.inner.lock().await;
+        let has_pending_route_sync = !self
+            .pending_route_sync
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty();
+        let current_local_fp = self.current_local_route_fingerprint();
+        let route_fp_changed = inner_guard.last_route_fp != route_fp_before
+            || current_local_fp != local_fp_before
+            || inner_guard.last_route_fp.as_deref().is_some_and(|fp| {
+                route_fp_before.as_deref() == Some(local_fp_before.as_str())
+                    && fp != current_local_fp
+            });
+        if inner_guard.epoch != epoch_before
+            || self.is_manual_killswitch()
+            || inner_guard.route_dirty
+            || inner_guard.needs_reaudit
+            || self.force_reaudit.load(Ordering::SeqCst)
+            || has_pending_route_sync
+            || route_fp_changed
+            || inner_guard
+                .observed_ip
+                .as_deref()
+                .is_some_and(|obs| obs != baseline_ip)
+        {
+            inner_guard.needs_reaudit = true;
+            return;
+        }
+        let inner = &mut *inner_guard;
+
         let Some(summary) = audited
             .ok()
             .and_then(|results| summarize_for_state(&results, &enabled_unrouted, &st_before))
@@ -228,7 +283,14 @@ impl NetworkGuard {
                 self.update_tray(env, &summary.tray).await;
             }
             crate::state::InterceptionBehavior::AskPopup => {
-                if inner.handled_ip.as_deref() == Some(baseline_ip) || inner.pending.is_some() {
+                let detecting_alert_id = inner
+                    .pending
+                    .as_ref()
+                    .filter(|p| p.alert_emitted && p.target_ip.is_empty())
+                    .map(|p| p.id.clone());
+                if inner.handled_ip.as_deref() == Some(baseline_ip)
+                    || (inner.pending.is_some() && detecting_alert_id.is_none())
+                {
                     let st_after = env.state.get_data().await;
                     self.sync_gates_with_state_and_pending(&st_after, inner.pending.as_ref());
                     self.update_tray(env, &summary.tray).await;
@@ -236,7 +298,36 @@ impl NetworkGuard {
                 }
                 let old_baseline = inner.baseline.clone();
                 let ip_owned = baseline_ip.to_string();
-                if has_newly_report {
+                if let Some(alert_id) = detecting_alert_id {
+                    if has_newly_report {
+                        self.enrich_ready_alert_locked(
+                            env,
+                            inner,
+                            old_baseline.as_ref(),
+                            ip_owned,
+                            &alert_id,
+                            &summary,
+                            &already_blocked,
+                            &newly_affected,
+                            None,
+                            Instant::now(),
+                        )
+                        .await;
+                    } else {
+                        self.enrich_failed_alert_locked(
+                            env,
+                            inner,
+                            old_baseline.as_ref(),
+                            ip_owned,
+                            &alert_id,
+                            &already_blocked,
+                            &newly_affected,
+                            &summary.healthy_providers,
+                            Instant::now(),
+                        )
+                        .await;
+                    }
+                } else if has_newly_report {
                     self.emit_ready_network_alert_locked(
                         env,
                         inner,

@@ -197,6 +197,13 @@ pub async fn geo_of_ip(probe: &dyn IpProbe, ip: IpAddr) -> Result<GeoInfo, Unkno
         .unwrap_or(Err(UnknownReason::Timeout))
 }
 
+/// Google Public DNS ASNs (from `PUBLIC_DNS_SERVICES`).
+const GOOGLE_PUBLIC_DNS_ASNS: &[u32] = &[15169, 36040, 19527, 396982];
+
+fn is_google_asn(asn: Option<u32>) -> bool {
+    asn.is_some_and(|a| GOOGLE_PUBLIC_DNS_ASNS.contains(&a))
+}
+
 /// Asks both whoami sources, requires them to agree and locates the resolver.
 pub async fn measure_resolver(
     dns: &dyn DnsLookup,
@@ -208,10 +215,53 @@ pub async fn measure_resolver(
         dns.lookup_txt(GOOGLE_TXT_HOST, WHOAMI_LIMIT)
     );
     let (akamai, google) = (akamai_reading(&akamai), google_reading(&google));
-    let sources = source_views(&akamai, &google);
+    let mut sources = source_views(&akamai, &google);
     let agreed = match combine_sources(&akamai, &google) {
         Ok(agreed) => agreed,
-        Err(unmeasured) => return ResolverView::Unmeasured(unmeasured),
+        Err(unmeasured) => {
+            // Safe Google Public DNS ASN parity: when one whoami IP is in Google Public DNS
+            // CIDR ranges and the other is an unlisted IP belonging to Google's own ASNs
+            // (15169, 36040, 19527, 396982), both egresses belong to Google Public DNS.
+            // Never relaxes Fail-Closed for different providers or unknown/non-Google ASNs.
+            if unmeasured.code == "DNS_WHOAMI_DISAGREE"
+                && let (super::SourceReading::Addr(a), super::SourceReading::Addr(g)) =
+                    (&akamai, &google)
+            {
+                let (op_a, op_g) = (
+                    crate::auditor::probes::public_dns::operator_of(*a),
+                    crate::auditor::probes::public_dns::operator_of(*g),
+                );
+                let google_pair = match (op_a, op_g) {
+                    (Some("Google Public DNS"), None) => Some((*a, *g, 1usize)),
+                    (None, Some("Google Public DNS")) => Some((*g, *a, 0usize)),
+                    _ => None,
+                };
+                if let Some((known_google_ip, unknown_ip, unknown_idx)) = google_pair {
+                    let geo = geo_cache
+                        .get_or_compute(
+                            &unknown_ip.to_string(),
+                            GEO_TTL,
+                            |r| r.is_ok(),
+                            geo_of_ip(probe, unknown_ip),
+                        )
+                        .await;
+                    if let Ok(info) = geo
+                        && is_google_asn(info.asn)
+                    {
+                        if let Some(view) = sources.get_mut(unknown_idx) {
+                            view.operator = Some("Google Public DNS".to_string());
+                        }
+                        return ResolverView::Located {
+                            ip: known_google_ip,
+                            country: String::new(),
+                            public_service: Some("Google Public DNS"),
+                            sources,
+                        };
+                    }
+                }
+            }
+            return ResolverView::Unmeasured(unmeasured);
+        }
     };
     let ip = agreed.ip;
     // The operator is known by its address range: no geo request (its country is not compared).

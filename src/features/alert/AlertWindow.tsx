@@ -232,7 +232,13 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
   const previousIpRaw = network_change?.old_ip;
   const previousCountry = formatCountryWithCode(network_change?.old_country) || copy.unknownCountry;
   const currentIpRaw = network_change?.new_ip || report?.telemetry?.ip;
-  const currentIp = currentIpRaw ? formatIp(currentIpRaw, effectiveHideIpMode) : copy.unknownIp;
+  const currentIpNode: ReactNode = currentIpRaw ? (
+    formatIp(currentIpRaw, effectiveHideIpMode)
+  ) : detecting ? (
+    <Skeleton width={96} height={12} />
+  ) : (
+    copy.unknownIp
+  );
   const previousIp = previousIpRaw ? formatIp(previousIpRaw, effectiveHideIpMode) : null;
   const currentCountryCode = network_change?.new_country || report?.telemetry?.country_code || null;
   const service = providerCopy[payload.provider]?.name ?? payload.provider;
@@ -302,7 +308,7 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
       title={copy.title}
       text={text}
       service={service}
-      ip={currentIp}
+      ip={currentIpNode}
       country={countryNode}
       countryTone={detecting && !currentCountryCode ? "neutral" : highRisk ? "danger" : "warn"}
       previous={previousIp ? { ip: previousIp, country: previousCountry, label: copy.was } : null}

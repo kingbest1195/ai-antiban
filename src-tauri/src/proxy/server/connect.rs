@@ -206,8 +206,9 @@ impl ProxyServer {
         } else {
             // Step 0: Fast Kernel Route Check & Network guard — a sudden IP change freezes every connection until the
             // user confirms the new network (or the old IP comes back).
+            let chained = self.transit.chained_proxy(self.bound_addr.port());
             if !self.state.is_split_tunnel_mode().await
-                && self.guard.check_route_fingerprint_sync(None)
+                && self.guard.check_route_fingerprint_sync(chained.as_deref())
             {
                 self.auditor.resolver.invalidate_direct_cache().await;
                 self.guard

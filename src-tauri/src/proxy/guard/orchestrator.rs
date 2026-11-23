@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+#[cfg(any(test, feature = "test-support"))]
+use std::time::Duration;
 use std::time::Instant;
 
 use tokio::task::JoinHandle;
@@ -11,14 +13,87 @@ use crate::core::timing::log_timing;
 use crate::proxy::hold_queue::{
     DEFAULT_HOLD_TTL_SECS, PHASE_DETECTING, RiskInterceptPayload, build_gate_reason,
 };
+use crate::state::KNOWN_PROVIDERS;
 
 use super::audit_summary::audit_enabled;
 use super::policy::{
     all_excepted, all_pinned_or_excepted_for, is_blocked_geo_code, network_change, now_unix_ms,
 };
-use super::types::{ALL_PROVIDERS, Baseline, Env, Inner, NetworkGuard, Pending};
+use super::types::{
+    ALL_PROVIDERS, Baseline, Env, Gate, GuardCtx, Inner, NetworkGuard, Pending,
+    compute_local_route_fingerprint,
+};
 
 impl NetworkGuard {
+    /// Computes the current local route fingerprint, isolating unit tests from global
+    /// `sysproxy::set_chained_proxy` mutations in parallel `sysproxy` unit test threads.
+    pub(super) fn current_local_route_fingerprint(&self) -> String {
+        #[cfg(test)]
+        let chained: Option<String> = None;
+        #[cfg(not(test))]
+        let chained = crate::sysproxy::get_chained_proxy();
+        compute_local_route_fingerprint(chained.as_deref())
+    }
+
+    /// True when the route moved (or a CONNECT flagged it) while a probe was in flight. Such a
+    /// probe may have travelled over the old route, so it must never open the gate: the gate is
+    /// kept closed and the next tick (fingerprint differs / `route_dirty`) handles the change.
+    pub(super) fn probe_is_stale(&self, inner: &Inner, planned_fp: &str) -> bool {
+        let stale = inner.route_dirty || self.current_local_route_fingerprint() != planned_fp;
+        if stale && self.gate() == Gate::Open {
+            self.set_gate(Gate::Pending);
+        }
+        stale
+    }
+
+    pub(super) async fn unblock_disabled_and_routed(
+        &self,
+        env: &Env,
+        st: &crate::state::AppStateData,
+    ) {
+        if self.is_manual_killswitch() {
+            return;
+        }
+        let enabled_unrouted = st.enabled_unrouted_providers();
+        for p in KNOWN_PROVIDERS {
+            if st.blocked_providers.contains(p) && !enabled_unrouted.contains(&p) {
+                let _ = env.state.unblock_provider(p).await;
+            }
+        }
+    }
+
+    pub async fn tick(self: &Arc<Self>, ctx: &GuardCtx) {
+        match self.env.get() {
+            Some(env) => self.check_route_and_tick(env).await,
+            None => self.check_route_and_tick(&Env::from_ctx(ctx.clone())).await,
+        }
+    }
+
+    /// Waits for an asynchronous `ProbeChanged` probe task to finish (test helper).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_probe_settled_for_test(&self) {
+        for _ in 0..200 {
+            if !self.inner.lock().await.probe_in_flight {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Integration-test seam: seeds a trusted baseline and matching route fingerprint without
+    /// installing `Env` (so `ensure_fresh` stays a no-op when testing `connect.rs` pre-checks).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_baseline_for_test(&self, ip: &str, cc: &str, upstream_key: Option<&str>) {
+        let mut inner = self.inner.lock().await;
+        inner.baseline = Some(Baseline {
+            ip: ip.to_string(),
+            country: Some(cc.to_string()),
+            trusted: true,
+        });
+        inner.last_route_fp = Some(compute_local_route_fingerprint(upstream_key));
+        inner.route_dirty = false;
+    }
+
     /// Persists "the previous temporary session allowances belonged to the old network" in the
     /// background. Neither `trusted_exceptions` nor `blocked_providers` is cleared here:
     /// persistent exceptions always survive network switches, and `apply_audit_outcome_locked`
@@ -57,9 +132,12 @@ impl NetworkGuard {
         let enabled_unrouted = st.enabled_unrouted_providers();
         if enabled_unrouted.is_empty() {
             // Every enabled provider is routed (or all providers disabled): local network change
-            // does not trigger alerts or block traffic.
+            // does not trigger alerts or block traffic, nor hide an active PayShield checkout alert.
             let had_alert = inner.invalidate_alert().is_some()
-                || env.hold_queue.has_active_non_sim_holds().await;
+                || env
+                    .hold_queue
+                    .has_active_non_checkout_alerts_or_holds()
+                    .await;
             self.restore_epoch.fetch_add(1, Ordering::SeqCst);
             let cancelled = env.hold_queue.cancel_all_superseded().await;
             inner.handled_ip = Some(new_ip);
@@ -327,8 +405,32 @@ impl NetworkGuard {
         );
     }
 
+    pub(super) fn prepare_silent_pending_locked(
+        self: &Arc<Self>,
+        env: &Env,
+        inner: &mut Inner,
+        new_ip: &str,
+        non_blocked: &[&'static str],
+        already_blocked: &[&'static str],
+    ) -> (String, u64) {
+        let (silent_id, silent_epoch) = (Uuid::new_v4().to_string(), inner.epoch);
+        inner.needs_reaudit = false;
+        inner.pending = Some(Pending {
+            id: silent_id.clone(),
+            epoch: silent_epoch,
+            target_ip: new_ip.to_string(),
+            tel: None,
+            clear_old_state: Some(self.spawn_clear_old_network_state(env)),
+            affected_providers: non_blocked.to_vec(),
+            already_blocked_providers: already_blocked.to_vec(),
+            healthy_providers: Vec::new(),
+            alert_emitted: false,
+        });
+        (silent_id, silent_epoch)
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn spawn_background_audit_task(
+    pub(super) fn spawn_background_audit_task(
         self: &Arc<Self>,
         env: &Env,
         inner: &mut Inner,

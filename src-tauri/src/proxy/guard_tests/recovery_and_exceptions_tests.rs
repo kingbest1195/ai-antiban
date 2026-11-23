@@ -361,12 +361,9 @@ async fn test_silent_auto_recovery_when_checks_become_yellow_pinned_or_excepted(
         .await
         .unwrap();
     h2.guard.sync_gates_with_state(&h2.state).await;
-    {
-        let mut inner = h2.guard.inner.lock().await;
-        h2.guard
-            .verify_and_restore_baseline_locked(&h2.env, &mut inner, "5.5.5.5", true)
-            .await;
-    }
+    h2.guard
+        .verify_and_restore_baseline(&h2.env, "5.5.5.5", true)
+        .await;
     assert_eq!(h2.io.count("interceptor://risk-detected"), 0);
     assert_eq!(h2.guard.gate(), Gate::Open);
     assert!(h2.state.get_data().await.blocked_providers.is_empty());

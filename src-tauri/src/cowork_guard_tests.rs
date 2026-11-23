@@ -55,15 +55,103 @@ fn validates_task_xml_security_and_triggers() {
     // Reject missing BootTrigger
     let logon_only = good_xml.replace("BootTrigger", "LogonTrigger");
     assert!(!is_task_xml_healthy(&logon_only));
+    assert!(diagnose_task_xml(&logon_only).is_err());
 
-    // Accept <UserId>SYSTEM</UserId> and localized Russian NT AUTHORITY\СИСТЕМА
+    // Reject disabled BootTrigger
+    let disabled_boot = good_xml.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>");
+    assert!(!is_task_xml_healthy(&disabled_boot));
+    assert!(
+        diagnose_task_xml(&disabled_boot)
+            .unwrap_err()
+            .contains("disabled")
+    );
+
+    // Accept real Windows COM task.Xml() output for S-1-5-18 (omits <RunLevel>, adds id attr)
+    let win_com_xml = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <BootTrigger id="1">
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+    </Principal>
+  </Principals>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Program Files\Zastava\zastava.exe</Command>
+      <Arguments>--apply-cowork-guard-once</Arguments>
+    </Exec>
+  </Actions>
+</Task>"#;
+    assert!(
+        diagnose_task_xml(win_com_xml).is_ok(),
+        "Windows COM XML without <RunLevel> must be healthy"
+    );
+
+    // Accept <UserId>SYSTEM</UserId>, <UserId>СИСТЕМА</UserId>, and localized NT AUTHORITY\СИСТЕМА
     let system_short = good_xml.replace("<UserId>S-1-5-18</UserId>", "<UserId>SYSTEM</UserId>");
     assert!(is_task_xml_healthy(&system_short));
+    let system_short_ru = good_xml.replace("<UserId>S-1-5-18</UserId>", "<UserId>СИСТЕМА</UserId>");
+    assert!(is_task_xml_healthy(&system_short_ru));
     let system_ru = good_xml.replace(
         "<UserId>S-1-5-18</UserId>",
         "<UserId>NT AUTHORITY\\СИСТЕМА</UserId>",
     );
     assert!(is_task_xml_healthy(&system_ru));
+
+    // Reject task disabled at the <Settings><Enabled>false</Enabled></Settings> level
+    // even when <BootTrigger><Enabled>true</Enabled></BootTrigger> remains enabled.
+    let disabled_settings_xml = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Enabled>false</Enabled></Settings>
+  <Actions Context="Author"><Exec><Command>C:\Program Files\Zastava\zastava.exe</Command><Arguments>--apply-cowork-guard-once</Arguments></Exec></Actions>
+</Task>"#;
+    assert!(!is_task_xml_healthy(disabled_settings_xml));
+    assert!(
+        diagnose_task_xml(disabled_settings_xml)
+            .unwrap_err()
+            .contains("<Settings> is disabled")
+    );
+
+    // Reject spoofed <Description>/<Author> containing S-1-5-18 or zastava.exe --apply-cowork-guard-once
+    // when the actual <Principals> or <Exec> does not match.
+    let spoofed_principal_xml = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>S-1-5-18 NT AUTHORITY\SYSTEM</Author>
+    <Description>S-1-5-18 zastava.exe --apply-cowork-guard-once</Description>
+  </RegistrationInfo>
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-32-545</UserId></Principal></Principals>
+  <Actions Context="Author"><Exec><Command>C:\Program Files\Zastava\zastava.exe</Command><Arguments>--apply-cowork-guard-once</Arguments></Exec></Actions>
+</Task>"#;
+    assert!(!is_task_xml_healthy(spoofed_principal_xml));
+    assert!(
+        diagnose_task_xml(spoofed_principal_xml)
+            .unwrap_err()
+            .contains("Principal is not SYSTEM")
+    );
+
+    let spoofed_exec_xml = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Runs zastava.exe --apply-cowork-guard-once as S-1-5-18</Description>
+  </RegistrationInfo>
+  <Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId></Principal></Principals>
+  <Actions Context="Author"><Exec><Command>C:\Windows\System32\notepad.exe</Command><Arguments>--noop</Arguments></Exec></Actions>
+</Task>"#;
+    assert!(!is_task_xml_healthy(spoofed_exec_xml));
+    assert!(
+        diagnose_task_xml(spoofed_exec_xml)
+            .unwrap_err()
+            .contains("Exec action must run zastava.exe")
+    );
 }
 
 #[test]

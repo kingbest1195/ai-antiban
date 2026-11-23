@@ -129,4 +129,52 @@ describe("SystemGuardSection Tier 2 («Под капотом / Для специ
     expect(expandedText).toContain(copy.privacy.networkTitle);
     expect(expandedText).toContain("Локальный прокси-фильтр");
   });
+
+  it("отображает inline coworkError при сбое настройки защиты службы Windows", () => {
+    let tree: ReactElement | null = null;
+    const render = () => {
+      hookRuntime.beginRender();
+      tree = SystemGuardSection({
+        autoUpdateEnabled: true,
+        coworkStatus: {
+          platform: "windows",
+          supported: true,
+          service_present: true,
+          start_type: 2,
+          service_running: true,
+          task_installed: false,
+          task_healthy: false,
+          needs_repair: true,
+          summary: "Фоновая служба Claude стоит на автозапуске.",
+          detected_ai_apps: [],
+        },
+        coworkBusy: false,
+        coworkError: "Планировщик задач отказал в регистрации.",
+        onInstallCoworkGuard: vi.fn(),
+        onRefreshCoworkGuard: vi.fn(),
+        exportBusy: false,
+        onExportDiagnostics: vi.fn(async () => {}),
+        previewItems: [],
+        previewLoading: false,
+        previewError: null,
+        previewOpen: false,
+        onTogglePreview: vi.fn(),
+        cleaningProxy: false,
+        proxyResult: null,
+        onRequestCleanProxy: vi.fn(),
+      }) as ReactElement;
+    };
+    hookRuntime.reset(render);
+    render();
+
+    const text = collectText(tree);
+    expect(text).toContain(copy.coworkGuard.toastErrTitle);
+    expect(text).toContain("Планировщик задач отказал в регистрации.");
+  });
+
+  it("в заголовках copy.coworkGuard разделяет успешную настройку и предупреждение при needs_repair", () => {
+    expect(copy.coworkGuard.statusNeedsRepair).toBe("Требуется настройка");
+    expect(copy.coworkGuard.toastOkTitle).toBe("Защита фоновой службы настроена");
+    expect(copy.coworkGuard.statusNeedsRepair).not.toBe(copy.coworkGuard.toastOkTitle);
+  });
 });

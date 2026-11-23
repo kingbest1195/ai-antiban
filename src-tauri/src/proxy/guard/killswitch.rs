@@ -106,17 +106,22 @@ impl NetworkGuard {
         let st = state.get_data().await;
         {
             let mut inner = self.inner.lock().await;
-            if let (Some(p), Some(env)) = (inner.invalidate_alert(), self.env.get()) {
+            let target_ip = inner.pending.as_ref().map(|p| p.target_ip.clone());
+            let detecting_unresolved = inner.probe_in_flight
+                || inner.route_dirty
+                || inner
+                    .pending
+                    .as_ref()
+                    .is_some_and(|p| p.target_ip.is_empty());
+            let removed = if detecting_unresolved {
+                inner.invalidate_alert_keep_probe()
+            } else {
+                inner.invalidate_alert()
+            };
+            if let (Some(p), Some(env)) = (removed, self.env.get()) {
                 env.hold_queue.remove(&p.id).await;
             }
-            let current_ip = inner
-                .observed_ip
-                .clone()
-                .or_else(|| inner.baseline.as_ref().map(|b| b.ip.clone()));
-            inner.paused_ip = current_ip.clone();
-            if inner.handled_ip.is_none() {
-                inner.handled_ip = current_ip;
-            }
+            self.bind_pause_ip_locked(&mut inner, target_ip.as_deref(), detecting_unresolved);
             self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
         }
         if let Some(env) = self.env.get() {
@@ -142,19 +147,59 @@ impl NetworkGuard {
         }
         self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
         let mut inner = self.inner.lock().await;
-        let current_ip = inner
-            .observed_ip
-            .clone()
-            .or_else(|| inner.pending.as_ref().map(|p| p.target_ip.clone()))
-            .or_else(|| inner.handled_ip.clone())
-            .or_else(|| inner.baseline.as_ref().map(|b| b.ip.clone()));
-        inner.paused_ip = current_ip;
+        let target_ip = inner.pending.as_ref().map(|p| p.target_ip.clone());
+        let detecting_unresolved = inner.probe_in_flight
+            || inner.route_dirty
+            || inner
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.target_ip.is_empty());
+        self.bind_pause_ip_locked(&mut inner, target_ip.as_deref(), detecting_unresolved);
         if let Some(env) = self.env.get() {
             let st = env.state.get_data().await;
             self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
         } else {
             self.set_gate(Gate::Blocked);
         }
+    }
+
+    /// Binds `paused_ip` for `PauseMode::UntilNetworkChange`. When paused during `phase: "detecting"`
+    /// before the new route's egress IP is resolved, leaves `paused_ip = None` and arms
+    /// `pending_pause_ip_bind = true` so the first probe response on `paused_route_fp` binds the
+    /// new IP instead of trapping the stale pre-change `observed_ip`.
+    pub(super) fn bind_pause_ip_locked(
+        &self,
+        inner: &mut Inner,
+        known_target_ip: Option<&str>,
+        detecting_unresolved: bool,
+    ) {
+        if let Some(ip) = known_target_ip
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        {
+            inner.paused_ip = Some(ip.clone());
+            inner.handled_ip = Some(ip);
+            inner.pending_pause_ip_bind = false;
+            inner.paused_route_fp = inner.last_route_fp.clone();
+            return;
+        }
+        if detecting_unresolved || inner.pending_pause_ip_bind {
+            inner.paused_ip = None;
+            inner.pending_pause_ip_bind = true;
+            inner.paused_route_fp = inner.last_route_fp.clone();
+            return;
+        }
+        let current_ip = inner
+            .observed_ip
+            .clone()
+            .or_else(|| inner.handled_ip.clone())
+            .or_else(|| inner.baseline.as_ref().map(|b| b.ip.clone()));
+        inner.paused_ip = current_ip.clone();
+        if inner.handled_ip.is_none() {
+            inner.handled_ip = current_ip;
+        }
+        inner.pending_pause_ip_bind = false;
+        inner.paused_route_fp = inner.last_route_fp.clone();
     }
 
     pub(super) fn clear_until_network_change_locked(&self, inner: &mut Inner) -> bool {
@@ -168,6 +213,8 @@ impl NetworkGuard {
         }
         drop(pm);
         inner.paused_ip = None;
+        inner.pending_pause_ip_bind = false;
+        inner.paused_route_fp = None;
         if was_until_change {
             self.set_gate_reason(None);
         }
@@ -296,6 +343,8 @@ impl NetworkGuard {
                 env.hold_queue.cancel_all_superseded().await;
             }
             inner.paused_ip = None;
+            inner.pending_pause_ip_bind = false;
+            inner.paused_route_fp = None;
             inner.handled_ip = None;
             inner.needs_reaudit = false;
             drop(inner);

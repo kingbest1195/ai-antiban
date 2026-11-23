@@ -342,8 +342,9 @@ async fn test_route_dirty_bypasses_probe_min_gap() {
     h.guard.inner.lock().await.route_dirty = true;
     h.guard.set_gate(Gate::Pending);
     h.guard.check_route_and_tick(&env).await;
-    assert_eq!(h.probes.load(Ordering::SeqCst), 1);
     assert!(!h.guard.inner.lock().await.route_dirty, "flag is consumed");
+    h.guard.wait_probe_settled_for_test().await;
+    assert_eq!(h.probes.load(Ordering::SeqCst), 1);
     // Probed IP == trusted baseline: the network did not really change.
     assert_eq!(h.guard.gate(), Gate::Open);
 }

@@ -24,6 +24,7 @@ mod killswitch;
 mod orchestrator;
 mod policy;
 mod probe_apply;
+mod probe_changed;
 mod probe_loop;
 mod routes_sync;
 mod session_confirm;

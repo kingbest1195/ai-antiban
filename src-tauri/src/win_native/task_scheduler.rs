@@ -104,28 +104,12 @@ mod win {
             .map_err(|e| format!("ITaskFolder::CreateFolder({norm}) failed: {e}"))
     }
 
-    pub fn register_task_xml(
-        folder_path: &str,
+    fn try_register_and_verify(
+        folder: &ITaskFolder,
         task_name: &str,
         xml: &str,
         sddl: &str,
     ) -> Result<(), String> {
-        let (_com, service) = connect_service()?;
-        let folder = open_or_create_folder(&service, folder_path)?;
-
-        let existing_folder_sd =
-            unsafe { folder.GetSecurityDescriptor(super::SECURITY_INFO_NO_SACL) }
-                .map(|b| b.to_string())
-                .unwrap_or_default();
-        if !existing_folder_sd.is_empty() {
-            let updated_folder_sd = ensure_au_read_exec_in_sddl(&existing_folder_sd);
-            if updated_folder_sd != existing_folder_sd {
-                // SAFETY: Updates folder DACL so non-elevated callers can query task status.
-                unsafe { folder.SetSecurityDescriptor(&BSTR::from(updated_folder_sd.as_str()), 0) }
-                    .map_err(|e| format!("ITaskFolder::SetSecurityDescriptor failed: {e}"))?;
-            }
-        }
-
         let empty = VARIANT::default();
         let user_id = VARIANT::from("S-1-5-18");
         let sddl_var = VARIANT::from(sddl);
@@ -151,6 +135,70 @@ mod win {
                 unsafe { task.SetSecurityDescriptor(&BSTR::from(updated.as_str()), 0) }
                     .map_err(|e| format!("IRegisteredTask::SetSecurityDescriptor failed: {e}"))?;
             }
+        }
+        let registered_xml = unsafe { task.Xml() }
+            .map_err(|e| format!("IRegisteredTask::Xml({task_name}) post-register failed: {e}"))?
+            .to_string();
+        crate::cowork_guard::diagnose_task_xml(&registered_xml).map_err(|reason| {
+            format!("Зарегистрированная задача не прошла проверку целостности: {reason}")
+        })?;
+        Ok(())
+    }
+
+    pub fn register_task_xml(
+        folder_path: &str,
+        task_name: &str,
+        xml: &str,
+        sddl: &str,
+    ) -> Result<(), String> {
+        let (_com, service) = connect_service()?;
+        let folder = open_or_create_folder(&service, folder_path)?;
+
+        let existing_folder_sd =
+            unsafe { folder.GetSecurityDescriptor(super::SECURITY_INFO_NO_SACL) }
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+        if !existing_folder_sd.is_empty() {
+            let updated_folder_sd = ensure_au_read_exec_in_sddl(&existing_folder_sd);
+            if updated_folder_sd != existing_folder_sd {
+                // SAFETY: Updates folder DACL so non-elevated callers can query task status.
+                unsafe { folder.SetSecurityDescriptor(&BSTR::from(updated_folder_sd.as_str()), 0) }
+                    .map_err(|e| format!("ITaskFolder::SetSecurityDescriptor failed: {e}"))?;
+            }
+        }
+
+        // Snapshot previous task XML before any overwrite/delete for best-effort rollback.
+        let prev_xml = unsafe { folder.GetTask(&BSTR::from(task_name)) }
+            .ok()
+            .and_then(|t| unsafe { t.Xml() }.ok());
+
+        // Fast path: atomic in-place TASK_CREATE_OR_UPDATE without pre-deleting existing task.
+        if try_register_and_verify(&folder, task_name, xml, sddl).is_ok() {
+            return Ok(());
+        }
+
+        // Fallback: legacy/corrupted task or incompatible ACL prevented in-place update;
+        // delete and recreate cleanly, rolling back `prev_xml` on failure.
+        let _ = unsafe { folder.DeleteTask(&BSTR::from(task_name), 0) };
+        if let Err(err) = try_register_and_verify(&folder, task_name, xml, sddl) {
+            let _ = unsafe { folder.DeleteTask(&BSTR::from(task_name), 0) };
+            if let Some(ref old_xml) = prev_xml {
+                let empty = VARIANT::default();
+                let user_id = VARIANT::from("S-1-5-18");
+                let sddl_var = VARIANT::from(sddl);
+                let _ = unsafe {
+                    folder.RegisterTask(
+                        &BSTR::from(task_name),
+                        old_xml,
+                        TASK_CREATE_OR_UPDATE.0,
+                        &user_id,
+                        &empty,
+                        TASK_LOGON_SERVICE_ACCOUNT,
+                        &sddl_var,
+                    )
+                };
+            }
+            return Err(err);
         }
         Ok(())
     }

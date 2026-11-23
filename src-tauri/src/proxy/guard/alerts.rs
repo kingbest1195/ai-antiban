@@ -45,11 +45,12 @@ impl NetworkGuard {
             }
         }
         self.freeze_providers_pending(&st, newly_affected, &blocked_set);
-        inner.handled_ip = Some(new_ip);
+        inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 
         let epoch = inner.epoch;
         if let Some(p) = inner.pending.as_mut() {
+            p.target_ip = new_ip;
             p.tel = Some(summary.tel.clone());
             p.affected_providers = newly_affected.to_vec();
             p.already_blocked_providers = already_blocked.to_vec();
@@ -108,6 +109,7 @@ impl NetworkGuard {
 
         let epoch = inner.epoch;
         if let Some(p) = inner.pending.as_mut() {
+            p.target_ip = new_ip.clone();
             p.tel = None;
             p.affected_providers = newly_affected.to_vec();
             p.already_blocked_providers = already_blocked.to_vec();
@@ -131,6 +133,55 @@ impl NetworkGuard {
         env.emit("interceptor://enriched", &enriched);
         env.io.tray_status("red", None);
         log_timing(id, "enriched_failed", t0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn enrich_offline_failed_alert_locked(
+        self: &Arc<Self>,
+        env: &Env,
+        inner: &mut Inner,
+        old_baseline: Option<&Baseline>,
+        id: &str,
+        already_blocked: &[&'static str],
+        newly_affected: &[&'static str],
+        t0: Instant,
+    ) {
+        let st = env.state.get_data().await;
+        let blocked_set: HashSet<String> = already_blocked
+            .iter()
+            .map(|s| (*s).to_string())
+            .chain(st.blocked_providers.iter().cloned())
+            .filter(|p| !newly_affected.contains(&p.as_str()))
+            .collect();
+        self.freeze_providers_pending(&st, newly_affected, &blocked_set);
+        // Never latch handled_ip when offline so subsequent recovery ticks re-probe and recover.
+        inner.handled_ip = None;
+        inner.needs_reaudit = true;
+
+        let epoch = inner.epoch;
+        if let Some(p) = inner.pending.as_mut() {
+            p.tel = None;
+            p.affected_providers = newly_affected.to_vec();
+            p.already_blocked_providers = already_blocked.to_vec();
+            p.healthy_providers.clear();
+        }
+
+        let reason = "Нет подключения к сети после смены маршрута — запросы временно остановлены"
+            .to_string();
+        self.set_gate_reason(Some(reason.clone()));
+
+        let enriched = EnrichedPayload {
+            id: id.to_string(),
+            epoch,
+            phase: PHASE_FAILED.to_string(),
+            report: None,
+            network_change: network_change(old_baseline, None, None),
+            gate_reason: Some(reason),
+        };
+        env.hold_queue.update_alert(&enriched);
+        env.emit("interceptor://enriched", &enriched);
+        env.io.tray_status("red", None);
+        log_timing(id, "enriched_offline_failed", t0);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -315,6 +366,8 @@ impl NetworkGuard {
             log_timing(id, "audit_dropped_stale", t0);
             return;
         }
+        inner.probe_abort = None;
+        inner.audit_abort = None;
         let old = inner.baseline.clone();
         let (clear_old_state, prev_already_blocked, alert_emitted) = match inner.pending.as_mut() {
             Some(p) => (

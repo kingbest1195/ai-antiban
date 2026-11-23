@@ -104,16 +104,37 @@ export function AlertStrip({
               disabled={coworkGuard.repairing}
               onClick={() => {
                 setRepairFallbackError(null);
-                void coworkGuard.repair().then((updated) => {
+                void coworkGuard.repair().then((res) => {
+                  const isOutcomeObj =
+                    res !== null &&
+                    typeof res === "object" &&
+                    ("status" in res || "error" in res);
+                  const updated = isOutcomeObj
+                    ? (res as { status: typeof coworkGuard.status; error: string | null }).status
+                    : (res as typeof coworkGuard.status);
+                  const freshError = isOutcomeObj
+                    ? (res as { status: typeof coworkGuard.status; error: string | null }).error
+                    : coworkGuard.error;
                   if (!updated) {
+                    const backendErr = (freshError ?? coworkGuard.error)?.trim();
+                    if (backendErr) {
+                      setRepairFallbackError(backendErr);
+                    }
+                    const isUacCancel =
+                      !backendErr ||
+                      backendErr.includes("ELEVATION_CANCELLED") ||
+                      /отмен[её]н|cancel/iu.test(backendErr);
                     overview.onToast?.(
                       "Не удалось защитить фоновую службу Claude",
-                      "Запрос прав администратора отменён или планировщик вернул ошибку. Попробуйте снова или проверьте настройки.",
+                      isUacCancel
+                        ? "Запрос прав администратора отменён или планировщик вернул ошибку. Попробуйте снова или проверьте настройки."
+                        : backendErr,
                       "error",
                     );
                   } else if (updated.needs_repair) {
                     const summary =
                       updated.summary ||
+                      freshError ||
                       "Защита фоновой службы Claude настроена не полностью. Откройте настройки или проверьте права администратора.";
                     setRepairFallbackError(summary);
                     overview.onToast?.(

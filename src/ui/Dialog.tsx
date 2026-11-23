@@ -31,7 +31,7 @@ export interface DialogProps {
   text: ReactNode;
   /** Маршрут: сервис → IP → страна (или заголовок карточки «Было → Стало»). */
   service: string;
-  ip: string;
+  ip: ReactNode;
   /** Строка или заглушка (Skeleton), пока страна определяется. */
   country: ReactNode;
   /** Тон бейджа страны; по умолчанию danger (небезопасный адрес). */

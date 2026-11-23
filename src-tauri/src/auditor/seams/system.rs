@@ -118,10 +118,24 @@ impl SystemInfo for RealSystem {
     }
 
     fn system_timezone(&self) -> Result<String, String> {
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(Some(win_id)) = crate::win_native::timezone::current_windows_tz_id()
+                && let Some(iana) = crate::os_tz::windows_to_iana_tz(&win_id)
+            {
+                return Ok(iana.to_string());
+            }
+        }
         iana_time_zone::get_timezone().map_err(|e| e.to_string())
     }
 
     fn local_utc_offset_secs(&self) -> Option<i32> {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(secs) = crate::win_native::timezone::local_utc_offset_secs() {
+                return Some(secs);
+            }
+        }
         Some(chrono::Local::now().offset().local_minus_utc())
     }
 
@@ -152,7 +166,12 @@ impl SystemInfo for RealSystem {
         parse_utc_offset(&String::from_utf8_lossy(&out.stdout))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    fn zone_utc_offset_secs(&self, zone: &str) -> Option<i32> {
+        crate::win_native::timezone::windows_zone_utc_offset_secs(zone)
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
     fn zone_utc_offset_secs(&self, _zone: &str) -> Option<i32> {
         // No time zone database on this OS: the offset of an IANA name cannot be computed.
         None

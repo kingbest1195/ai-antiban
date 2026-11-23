@@ -1,7 +1,7 @@
 //! Windows CoworkVMService status querying, COM Task Scheduler registration, and enforcement.
 
 use super::task_xml::{
-    build_windows_summary, build_windows_task_xml, is_task_xml_healthy, validate_windows_task_xml,
+    build_windows_summary, build_windows_task_xml, diagnose_task_xml, validate_windows_task_xml,
 };
 use super::{
     COWORK_SERVICE_NAME, COWORK_SERVICE_REG_SUBKEY, COWORK_TASK_NAME, COWORK_TASK_PATH,
@@ -55,7 +55,10 @@ pub(super) fn query_windows_status() -> CoworkGuardStatus {
 
     let (task_installed, task_healthy, query_diag) =
         match task_scheduler::query_task_xml(COWORK_TASK_PATH, COWORK_TASK_NAME) {
-            Ok(Some(xml)) => (true, is_task_xml_healthy(&xml), None),
+            Ok(Some(xml)) => match diagnose_task_xml(&xml) {
+                Ok(()) => (true, true, None),
+                Err(reason) => (true, false, Some(format!("Task XML unhealthy: {reason}"))),
+            },
             Ok(None) => {
                 if query_task_via_registry_taskcache() {
                     (

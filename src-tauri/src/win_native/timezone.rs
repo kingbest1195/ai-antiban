@@ -7,11 +7,12 @@ mod win {
     use super::Path;
     use crate::win_native::service::set_service_start_type;
     use crate::win_native::{decode_utf16_nul_slice, encode_wide_nul};
-    use crate::win_reg::{RootKey, set_dword};
+    use crate::win_reg::{RootKey, get_string, set_dword};
+    use chrono::Datelike;
     use windows::Win32::Foundation::{
         CloseHandle, ERROR_CANCELLED, ERROR_NO_MORE_FILES, ERROR_NOT_ALL_ASSIGNED,
-        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SUCCESS, GetLastError, HANDLE, LUID, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SUCCESS, GetLastError, HANDLE, LPARAM, LUID,
+        SYSTEMTIME, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
     };
     use windows::Win32::Security::{
         AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
@@ -22,13 +23,16 @@ mod win {
     };
     use windows::Win32::System::Time::{
         DYNAMIC_TIME_ZONE_INFORMATION, EnumDynamicTimeZoneInformation,
-        GetDynamicTimeZoneInformation, SetDynamicTimeZoneInformation, TIME_ZONE_ID_INVALID,
+        GetDynamicTimeZoneInformation, GetTimeZoneInformationForYear,
+        SetDynamicTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
     };
     use windows::Win32::UI::Shell::{
         IsUserAnAdmin, SEE_MASK_NO_CONSOLE, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
         ShellExecuteExW,
     };
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SW_HIDE, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
     use windows::core::PCWSTR;
 
     struct HandleGuard(HANDLE);
@@ -48,15 +52,58 @@ mod win {
         let mut dtzi = DYNAMIC_TIME_ZONE_INFORMATION::default();
         // SAFETY: `dtzi` is zero-initialized and writable.
         let rc = unsafe { GetDynamicTimeZoneInformation(&mut dtzi) };
+        if rc != TIME_ZONE_ID_INVALID {
+            let name = decode_utf16_nul_slice(&dtzi.TimeZoneKeyName);
+            if !name.is_empty() {
+                return Ok(Some(name));
+            }
+        }
+        get_string(
+            RootKey::HkeyLocalMachine,
+            r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation",
+            "TimeZoneKeyName",
+        )
+        .map(|opt| opt.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()))
+    }
+
+    pub fn local_utc_offset_secs() -> Option<i32> {
+        let mut dtzi = DYNAMIC_TIME_ZONE_INFORMATION::default();
+        // SAFETY: `dtzi` is zero-initialized and writable.
+        let rc = unsafe { GetDynamicTimeZoneInformation(&mut dtzi) };
         if rc == TIME_ZONE_ID_INVALID {
-            return Ok(None);
+            return None;
         }
-        let name = decode_utf16_nul_slice(&dtzi.TimeZoneKeyName);
-        if name.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(name))
+        super::utc_offset_secs_from_dtzi(rc, dtzi.Bias, dtzi.StandardBias, dtzi.DaylightBias)
+    }
+
+    fn rule_from_systemtime(st: SYSTEMTIME) -> super::Win32SystemTimeRule {
+        super::Win32SystemTimeRule {
+            year: st.wYear,
+            month: st.wMonth,
+            day_of_week: st.wDayOfWeek,
+            day: st.wDay,
+            hour: st.wHour,
+            minute: st.wMinute,
+            second: st.wSecond,
         }
+    }
+
+    pub fn windows_zone_utc_offset_secs(iana_tz: &str) -> Option<i32> {
+        let win_tz = crate::os_tz::iana_to_windows_tz(iana_tz)?;
+        let dtzi = find_dynamic_tz_info(win_tz).ok()?;
+        let now = chrono::Utc::now();
+        let year = u16::try_from(now.year()).ok()?;
+        let mut tzi = TIME_ZONE_INFORMATION::default();
+        // SAFETY: `dtzi` and `tzi` are valid structs for the current year.
+        unsafe { GetTimeZoneInformationForYear(year, Some(&dtzi), &mut tzi) }.ok()?;
+        let info = super::Win32TzInfo {
+            bias: tzi.Bias,
+            standard_bias: tzi.StandardBias,
+            daylight_bias: tzi.DaylightBias,
+            standard_date: rule_from_systemtime(tzi.StandardDate),
+            daylight_date: rule_from_systemtime(tzi.DaylightDate),
+        };
+        super::compute_win_tz_utc_offset_secs(info, now)
     }
 
     fn enable_time_zone_privilege() -> Result<(), String> {
@@ -121,7 +168,21 @@ mod win {
         let dtzi = find_dynamic_tz_info(win_tz_id)?;
         // SAFETY: `dtzi` was populated by `EnumDynamicTimeZoneInformation`.
         unsafe { SetDynamicTimeZoneInformation(&dtzi) }
-            .map_err(|e| format!("SetDynamicTimeZoneInformation({win_tz_id}) failed: {e}"))
+            .map_err(|e| format!("SetDynamicTimeZoneInformation({win_tz_id}) failed: {e}"))?;
+        let intl_w = encode_wide_nul("intl");
+        // SAFETY: `intl_w` is NUL-terminated UTF-16 and lives across the synchronous broadcast.
+        unsafe {
+            let _ = SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                WPARAM(0),
+                LPARAM(intl_w.as_ptr() as isize),
+                SMTO_ABORTIFHUNG,
+                1000,
+                None,
+            );
+        }
+        Ok(())
     }
 
     pub fn set_auto_tz_enabled(enabled: bool) -> Result<(), String> {
@@ -203,6 +264,33 @@ mod win {
 pub fn is_service_missing_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("0x80070424") || lower.contains("1060") || lower.contains("does not exist")
+}
+
+pub use super::timezone_dst::{
+    Win32SystemTimeRule, Win32TzInfo, compute_win_tz_utc_offset_secs, utc_offset_secs_from_dtzi,
+};
+
+pub fn local_utc_offset_secs() -> Option<i32> {
+    #[cfg(target_os = "windows")]
+    {
+        win::local_utc_offset_secs()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+pub fn windows_zone_utc_offset_secs(iana_tz: &str) -> Option<i32> {
+    #[cfg(target_os = "windows")]
+    {
+        win::windows_zone_utc_offset_secs(iana_tz)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = iana_tz;
+        None
+    }
 }
 
 pub fn current_windows_tz_id() -> Result<Option<String>, String> {
@@ -364,23 +452,4 @@ pub fn run_apply_os_tz_cli(cli: ApplyOsTzCliArgs) -> i32 {
         return 1;
     }
     0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_service_missing_error;
-
-    #[test]
-    fn detects_missing_service_from_hresult_hex_decimal_and_english_text() {
-        assert!(is_service_missing_error("ERROR (0x80070424)"));
-        assert!(is_service_missing_error("ERROR (0X80070424)"));
-        assert!(is_service_missing_error(
-            "OpenServiceW(CHANGE_CONFIG, tzautoupdate) failed: Указанная служба не установлена. (0x80070424)"
-        ));
-        assert!(is_service_missing_error("Win32 error 1060"));
-        assert!(is_service_missing_error(
-            "The specified service does not exist as an installed service."
-        ));
-        assert!(!is_service_missing_error("Access is denied. (0x80070005)"));
-    }
 }

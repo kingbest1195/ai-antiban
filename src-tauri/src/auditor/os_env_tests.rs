@@ -521,3 +521,58 @@ fn the_synced_zone_note_follows_the_switch_and_returns_cli_only_warning_when_act
         (CheckStatus::Warning, "TIMEZONE_MISMATCH")
     );
 }
+
+#[test]
+fn windows_live_tz_and_offset_resolve_berlin_amsterdam_and_tolerance() {
+    // Models Windows after syncing OS TZ to Europe/Amsterdam (mapped to W. Europe Standard Time
+    // -> canonical Europe/Berlin) while AI CLI env is synced to Europe/Amsterdam.
+    let mut win_synced = FakeSystem {
+        timezone: Ok("Europe/Berlin".into()),
+        local_offset: Some(3600),
+        sync_ai_tz: true,
+        ..sys()
+    };
+    win_synced
+        .zone_offsets
+        .insert("Europe/Amsterdam".into(), 3600);
+    win_synced.zone_offsets.insert("Europe/London".into(), 0);
+    win_synced
+        .zone_offsets
+        .insert("America/New_York".into(), -5 * 3600);
+
+    // Must be Ok(TIMEZONE_MATCH), never stuck on TIMEZONE_SYNCED_CLI_ONLY!
+    let exact = evaluate_system_timezone_with_sync(
+        &win_synced,
+        Some("Europe/Amsterdam"),
+        Some("Europe/Amsterdam"),
+        true,
+    );
+    assert_eq!(
+        (exact.status, exact.code.as_str()),
+        (CheckStatus::Ok, "TIMEZONE_MATCH")
+    );
+
+    // Within +-1h tolerance (Berlin UTC+1 vs London UTC+0) -> Ok(TIMEZONE_MATCH).
+    let tol = evaluate_system_timezone_with_sync(
+        &win_synced,
+        Some("Europe/London"),
+        Some("Europe/Amsterdam"),
+        true,
+    );
+    assert_eq!(
+        (tol.status, tol.code.as_str()),
+        (CheckStatus::Ok, "TIMEZONE_MATCH")
+    );
+
+    // Beyond +-1h (Berlin vs New York) -> Warning(TIMEZONE_SYNCED_CLI_ONLY).
+    let far = evaluate_system_timezone_with_sync(
+        &win_synced,
+        Some("America/New_York"),
+        Some("Europe/Amsterdam"),
+        true,
+    );
+    assert_eq!(
+        (far.status, far.code.as_str()),
+        (CheckStatus::Warning, "TIMEZONE_SYNCED_CLI_ONLY")
+    );
+}

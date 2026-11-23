@@ -168,6 +168,7 @@ export function SettingsModal({
             autoUpdateEnabled={autoUpdateEnabled}
             coworkStatus={ctrl.coworkStatus}
             coworkBusy={ctrl.coworkBusy}
+            coworkError={ctrl.coworkError}
             onInstallCoworkGuard={ctrl.handleInstallCoworkGuard}
             onRefreshCoworkGuard={ctrl.handleRefreshCoworkGuard}
             exportBusy={ctrl.exportBusy}

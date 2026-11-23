@@ -315,5 +315,6 @@ mod audit_lifecycle_tests;
 mod gates_tests;
 mod pinning_and_pause_tests;
 mod provider_isolation_tests;
+mod real_ticker_changed_tests;
 mod real_ticker_tests;
 mod recovery_and_exceptions_tests;

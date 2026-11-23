@@ -8,6 +8,10 @@ pub mod process;
 pub mod service;
 pub mod task_scheduler;
 pub mod timezone;
+pub mod timezone_dst;
+
+#[cfg(test)]
+mod timezone_tests;
 
 /// Explicit SDDL granting Full Access to `SYSTEM` (`SY`) and `Administrators` (`BA`),
 /// plus Generic Read/Execute (`GRGX`) to `Authenticated Users` (`AU`).

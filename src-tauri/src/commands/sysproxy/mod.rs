@@ -63,6 +63,7 @@ pub(crate) async fn toggle_sysproxy_shared(
         .await
         {
             Ok(true) => {
+                auditor.resolver.check_cache().os.clear().await;
                 eprintln!("Застава: системный часовой пояс ОС восстановлен при выключении защиты.");
             }
             Ok(false) => {}

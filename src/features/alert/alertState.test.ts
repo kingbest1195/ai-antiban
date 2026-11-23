@@ -232,6 +232,81 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
     expect(html).toContain("disabled");
   });
 
+  it("при phase === detecting и new_ip === null, new_country === null рендерит диалог со Skeleton и без Разрешить, а enriched заполняет данные", () => {
+    const initialDetecting: RiskInterceptPayload = {
+      ...detecting("a-instant"),
+      network_change: { old_ip: "185.212.102.40", old_country: "NL", new_ip: null, new_country: null },
+      gate_reason: "Смена внешнего IP или сетевого интерфейса — выполняется проверка безопасности",
+    };
+
+    const s1 = alertReducer(initialAlertState, { type: "detected", payload: initialDetecting });
+    expect(s1.payload).not.toBeNull();
+    expect(canAllow(s1)).toBe(false);
+
+    const htmlDetecting = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        hideIpMode: false,
+        initialPayload: s1.payload ?? undefined,
+      }),
+    );
+    expect(htmlDetecting).toContain("zs-dialog");
+    expect(htmlDetecting).toContain("zs-route-diff");
+    expect(htmlDetecting).toContain("185.212.102.40");
+    expect(htmlDetecting).toContain("Нидерланды (NL)");
+    expect(htmlDetecting).toContain("zs-skeleton");
+    expect(htmlDetecting).not.toContain(alertDialog.unknownIp);
+    expect(htmlDetecting).toContain(alertDialog.detectingHint);
+    expect(htmlDetecting).toContain("disabled");
+
+    // Enriched ready fills in new_ip, new_country, report and enables Allow.
+    const s2 = alertReducer(s1, {
+      type: "enriched",
+      payload: enriched({
+        id: "a-instant",
+        epoch: 1,
+        phase: "ready",
+        network_change: { old_ip: "185.212.102.40", old_country: "NL", new_ip: "185.220.101.5", new_country: "RU" },
+        gate_reason: "GEO_BLOCKED: RU",
+      }),
+    });
+    expect(canAllow(s2)).toBe(true);
+    const htmlReady = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        hideIpMode: false,
+        initialPayload: s2.payload ?? undefined,
+      }),
+    );
+    expect(htmlReady).toContain("185.220.101.5");
+    expect(htmlReady).toContain("Россия (RU)");
+    expect(htmlReady).not.toContain("zs-skeleton");
+    expect(htmlReady).not.toContain("disabled");
+
+    // Enriched failed (offline): removes Skeleton, shows unknownIp/unknownCountry/failedText, keeps Allow disabled.
+    const sFailed = alertReducer(s1, {
+      type: "enriched",
+      payload: enriched({
+        id: "a-instant",
+        epoch: 1,
+        phase: "failed",
+        report: null,
+        network_change: { old_ip: "185.212.102.40", old_country: "NL", new_ip: null, new_country: null },
+        gate_reason: "Нет подключения к сети после смены маршрута — запросы временно остановлены",
+      }),
+    });
+    expect(isFailed(sFailed)).toBe(true);
+    expect(canAllow(sFailed)).toBe(false);
+    const htmlFailed = renderToStaticMarkup(
+      createElement(AlertWindow, {
+        hideIpMode: false,
+        initialPayload: sFailed.payload ?? undefined,
+      }),
+    );
+    expect(htmlFailed).not.toContain("zs-skeleton");
+    expect(htmlFailed).toContain(alertDialog.unknownIp);
+    expect(htmlFailed).toContain(alertDialog.unknownCountry);
+    expect(htmlFailed).toContain("disabled");
+  });
+
   it("AlertWindow рендерит длинное название страны в Было → Стало и обе горячие клавиши 1 и 2", () => {
     const html = renderToStaticMarkup(
       createElement(AlertWindow, {

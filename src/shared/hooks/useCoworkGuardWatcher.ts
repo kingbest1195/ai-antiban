@@ -3,12 +3,17 @@ import type { CoworkGuardStatus } from "../../types";
 import { onCoworkGuardStatus } from "../../utils/api/events";
 import { getCoworkGuardStatus, installOrRepairCoworkGuard } from "../../utils/api/sysproxy";
 
+export interface CoworkGuardRepairResult {
+  status: CoworkGuardStatus | null;
+  error: string | null;
+}
+
 export interface CoworkGuardWatcherState {
   status: CoworkGuardStatus | null;
   needsRepair: boolean;
   repairing: boolean;
   error: string | null;
-  repair: () => Promise<CoworkGuardStatus | null>;
+  repair: () => Promise<CoworkGuardRepairResult | CoworkGuardStatus | null>;
   refresh: () => Promise<CoworkGuardStatus | null>;
 }
 
@@ -143,8 +148,9 @@ export function useCoworkGuardWatcher(): CoworkGuardWatcherState {
     }
   }, []);
 
-  const repair = useCallback(async () => {
-    return await runCoworkGuardRepair({
+  const repair = useCallback(async (): Promise<CoworkGuardRepairResult> => {
+    let latestError: string | null = null;
+    const nextStatus = await runCoworkGuardRepair({
       installOrRepair: installOrRepairCoworkGuard,
       onStatus: (updated) => {
         if (mountedRef.current) setStatus(updated);
@@ -153,9 +159,11 @@ export function useCoworkGuardWatcher(): CoworkGuardWatcherState {
         if (mountedRef.current) setRepairing(next);
       },
       onError: (msg) => {
+        latestError = msg;
         if (mountedRef.current) setError(msg);
       },
     });
+    return { status: nextStatus, error: latestError };
   }, []);
 
   return {
