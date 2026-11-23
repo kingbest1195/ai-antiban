@@ -200,11 +200,14 @@ pub(super) fn score_bin_axis(
     let mut notes = Vec::new();
     if matches!(
         input.channel,
-        PaymentChannel::AppleIAP | PaymentChannel::Api
+        PaymentChannel::AppleIAP | PaymentChannel::GooglePlayIap | PaymentChannel::Api
     ) {
         let msg = match input.channel {
             PaymentChannel::AppleIAP => {
                 "Оплата через App Store (подарочной картой): банковская карта сайту не передаётся, риск проверки по карте исключён."
+            }
+            PaymentChannel::GooglePlayIap => {
+                "Оплата через Google Play: номер карты не передаётся напрямую на сайт ИИ-сервиса."
             }
             _ => "Оплата API-баланса: форма оплаты подписки на сайте claude.ai не используется.",
         };

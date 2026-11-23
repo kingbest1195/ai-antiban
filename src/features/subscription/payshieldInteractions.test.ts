@@ -663,4 +663,32 @@ describe("PayShield mounted interactions", () => {
     await Promise.resolve();
     expect(apiMocks.clearUpstreamProxy).toHaveBeenCalledTimes(1);
   });
+
+  it("PaymentReadinessCard передаёт targetService=gemini и показывает поле профиля Google", async () => {
+    const mounted = mountNode(() =>
+      PaymentReadinessCard({
+        channel: "directCard",
+        exitCountry: "US",
+        inCleanRoom: true,
+      }),
+    );
+    await mounted.settle();
+
+    const serviceSelect = collectElements(
+      mounted.tree,
+      (el) => el.type === Select && el.props.label === copy.readiness.serviceLabel,
+    )[0];
+    expect(serviceSelect).toBeDefined();
+    (serviceSelect.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: "gemini" } });
+    await mounted.settle();
+
+    expect(apiMocks.evaluatePaymentReadiness).toHaveBeenLastCalledWith(
+      expect.objectContaining({ targetService: "gemini", provider: "gemini" }),
+    );
+    const gpSelect = collectElements(
+      mounted.tree,
+      (el) => el.type === Select && el.props.label === copy.readiness.googleProfileLabel,
+    )[0];
+    expect(gpSelect).toBeDefined();
+  });
 });

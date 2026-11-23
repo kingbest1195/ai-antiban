@@ -7,6 +7,7 @@ use super::{
     ReadinessTier, SubscriptionPlan,
 };
 use crate::auditor::geo_matrix::CheckStatus;
+use crate::core::bin_radar::AiPaymentService;
 use crate::core::country::format_country_ru;
 
 fn score_geo_billing_axis(
@@ -43,6 +44,40 @@ fn score_geo_billing_axis(
                 "Аккаунт App Store США (US) и подключение согласованы для оплаты через App Store."
                     .to_string(),
             );
+        }
+        let score = pts.clamp(0, 25) as u8;
+        return AxisScore {
+            id: "geo_billing_parity".to_string(),
+            label: "Совпадение страны, карты и адреса".to_string(),
+            score,
+            max_score: 25,
+            status: axis_status(score, 25, axis_blocker),
+            notes,
+        };
+    }
+
+    if input.channel == PaymentChannel::GooglePlayIap {
+        let gp_cc = norm_cc(input.google_profile_country.as_deref());
+        let mut pts: i32 = 25;
+        let mut axis_blocker = false;
+        if gp_cc == "RU" {
+            pts = 0;
+            axis_blocker = true;
+            let msg = "Платёжный профиль Google привязан к России — оплата зарубежной картой вызовет холд OR-CCSEH-21 / OR-HDT-16.";
+            notes.push(msg.to_string());
+            blockers.push(msg.to_string());
+        } else if !gp_cc.is_empty() && !exit_cc.is_empty() && gp_cc != exit_cc {
+            pts -= 15;
+            axis_blocker = true;
+            let msg = format!(
+                "Конфликт стран Google Play: профиль в {} при подключении через {}.",
+                format_country_ru(&gp_cc),
+                format_country_ru(&exit_cc)
+            );
+            notes.push(msg.clone());
+            blockers.push(msg);
+        } else {
+            notes.push("Профиль Google Play и подключение согласованы.".to_string());
         }
         let score = pts.clamp(0, 25) as u8;
         return AxisScore {
@@ -116,6 +151,30 @@ fn score_geo_billing_axis(
         }
     }
 
+    if input.target_service == Some(AiPaymentService::Gemini) {
+        let gp_cc = norm_cc(input.google_profile_country.as_deref());
+        let card_cc = norm_cc(
+            input
+                .bin_report
+                .as_ref()
+                .and_then(|b| b.country_code.as_deref()),
+        );
+        let exit_cc = norm_cc(input.exit_country.as_deref());
+        if gp_cc == "RU"
+            || (!gp_cc.is_empty()
+                && ((!card_cc.is_empty() && gp_cc != card_cc)
+                    || (!exit_cc.is_empty() && gp_cc != exit_cc)))
+        {
+            pts -= 20;
+            axis_blocker = true;
+            let msg = "Нарушен Google Payments Profile Lock (страна профиля Google != страна карты/IP): риск холда OR-CCSEH-21 / OR-HDT-16 и 24-часового ограничения смены страны.";
+            notes.push(msg.to_string());
+            blockers.push(msg.to_string());
+        }
+    } else if input.target_service == Some(AiPaymentService::Cursor) {
+        notes.push("Для Cursor соблюдайте стабильность устройства (machineId) и не используйте цепочки пробных аккаунтов.".to_string());
+    }
+
     if notes.is_empty() {
         let exit_desc = if exit_cc.is_empty() {
             "не определена".to_string()
@@ -152,12 +211,38 @@ fn score_channel_axis(
 
     if matches!(
         input.channel,
-        PaymentChannel::AppleIAP | PaymentChannel::Api
+        PaymentChannel::AppleIAP | PaymentChannel::GooglePlayIap | PaymentChannel::Api
     ) {
-        let msg = if input.channel == PaymentChannel::AppleIAP {
-            "Оплата через App Store (подарочной картой США) избавляет от проверок антифрода и паспорта на сайте."
-        } else {
-            "Оплата API-баланса не использует форму подписки на сайте."
+        if input.channel == PaymentChannel::GooglePlayIap {
+            let gp_cc = norm_cc(input.google_profile_country.as_deref());
+            let exit_cc = norm_cc(input.exit_country.as_deref());
+            let gp_conflict =
+                gp_cc == "RU" || (!gp_cc.is_empty() && !exit_cc.is_empty() && gp_cc != exit_cc);
+            if gp_conflict {
+                let msg = "Профиль Google Payments конфликтует с оплатой (риск OR-CCSEH-21 / OR-HDT-16; смена страны блокирует изменения на 24 часа).";
+                notes.push(msg.to_string());
+                blockers.push(msg.to_string());
+                return (
+                    AxisScore {
+                        id: "channel_env_warmup".to_string(),
+                        label: "Способ оплаты, среда и прогрев".to_string(),
+                        score: 0,
+                        max_score: 20,
+                        status: CheckStatus::Critical,
+                        notes,
+                    },
+                    true,
+                );
+            }
+        }
+        let msg = match input.channel {
+            PaymentChannel::AppleIAP => {
+                "Оплата через App Store (подарочной картой США) избавляет от проверок антифрода и паспорта на сайте."
+            }
+            PaymentChannel::GooglePlayIap => {
+                "Оплата через Google Play избавляет от прямой формы карты на сайте, но требует согласованного региона Google Payments (смена страны даёт холд 24 ч)."
+            }
+            _ => "Оплата API-баланса не использует форму подписки на сайте.",
         };
         notes.push(msg.to_string());
         return (
@@ -256,6 +341,30 @@ fn score_channel_axis(
         }
     }
 
+    if input.target_service == Some(AiPaymentService::Gemini) {
+        let gp_cc = norm_cc(input.google_profile_country.as_deref());
+        let card_cc = norm_cc(
+            input
+                .bin_report
+                .as_ref()
+                .and_then(|b| b.country_code.as_deref()),
+        );
+        let exit_cc = norm_cc(input.exit_country.as_deref());
+        if gp_cc == "RU"
+            || (!gp_cc.is_empty()
+                && ((!card_cc.is_empty() && gp_cc != card_cc)
+                    || (!exit_cc.is_empty() && gp_cc != exit_cc)))
+        {
+            pts -= 20;
+            axis_blocker = true;
+            let msg = "Нарушен Google Payments Profile Lock (страна профиля Google != страна карты/IP): риск холда OR-CCSEH-21 / OR-HDT-16 и 24-часового ограничения смены страны.";
+            notes.push(msg.to_string());
+            blockers.push(msg.to_string());
+        }
+    } else if input.target_service == Some(AiPaymentService::Cursor) {
+        notes.push("Для Cursor соблюдайте стабильность устройства (machineId) и не используйте цепочки пробных аккаунтов.".to_string());
+    }
+
     if notes.is_empty() {
         notes.push("Среда, прогрев (от 96 ч) и способ оплаты полностью подходят.".to_string());
     }
@@ -303,7 +412,7 @@ pub fn evaluate_payment_readiness(input: &PaymentReadinessInput) -> PaymentReadi
 
     let requires_matching_billing = !matches!(
         input.channel,
-        PaymentChannel::AppleIAP | PaymentChannel::Api
+        PaymentChannel::AppleIAP | PaymentChannel::GooglePlayIap | PaymentChannel::Api
     );
 
     let recommended_action = if hard_zero_block || tier == ReadinessTier::Red {
@@ -321,7 +430,7 @@ pub fn evaluate_payment_readiness(input: &PaymentReadinessInput) -> PaymentReadi
             || input.account_age_confirmed_96h == Some(true)
             || matches!(
                 input.channel,
-                PaymentChannel::AppleIAP | PaymentChannel::Api
+                PaymentChannel::AppleIAP | PaymentChannel::GooglePlayIap | PaymentChannel::Api
             );
         let msg = if warmup_ok {
             "Устраните предупреждения перед оплатой: откройте «Чистую комнату» и проверьте совпадение стран."

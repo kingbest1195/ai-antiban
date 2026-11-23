@@ -9,9 +9,12 @@ import {
   dismissHint,
   fetchAppState,
   generateBunkerRestorePrompt,
+  getBinRadarStats,
   getBunkerStatus,
   getOsTzStatus,
+  getPaymentAdvice,
   getPersonaRiskReport,
+  getProvidersManifest,
   launchCleanBrowser,
   listBunkerSnapshots,
   listCleanProfiles,
@@ -24,7 +27,9 @@ import {
   restoreOsTimezone,
   runBunkerBackupNow,
   runCleanRoomAudit,
+  setBinRadarOptIn,
   startCleanProfileWarmup,
+  submitBinRadarReport,
   syncOsTimezone,
   untaintCleanRoomIp,
   updateBunkerSettings,
@@ -273,5 +278,58 @@ describe("v3 SOS / Persona Risk Index & State Flags", () => {
     const unlisten = await onWindowFocusChanged(() => {});
     expect(typeof unlisten).toBe("function");
     unlisten();
+  });
+
+  it("PayShield v3.2 API & mocks: BIN Radar (n<5 и toxic), Advisor 5 сценариев, Manifest и Zero-PII opt-in", async () => {
+    const lowN = await getBinRadarStats("53787200", "cursor");
+    expect(lowN.status).toBe("insufficient_data");
+    expect(lowN.window14d).toBeNull();
+
+    const toxicStats = await getBinRadarStats("49372400", "claude_pro");
+    expect(toxicStats.status).toBe("critical");
+    expect(toxicStats.criticalWarning).toBe(true);
+
+    const manifest = await getProvidersManifest();
+    expect(manifest.providers.length).toBeGreaterThanOrEqual(5);
+
+    const rescuePlan = await getPaymentAdvice({
+      target_service: "claude_pro",
+      has_iphone_apple_id: false,
+      available_bin_prefix: "49372412",
+      payment_rails: ["crypto_usdt"],
+      willing_to_warmup_96h: true,
+      network_state: { exit_country: "DE", trust_score: 90, clean_room_ready: true, is_zastava_key_active: true },
+    });
+    expect(rescuePlan.primary.route_id).toBe("apple_iap_us_gift");
+    expect(rescuePlan.blocked_red_flags.some((b) => b.explanation.includes("Google Pay"))).toBe(true);
+
+    const geminiPlan = await getPaymentAdvice({
+      target_service: "gemini",
+      has_iphone_apple_id: false,
+      payment_rails: ["rub_sbp"],
+      willing_to_warmup_96h: true,
+      google_payments_country: "RU",
+      network_state: { exit_country: "US", trust_score: 90, clean_room_ready: true, is_zastava_key_active: true },
+    });
+    expect(geminiPlan.blocked_red_flags.some((b) => b.reason.includes("OR-CCSEH-21") || b.title.includes("OR-CCSEH-21"))).toBe(true);
+
+    const validReport = {
+      bin_prefix: "49372400",
+      service: "claude_pro",
+      channel: "stripe_web_card",
+      geo_match: "triple_mismatch",
+      warmup_bucket: "lt_24h",
+      outcome: "instant_kyc",
+      client_version: "3.2.0",
+    };
+    await setBinRadarOptIn(false);
+    await expect(submitBinRadarReport(validReport)).rejects.toThrow();
+
+    await setBinRadarOptIn(true);
+    await expect(submitBinRadarReport({ ...validReport, email: "leak@example.com" })).rejects.toThrow();
+    await expect(submitBinRadarReport({ ...validReport, bin_prefix: "4937240012345678" })).rejects.toThrow();
+    const submitted = await submitBinRadarReport(validReport);
+    expect(submitted.bin_prefix).toBe("49372400");
+    await setBinRadarOptIn(false);
   });
 });

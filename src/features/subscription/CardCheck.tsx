@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ChangeEvent, ClipboardEvent, FormEvent } from "react";
-import type { BinReport, ClaudeWebVerdict } from "../../types";
-import { checkCardBin } from "../../utils/api";
+import type { AiPaymentService, BinRadarLookupStats, BinReport, ClaudeWebVerdict } from "../../types";
+import { checkCardBin, getBinRadarStats } from "../../utils/api";
 import { Badge, Banner, Button, Card, Field, Row, Rows } from "../../ui";
 import type { BannerTone, RowTone } from "../../ui";
 import { subscription } from "../../shared/copy/ru";
@@ -16,6 +16,7 @@ export interface CardCheckProps {
   country?: string;
   /** Явный код страны выхода (алиас для встраивания в «Чистую комнату» и экран оплаты). */
   exitCountry?: string;
+  targetService?: AiPaymentService;
   ctaVariant?: "primary" | "secondary";
   onToast?: ShowToast;
   onNavigateToPaymentGuide?: () => void;
@@ -67,6 +68,7 @@ function claudeVerdictTone(verdict: ClaudeWebVerdict): RowTone {
 export function CardCheck({
   country,
   exitCountry,
+  targetService = "claude_pro",
   ctaVariant = "primary",
   onToast,
   onNavigateToPaymentGuide,
@@ -81,6 +83,7 @@ export function CardCheck({
   const [binInput, setBinInput] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [result, setResult] = useState<BinReport | null>(null);
+  const [radarStats, setRadarStats] = useState<BinRadarLookupStats | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -121,8 +124,12 @@ export function CardCheck({
     setError(null);
 
     try {
-      const report = await checkCardBin(cleaned, resolvedCountry || null);
+      const [report, radar] = await Promise.all([
+        checkCardBin(cleaned, resolvedCountry || null),
+        getBinRadarStats(cleaned, targetService).catch(() => null),
+      ]);
       setResult(report);
+      setRadarStats(radar);
       onBinChecked?.(report);
       if (onToast) {
         const bank = report.knownFintechLabel || report.issuerName || copy.toast.okBank;
@@ -176,16 +183,24 @@ export function CardCheck({
         </form>
       </Card>
 
-      {result && <Verdict report={result} onNavigateToPaymentGuide={onNavigateToPaymentGuide} />}
+      {result && (
+        <Verdict
+          report={result}
+          radarStats={radarStats}
+          onNavigateToPaymentGuide={onNavigateToPaymentGuide}
+        />
+      )}
     </>
   );
 }
 
 export function Verdict({
   report,
+  radarStats,
   onNavigateToPaymentGuide,
 }: {
   report: BinReport;
+  radarStats?: BinRadarLookupStats | null;
   onNavigateToPaymentGuide?: () => void;
 }) {
   const tone = verdictTone(report);
@@ -252,6 +267,21 @@ export function Verdict({
             title={claudeVerdictLabel(report.claudeWebVerdict)}
             sub={d.claudeVerdict}
           />
+          {radarStats && (
+            <Row
+              icon={radarStats.criticalWarning ? "alert" : "info"}
+              tone={radarStats.criticalWarning ? "danger" : "neutral"}
+              title={radarStats.summaryRu}
+              sub={copy.radar.label}
+              trail={
+                radarStats.criticalWarning && onNavigateToPaymentGuide ? (
+                  <Button variant="secondary" size="sm" onClick={onNavigateToPaymentGuide}>
+                    {copy.radar.rescueCta}
+                  </Button>
+                ) : undefined
+              }
+            />
+          )}
         </Rows>
       </div>
     </Card>

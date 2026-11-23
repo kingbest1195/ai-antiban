@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { guides as copy, subscription } from "../../shared/copy/ru";
 import { GuidesScreen } from "./GuidesScreen";
+import { SafePaymentAdvisorCard } from "./SafePaymentAdvisorCard";
 import { BLACKLISTED_PROVIDERS, VIRTUAL_CARD_PROVIDERS, VPS_PROVIDERS } from "./providers";
 
 describe("PaymentGuide inside GuidesScreen", () => {
@@ -193,6 +194,53 @@ describe("PaymentGuide inside GuidesScreen", () => {
     // Ноль восклицательных знаков в текстовом содержимом PaymentGuide
     const textOnly = html.replace(/<[^>]+>/g, " ");
     expect(textOnly).not.toContain("!");
+    expect(html).toContain(copy.payment.advisor.title);
+  });
+
+  it("SafePaymentAdvisorCard рендерит рекомендации и предупреждения без жаргона и восклицательных знаков", () => {
+    const html = renderToStaticMarkup(
+      createElement(SafePaymentAdvisorCard, {
+        exitCountry: "DE",
+        initialBin: "49372400",
+        initialPlan: {
+          primary: {
+            route_id: "apple_iap_us_gift",
+            title: "Безопасный обход через App Store (подарочная карта США)",
+            kyc_risk_tier: "minimal",
+            estimated_fees: "Т-Банк и СберБанк Онлайн по курсу банка",
+            provider_ids: ["tbank", "sberbank", "kupikod"],
+            checklist: ["Отдельный аккаунт Apple (США) с безналоговым адресом."],
+            warnings: [],
+          },
+          fallbacks: [
+            {
+              route_id: "direct_web_card",
+              title: "Прямая оплата картой на сайте",
+              kyc_risk_tier: "medium",
+              estimated_fees: "По тарифу сервиса карт",
+              provider_ids: ["wanttopay"],
+              checklist: ["Прогрев 96 часов."],
+            },
+          ],
+          blocked_red_flags: [
+            {
+              route_id: "blocked_web_card_rescue",
+              title: "Опасный путь: оплата на сайте выбранной картой",
+              kyc_risk_tier: "critical",
+              reason: "Высокий риск проверки документов.",
+              explanation: "Оплата через Google Pay передаёт реальную страну карты.",
+              rescue_route_id: "apple_iap_us_gift",
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(html).toContain("Рекомендуемый маршрут");
+    expect(html).toContain("Опасный путь");
+    expect(html).toContain("Google Pay");
+    expect(html).not.toContain("zs-btn--primary");
+    expect(html.replace(/<[^>]+>/g, " ")).not.toContain("!");
   });
 });
 

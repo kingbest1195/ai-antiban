@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-11-23T12:00:00Z",
+  "ttl_seconds": 86400,
+  "providers": [
+    {
+      "id": "tbank",
+      "name": "Т-Банк (подарочная карта США)",
+      "category": "apple_gift_card",
+      "tier": "tier1_iap",
+      "status": "active",
+      "known_bin_prefixes": [],
+      "supported_rails": ["rub_sbp"],
+      "supported_services": ["claude_pro", "claude_max", "chatgpt"],
+      "fees_summary": "Номиналы $2–$100 по курсу банка; не выбирайте регион «Россия» с наценкой около +60%",
+      "warnings_ru": [
+        "Выбирайте только регион США в разделе Apple и начинайте с тестовой покупки $2 или $5.",
+        "Используйте отдельный US Apple ID только для покупок, а не основной личный аккаунт iCloud."
+      ],
+      "affiliate_url": null,
+      "auto_demote_exempt": false
+    },
+    {
+      "id": "sberbank",
+      "name": "СберБанк Онлайн (Apple Card США)",
+      "category": "apple_gift_card",
+      "tier": "tier1_iap",
+      "status": "active",
+      "known_bin_prefixes": [],
+      "supported_rails": ["rub_sbp"],
+      "supported_services": ["claude_pro", "claude_max", "chatgpt"],
+      "fees_summary": "Номиналы $2–$500 по курсу, близкому к ЦБ РФ",
+      "warnings_ru": [
+        "Откройте Платежи → Отдых и развлечения → Онлайн-сервисы / Игры → Apple Card (США).",
+        "Используйте отдельный US Apple ID только для покупок и начинайте с тестового номинала $2 или $5."
+      ],
+      "affiliate_url": null,
+      "auto_demote_exempt": false
+    },
+    {
+      "id": "kupikod",
+      "name": "Kupikod",
+      "category": "apple_gift_card",
+      "tier": "tier1_iap",
+      "status": "active",
+      "known_bin_prefixes": [],
+      "supported_rails": ["rub_sbp", "crypto_usdt"],
+      "supported_services": ["claude_pro", "claude_max", "chatgpt"],
+      "fees_summary": "Наценка около 25–34% к курсу; возвраты по умолчанию начисляются в Kupicoin",
+      "warnings_ru": [
+        "Обязательно снимите галочку автоподписки «Пропуск Kupikod» (299 ₽/мес) перед оплатой.",
+        "Сделайте непрерывную видеозапись экрана от оплаты до активации кода; окно претензий — строго 2 часа."
+      ],
+      "affiliate_url": "https://kupikod.com/",
+      "auto_demote_exempt": false
+    },
+    {
+      "id": "wanttopay",
+      "name": "WantToPay",
+      "category": "virtual_card",
+      "tier": "tier2_conditional",
+      "status": "active",
+      "known_bin_prefixes": ["48331200"],
+      "supported_rails": ["rub_sbp", "crypto_usdt"],
+      "supported_services": ["claude_pro", "claude_max", "chatgpt", "cursor", "gemini"],
+      "fees_summary": "Активация 25–40% + продление 10–25% в USDT; комиссия $0.25–$1.00 за каждую отклонённую попытку",
+      "warnings_ru": [
+        "Используйте только тарифы Easy или Smart (избегайте дешёвого предоплаченного тарифа).",
+        "Оплачивайте строго с IP и адресом США после 96 часов прогрева аккаунта и с 72-часовой защитой маршрута."
+      ],
+      "affiliate_url": "https://telegram.me/WantToPayBot?start=w17851188--ERIEX",
+      "auto_demote_exempt": false
+    },
+    {
+      "id": "platipomiru",
+      "name": "Плати по миру",
+      "category": "virtual_card",
+      "tier": "tier2_conditional",
+      "status": "active",
+      "known_bin_prefixes": ["44661400"],
+      "supported_rails": ["rub_sbp"],
+      "supported_services": ["claude_pro", "claude_max", "chatgpt", "cursor", "gemini"],
+      "fees_summary": "Выпуск карты через СБП в рублях — строго тариф «Для подписок»",
+      "warnings_ru": [
+        "Оформляйте только тариф «Для подписок» — обычные карты для путешествий на сайтах ИИ не проходят.",
+        "Требуется строгое совпадение с IP и адресом США, 96 часов прогрева до оплаты и 72 часа защиты маршрута после."
+      ],
+      "affiliate_url": "https://platipomiru.com/?code=UXCAF1Z9",
+      "auto_demote_exempt": false
+    }
+  ],
+  "blacklist": [
+    {
+      "id": "antarctic-wallet",
+      "name": "Antarctic Wallet",
+      "reason_ru": "Частые запросы паспорта и заморозки из-за несовпадения страны карты и подключения."
+    },
+    {
+      "id": "altyn-wallet",
+      "name": "Altyn Wallet",
+      "reason_ru": "Высокий риск мгновенной проверки документов и блокировки счёта."
+    },
+    {
+      "id": "wayment",
+      "name": "Wayment",
+      "reason_ru": "Карта из Сингапура при IP США/Европы почти гарантированно вызывает проверку паспорта."
+    },
+    {
+      "id": "epn",
+      "name": "e.pn",
+      "reason_ru": "Блокирует пользователей из РФ при проверке документов; частые отказы при продлении."
+    },
+    {
+      "id": "redotpay",
+      "name": "RedotPay",
+      "reason_ru": "Частые проверки документов и отказы при регулярном списании подписки."
+    },
+    {
+      "id": "pstnet",
+      "name": "PST.net",
+      "reason_ru": "Высокий риск проверок и массовые отказы карт при продлении."
+    },
+    {
+      "id": "flexcard",
+      "name": "FlexCard",
+      "reason_ru": "Массовые отказы виртуальных карт при продлении подписки."
+    },
+    {
+      "id": "gray-marketplaces",
+      "name": "Plati.market / Avito / GGSel / Ozon / WB / случайные боты в Telegram",
+      "reason_ru": "Серые подарочные карты и чужие семейные инвайты ведут к пожизненной блокировке аккаунта Apple или Google."
+    }
+  ],
+  "signature_ed25519_b64": "w3mxcWPtJa/bG7e8iSQgYP4MJ5/hqVPfptN3JZflQlSaC0yl9fbSyQE2URF01Q64ZooET/inNN25M10VHW1MDw=="
+}

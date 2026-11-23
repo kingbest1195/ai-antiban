@@ -34,6 +34,7 @@ fn andrew_incident_sg_bin_de_vpn_de_billing_gpay_is_red_below_50() {
         warmup_hours: Some(120),
         account_age_confirmed_96h: None,
         plan: SubscriptionPlan::Pro,
+        target_service: None,
         evaluated_at: 1_700_000_000,
     };
 

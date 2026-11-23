@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-11-23T12:00:00Z",
+  "ttl_seconds": 86400,
+  "entries": [
+    {
+      "bin_prefix": "49372400",
+      "service": "claude_pro",
+      "window_14d": {
+        "n": 34,
+        "success_pct": 14.7,
+        "soft_decline_pct": 20.6,
+        "instant_kyc_pct": 52.9,
+        "instant_ban_pct": 11.8
+      },
+      "window_30d": {
+        "n": 61,
+        "success_pct": 19.2,
+        "soft_decline_pct": 21.3,
+        "instant_kyc_pct": 49.1,
+        "instant_ban_pct": 10.4
+      }
+    },
+    {
+      "bin_prefix": "49372400",
+      "service": "chatgpt",
+      "window_14d": {
+        "n": 21,
+        "success_pct": 23.8,
+        "soft_decline_pct": 23.8,
+        "instant_kyc_pct": 42.9,
+        "instant_ban_pct": 9.5
+      },
+      "window_30d": {
+        "n": 39,
+        "success_pct": 25.6,
+        "soft_decline_pct": 23.1,
+        "instant_kyc_pct": 41.0,
+        "instant_ban_pct": 10.3
+      }
+    },
+    {
+      "bin_prefix": "49372400",
+      "service": "gemini",
+      "window_14d": {
+        "n": 18,
+        "success_pct": 27.8,
+        "soft_decline_pct": 22.2,
+        "instant_kyc_pct": 38.9,
+        "instant_ban_pct": 11.1
+      },
+      "window_30d": {
+        "n": 30,
+        "success_pct": 30.0,
+        "soft_decline_pct": 23.3,
+        "instant_kyc_pct": 36.7,
+        "instant_ban_pct": 10.0
+      }
+    },
+    {
+      "bin_prefix": "22044100",
+      "service": "claude_pro",
+      "window_14d": {
+        "n": 25,
+        "success_pct": 0.0,
+        "soft_decline_pct": 28.0,
+        "instant_kyc_pct": 48.0,
+        "instant_ban_pct": 24.0
+      },
+      "window_30d": {
+        "n": 44,
+        "success_pct": 0.0,
+        "soft_decline_pct": 31.8,
+        "instant_kyc_pct": 45.5,
+        "instant_ban_pct": 22.7
+      }
+    },
+    {
+      "bin_prefix": "40403800",
+      "service": "claude_pro",
+      "window_14d": {
+        "n": 22,
+        "success_pct": 9.1,
+        "soft_decline_pct": 18.2,
+        "instant_kyc_pct": 54.5,
+        "instant_ban_pct": 18.2
+      },
+      "window_30d": {
+        "n": 41,
+        "success_pct": 12.2,
+        "soft_decline_pct": 19.5,
+        "instant_kyc_pct": 51.2,
+        "instant_ban_pct": 17.1
+      }
+    },
+    {
+      "bin_prefix": "44661400",
+      "service": "claude_pro",
+      "window_14d": {
+        "n": 42,
+        "success_pct": 78.6,
+        "soft_decline_pct": 9.5,
+        "instant_kyc_pct": 9.5,
+        "instant_ban_pct": 2.4
+      },
+      "window_30d": {
+        "n": 79,
+        "success_pct": 79.7,
+        "soft_decline_pct": 8.9,
+        "instant_kyc_pct": 8.9,
+        "instant_ban_pct": 2.5
+      }
+    },
+    {
+      "bin_prefix": "44661400",
+      "service": "chatgpt",
+      "window_14d": {
+        "n": 28,
+        "success_pct": 82.1,
+        "soft_decline_pct": 7.1,
+        "instant_kyc_pct": 7.1,
+        "instant_ban_pct": 3.7
+      },
+      "window_30d": {
+        "n": 53,
+        "success_pct": 81.1,
+        "soft_decline_pct": 9.4,
+        "instant_kyc_pct": 5.7,
+        "instant_ban_pct": 3.8
+      }
+    },
+    {
+      "bin_prefix": "44661400",
+      "service": "cursor",
+      "window_14d": {
+        "n": 19,
+        "success_pct": 78.9,
+        "soft_decline_pct": 10.5,
+        "instant_kyc_pct": 5.3,
+        "instant_ban_pct": 5.3
+      },
+      "window_30d": {
+        "n": 33,
+        "success_pct": 78.8,
+        "soft_decline_pct": 12.1,
+        "instant_kyc_pct": 6.1,
+        "instant_ban_pct": 3.0
+      }
+    },
+    {
+      "bin_prefix": "44661400",
+      "service": "gemini",
+      "window_14d": {
+        "n": 16,
+        "success_pct": 75.0,
+        "soft_decline_pct": 12.5,
+        "instant_kyc_pct": 6.3,
+        "instant_ban_pct": 6.2
+      },
+      "window_30d": {
+        "n": 27,
+        "success_pct": 74.1,
+        "soft_decline_pct": 14.8,
+        "instant_kyc_pct": 7.4,
+        "instant_ban_pct": 3.7
+      }
+    },
+    {
+      "bin_prefix": "48331200",
+      "service": "claude_pro",
+      "window_14d": {
+        "n": 31,
+        "success_pct": 74.2,
+        "soft_decline_pct": 12.9,
+        "instant_kyc_pct": 9.7,
+        "instant_ban_pct": 3.2
+      },
+      "window_30d": {
+        "n": 58,
+        "success_pct": 75.9,
+        "soft_decline_pct": 12.1,
+        "instant_kyc_pct": 8.6,
+        "instant_ban_pct": 3.4
+      }
+    },
+    {
+      "bin_prefix": "48331200",
+      "service": "chatgpt",
+      "window_14d": {
+        "n": 24,
+        "success_pct": 79.2,
+        "soft_decline_pct": 12.5,
+        "instant_kyc_pct": 4.2,
+        "instant_ban_pct": 4.1
+      },
+      "window_30d": {
+        "n": 46,
+        "success_pct": 78.3,
+        "soft_decline_pct": 13.0,
+        "instant_kyc_pct": 4.3,
+        "instant_ban_pct": 4.4
+      }
+    },
+    {
+      "bin_prefix": "48331200",
+      "service": "cursor",
+      "window_14d": {
+        "n": 18,
+        "success_pct": 77.8,
+        "soft_decline_pct": 11.1,
+        "instant_kyc_pct": 5.6,
+        "instant_ban_pct": 5.5
+      },
+      "window_30d": {
+        "n": 31,
+        "success_pct": 77.4,
+        "soft_decline_pct": 12.9,
+        "instant_kyc_pct": 6.5,
+        "instant_ban_pct": 3.2
+      }
+    },
+    {
+      "bin_prefix": "48595300",
+      "service": "claude_pro",
+      "window_14d": {
+        "n": 19,
+        "success_pct": 68.4,
+        "soft_decline_pct": 15.8,
+        "instant_kyc_pct": 10.5,
+        "instant_ban_pct": 5.3
+      },
+      "window_30d": {
+        "n": 35,
+        "success_pct": 68.6,
+        "soft_decline_pct": 17.1,
+        "instant_kyc_pct": 8.6,
+        "instant_ban_pct": 5.7
+      }
+    },
+    {
+      "bin_prefix": "44004300",
+      "service": "claude_pro",
+      "window_14d": {
+        "n": 17,
+        "success_pct": 64.7,
+        "soft_decline_pct": 17.6,
+        "instant_kyc_pct": 11.8,
+        "instant_ban_pct": 5.9
+      },
+      "window_30d": {
+        "n": 30,
+        "success_pct": 66.7,
+        "soft_decline_pct": 16.7,
+        "instant_kyc_pct": 10.0,
+        "instant_ban_pct": 6.6
+      }
+    },
+    {
+      "bin_prefix": "53787200",
+      "service": "cursor",
+      "window_14d": {
+        "n": 3,
+        "success_pct": 100.0,
+        "soft_decline_pct": 0.0,
+        "instant_kyc_pct": 0.0,
+        "instant_ban_pct": 0.0
+      },
+      "window_30d": {
+        "n": 4,
+        "success_pct": 75.0,
+        "soft_decline_pct": 25.0,
+        "instant_kyc_pct": 0.0,
+        "instant_ban_pct": 0.0
+      }
+    }
+  ],
+  "signature_ed25519_b64": "E3C1iy5MkGFzOrLi9hGjoAGV/u//oHbQ2XMQnFFf898Gp9bs980pEAtYgM0jstOp1E6iiDQKD0QqXeEhHRajDQ=="
+}

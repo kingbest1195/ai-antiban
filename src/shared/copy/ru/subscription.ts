@@ -107,6 +107,14 @@ export const subscription = {
     failClosedText:
       "Оплата без подтверждения карты повышает риск проверки по паспорту и селфи. Попробуйте повторить позже или оплатите через App Store.",
     guideLink: "Открыть инструкцию по безопасной оплате",
+    radar: {
+      label: "Статистика оплат по первым 8 цифрам карты",
+      insufficient: "Статистика оплат: недостаточно данных (меньше 5 отзывов)",
+      rescueCta: "Подобрать безопасный способ",
+      rescueTitle: "Высокий риск проверки паспорта по статистике",
+      rescueText:
+        "Оплата на сайте этой картой (в том числе через Google Pay) почти всегда вызывает проверку документов. Перейдите на оплату через App Store с подарочной картой США.",
+    },
   },
 
   address: {
@@ -141,6 +149,14 @@ export const subscription = {
     title: "Готово ли к оплате",
     subtitle: "Итоговая оценка связки карты, адреса, подключения и возраста аккаунта.",
     channelLabel: "Способ оплаты на сайте",
+    serviceLabel: "Сервис ИИ",
+    services: {
+      claude_pro: "Claude Pro ($20)",
+      claude_max: "Claude Max ($100/$200)",
+      chatgpt: "ChatGPT (Plus / Pro)",
+      cursor: "Cursor",
+      gemini: "Gemini / AI Studio",
+    },
     planLabel: "Тариф",
     accountAgeLabel: "Возраст аккаунта",
     accountAgeUnder4: "Меньше 4 дней",
@@ -154,6 +170,7 @@ export const subscription = {
     appleIdLabel: "Страна аккаунта Apple",
     channels: {
       appleIAP: "Через App Store",
+      googlePlayIap: "Через Google Play",
       directCard: "Карта",
       googlePayWeb: "Google Pay",
       applePayWeb: "Apple Pay",
