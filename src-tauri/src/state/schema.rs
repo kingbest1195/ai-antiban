@@ -298,6 +298,9 @@ pub struct AppStateData {
     pub whats_new_v3_seen: bool,
     #[serde(default)]
     pub dismissed_hints: Vec<String>,
+    /// Strictly opt-in anonymous BIN Radar statistics reporting (off by default).
+    #[serde(default)]
+    pub bin_radar_opt_in: bool,
 }
 
 impl std::fmt::Debug for AppStateData {
@@ -342,6 +345,7 @@ impl std::fmt::Debug for AppStateData {
             .field("onboarding_v3_done", &self.onboarding_v3_done)
             .field("whats_new_v3_seen", &self.whats_new_v3_seen)
             .field("dismissed_hints", &self.dismissed_hints)
+            .field("bin_radar_opt_in", &self.bin_radar_opt_in)
             .field(
                 "skipped_routes",
                 &format_args!("<{} not shown>", self.skipped_routes.len()),
@@ -432,6 +436,7 @@ impl Default for AppStateData {
             onboarding_v3_done: false,
             whats_new_v3_seen: false,
             dismissed_hints: Vec::new(),
+            bin_radar_opt_in: false,
         }
     }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type {
+  AiPaymentService,
   BinReport,
   PaymentChannel,
   PaymentReadinessReport,
@@ -27,6 +28,8 @@ export interface PaymentReadinessCardProps {
   onChannelChange?: (channel: PaymentChannel) => void;
   plan?: SubscriptionPlan;
   onPlanChange?: (plan: SubscriptionPlan) => void;
+  targetService?: AiPaymentService;
+  onTargetServiceChange?: (service: AiPaymentService) => void;
   billingCountry?: string;
   onBillingCountryChange?: (country: string) => void;
   appleIdCountry?: string;
@@ -70,6 +73,8 @@ export function PaymentReadinessCard({
   onChannelChange,
   plan: controlledPlan,
   onPlanChange,
+  targetService: controlledService,
+  onTargetServiceChange,
   billingCountry: controlledBilling,
   onBillingCountryChange,
   appleIdCountry: controlledAppleId,
@@ -81,6 +86,7 @@ export function PaymentReadinessCard({
   const normalizedExit = exitCountry && exitCountry !== "--" ? exitCountry.trim().toUpperCase() : "";
   const [localChannel, setLocalChannel] = useState<PaymentChannel>("appleIAP");
   const [localPlan, setLocalPlan] = useState<SubscriptionPlan>("pro");
+  const [localService, setLocalService] = useState<AiPaymentService>("claude_pro");
   const [localBilling, setLocalBilling] = useState<string>(
     binReport?.countryCode ?? normalizedExit ?? "",
   );
@@ -94,6 +100,7 @@ export function PaymentReadinessCard({
 
   const channel = controlledChannel ?? localChannel;
   const plan = controlledPlan ?? localPlan;
+  const targetService = controlledService ?? localService;
   const billingCountry = controlledBilling ?? localBilling;
   const appleIdCountry = controlledAppleId ?? localAppleIdCountry;
   const warmup = warmupProgress(warmupStartedAt);
@@ -108,6 +115,13 @@ export function PaymentReadinessCard({
   const setPlan = (next: SubscriptionPlan) => {
     if (controlledPlan === undefined) setLocalPlan(next);
     onPlanChange?.(next);
+  };
+
+  const setTargetService = (next: AiPaymentService) => {
+    if (controlledService === undefined) setLocalService(next);
+    onTargetServiceChange?.(next);
+    if (next === "claude_max") setPlan("max");
+    else if (next === "claude_pro") setPlan("pro");
   };
 
   const setBillingCountry = (next: string) => {
@@ -149,6 +163,12 @@ export function PaymentReadinessCard({
     }
     let cancelled = false;
     setLoading(true);
+    const providerForService =
+      targetService === "gemini"
+        ? "gemini"
+        : targetService === "chatgpt"
+          ? "openai"
+          : "anthropic";
     evaluatePaymentReadiness({
       bin: binReport?.binPrefix ?? null,
       billingCountry: billingCountry || null,
@@ -158,7 +178,8 @@ export function PaymentReadinessCard({
       inCleanRoom,
       plan,
       profileId: profileId ?? null,
-      provider: "anthropic",
+      provider: providerForService,
+      targetService,
       accountAgeConfirmed96h: warmupDone ? true : accountAge === "over4d",
     })
       .then((res) => {
@@ -179,6 +200,7 @@ export function PaymentReadinessCard({
     channel,
     inCleanRoom,
     plan,
+    targetService,
     profileId,
     normalizedExit,
     accountAge,
@@ -270,6 +292,19 @@ export function PaymentReadinessCard({
           options={channelOptions}
         />
 
+        <Select
+          label={copy.serviceLabel}
+          value={targetService}
+          onChange={(e) => setTargetService(e.target.value as AiPaymentService)}
+          options={[
+            { value: "claude_pro", label: copy.services.claude_pro },
+            { value: "claude_max", label: copy.services.claude_max },
+            { value: "chatgpt", label: copy.services.chatgpt },
+            { value: "cursor", label: copy.services.cursor },
+            { value: "gemini", label: copy.services.gemini },
+          ]}
+        />
+
         {channel !== "appleIAP" && (
           <Segmented<SubscriptionPlan>
             aria-label={copy.planLabel}
@@ -319,7 +354,7 @@ export function PaymentReadinessCard({
               onChange={(e) => setBillingCountry(e.target.value)}
               options={billingOptions}
             />
-            {channel === "googlePayWeb" && (
+            {(channel === "googlePayWeb" || targetService === "gemini") && (
               <Select
                 label={copy.googleProfileLabel}
                 value={googleProfileCountry}

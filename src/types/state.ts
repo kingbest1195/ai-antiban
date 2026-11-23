@@ -118,6 +118,8 @@ export interface AppStateData {
   whats_new_v3_seen?: boolean;
   /** Закрытые контекстные подсказки (HintCard). */
   dismissed_hints?: string[];
+  /** Добровольное участие в анонимной статистике карт (по умолчанию выключено). */
+  bin_radar_opt_in?: boolean;
 }
 
 /** Состояние синхронизации системного часового пояса ОС (`os_tz::OsTzSyncStatus`). */

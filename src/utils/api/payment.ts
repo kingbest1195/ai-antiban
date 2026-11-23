@@ -1,7 +1,13 @@
 import type {
   ActivateQuarantineParams,
+  AdvisorPlan,
+  AdvisorQuery,
+  AiPaymentService,
+  BinRadarLookupStats,
+  BinRadarReport,
   BinReport,
   EvaluatePaymentReadinessParams,
+  EvaluatedProvidersManifest,
   PassportVerificationResult,
   PaymentPassport,
   PaymentReadinessReport,
@@ -21,6 +27,13 @@ import {
   mockSavePaymentPassport,
   mockVerifyPaymentPassport,
 } from "./mocks/payment";
+import {
+  mockGetBinRadarStats,
+  mockGetPaymentAdvice,
+  mockGetProvidersManifest,
+  mockSubmitBinRadarReport,
+  setMockBinRadarOptIn,
+} from "./mocks/paymentAdvisor";
 
 /** 8-значный BIN-рентген (Zero PCI-DSS, строго 6–8 цифр, Fail-Closed). */
 export async function checkCardBin(
@@ -134,4 +147,52 @@ export async function verifyPaymentPassport(
     });
   }
   return mockVerifyPaymentPassport(profileId, current);
+}
+
+/** Детерминированный Safe Payment Advisor для 5 сценариев оплаты подписок ИИ. */
+export async function getPaymentAdvice(query: AdvisorQuery): Promise<AdvisorPlan> {
+  if (isTauri()) {
+    return await tauriInvoke<AdvisorPlan>("get_payment_advice", { query });
+  }
+  return mockGetPaymentAdvice(query);
+}
+
+/** Локальная статистика BIN Radar (n >= 5 для показа процентов, иначе insufficient_data). */
+export async function getBinRadarStats(
+  binPrefix: string,
+  service: AiPaymentService = "claude_pro",
+): Promise<BinRadarLookupStats> {
+  if (isTauri()) {
+    return await tauriInvoke<BinRadarLookupStats>("get_bin_radar_stats", {
+      binPrefix,
+      service,
+    });
+  }
+  return mockGetBinRadarStats(binPrefix, service);
+}
+
+/** Динамический реестр провайдеров с Per-Service Auto-Demote. */
+export async function getProvidersManifest(): Promise<EvaluatedProvidersManifest> {
+  if (isTauri()) {
+    return await tauriInvoke<EvaluatedProvidersManifest>("get_providers_manifest");
+  }
+  return mockGetProvidersManifest();
+}
+
+/** Локальный opt-in приём Zero-PII/Zero-PCI отчёта (deny_unknown_fields + ^[0-9]{8}$). */
+export async function submitBinRadarReport(
+  report: Record<string, unknown>,
+): Promise<BinRadarReport> {
+  if (isTauri()) {
+    return await tauriInvoke<BinRadarReport>("submit_bin_radar_report", { report });
+  }
+  return mockSubmitBinRadarReport(report);
+}
+
+/** Переключает добровольное участие в статистике BIN Radar. */
+export async function setBinRadarOptIn(enabled: boolean): Promise<boolean> {
+  if (isTauri()) {
+    return await tauriInvoke<boolean>("set_bin_radar_opt_in", { enabled });
+  }
+  return setMockBinRadarOptIn(enabled);
 }

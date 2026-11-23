@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "apple_iap_us_gift",
+      "services": ["claude_pro", "claude_max", "chatgpt"],
+      "tax_free_states": ["OR 97204", "DE 19801", "MT 59101", "NH 03801", "AK 99501"],
+      "providers": ["tbank", "sberbank", "kupikod"]
+    },
+    {
+      "id": "direct_web_card",
+      "services": ["claude_pro", "claude_max", "chatgpt", "cursor"],
+      "warmup_hours": 96,
+      "quarantine_hours": 72,
+      "providers": ["wanttopay", "platipomiru"]
+    },
+    {
+      "id": "blocked_web_card_rescue",
+      "toxic_prefixes": ["493724", "220441", "404038", "474447"],
+      "rescue_target": "apple_iap_us_gift"
+    },
+    {
+      "id": "gemini_google_ecosystem",
+      "services": ["gemini"],
+      "error_codes": ["OR-CCSEH-21", "OR-HDT-16", "OR-CBAT-15"],
+      "country_switch_hold_hours": 24
+    },
+    {
+      "id": "chatgpt_and_cursor",
+      "services": ["chatgpt", "cursor"],
+      "cursor_device_id_keys": ["telemetry.machineId", "telemetry.devDeviceId"]
+    }
+  ]
+}

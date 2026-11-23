@@ -1,5 +1,6 @@
-import { useRef, useState } from "react";
-import type { BinReport } from "../../types";
+import { useEffect, useRef, useState } from "react";
+import type { BinReport, EvaluatedProvider } from "../../types";
+import { getProvidersManifest } from "../../utils/api";
 import { Badge, Banner, Button, Card, Icon, Row, Rows, Steps } from "../../ui";
 import type { StepItem } from "../../ui";
 import { common, guides as copy } from "../../shared/copy/ru";
@@ -9,6 +10,7 @@ import { CardCheck } from "../subscription/CardCheck";
 import "../subscription/subscription.css";
 import { useGuide } from "./context";
 import { Rich } from "./Rich";
+import { SafePaymentAdvisorCard } from "./SafePaymentAdvisorCard";
 import { BLACKLISTED_PROVIDERS, VIRTUAL_CARD_PROVIDERS } from "./providers";
 import type { VirtualCardProvider } from "./providers";
 
@@ -18,26 +20,40 @@ export interface PaymentGuideProps {
 
 function ProviderOfferList({
   providers,
+  manifestMap,
+  demotedBadge,
   importantPointsLabel,
   nuancesToggle,
   onOpen,
 }: {
   providers: VirtualCardProvider[];
+  manifestMap: Map<string, EvaluatedProvider>;
+  demotedBadge: string;
   importantPointsLabel: string;
   nuancesToggle: string;
   onOpen: (card: VirtualCardProvider) => void;
 }) {
+  const ordered = [...providers].sort((a, b) => {
+    const da = manifestMap.get(a.id)?.effectiveStatus !== "active" && manifestMap.has(a.id) ? 1 : 0;
+    const db = manifestMap.get(b.id)?.effectiveStatus !== "active" && manifestMap.has(b.id) ? 1 : 0;
+    return da - db;
+  });
+
   return (
     <ul className="guides-offers">
-      {providers.map((card) => {
-        const isAppStore = card.tier === "tier1_iap";
+      {ordered.map((card) => {
+        const evalProv = manifestMap.get(card.id);
+        const isDemoted = Boolean(
+          evalProv && (evalProv.globalDemoted || evalProv.effectiveStatus !== "active"),
+        );
+        const isAppStore = card.tier === "tier1_iap" && !isDemoted;
 
         return (
           <li key={card.id} className="guides-offer">
             <Row
               as="div"
-              icon={isAppStore ? "shield" : "lock"}
-              tone={isAppStore ? "ok" : "warn"}
+              icon={isDemoted ? "alert" : isAppStore ? "shield" : "lock"}
+              tone={isDemoted ? "danger" : isAppStore ? "ok" : "warn"}
               title={card.name}
               sub={card.subtitle}
               trail={
@@ -48,6 +64,11 @@ function ProviderOfferList({
                 ) : undefined
               }
             />
+            {isDemoted && evalProv?.demoteReasonRu && (
+              <Banner tone="danger" role="alert" icon="alert" title={demotedBadge}>
+                {evalProv.demoteReasonRu}
+              </Banner>
+            )}
             <p className="guides-offer__text">
               <Rich text={card.description} />
             </p>
@@ -101,8 +122,11 @@ function ProviderOfferList({
               </details>
             )}
             <div className="guides-offer__meta">
-              <Badge tone={isAppStore ? "ok" : "warn"} icon={isAppStore ? "shield" : "alert"}>
-                {card.badge}
+              <Badge
+                tone={isDemoted ? "danger" : isAppStore ? "ok" : "warn"}
+                icon={isDemoted ? "alert" : isAppStore ? "shield" : "alert"}
+              >
+                {isDemoted ? demotedBadge : card.badge}
               </Badge>
             </div>
           </li>
@@ -116,8 +140,26 @@ function ProviderOfferList({
 export function PaymentGuide({ onOpenPaymentTools }: PaymentGuideProps) {
   const { currentCountry, onToast } = useGuide();
   const [binReport, setBinReport] = useState<BinReport | null>(null);
+  const [manifestMap, setManifestMap] = useState<Map<string, EvaluatedProvider>>(new Map());
   const paymentToolsRef = useRef<HTMLDivElement>(null);
   const t = copy.payment;
+
+  useEffect(() => {
+    let cancelled = false;
+    getProvidersManifest()
+      .then((res) => {
+        if (cancelled) return;
+        const next = new Map<string, EvaluatedProvider>();
+        for (const p of res.providers) {
+          next.set(p.entry.id, p);
+        }
+        setManifestMap(next);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleOpenPaymentTools = () => {
     if (onOpenPaymentTools) {
@@ -161,6 +203,8 @@ export function PaymentGuide({ onOpenPaymentTools }: PaymentGuideProps) {
         <CardCheck exitCountry={currentCountry} onToast={onToast} onBinChecked={setBinReport} />
 
         <AddressCard cardCountry={binReport?.countryCode ?? null} scenario="card" onToast={onToast} />
+
+        <SafePaymentAdvisorCard exitCountry={currentCountry} initialBin={binReport?.binPrefix ?? null} />
       </div>
 
       <Card className="guides-card" title={t.appStoreTitle} aside={<Badge tone="ok" icon="shield">{t.appStoreBadge}</Badge>}>
@@ -169,6 +213,8 @@ export function PaymentGuide({ onOpenPaymentTools }: PaymentGuideProps) {
         </p>
         <ProviderOfferList
           providers={appStoreProviders}
+          manifestMap={manifestMap}
+          demotedBadge={t.advisor.demotedBadge}
           importantPointsLabel={t.importantPointsLabel}
           nuancesToggle={t.nuancesToggle}
           onOpen={open}
@@ -181,6 +227,8 @@ export function PaymentGuide({ onOpenPaymentTools }: PaymentGuideProps) {
         </p>
         <ProviderOfferList
           providers={webCardProviders}
+          manifestMap={manifestMap}
+          demotedBadge={t.advisor.demotedBadge}
           importantPointsLabel={t.importantPointsLabel}
           nuancesToggle={t.nuancesToggle}
           onOpen={open}

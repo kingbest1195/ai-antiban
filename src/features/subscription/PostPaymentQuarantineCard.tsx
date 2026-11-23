@@ -40,6 +40,7 @@ export interface PostPaymentQuarantineCardProps {
 
 function toPassportChannel(channel: PaymentChannel): PassportChannel {
   if (channel === "appleIAP") return "appleIAP";
+  if (channel === "googlePlayIap") return "googlePlayIap";
   if (channel === "api") return "api";
   return "directCard";
 }

@@ -15,6 +15,7 @@ use crate::auditor::geo_matrix::CheckStatus;
 use crate::auditor::ip_type::IpType;
 use crate::auditor::network::current_timestamp;
 use crate::bin_checker::BinReport;
+use crate::core::bin_radar::AiPaymentService;
 use crate::state::AppStateData;
 
 pub use axes_geo_channel::evaluate_payment_readiness;
@@ -39,6 +40,12 @@ pub enum PaymentChannel {
     ApplePayWeb,
     #[serde(alias = "AppleIAP", alias = "apple_iap", alias = "appleIap")]
     AppleIAP,
+    #[serde(
+        alias = "GooglePlayIap",
+        alias = "google_play_iap",
+        alias = "GooglePayments"
+    )]
+    GooglePlayIap,
     #[serde(alias = "Api", alias = "API")]
     Api,
 }
@@ -112,6 +119,7 @@ pub struct PaymentReadinessInput {
     pub warmup_hours: Option<u64>,
     pub account_age_confirmed_96h: Option<bool>,
     pub plan: SubscriptionPlan,
+    pub target_service: Option<AiPaymentService>,
     pub evaluated_at: u64,
 }
 
@@ -218,6 +226,7 @@ impl PaymentReadinessInput {
             warmup_hours,
             account_age_confirmed_96h: None,
             plan,
+            target_service: None,
             evaluated_at: now,
         }
     }

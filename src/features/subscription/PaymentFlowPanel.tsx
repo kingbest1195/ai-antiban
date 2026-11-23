@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type {
+  AiPaymentService,
   BinReport,
   PaymentChannel,
   SubscriptionPlan,
@@ -59,6 +60,7 @@ export function PaymentFlowPanel({
   const [appleIdCountry, setAppleIdCountry] = useState<string>("US");
   const [binReport, setBinReport] = useState<BinReport | null>(null);
   const [webChannel, setWebChannel] = useState<PaymentChannel>("directCard");
+  const [targetService, setTargetService] = useState<AiPaymentService>("claude_pro");
   const [plan, setPlan] = useState<SubscriptionPlan>("pro");
   const [billingCountry, setBillingCountry] = useState<string>("");
   const [passportVersion, setPassportVersion] = useState<number>(0);
@@ -154,11 +156,33 @@ export function PaymentFlowPanel({
         <>
           <CardCheck
             exitCountry={exitCountry}
+            targetService={targetService}
             ctaVariant={compactPrimary ? "primary" : "secondary"}
             onToast={onToast}
             onNavigateToPaymentGuide={onNavigateToPaymentGuide}
             onBinChecked={handleBinChecked}
           />
+          {binReport &&
+            (binReport.claudeWebVerdict === "highKycRisk" ||
+              binReport.claudeWebVerdict === "blocked") && (
+              <Banner
+                tone="danger"
+                icon="alert"
+                role="alert"
+                title={copy.card.radar.rescueTitle}
+                action={
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setFlow("app_store")}
+                  >
+                    {copy.card.radar.rescueCta}
+                  </Button>
+                }
+              >
+                {copy.card.radar.rescueText}
+              </Banner>
+            )}
           <PaymentReadinessCard
             binReport={binReport}
             exitCountry={exitCountry}
@@ -168,6 +192,8 @@ export function PaymentFlowPanel({
             onChannelChange={setWebChannel}
             plan={plan}
             onPlanChange={setPlan}
+            targetService={targetService}
+            onTargetServiceChange={setTargetService}
             billingCountry={billingCountry}
             onBillingCountryChange={setBillingCountry}
             warmupStartedAt={warmupStartedAt}
@@ -206,9 +232,11 @@ export function PaymentFlowPanel({
         currentChannel={
           activeChannel === "appleIAP"
             ? "appleIAP"
-            : activeChannel === "api"
-              ? "api"
-              : "directCard"
+            : activeChannel === "googlePlayIap"
+              ? "googlePlayIap"
+              : activeChannel === "api"
+                ? "api"
+                : "directCard"
         }
         currentExitIp={exitIp}
         currentExitAsn={exitAsn}

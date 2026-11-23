@@ -118,6 +118,18 @@ impl AppState {
         self.save_async().await
     }
 
+    pub async fn is_bin_radar_opt_in(&self) -> bool {
+        self.inner.read().await.bin_radar_opt_in
+    }
+
+    pub async fn set_bin_radar_opt_in(&self, enabled: bool) -> Result<(), StateError> {
+        {
+            let mut w = self.inner.write().await;
+            w.bin_radar_opt_in = enabled;
+        }
+        self.save_async().await
+    }
+
     // --- Manual kill-switch persistence ---
 
     pub async fn is_manual_killswitch_saved(&self) -> bool {

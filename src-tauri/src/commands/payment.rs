@@ -3,7 +3,11 @@
 
 use super::AppContext;
 use crate::auditor::Auditor;
+use crate::auditor::bin_radar_verify::submit_local_bin_radar_report;
 use crate::auditor::geo_matrix::ProviderId;
+use crate::auditor::payment_advisor::{
+    evaluate_advisor_plan, get_bin_radar_stats_for, get_evaluated_providers_manifest,
+};
 use crate::auditor::payment_readiness::{
     PaymentChannel, PaymentReadinessInput, PaymentReadinessReport, SubscriptionPlan,
     evaluate_payment_readiness as eval_payment_readiness_core,
@@ -13,6 +17,9 @@ use crate::clean_room::quarantine::{
     PostPaymentQuarantineStatus, QuarantineActivationInput, activate_quarantine_in,
     get_quarantine_status_in, override_quarantine_in,
 };
+use crate::core::bin_radar::{AiPaymentService, BinRadarLookupStats, BinRadarReport};
+use crate::core::payment_advisor::{AdvisorPlan, AdvisorQuery};
+use crate::core::providers_manifest::EvaluatedProvidersManifest;
 use crate::proxy::server::checkout_guard::checkout_provider_key;
 use crate::proxy::{HoldResolution, ProxyManager};
 use crate::routing::RouteSelection;
@@ -43,6 +50,8 @@ pub struct EvaluatePaymentReadinessParams {
     pub profile_id: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
+    pub target_service: Option<AiPaymentService>,
 }
 
 fn sanitize_country_code(raw: Option<&str>) -> Option<&str> {
@@ -109,7 +118,11 @@ pub async fn evaluate_payment_readiness(
         .provider
         .as_deref()
         .and_then(ProviderId::from_id)
-        .unwrap_or(ProviderId::Anthropic);
+        .unwrap_or(match params.target_service {
+            Some(AiPaymentService::Gemini) => ProviderId::Gemini,
+            Some(AiPaymentService::Chatgpt) => ProviderId::Openai,
+            _ => ProviderId::Anthropic,
+        });
 
     let active_profile = params
         .profile_id
@@ -174,6 +187,7 @@ pub async fn evaluate_payment_readiness(
         params.profile_id.as_deref(),
     );
     eval_input.account_age_confirmed_96h = params.account_age_confirmed_96h;
+    eval_input.target_service = params.target_service;
     let report = eval_payment_readiness_core(&eval_input);
     proxy_mgr
         .server
@@ -302,39 +316,63 @@ pub async fn set_warmup_timer(
     Ok(timestamp)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auditor::geo_matrix::CheckStatus;
-
-    #[test]
-    fn evaluate_params_deserialize_account_age_confirmed_96h_camel_case() {
-        let json = r#"{"accountAgeConfirmed96h":true,"inCleanRoom":true,"plan":"max"}"#;
-        let parsed: EvaluatePaymentReadinessParams = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.account_age_confirmed_96h, Some(true));
-        assert!(parsed.in_clean_room);
-        assert_eq!(parsed.plan, SubscriptionPlan::Max);
-
-        let empty: EvaluatePaymentReadinessParams = serde_json::from_str("{}").unwrap();
-        assert_eq!(empty.account_age_confirmed_96h, None);
-    }
-
-    #[tokio::test]
-    async fn check_card_bin_ignores_placeholder_or_invalid_country_codes() {
-        let checker = bin_checker::BinChecker::new();
-        for invalid in ["", "--", " -- ", "12", "USA", "ru1"] {
-            let report = check_card_bin_with("485953", Some(invalid), None, &checker)
-                .await
-                .unwrap();
-            assert_eq!(report.status, CheckStatus::Ok, "raw={invalid}");
-            assert!(
-                !report
-                    .warnings
-                    .iter()
-                    .any(|w| w.contains("текущее подключение — .")),
-                "empty country placeholder leaked into warnings for '{invalid}': {:?}",
-                report.warnings
-            );
-        }
-    }
+#[tauri::command]
+pub async fn get_payment_advice(
+    query: AdvisorQuery,
+    app: tauri::AppHandle,
+) -> Result<AdvisorPlan, String> {
+    let data_dir = app.path().app_data_dir().ok();
+    Ok(evaluate_advisor_plan(&query, data_dir.as_deref()))
 }
+
+#[tauri::command]
+pub async fn get_bin_radar_stats(
+    bin_prefix: String,
+    service: Option<AiPaymentService>,
+    app: tauri::AppHandle,
+) -> Result<BinRadarLookupStats, String> {
+    let clean = validate_strict_bin_prefix(bin_prefix.trim())?;
+    let data_dir = app.path().app_data_dir().ok();
+    let svc = service.unwrap_or(AiPaymentService::ClaudePro);
+    Ok(get_bin_radar_stats_for(data_dir.as_deref(), &clean, svc))
+}
+
+#[tauri::command]
+pub async fn get_providers_manifest(
+    app: tauri::AppHandle,
+) -> Result<EvaluatedProvidersManifest, String> {
+    let data_dir = app.path().app_data_dir().ok();
+    Ok(get_evaluated_providers_manifest(data_dir.as_deref()))
+}
+
+#[tauri::command]
+pub async fn submit_bin_radar_report(
+    report: serde_json::Value,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppContext>,
+) -> Result<BinRadarReport, String> {
+    let opt_in = state.is_bin_radar_opt_in().await;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Не удалось определить папку данных: {e}"))?;
+    let raw =
+        serde_json::to_string(&report).map_err(|e| format!("Некорректный формат отчёта: {e}"))?;
+    submit_local_bin_radar_report(&data_dir, opt_in, &raw)
+}
+
+#[tauri::command]
+pub async fn set_bin_radar_opt_in(
+    enabled: bool,
+    state: tauri::State<'_, AppContext>,
+) -> Result<bool, String> {
+    state
+        .set_bin_radar_opt_in(enabled)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(enabled)
+}
+
+#[cfg(test)]
+#[path = "payment_tests.rs"]
+mod tests;

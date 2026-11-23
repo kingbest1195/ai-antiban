@@ -39,7 +39,19 @@ export type PaymentChannel =
   | "googlePayWeb"
   | "applePayWeb"
   | "appleIAP"
+  | "googlePlayIap"
   | "api";
+
+export type AiPaymentService =
+  | "claude_pro"
+  | "claude_max"
+  | "chatgpt"
+  | "cursor"
+  | "gemini";
+
+export type PaymentRail = "rub_sbp" | "crypto_usdt" | "foreign_bank_card";
+
+export type KycRiskTier = "minimal" | "low" | "medium" | "high" | "critical";
 
 export type SubscriptionPlan = "pro" | "max" | "api" | "unknown";
 
@@ -82,6 +94,7 @@ export interface EvaluatePaymentReadinessParams {
   plan?: SubscriptionPlan;
   profileId?: string | null;
   provider?: string | null;
+  targetService?: AiPaymentService | null;
   accountAgeConfirmed96h?: boolean;
 }
 
@@ -121,7 +134,7 @@ export interface ActivateQuarantineParams {
   exitCountry?: string | null;
 }
 
-export type PassportChannel = "directCard" | "appleIAP" | "api";
+export type PassportChannel = "directCard" | "appleIAP" | "googlePlayIap" | "api";
 
 export interface PaymentPassport {
   profileId: string;
@@ -148,4 +161,145 @@ export interface PassportVerificationResult {
   mismatches: string[];
   warnings: string[];
   passport: PaymentPassport;
+}
+
+export type BinRadarStatus = "sufficient" | "insufficient_data" | "critical";
+
+export interface BinRadarWindowStats {
+  n: number;
+  success_pct: number;
+  soft_decline_pct: number;
+  instant_kyc_pct: number;
+  instant_ban_pct: number;
+}
+
+export interface BinRadarLookupStats {
+  binPrefix: string;
+  service: AiPaymentService;
+  status: BinRadarStatus;
+  sampleSize14d: number;
+  sampleSize30d: number;
+  window14d: BinRadarWindowStats | null;
+  window30d: BinRadarWindowStats | null;
+  riskPct14d: number | null;
+  criticalWarning: boolean;
+  summaryRu: string;
+}
+
+export type GeoMatchClass =
+  | "full_match"
+  | "ip_mismatch"
+  | "billing_mismatch"
+  | "triple_mismatch";
+
+export type WarmupBucket = "lt_24h" | "24_96h" | "gt_96h";
+
+export type PaymentOutcome =
+  | "success"
+  | "soft_decline"
+  | "instant_kyc"
+  | "instant_ban";
+
+export interface BinRadarReport {
+  bin_prefix: string;
+  service: AiPaymentService;
+  channel:
+    | "stripe_web_card"
+    | "stripe_google_pay"
+    | "stripe_apple_pay"
+    | "apple_iap"
+    | "google_play_iap";
+  geo_match: GeoMatchClass;
+  warmup_bucket: WarmupBucket;
+  outcome: PaymentOutcome;
+  client_version: string;
+}
+
+export interface AdvisorNetworkContext {
+  exit_country?: string | null;
+  trust_score: number;
+  clean_room_ready: boolean;
+  is_zastava_key_active: boolean;
+}
+
+export interface AdvisorQuery {
+  target_service: AiPaymentService;
+  has_iphone_apple_id: boolean;
+  available_bin_prefix?: string | null;
+  payment_rails: PaymentRail[];
+  willing_to_warmup_96h: boolean;
+  google_payments_country?: string | null;
+  is_new_google_account?: boolean | null;
+  network_state: AdvisorNetworkContext;
+}
+
+export interface AdvisorRoute {
+  route_id: string;
+  title: string;
+  kyc_risk_tier: KycRiskTier;
+  estimated_fees: string;
+  provider_ids: string[];
+  checklist: string[];
+  warnings?: string[];
+  demoted_provider_ids?: string[];
+}
+
+export interface BlockedRouteWarning {
+  route_id: string;
+  title: string;
+  kyc_risk_tier: KycRiskTier;
+  reason: string;
+  explanation: string;
+  rescue_route_id?: string | null;
+}
+
+export interface AdvisorPlan {
+  primary: AdvisorRoute;
+  fallbacks: AdvisorRoute[];
+  blocked_red_flags: BlockedRouteWarning[];
+}
+
+export type ProviderStatus = "active" | "demoted_warning" | "blacklist";
+
+export interface ProviderManifestEntry {
+  id: string;
+  name: string;
+  category: string;
+  tier: string;
+  status: ProviderStatus;
+  known_bin_prefixes: string[];
+  supported_rails: string[];
+  supported_services: AiPaymentService[];
+  fees_summary: string;
+  warnings_ru: string[];
+  affiliate_url?: string | null;
+}
+
+export interface ServiceDemoteStatus {
+  service: AiPaymentService;
+  status: ProviderStatus;
+  rate14d: number;
+  sampleSize14d: number;
+  reasonRu?: string | null;
+}
+
+export interface EvaluatedProvider {
+  entry: ProviderManifestEntry;
+  effectiveStatus: ProviderStatus;
+  globalDemoted: boolean;
+  perService: ServiceDemoteStatus[];
+  demoteReasonRu?: string | null;
+}
+
+export interface BlacklistedManifestEntry {
+  id: string;
+  name: string;
+  reason_ru: string;
+}
+
+export interface EvaluatedProvidersManifest {
+  schemaVersion: number;
+  generatedAtUtc: string;
+  providers: EvaluatedProvider[];
+  blacklist: BlacklistedManifestEntry[];
 }

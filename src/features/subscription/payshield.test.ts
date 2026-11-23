@@ -601,4 +601,48 @@ describe("Оплата подписки — Progressive Disclosure, UX и инв
       expect(mockOutputs.toLowerCase()).not.toContain(bad.toLowerCase());
     }
   });
+
+  it("8. BIN Radar в Verdict: статистика при n>=5, insufficient_data при n<5, rescue при criticalWarning и поддержка targetService", () => {
+    const n4Html = renderToStaticMarkup(
+      createElement(Verdict, {
+        report: makeReport({ binPrefix: "53787200" }),
+        radarStats: {
+          binPrefix: "53787200",
+          service: "cursor",
+          status: "insufficient_data",
+          sampleSize14d: 3,
+          sampleSize30d: 4,
+          window14d: null,
+          window30d: null,
+          riskPct14d: null,
+          criticalWarning: false,
+          summaryRu: "Статистика оплат: недостаточно данных (меньше 5 отзывов)",
+        },
+      }),
+    );
+    expect(n4Html).toContain("недостаточно данных");
+    expect(n4Html).not.toContain("Подобрать безопасный способ");
+
+    const critHtml = renderToStaticMarkup(
+      createElement(Verdict, {
+        report: makeReport({ binPrefix: "49372400", status: "critical", countryCode: "SG" }),
+        onNavigateToPaymentGuide: vi.fn(),
+        radarStats: {
+          binPrefix: "49372400",
+          service: "claude_pro",
+          status: "critical",
+          sampleSize14d: 34,
+          sampleSize30d: 61,
+          window14d: { n: 34, success_pct: 14.7, soft_decline_pct: 20.6, instant_kyc_pct: 52.9, instant_ban_pct: 11.8 },
+          window30d: null,
+          riskPct14d: 64.7,
+          criticalWarning: true,
+          summaryRu: "Успех 15% · Проверка паспорта/отказ 65% · Отклонено 21% · За 14 дн., n=34",
+        },
+      }),
+    );
+    expect(critHtml).toContain("n=34");
+    expect(critHtml).toContain("Подобрать безопасный способ");
+    expect(critHtml).not.toContain("!");
+  });
 });

@@ -1,3 +1,4 @@
+pub mod bin_radar_verify;
 pub mod cache;
 pub mod cache_cleaner;
 pub mod claude_exporter;
@@ -10,6 +11,7 @@ pub mod ip_type;
 pub mod leaks;
 pub mod network;
 pub mod os_env;
+pub mod payment_advisor;
 pub mod payment_readiness;
 pub mod persona_risk;
 pub mod probes;

@@ -21,6 +21,12 @@ pub enum PassportChannel {
     DirectCard,
     #[serde(alias = "AppleIAP", alias = "apple_iap", alias = "appleIap")]
     AppleIAP,
+    #[serde(
+        alias = "GooglePlayIap",
+        alias = "google_play_iap",
+        alias = "GooglePayments"
+    )]
+    GooglePlayIap,
     #[serde(alias = "Api", alias = "API")]
     Api,
 }
@@ -96,7 +102,7 @@ pub fn validate_and_normalize_passport(
     if trimmed_bin.is_empty()
         && matches!(
             passport.channel,
-            PassportChannel::AppleIAP | PassportChannel::Api
+            PassportChannel::AppleIAP | PassportChannel::GooglePlayIap | PassportChannel::Api
         )
     {
         passport.bin_prefix = String::new();
@@ -151,6 +157,7 @@ fn passport_channel_label_ru(ch: PassportChannel) -> &'static str {
     match ch {
         PassportChannel::DirectCard => "Картой на сайте",
         PassportChannel::AppleIAP => "Через App Store",
+        PassportChannel::GooglePlayIap => "Через Google Play",
         PassportChannel::Api => "Оплата API-баланса",
     }
 }
