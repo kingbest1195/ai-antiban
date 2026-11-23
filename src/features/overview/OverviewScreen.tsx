@@ -80,7 +80,7 @@ export interface OverviewScreenProps {
   onPinIp: (ip: string, provider?: ProviderId) => void;
   onUnpinIp: (provider?: ProviderId) => void;
   onToggleStrict: () => void;
-  onAllowProvider: (provider: ProviderId) => Promise<unknown> | void;
+  onAllowProvider: (provider: ProviderId, persistException?: boolean) => Promise<unknown> | void;
   onUnblockProvider: (provider: ProviderId) => Promise<unknown> | void;
   onVerifyAndUnblockProvider?: (provider: ProviderId) => Promise<boolean>;
 
@@ -146,11 +146,17 @@ export function OverviewScreen(props: OverviewScreenProps) {
   });
 
   const [pendingAllow, setPendingAllow] = useState<ProviderId | null>(null);
+  const [persistForceException, setPersistForceException] = useState<boolean>(false);
   const [verifyingAllow, setVerifyingAllow] = useState<ProviderId | null>(null);
-  const runAllow = async (provider: ProviderId, blockedByUser: boolean) => {
+  const runAllow = async (provider: ProviderId, blockedByUser: boolean, persistException = false) => {
     setVerifyingAllow(provider);
     try {
-      await executeAllowSequence(provider, blockedByUser, props.onUnblockProvider, props.onAllowProvider);
+      await executeAllowSequence(
+        provider,
+        blockedByUser,
+        props.onUnblockProvider,
+        (p) => props.onAllowProvider(p, persistException),
+      );
     } finally {
       setVerifyingAllow(null);
     }
@@ -161,6 +167,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
       try {
         const unblocked = await props.onVerifyAndUnblockProvider(service.id);
         if (!unblocked) {
+          setPersistForceException(false);
           setPendingAllow(service.id);
         }
       } finally {
@@ -168,8 +175,12 @@ export function OverviewScreen(props: OverviewScreenProps) {
       }
       return;
     }
-    if (needsForceConfirm(service.status, report)) setPendingAllow(service.id);
-    else await runAllow(service.id, blockedByUser);
+    if (needsForceConfirm(service.status, report)) {
+      setPersistForceException(false);
+      setPendingAllow(service.id);
+    } else {
+      await runAllow(service.id, blockedByUser, false);
+    }
   };
 
   const progress = progressOf(buildPendingChecks(partial ?? null, state));
@@ -372,18 +383,36 @@ export function OverviewScreen(props: OverviewScreenProps) {
         title={pendingAllow ? copy.service.confirm.title(providerCopy[pendingAllow].name) : ""}
         confirmLabel={copy.service.confirm.action}
         busy={verifyingAllow !== null}
-        onCancel={() => setPendingAllow(null)}
+        onCancel={() => {
+          setPendingAllow(null);
+          setPersistForceException(false);
+        }}
         onConfirm={async () => {
           if (pendingAllow) {
             const target = pendingAllow;
+            const persist = persistForceException;
             setPendingAllow(null);
-            await runAllow(target, Boolean(state?.blocked_providers?.includes(target)));
+            setPersistForceException(false);
+            await runAllow(target, Boolean(state?.blocked_providers?.includes(target)), persist);
           } else {
             setPendingAllow(null);
+            setPersistForceException(false);
           }
         }}
       >
-        {pendingAllow ? copy.service.confirm.text(providerCopy[pendingAllow].name) : ""}
+        {pendingAllow ? (
+          <>
+            <p>{copy.service.confirm.text(providerCopy[pendingAllow].name)}</p>
+            <label className="zs-t-caption mt-2 flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={persistForceException}
+                onChange={(e) => setPersistForceException(e.target.checked)}
+              />
+              <span>{copy.service.confirm.persistLabel}</span>
+            </label>
+          </>
+        ) : ""}
       </ConfirmModal>
 
       <ProtectedSection

@@ -34,6 +34,8 @@ pub use resolver::NetworkResolver;
 
 pub const CACHE_TTL_SECONDS: u64 = 15;
 pub const REQUEST_TIMEOUT_MS: u64 = 3500;
+/// Extended timeout for routed audits (double tunnel: e.g. Zastava key over V2BOX/TUN).
+pub const ROUTE_REQUEST_TIMEOUT_MS: u64 = 8000;
 
 /// Neutral browser-like User-Agent for telemetry and exit probes (never identifies Zastava).
 pub const NEUTRAL_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";

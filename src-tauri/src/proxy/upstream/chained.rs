@@ -104,11 +104,12 @@ pub async fn connect_via_chained_proxy(
                 .map_err(ChainedError::Unreachable)?;
             return Ok(UpstreamStream::Plain(s));
         }
-        let (code, _line) = http_connect_exchange(&mut s, &entry, target_host, target_port)
-            .await
-            .map_err(ChainedError::Unreachable)?;
+        let (code, _line, leftover) =
+            http_connect_exchange(&mut s, &entry, target_host, target_port)
+                .await
+                .map_err(ChainedError::Unreachable)?;
         if code.starts_with('2') {
-            Ok(UpstreamStream::Plain(s))
+            Ok(UpstreamStream::Plain(s).with_prefix(leftover))
         } else {
             Err(ChainedError::Refused { status: code })
         }
@@ -202,9 +203,9 @@ pub(super) async fn connect_entry_tcp_via_chained(
 ) -> Result<TcpStream, ChainedError> {
     match connect_via_chained_proxy(chained, &entry.host, entry.port, timeout, gateway_port).await {
         Ok(UpstreamStream::Plain(s)) => return Ok(s),
-        Ok(UpstreamStream::Tls(_)) => {
+        Ok(UpstreamStream::Tls(_) | UpstreamStream::Prefixed { .. }) => {
             return Err(ChainedError::Unreachable(io::Error::other(
-                "unexpected TLS stream from chained proxy",
+                "unexpected TLS or prefixed stream from chained proxy",
             )));
         }
         Err(ChainedError::Refused { status }) => {

@@ -23,6 +23,7 @@ pub(super) struct ResolveInterceptionParams<'a> {
     pub(super) action: proxy::InterceptionAction,
     pub(super) provider: &'a str,
     pub(super) scope: Option<&'a str>,
+    pub(super) persist_exception: bool,
     pub(super) proxy_manager: &'a proxy::ProxyManager,
     pub(super) state: &'a state::AppState,
     pub(super) auditor: &'a auditor::Auditor,
@@ -73,12 +74,7 @@ async fn resolve_provider_telemetry_for_allow(
         return (direct_tel, ip);
     }
 
-    let fallback_ip = if is_direct {
-        proxy_manager.guard.current_observed_ip().await
-    } else {
-        None
-    };
-    (None, fallback_ip)
+    (None, None)
 }
 
 async fn claim_and_block_targets_if_active(
@@ -126,6 +122,7 @@ pub(super) async fn resolve_interception_with_params(
         action,
         provider,
         scope,
+        persist_exception,
         proxy_manager,
         state,
         auditor,
@@ -164,12 +161,18 @@ pub(super) async fn resolve_interception_with_params(
             if is_network_scope {
                 // Network-wide allow: only for the alert that is still current and fully audited
                 // (checked and applied by the guard under its lock). Persists trusted_exceptions
-                // and opens ONLY `targets`, preserving unrelated `already_blocked_providers`.
+                // ONLY when `persist_exception == true`, opening ONLY `targets`.
                 proxy_manager
                     .guard
-                    .allow_network_alert(id, &targets)
+                    .allow_network_alert_with(id, &targets, persist_exception)
                     .await?;
             } else {
+                if proxy_manager.guard.is_manual_killswitch() {
+                    return Err(proxy::AllowError::new(
+                        proxy::AllowErrorCode::BlockedByManualKillswitch,
+                        "manual kill-switch is engaged",
+                    ));
+                }
                 for p in &targets {
                     let (tel_opt, ip_opt) =
                         resolve_provider_telemetry_for_allow(id, p, state, auditor, proxy_manager)
@@ -178,10 +181,9 @@ pub(super) async fn resolve_interception_with_params(
                         .allow_provider_for_session(p)
                         .await
                         .map_err(|e| e.to_string())?;
-                    if !proxy_manager.guard.is_manual_killswitch() {
-                        state.unblock_provider(p).await.map_err(|e| e.to_string())?;
-                    }
-                    if let Some(ip) = ip_opt
+                    state.unblock_provider(p).await.map_err(|e| e.to_string())?;
+                    if persist_exception
+                        && let Some(ip) = ip_opt
                         && !ip.trim().is_empty()
                     {
                         state
@@ -302,11 +304,37 @@ pub(crate) async fn resolve_interception_core(
     state: &state::AppState,
     auditor: &auditor::Auditor,
 ) -> Result<ResolveInterceptionOutcome, proxy::AllowError> {
+    resolve_interception_core_with(
+        id,
+        action,
+        provider,
+        scope,
+        false,
+        proxy_manager,
+        state,
+        auditor,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_interception_core_with(
+    id: &str,
+    action: proxy::InterceptionAction,
+    provider: &str,
+    scope: Option<&str>,
+    persist_exception: bool,
+    proxy_manager: &proxy::ProxyManager,
+    state: &state::AppState,
+    auditor: &auditor::Auditor,
+) -> Result<ResolveInterceptionOutcome, proxy::AllowError> {
     resolve_interception_with_params(ResolveInterceptionParams {
         id,
         action,
         provider,
         scope,
+        persist_exception,
         proxy_manager,
         state,
         auditor,

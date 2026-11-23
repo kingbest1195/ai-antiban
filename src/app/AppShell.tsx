@@ -207,7 +207,11 @@ export function AppShell() {
             title={copy.intercept.title(payload.provider.toUpperCase())}
             action={
               <div className="zs-banner__actions">
-                <Button size="sm" disabled={payload.phase !== "ready"} onClick={intercept.handleAllowInterception}>
+                <Button
+                  size="sm"
+                  disabled={payload.phase !== "ready"}
+                  onClick={() => void intercept.handleAllowInterception(false)}
+                >
                   {copy.intercept.allow}
                 </Button>
                 <Button size="sm" variant="secondary" onClick={intercept.handlePauseUntilNetworkChange}>

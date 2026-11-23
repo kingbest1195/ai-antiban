@@ -67,6 +67,7 @@ export interface RouteTestResult {
   latency_ms?: number | null;
   exit_ip_matches?: boolean | null;
   error?: string | null;
+  ip_reputation?: import("./audit").CheckResult | null;
 }
 
 export interface RouteUnavailablePayload {

@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use super::cache::{DNSBL_TTL, IPV6_TTL, OS_TTL, cached_check};
 use super::evaluate_checks::{
-    CHECK_LIMIT_IO, CHECK_LIMIT_LOCAL, reconcile_key_exit_external_lists, resolver_view,
-    run_dns_resolver_check, run_locale_check, run_timezone_check, run_udp_stun_check, tracked,
+    CHECK_LIMIT_IO, CHECK_LIMIT_IO_ROUTED, CHECK_LIMIT_LOCAL, reconcile_key_exit_external_lists,
+    resolver_view, run_dns_resolver_check, run_locale_check, run_timezone_check,
+    run_udp_stun_check, tracked,
 };
 use super::probes::whoami;
 use super::run_check::{blocking_check, run_check};
@@ -59,6 +60,11 @@ impl Auditor {
         let route_usable =
             bound_route.is_some_and(|r| r.check_usable(network::current_timestamp()).is_ok());
         let via_zastava_key = bound_route.is_some() && route_usable;
+        let check_limit_io = if via_zastava_key {
+            CHECK_LIMIT_IO_ROUTED
+        } else {
+            CHECK_LIMIT_IO
+        };
         let route_client = if !self.use_env_probe_for_direct
             && let Some(r) = bound_route
         {
@@ -144,7 +150,14 @@ impl Auditor {
         let dnsbl = tracked(
             &sink,
             3,
-            run_check("DNSBL", Duration::from_secs(5), {
+            run_check(
+                "DNSBL",
+                if via_zastava_key {
+                    CHECK_LIMIT_IO_ROUTED
+                } else {
+                    Duration::from_secs(5)
+                },
+                {
                 let (cache, asns, ip, label, dns) = (
                     cache.clone(),
                     dangerous_asns.clone(),
@@ -178,7 +191,7 @@ impl Auditor {
         let asn = tracked(
             &sink,
             4,
-            run_check("Address Reputation", CHECK_LIMIT_IO, {
+            run_check("Address Reputation", check_limit_io, {
                 let (cache, asns, tel, tor_probe) = (
                     cache.clone(),
                     dangerous_asns.clone(),
@@ -331,7 +344,7 @@ impl Auditor {
         let claude_exit = tracked(
             &sink,
             13,
-            run_check("Provider Exit", CHECK_LIMIT_IO, {
+            run_check("Provider Exit", check_limit_io, {
                 let resolver = self.resolver.clone();
                 let bound_route = match selection {
                     RouteSelection::Route(r) => Some(r.clone()),
@@ -340,16 +353,18 @@ impl Auditor {
                 let tel = telemetry.clone();
                 let matrix = matrix.clone();
                 let probe = self.use_env_probe_for_direct.then(|| env.probe.clone());
+                let cached_route_client = route_client.clone();
                 let latency_slot = exit_latency_ms.clone();
                 async move {
                     let started = std::time::Instant::now();
                     let res = resolver
-                        .probe_provider_exit_with_probe(
+                        .probe_provider_exit_with_client(
                             provider,
                             bound_route.as_ref(),
                             &tel,
                             &matrix,
                             probe.as_deref(),
+                            cached_route_client.as_ref(),
                         )
                         .await;
                     if !res.is_unknown() {

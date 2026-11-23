@@ -77,6 +77,7 @@ async fn resolve_interception_single_provider_allow_persists_exception_and_keeps
         .register("hold-1".to_string(), "anthropic")
         .await;
 
+    // Default AllowSession (persist_exception = false): ephemeral session only, never writes trusted_exceptions.
     resolve_interception_core(
         "hold-1",
         proxy::InterceptionAction::AllowSession,
@@ -88,6 +89,30 @@ async fn resolve_interception_single_provider_allow_persists_exception_and_keeps
     )
     .await
     .unwrap();
+    assert!(
+        !state
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
+
+    // Explicit persist_exception = true writes trusted_exceptions.
+    let rx2 = pm
+        .hold_queue
+        .register("hold-2".to_string(), "anthropic")
+        .await;
+    resolve_interception_core_with(
+        "hold-2",
+        proxy::InterceptionAction::AllowSession,
+        "anthropic",
+        Some("provider"),
+        true,
+        &pm,
+        &state,
+        &auditor,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rx2.await.unwrap(), proxy::HoldResolution::Allow);
 
     assert_eq!(rx.await.unwrap(), proxy::HoldResolution::Allow);
     assert!(!state.is_provider_blocked("anthropic").await);

@@ -158,7 +158,20 @@ async fn allow_provider_session_persists_exception_without_leaking_unrelated_blo
     let pm = proxy::ProxyManager::from_server(server);
     pm.guard.sync_gates_with_state(&state).await;
 
-    allow_provider_session_inner("anthropic", &state, &auditor, &pm)
+    // Default (persist_exception = false): allows session only, leaves trusted_exceptions empty.
+    allow_provider_session_inner("anthropic", false, &state, &auditor, &pm)
+        .await
+        .unwrap();
+    assert!(!state.is_provider_blocked("anthropic").await);
+    assert!(state.is_provider_session_allowed("anthropic").await);
+    assert!(
+        !state
+            .is_ip_trusted_for_provider("anthropic", "5.5.5.5")
+            .await
+    );
+
+    // Explicit opt-in (persist_exception = true): persists (provider, exit_ip) in trusted_exceptions.
+    allow_provider_session_inner("anthropic", true, &state, &auditor, &pm)
         .await
         .unwrap();
 

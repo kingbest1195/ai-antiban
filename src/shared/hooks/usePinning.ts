@@ -88,9 +88,9 @@ export function usePinning({ state, refreshState, runFullAudit, showToast, curre
   }, [state, refreshState, runFullAudit, showToast]);
 
   const handleAllowProvider = useCallback(
-    async (provider: ProviderId) => {
+    async (provider: ProviderId, persistException = false) => {
       try {
-        await allowProviderSession(provider);
+        await allowProviderSession(provider, persistException);
         await refreshState();
         showToast(t.accessAllowed, t.accessAllowedText(providers[provider].name), "success");
         await runFullAudit(false);

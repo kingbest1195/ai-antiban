@@ -40,13 +40,24 @@ async fn guard_holds_and_requires_confirmation_on_same_country_asn_jump() {
     assert_eq!(h.guard.gate(), Gate::Pending);
     assert!(h.env.hold_queue.current_alert().is_some());
 
-    // Explicit user Allow opens the gate and persists trusted_exception.
+    // §7.6: Explicit Allow without persist_exception=true opens the gate for the session
+    // and NEVER auto-persists into trusted_exceptions; explicit persist_exception=true does.
     let id = ev.0["id"].as_str().unwrap().to_string();
     h.guard
         .allow_network_alert(&id, &all_providers())
         .await
         .expect("explicit allow");
     assert_eq!(h.guard.gate(), Gate::Open);
+    assert!(h.state.is_provider_session_allowed("anthropic").await);
+    assert!(
+        !h.state
+            .is_ip_trusted_for_provider("anthropic", "95.217.1.1")
+            .await
+    );
+    h.state
+        .add_trusted_exception("anthropic", "95.217.1.1")
+        .await
+        .expect("explicit persist");
     assert!(
         h.state
             .is_ip_trusted_for_provider("anthropic", "95.217.1.1")
@@ -182,4 +193,53 @@ async fn guard_allows_pinned_ip_even_during_active_cooldown() {
         .expect("pinned IP allowed during cooldown");
     assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
     assert_eq!(h.guard.gate(), Gate::Open);
+}
+
+#[tokio::test(start_paused = true)]
+async fn sec7_6_allow_network_alert_respects_persist_flag_and_manual_killswitch() {
+    // 1. persist_exception=true writes confirmed fresh tel.ip to trusted_exceptions.
+    let h = harness(asn_jump_audit("95.217.2.2", "NL"), "95.217.2.2").await;
+    h.change("95.217.2.2").await;
+    let ev = h
+        .io
+        .wait_for("interceptor://enriched", 2000)
+        .await
+        .expect("enriched alert");
+    let id = ev.0["id"].as_str().unwrap().to_string();
+
+    h.guard
+        .allow_network_alert_with(&id, &all_providers(), true)
+        .await
+        .expect("explicit persist allow");
+    assert_eq!(h.guard.gate(), Gate::Open);
+    assert!(h.state.is_provider_session_allowed("anthropic").await);
+    assert!(
+        h.state
+            .is_ip_trusted_for_provider("anthropic", "95.217.2.2")
+            .await
+    );
+
+    // 2. Manual Kill-Switch blocks allow_network_alert_with BEFORE setting session_allowed_providers.
+    let h2 = harness(asn_jump_audit("95.217.3.3", "NL"), "95.217.3.3").await;
+    h2.change("95.217.3.3").await;
+    let ev2 = h2
+        .io
+        .wait_for("interceptor://enriched", 2000)
+        .await
+        .expect("enriched alert");
+    let id2 = ev2.0["id"].as_str().unwrap().to_string();
+
+    h2.guard.set_manual_killswitch(true, &h2.state).await;
+    let err = h2
+        .guard
+        .allow_network_alert_with(&id2, &all_providers(), true)
+        .await
+        .expect_err("manual killswitch must reject allow");
+    assert_eq!(err.code, AllowErrorCode::BlockedByManualKillswitch);
+    assert!(!h2.state.is_provider_session_allowed("anthropic").await);
+    assert!(
+        !h2.state
+            .is_ip_trusted_for_provider("anthropic", "95.217.3.3")
+            .await
+    );
 }

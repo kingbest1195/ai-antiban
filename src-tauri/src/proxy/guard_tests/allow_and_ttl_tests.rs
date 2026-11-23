@@ -135,7 +135,7 @@ async fn test_network_allow_only_when_ready() {
     assert_eq!(ev.0["phase"], "ready");
     let id = ev.0["id"].as_str().unwrap().to_string();
     h.guard
-        .allow_network_alert(&id, &all_providers())
+        .allow_network_alert_with(&id, &all_providers(), true)
         .await
         .expect("allowed");
     assert_eq!(h.guard.gate(), Gate::Open);

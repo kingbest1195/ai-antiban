@@ -66,10 +66,10 @@ async fn handshake_on_tcp(
             Ok(UpstreamStream::Plain(tcp))
         }
         EntryProto::Http => {
-            http_connect_handshake(&mut tcp, entry, target_host, target_port)
+            let leftover = http_connect_handshake(&mut tcp, entry, target_host, target_port)
                 .await
                 .map_err(|e| PhaseError::new(RoutePhase::Connect, e))?;
-            Ok(UpstreamStream::Plain(tcp))
+            Ok(UpstreamStream::Plain(tcp).with_prefix(leftover))
         }
         EntryProto::Https => {
             let server_name =
@@ -88,10 +88,11 @@ async fn handshake_on_tcp(
                         io::Error::new(e.kind(), format!("TLS handshake failed: {e}")),
                     )
                 })?;
-            http_connect_handshake(&mut tls_stream, entry, target_host, target_port)
-                .await
-                .map_err(|e| PhaseError::new(RoutePhase::Connect, e))?;
-            Ok(UpstreamStream::Tls(Box::new(tls_stream)))
+            let leftover =
+                http_connect_handshake(&mut tls_stream, entry, target_host, target_port)
+                    .await
+                    .map_err(|e| PhaseError::new(RoutePhase::Connect, e))?;
+            Ok(UpstreamStream::Tls(Box::new(tls_stream)).with_prefix(leftover))
         }
     }
 }
@@ -185,11 +186,18 @@ pub(super) async fn connect_entry_with(
             } else if let Some(cp) = chained_proxy
                 .filter(|cp| is_chained_eligible_for_entry(entry, Some(&addrs), gateway_port, cp))
             {
+                let has_fake_ip = addrs
+                    .iter()
+                    .any(|a| crate::core::net_safety::is_tun_fake_ip(&a.ip()));
                 let mut direct_fut = Box::pin(async {
                     match tokio::time::timeout(rem, async {
-                        let tcp = tcp_connect_addrs(addrs, rem)
-                            .await
-                            .map_err(|e| PhaseError::new(RoutePhase::TcpDirect, e))?;
+                        let tcp = super::handshakes::tcp_connect_addrs_with_v4_priority(
+                            addrs,
+                            rem,
+                            has_fake_ip,
+                        )
+                        .await
+                        .map_err(|e| PhaseError::new(RoutePhase::TcpDirect, e))?;
                         handshake_on_tcp(tcp, entry, target_host, target_port, tls).await
                     })
                     .await
@@ -208,7 +216,11 @@ pub(super) async fn connect_entry_with(
                     }
                 });
 
-                let headstart = HEDGED_DIRECT_HEADSTART.min(rem);
+                let headstart = if has_fake_ip {
+                    Duration::ZERO
+                } else {
+                    HEDGED_DIRECT_HEADSTART.min(rem)
+                };
                 match tokio::time::timeout(headstart, &mut direct_fut).await {
                     Ok(Ok(stream)) => return Ok(stream),
                     Ok(Err(pe)) => Err(pe),

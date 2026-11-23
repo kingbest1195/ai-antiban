@@ -172,11 +172,19 @@ pub async fn toggle_strict_pinning(
 #[tauri::command]
 pub async fn allow_provider_session(
     provider: String,
+    persist_exception: Option<bool>,
     state: tauri::State<'_, state::AppState>,
     auditor: tauri::State<'_, auditor::Auditor>,
     proxy_manager: tauri::State<'_, proxy::ProxyManager>,
 ) -> Result<(), String> {
-    helpers::allow_provider_session_inner(&provider, &state, &auditor, &proxy_manager).await
+    helpers::allow_provider_session_inner(
+        &provider,
+        persist_exception.unwrap_or(false),
+        &state,
+        &auditor,
+        &proxy_manager,
+    )
+    .await
 }
 
 #[tauri::command]

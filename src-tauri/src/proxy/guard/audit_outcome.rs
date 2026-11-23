@@ -178,10 +178,8 @@ impl NetworkGuard {
             .collect();
 
         if summary.affected_providers.is_empty() {
-            let ip = inner
-                .observed_ip
-                .clone()
-                .unwrap_or_else(|| summary.tel.ip.clone());
+            let ip = summary.tel.ip.trim().to_string();
+            inner.observed_ip = Some(ip.clone());
             self.accept_locked(env, inner, &ip, &summary.tel).await;
             return;
         }

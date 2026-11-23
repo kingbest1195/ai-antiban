@@ -20,6 +20,7 @@ export async function resolveInterception(
   action: InterceptionAction,
   provider: ProviderId,
   scope?: string,
+  persistException = false,
 ): Promise<boolean> {
   if (isTauri()) {
     return await tauriInvoke<boolean>("resolve_interception", {
@@ -27,6 +28,7 @@ export async function resolveInterception(
       action,
       provider,
       scope,
+      persistException,
     });
   }
   clearMockPendingAlert(id);

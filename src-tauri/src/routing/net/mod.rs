@@ -34,7 +34,7 @@ pub const ENTRY_DNS_TIMEOUT: Duration = Duration::from_secs(4);
 const SYSTEM_DNS_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(1200);
 const SYSTEM_DNS_RETRY_TIMEOUT: Duration = Duration::from_millis(800);
 const SYSTEM_DNS_RETRY_DELAY: Duration = Duration::from_millis(100);
-const ENTRY_DNS_CACHE_TTL: Duration = Duration::from_secs(60);
+const ENTRY_DNS_CACHE_TTL: Duration = Duration::from_secs(300);
 const ENTRY_DNS_STALE_TTL: Duration = Duration::from_secs(900);
 const ENTRY_DNS_EMERGENCY_STALE_TTL: Duration = Duration::from_secs(7200);
 const EMERGENCY_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
@@ -271,6 +271,7 @@ async fn resolve_entry_checked_with(
     backend: &dyn EntryDnsBackend,
     cache: &EntryDnsCache,
     allow_bg_refresh: bool,
+    fast_fake_ip_with_chained: bool,
 ) -> io::Result<Vec<SocketAddr>> {
     if let Ok(ip) = entry.host.parse::<IpAddr>() {
         let addrs = vec![SocketAddr::new(ip, entry.port)];
@@ -319,6 +320,16 @@ async fn resolve_entry_checked_with(
                         return Ok(clean);
                     }
                     Ok(AddrsOutcome::FakeIp(fake)) => {
+                        if fast_fake_ip_with_chained {
+                            if allow_bg_refresh {
+                                spawn_background_dns_refresh(
+                                    entry.clone(),
+                                    allow_local,
+                                    gateway_port,
+                                );
+                            }
+                            return Ok(fake);
+                        }
                         fake_ip_candidate = Some(fake);
                         break;
                     }
@@ -452,6 +463,9 @@ pub async fn resolve_entry_checked(
     if let Some(res) = test_support::check_test_dns_override(entry, allow_local, gateway_port) {
         return res;
     }
+    let has_chained = crate::sysproxy::get_chained_proxy().is_some_and(|cp| {
+        !crate::sysproxy::is_gateway_host_port(&cp, (gateway_port > 0).then_some(gateway_port))
+    });
     resolve_entry_checked_with(
         entry,
         allow_local,
@@ -459,6 +473,7 @@ pub async fn resolve_entry_checked(
         &ProdEntryDnsBackend,
         global_entry_dns_cache(),
         true,
+        has_chained,
     )
     .await
 }

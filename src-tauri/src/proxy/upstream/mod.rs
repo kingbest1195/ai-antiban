@@ -2,7 +2,7 @@
 
 mod chained;
 mod entry_connect;
-mod handshakes;
+pub(crate) mod handshakes;
 
 pub use chained::{
     ChainedError, connect_chained_tcp, connect_via_chained_proxy, is_socks5_chained,
@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::task::JoinSet;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
@@ -36,6 +37,23 @@ pub fn parse_upstream_key(input: &str) -> Result<UpstreamProxyConfig, String> {
 pub enum UpstreamStream {
     Plain(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
+    Prefixed {
+        prefix: std::io::Cursor<Vec<u8>>,
+        inner: Box<UpstreamStream>,
+    },
+}
+
+impl UpstreamStream {
+    pub(crate) fn with_prefix(self, prefix: Vec<u8>) -> Self {
+        if prefix.is_empty() {
+            self
+        } else {
+            Self::Prefixed {
+                prefix: std::io::Cursor::new(prefix),
+                inner: Box::new(self),
+            }
+        }
+    }
 }
 
 impl AsyncRead for UpstreamStream {
@@ -47,6 +65,18 @@ impl AsyncRead for UpstreamStream {
         match self.get_mut() {
             UpstreamStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
             UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+            UpstreamStream::Prefixed { prefix, inner } => {
+                let pos = prefix.position() as usize;
+                let data = prefix.get_ref();
+                if pos < data.len() {
+                    let avail = &data[pos..];
+                    let to_copy = avail.len().min(buf.remaining());
+                    buf.put_slice(&avail[..to_copy]);
+                    prefix.set_position((pos + to_copy) as u64);
+                    return Poll::Ready(Ok(()));
+                }
+                Pin::new(inner.as_mut()).poll_read(cx, buf)
+            }
         }
     }
 }
@@ -60,6 +90,7 @@ impl AsyncWrite for UpstreamStream {
         match self.get_mut() {
             UpstreamStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
             UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+            UpstreamStream::Prefixed { inner, .. } => Pin::new(inner.as_mut()).poll_write(cx, buf),
         }
     }
 
@@ -67,6 +98,7 @@ impl AsyncWrite for UpstreamStream {
         match self.get_mut() {
             UpstreamStream::Plain(s) => Pin::new(s).poll_flush(cx),
             UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+            UpstreamStream::Prefixed { inner, .. } => Pin::new(inner.as_mut()).poll_flush(cx),
         }
     }
 
@@ -74,6 +106,7 @@ impl AsyncWrite for UpstreamStream {
         match self.get_mut() {
             UpstreamStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
             UpstreamStream::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+            UpstreamStream::Prefixed { inner, .. } => Pin::new(inner.as_mut()).poll_shutdown(cx),
         }
     }
 }
@@ -91,7 +124,7 @@ fn build_tls_config(roots: RootCertStore) -> io::Result<ClientConfig> {
 
 /// Production TLS config: Mozilla roots (webpki-roots, same as reqwest), full verification.
 /// There is intentionally no way to inject roots or disable verification on this path.
-fn production_tls_config() -> io::Result<Arc<ClientConfig>> {
+pub(crate) fn production_tls_config() -> io::Result<Arc<ClientConfig>> {
     static CFG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     if let Some(c) = CFG.get() {
         return Ok(Arc::clone(c));
@@ -101,6 +134,8 @@ fn production_tls_config() -> io::Result<Arc<ClientConfig>> {
     let cfg = Arc::new(build_tls_config(roots)?);
     Ok(Arc::clone(CFG.get_or_init(|| cfg)))
 }
+
+const ROUTE_ENTRY_STAGGER: Duration = Duration::from_millis(500);
 
 async fn connect_via_route_inner(
     route: &Route,
@@ -124,10 +159,12 @@ async fn connect_via_route_inner(
             "route has no entry nodes",
         ));
     }
-    let mut errors = Vec::with_capacity(route.entries.len());
-    let mut last_kind = io::ErrorKind::Other;
     let allow_local = route.allows_local_entries();
-    for (i, entry) in route.entries.iter().enumerate() {
+    let mut errors: Vec<Option<String>> = vec![None; route.entries.len()];
+    let mut last_kind = io::ErrorKind::Other;
+
+    if route.entries.len() == 1 {
+        let entry = &route.entries[0];
         match connect_entry_with(
             entry,
             target_host,
@@ -143,16 +180,79 @@ async fn connect_via_route_inner(
             Ok(s) => return Ok(s),
             Err(e) => {
                 last_kind = e.kind();
-                errors.push(format!(
-                    "entry #{} {} {}: {e}",
-                    i + 1,
+                errors[0] = Some(format!(
+                    "entry #1 {} {}: {e}",
                     entry.proto.as_str(),
                     entry.endpoint()
                 ));
             }
         }
+    } else {
+        let mut set: JoinSet<(usize, io::Result<UpstreamStream>)> = JoinSet::new();
+        let mut next_idx = 0usize;
+        let spawn_entry = |set: &mut JoinSet<(usize, io::Result<UpstreamStream>)>, idx: usize| {
+            let entry = route.entries[idx].clone();
+            let host = target_host.to_string();
+            let tls = Arc::clone(tls);
+            let cp = chained_proxy.map(str::to_string);
+            set.spawn(async move {
+                let res = connect_entry_with(
+                    &entry,
+                    &host,
+                    target_port,
+                    per_entry_timeout,
+                    &tls,
+                    allow_local,
+                    gateway_port,
+                    cp.as_deref(),
+                )
+                .await;
+                (idx, res)
+            });
+        };
+
+        spawn_entry(&mut set, next_idx);
+        next_idx += 1;
+
+        loop {
+            let has_more = next_idx < route.entries.len();
+            tokio::select! {
+                joined = set.join_next(), if !set.is_empty() => {
+                    match joined {
+                        Some(Ok((_idx, Ok(stream)))) => return Ok(stream),
+                        Some(Ok((idx, Err(e)))) => {
+                            last_kind = e.kind();
+                            let entry = &route.entries[idx];
+                            errors[idx] = Some(format!(
+                                "entry #{} {} {}: {e}",
+                                idx + 1,
+                                entry.proto.as_str(),
+                                entry.endpoint()
+                            ));
+                        }
+                        Some(Err(join_err)) => {
+                            last_kind = io::ErrorKind::Other;
+                            let _ = join_err;
+                        }
+                        None => {}
+                    }
+                    if next_idx < route.entries.len() {
+                        spawn_entry(&mut set, next_idx);
+                        next_idx += 1;
+                    } else if set.is_empty() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(ROUTE_ENTRY_STAGGER), if has_more => {
+                    spawn_entry(&mut set, next_idx);
+                    next_idx += 1;
+                }
+            }
+        }
     }
-    let summary = format!("all entry nodes failed ({})", errors.join("; "));
+
+    let joined_errors: Vec<String> = errors.into_iter().flatten().collect();
+    let summary = format!("all entry nodes failed ({})", joined_errors.join("; "));
     crate::diagnostics::record(
         "proxy:route",
         &format!(

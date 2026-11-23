@@ -102,15 +102,14 @@ pub(super) async fn resolve_exit_ip_for_provider(
     provider: &str,
     state: &state::AppState,
     auditor: &auditor::Auditor,
-    proxy_manager: &proxy::ProxyManager,
+    _proxy_manager: &proxy::ProxyManager,
 ) -> (Option<auditor::NetworkTelemetry>, Option<String>) {
     let mut tel_opt = None;
     let mut ip_opt = None;
-    let mut is_direct = true;
     if let Some(provider_id) = auditor::ProviderId::from_id(provider) {
         let data = state.get_data().await;
         let selection = crate::routing::select_route(&data, provider_id.as_str());
-        is_direct = matches!(selection, crate::routing::RouteSelection::Direct);
+        let is_direct = matches!(selection, crate::routing::RouteSelection::Direct);
         if let Ok(tel) = auditor
             .resolve_for_provider(provider_id, state, false)
             .await
@@ -130,26 +129,22 @@ pub(super) async fn resolve_exit_ip_for_provider(
             }
         }
     }
-    if ip_opt.is_none() {
-        if is_direct {
-            ip_opt = proxy_manager.guard.current_observed_ip().await;
-        }
-        if ip_opt.is_none() {
-            ip_opt = proxy_manager
-                .hold_queue
-                .current_alert()
-                .and_then(|alert| alert.report.map(|r| r.telemetry.ip));
-        }
-    }
     (tel_opt, ip_opt)
 }
 
 pub(crate) async fn allow_provider_session_inner(
     provider: &str,
+    persist_exception: bool,
     state: &state::AppState,
     auditor: &auditor::Auditor,
     proxy_manager: &proxy::ProxyManager,
 ) -> Result<(), String> {
+    if proxy_manager.guard.is_manual_killswitch() {
+        return Err(
+            "blocked_by_manual_killswitch: включён ручной «СТОП СЕТИ». Отключите его, чтобы разрешить запросы."
+                .to_string(),
+        );
+    }
     let canonical = auditor::ProviderId::from_id(provider)
         .map(|p| p.as_str())
         .unwrap_or(provider);
@@ -160,13 +155,12 @@ pub(crate) async fn allow_provider_session_inner(
         .allow_provider_for_session(canonical)
         .await
         .map_err(|e| e.to_string())?;
-    if !proxy_manager.guard.is_manual_killswitch() {
-        state
-            .unblock_provider(canonical)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(ip) = ip_opt
+    state
+        .unblock_provider(canonical)
+        .await
+        .map_err(|e| e.to_string())?;
+    if persist_exception
+        && let Some(ip) = ip_opt
         && !ip.trim().is_empty()
     {
         state

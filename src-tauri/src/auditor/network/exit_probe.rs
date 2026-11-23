@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::cascade::{IpInfoResponse, build_entry_client};
 use super::resolver::NetworkResolver;
-use super::{NEUTRAL_USER_AGENT, NetworkTelemetry, REQUEST_TIMEOUT_MS};
+use super::{NEUTRAL_USER_AGENT, NetworkTelemetry, REQUEST_TIMEOUT_MS, ROUTE_REQUEST_TIMEOUT_MS};
 use crate::auditor::geo_matrix::{
     CheckResult, CheckStatus, ProviderId, UnknownReason, evaluate_provider_geo,
 };
@@ -37,16 +37,42 @@ impl NetworkResolver {
         matrix: &ProviderMatrix,
         direct_probe: Option<&dyn IpProbe>,
     ) -> CheckResult {
+        self.probe_provider_exit_with_client(
+            provider,
+            route,
+            telemetry,
+            matrix,
+            direct_probe,
+            None,
+        )
+        .await
+    }
+
+    /// Variant of [`Self::probe_provider_exit_with_probe`] reusing a keep-alive `route_client`.
+    pub async fn probe_provider_exit_with_client(
+        &self,
+        provider: ProviderId,
+        route: Option<&Route>,
+        telemetry: &NetworkTelemetry,
+        matrix: &ProviderMatrix,
+        direct_probe: Option<&dyn IpProbe>,
+        route_client: Option<&reqwest::Client>,
+    ) -> CheckResult {
         let url_override = default_exit_probe_url(provider, route.is_some());
+        let timeout_ms = if route.is_some() {
+            ROUTE_REQUEST_TIMEOUT_MS
+        } else {
+            REQUEST_TIMEOUT_MS
+        };
         self.probe_provider_exit_inner(
             provider,
             route,
             telemetry,
             matrix,
             url_override,
-            None,
+            route_client,
             direct_probe,
-            Duration::from_millis(REQUEST_TIMEOUT_MS),
+            Duration::from_millis(timeout_ms),
         )
         .await
     }

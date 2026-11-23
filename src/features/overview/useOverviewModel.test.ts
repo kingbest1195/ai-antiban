@@ -304,7 +304,9 @@ describe("Wave 2: disabled_providers, trusted_exceptions и API-моки", () =>
     expect(m.tone).toBe("ok");
     expect(m.verdict).toBe(copy.verdict.ok);
     expect(m.banner).toBeNull();
-    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("allowed");
+    const anthropicSvc = m.services.find((s) => s.id === "anthropic");
+    expect(anthropicSvc?.status).toBe("allowed");
+    expect(anthropicSvc?.allowReason).toBe("pinned_travel");
 
     // Если вместе с IMPOSSIBLE_TRAVEL_CRITICAL есть реальный критичный блок (например, DNSBL), pinned_ip не перекрывает его.
     const dnsblCrit: CheckResult = { code: "DNSBL_LISTED_CRITICAL", status: "critical", message: "listed" };
@@ -336,13 +338,21 @@ describe("Wave 2: disabled_providers, trusted_exceptions и API-моки", () =>
   });
 
   it("API моки setProviderMonitoring, removeTrustedException и clearTrustedExceptions обновляют состояние", async () => {
+    await clearTrustedExceptions();
     const off = await setProviderMonitoring("gemini", false);
     expect(off.disabled_providers).toContain("gemini");
 
     const on = await setProviderMonitoring("gemini", true);
     expect(on.disabled_providers).not.toContain("gemini");
 
+    // Без явного persistException=true постоянное исключение не сохраняется.
     await allowProviderSession("openai");
+    const afterEphemeral = await fetchAppState();
+    expect(afterEphemeral.session_allowed_providers).toContain("openai");
+    expect(afterEphemeral.trusted_exceptions?.openai).toBeUndefined();
+
+    // С явным persistException=true исключение сохраняется и удаляется.
+    await allowProviderSession("openai", true);
     const afterAllow = await fetchAppState();
     expect(afterAllow.trusted_exceptions?.openai?.length).toBeGreaterThan(0);
 
@@ -350,8 +360,8 @@ describe("Wave 2: disabled_providers, trusted_exceptions и API-моки", () =>
     const afterRemove = await removeTrustedException("openai", ip);
     expect(afterRemove.trusted_exceptions?.openai).toBeUndefined();
 
-    await allowProviderSession("anthropic");
-    await allowProviderSession("gemini");
+    await allowProviderSession("anthropic", true);
+    await allowProviderSession("gemini", true);
     const afterClear = await clearTrustedExceptions();
     expect(afterClear.trusted_exceptions).toEqual({});
   });

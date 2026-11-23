@@ -91,14 +91,20 @@ export async function toggleStrictPinning(enabled: boolean): Promise<void> {
   mockState.strict_pinning_enabled = enabled;
 }
 
-export async function allowProviderSession(provider: ProviderId): Promise<void> {
+export async function allowProviderSession(
+  provider: ProviderId,
+  persistException = false,
+): Promise<void> {
   if (isTauri()) {
-    return await tauriInvoke("allow_provider_session", { provider });
+    return await tauriInvoke("allow_provider_session", { provider, persistException });
   }
   if (!mockState.session_allowed_providers.includes(provider)) {
     mockState.session_allowed_providers.push(provider);
   }
   mockState.blocked_providers = mockState.blocked_providers.filter((p) => p !== provider);
+  if (!persistException) {
+    return;
+  }
   const currentIp =
     mockFlags.scenario === "turkey"
       ? "185.220.101.5"

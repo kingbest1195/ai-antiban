@@ -32,6 +32,43 @@ fn test_ipinfo_org_parsing() {
 }
 
 #[test]
+fn parse_as_org_handles_lowercase_and_missing_name() {
+    use super::super::cascade::parse_as_org;
+    assert_eq!(
+        parse_as_org("as13335 Cloudflare, Inc."),
+        (Some(13335), Some("Cloudflare, Inc.".to_string()))
+    );
+    assert_eq!(
+        parse_as_org("  As20473  "),
+        (Some(20473), None)
+    );
+    assert_eq!(
+        parse_as_org("No Prefix Org"),
+        (None, Some("No Prefix Org".to_string()))
+    );
+    assert_eq!(parse_as_org("   "), (None, None));
+}
+
+#[test]
+fn has_provider_metadata_requires_asn_isp_or_org() {
+    let base = NetworkTelemetry {
+        ip: "1.1.1.1".to_string(),
+        country_code: "US".to_string(),
+        hostname: None,
+        asn: None,
+        org: None,
+        isp: None,
+        timezone: None,
+        resolved_at: current_timestamp(),
+    };
+    assert!(!base.has_provider_metadata());
+    let with_asn = NetworkTelemetry { asn: Some(13335), ..base.clone() };
+    assert!(with_asn.has_provider_metadata());
+    let with_isp = NetworkTelemetry { isp: Some("NordVPN".into()), ..base };
+    assert!(with_isp.has_provider_metadata());
+}
+
+#[test]
 fn test_build_upstream_client() {
     let socks_cfg = UpstreamProxyConfig {
         enabled: true,

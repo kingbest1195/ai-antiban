@@ -11,7 +11,7 @@ use sim::build_simulated_risk_report;
 use tauri::{Emitter, Manager};
 
 #[cfg(test)]
-pub(crate) use helpers::resolve_interception_core;
+pub(crate) use helpers::{resolve_interception_core, resolve_interception_core_with};
 pub(crate) use helpers::toggle_or_clear_stop_core;
 pub(crate) use sim::build_simulation_network_change;
 
@@ -22,6 +22,7 @@ pub async fn resolve_interception(
     action: proxy::InterceptionAction,
     provider: String,
     scope: Option<String>,
+    persist_exception: Option<bool>,
     proxy_manager: tauri::State<'_, proxy::ProxyManager>,
     state: tauri::State<'_, state::AppState>,
     auditor: tauri::State<'_, auditor::Auditor>,
@@ -52,6 +53,7 @@ pub async fn resolve_interception(
         action,
         provider: &provider,
         scope: scope.as_deref(),
+        persist_exception: persist_exception.unwrap_or(false),
         proxy_manager: &proxy_manager,
         state: &state,
         auditor: &auditor,

@@ -131,7 +131,7 @@ impl NetworkGuard {
         }
         match env.resolve_telemetry().await {
             Ok(tel) => {
-                let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
+                let ip = tel.ip.trim().to_string();
                 self.accept_locked(env, &mut inner, &ip, &tel).await;
             }
             Err(e) => {
@@ -143,12 +143,22 @@ impl NetworkGuard {
     /// The user's "allow" for the network alert `id` (command layer). Accepted only while that
     /// alert is still the current one (same id and epoch) AND its audit finished (`phase ==
     /// "ready"` and `alert_emitted == true`); otherwise nothing is opened or written and an error
-    /// goes back to the window. Persists `(provider, exit_ip)` in `trusted_exceptions`, preserves
-    /// unrelated `already_blocked_providers`, and opens only the allowed providers.
+    /// goes back to the window. Grants ephemeral session access by default; writes `(provider,
+    /// tel.ip)` to `trusted_exceptions` ONLY when `persist_exception == true`. Preserves unrelated
+    /// `already_blocked_providers` and opens only the allowed providers.
     pub async fn allow_network_alert(
         self: &Arc<Self>,
         id: &str,
         providers: &[String],
+    ) -> Result<(), AllowError> {
+        self.allow_network_alert_with(id, providers, false).await
+    }
+
+    pub async fn allow_network_alert_with(
+        self: &Arc<Self>,
+        id: &str,
+        providers: &[String],
+        persist_exception: bool,
     ) -> Result<(), AllowError> {
         let env = self.env.get().ok_or_else(|| {
             AllowError::new(
@@ -188,7 +198,7 @@ impl NetworkGuard {
         {
             let _ = clear.await;
         }
-        let ip = inner.observed_ip.clone().unwrap_or_else(|| tel.ip.clone());
+        let ip = tel.ip.trim().to_string();
         let st_before = env.state.get_data().await;
         let targets: Vec<String> = {
             let pending_affected = inner
@@ -223,7 +233,7 @@ impl NetworkGuard {
                 .allow_provider_for_session(p)
                 .await
                 .map_err(|e| AllowError::new(AllowErrorCode::Internal, e.to_string()))?;
-            if !ip.trim().is_empty() {
+            if persist_exception && !ip.is_empty() {
                 env.state
                     .add_trusted_exception(p, &ip)
                     .await

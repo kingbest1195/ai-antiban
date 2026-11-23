@@ -5,11 +5,13 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::routing::Entry;
+use crate::routing::{Entry, EntryProto};
 use crate::routing::net::resolve_entry_checked;
 
 const DIRECT_HEADSTART: Duration = Duration::from_millis(700);
@@ -84,6 +86,11 @@ pub(super) async fn spawn_entry_relay(
         .local_addr()
         .map_err(|e| format!("Failed to inspect audit entry relay address: {e}"))?;
 
+    let wrap_tls = entry.proto == EntryProto::Https
+        && entry
+            .tls_server_name()
+            .parse::<std::net::IpAddr>()
+            .is_ok();
     let entry = entry.clone();
     tokio::spawn(async move {
         while let Ok(Ok((mut inbound, _))) =
@@ -92,16 +99,84 @@ pub(super) async fn spawn_entry_relay(
             let e = entry.clone();
             let host = cp_host.clone();
             tokio::spawn(async move {
-                if let Ok(mut outbound) =
+                if let Ok((tcp, leftover)) =
                     connect_hedged(&e, scheme, &host, cp_port, allow_local, gateway_port).await
                 {
-                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    let mut outbound = MaybePrefixed::new(tcp, leftover);
+                    if wrap_tls {
+                        if let Ok(tls_cfg) = crate::proxy::upstream::production_tls_config()
+                            && let Ok(sni) =
+                                tokio_rustls::rustls::pki_types::ServerName::try_from(
+                                    e.tls_server_name().to_string(),
+                                )
+                            && let Ok(mut tls_out) =
+                                tokio_rustls::TlsConnector::from(tls_cfg)
+                                    .connect(sni, outbound)
+                                    .await
+                        {
+                            let _ =
+                                tokio::io::copy_bidirectional(&mut inbound, &mut tls_out).await;
+                        }
+                    } else {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
                 }
             });
         }
     });
 
     Ok(Some(relay_addr))
+}
+
+struct MaybePrefixed {
+    prefix: std::io::Cursor<Vec<u8>>,
+    tcp: TcpStream,
+}
+
+impl MaybePrefixed {
+    fn new(tcp: TcpStream, leftover: Vec<u8>) -> Self {
+        Self {
+            prefix: std::io::Cursor::new(leftover),
+            tcp,
+        }
+    }
+}
+
+impl AsyncRead for MaybePrefixed {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let pos = self.prefix.position() as usize;
+        let data = self.prefix.get_ref();
+        if pos < data.len() {
+            let avail = &data[pos..];
+            let n = avail.len().min(buf.remaining());
+            buf.put_slice(&avail[..n]);
+            self.prefix.set_position((pos + n) as u64);
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.tcp).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for MaybePrefixed {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.tcp).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.tcp).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.tcp).poll_shutdown(cx)
+    }
 }
 
 async fn connect_hedged(
@@ -111,7 +186,7 @@ async fn connect_hedged(
     cp_port: u16,
     allow_local: bool,
     gateway_port: u16,
-) -> io::Result<TcpStream> {
+) -> io::Result<(TcpStream, Vec<u8>)> {
     let direct_addrs = match resolve_entry_checked(entry, allow_local, gateway_port).await {
         Ok(addrs) => Some(addrs),
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Err(e),
@@ -131,7 +206,11 @@ async fn connect_hedged(
         return connect_via_chained(scheme, cp_host, cp_port, &entry.host, entry.port).await;
     };
 
-    let direct_fut = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addrs[..]));
+    let direct_fut = crate::proxy::upstream::handshakes::tcp_connect_addrs_with_v4_priority(
+        addrs,
+        CONNECT_TIMEOUT,
+        true,
+    );
     tokio::pin!(direct_fut);
 
     let headstart = tokio::time::sleep(DIRECT_HEADSTART);
@@ -139,8 +218,8 @@ async fn connect_hedged(
 
     tokio::select! {
         res = &mut direct_fut => {
-            if let Ok(Ok(stream)) = res {
-                return Ok(stream);
+            if let Ok(stream) = res {
+                return Ok((stream, Vec::new()));
             }
             connect_via_chained(scheme, cp_host, cp_port, &entry.host, entry.port).await
         }
@@ -150,13 +229,13 @@ async fn connect_hedged(
             tokio::pin!(chained_fut);
             tokio::select! {
                 res = &mut direct_fut => match res {
-                    Ok(Ok(stream)) => Ok(stream),
+                    Ok(stream) => Ok((stream, Vec::new())),
                     _ => chained_fut.await,
                 },
                 res = &mut chained_fut => match res {
-                    Ok(stream) => Ok(stream),
+                    Ok(pair) => Ok(pair),
                     Err(e) => match direct_fut.await {
-                        Ok(Ok(stream)) => Ok(stream),
+                        Ok(stream) => Ok((stream, Vec::new())),
                         _ => Err(e),
                     },
                 }
@@ -171,18 +250,21 @@ async fn connect_via_chained(
     cp_port: u16,
     target_host: &str,
     target_port: u16,
-) -> io::Result<TcpStream> {
+) -> io::Result<(TcpStream, Vec<u8>)> {
     let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((cp_host, cp_port)))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "chained proxy connect timeout"))??;
-    match scheme {
+    let leftover = match scheme {
         ChainedScheme::Http => http_connect(&mut stream, target_host, target_port).await?,
-        ChainedScheme::Socks5 => socks5_connect(&mut stream, target_host, target_port).await?,
-    }
-    Ok(stream)
+        ChainedScheme::Socks5 => {
+            socks5_connect(&mut stream, target_host, target_port).await?;
+            Vec::new()
+        }
+    };
+    Ok((stream, leftover))
 }
 
-async fn http_connect(stream: &mut TcpStream, host: &str, port: u16) -> io::Result<()> {
+async fn http_connect(stream: &mut TcpStream, host: &str, port: u16) -> io::Result<Vec<u8>> {
     let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
     tokio::time::timeout(CONNECT_TIMEOUT, stream.write_all(req.as_bytes()))
         .await
@@ -192,18 +274,23 @@ async fn http_connect(stream: &mut TcpStream, host: &str, port: u16) -> io::Resu
                 "chained HTTP CONNECT write timeout",
             )
         })??;
-    let mut buf = Vec::with_capacity(512);
-    let mut byte = [0u8; 1];
     tokio::time::timeout(CONNECT_TIMEOUT, async {
-        while buf.len() < 4096 {
-            let n = stream.read(&mut byte).await?;
+        let mut reader = BufReader::new(stream);
+        let mut buf = Vec::with_capacity(512);
+        loop {
+            if buf.len() >= 4096 {
+                return Err(io::Error::other("chained HTTP CONNECT header too large"));
+            }
+            let n = reader.read_until(b'\n', &mut buf).await?;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "chained HTTP EOF",
                 ));
             }
-            buf.push(byte[0]);
+            if buf.len() > 4096 {
+                return Err(io::Error::other("chained HTTP CONNECT header too large"));
+            }
             if buf.ends_with(b"\r\n\r\n") {
                 let first_line = String::from_utf8_lossy(&buf);
                 let ok = first_line
@@ -214,10 +301,9 @@ async fn http_connect(stream: &mut TcpStream, host: &str, port: u16) -> io::Resu
                 if !ok {
                     return Err(io::Error::other("chained HTTP CONNECT non-200 status"));
                 }
-                return Ok(());
+                return Ok(reader.buffer().to_vec());
             }
         }
-        Err(io::Error::other("chained HTTP CONNECT header too large"))
     })
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "chained HTTP CONNECT read timeout"))?
@@ -273,47 +359,5 @@ async fn socks5_connect(stream: &mut TcpStream, host: &str, port: u16) -> io::Re
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::routing::EntryProto;
-
-    fn mk_entry(host: &str, port: u16) -> Entry {
-        Entry {
-            proto: EntryProto::Socks5,
-            host: host.into(),
-            port,
-            username: None,
-            password: None,
-            sni: None,
-        }
-    }
-
-    #[test]
-    fn same_target_normalizes_loopback_aliases() {
-        assert!(same_target_as_chained(
-            &mk_entry("localhost", 1080),
-            "127.0.0.1",
-            1080
-        ));
-        assert!(same_target_as_chained(
-            &mk_entry("127.0.0.1", 1080),
-            "localhost",
-            1080
-        ));
-        assert!(same_target_as_chained(
-            &mk_entry("::1", 1080),
-            "localhost",
-            1080
-        ));
-        assert!(!same_target_as_chained(
-            &mk_entry("localhost", 1080),
-            "127.0.0.1",
-            1081
-        ));
-        assert!(!same_target_as_chained(
-            &mk_entry("1.2.3.4", 1080),
-            "127.0.0.1",
-            1080
-        ));
-    }
-}
+#[path = "entry_relay_tests.rs"]
+mod tests;

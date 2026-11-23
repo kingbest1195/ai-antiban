@@ -1,15 +1,38 @@
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use crate::proxy::transit::{HAPPY_EYEBALLS_STEP, race_connect};
 use crate::routing::Entry;
 use crate::routing::net::resolve_entry_checked;
+
+const IPV6_DEGRADATION_COOLDOWN_SECS: u64 = 120;
+static LAST_IPV6_FAILURE_SECS: AtomicU64 = AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub(crate) fn record_ipv6_failure() {
+    LAST_IPV6_FAILURE_SECS.store(now_secs(), Ordering::Relaxed);
+}
+
+fn should_prefer_v4(prefer_v4_hint: bool) -> bool {
+    if prefer_v4_hint || crate::sysproxy::get_chained_proxy().is_some() {
+        return true;
+    }
+    let last = LAST_IPV6_FAILURE_SECS.load(Ordering::Relaxed);
+    last > 0 && now_secs().saturating_sub(last) <= IPV6_DEGRADATION_COOLDOWN_SECS
+}
 
 fn configure_tcp_stream(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
@@ -19,7 +42,7 @@ fn configure_tcp_stream(stream: &TcpStream) {
     let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&ka);
 }
 
-fn order_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+fn order_socket_addrs_with_priority(addrs: &[SocketAddr], prefer_v4: bool) -> Vec<SocketAddr> {
     if addrs.len() <= 1 {
         return addrs.to_vec();
     }
@@ -32,9 +55,13 @@ fn order_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
         }
     }
     let mut out = Vec::with_capacity(v6.len() + v4.len());
-    let (mut a, mut b) = (v6.into_iter(), v4.into_iter());
+    let (mut first, mut second) = if prefer_v4 {
+        (v4.into_iter(), v6.into_iter())
+    } else {
+        (v6.into_iter(), v4.into_iter())
+    };
     loop {
-        match (a.next(), b.next()) {
+        match (first.next(), second.next()) {
             (None, None) => break,
             (x, y) => {
                 out.extend(x);
@@ -45,22 +72,39 @@ fn order_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
     out
 }
 
-pub(super) async fn tcp_connect_addrs(
+pub(crate) async fn tcp_connect_addrs_with_v4_priority(
     addrs: Vec<SocketAddr>,
     tcp_timeout: Duration,
+    prefer_v4_hint: bool,
 ) -> io::Result<TcpStream> {
-    let ordered = order_socket_addrs(&addrs);
+    let ordered = order_socket_addrs_with_priority(&addrs, should_prefer_v4(prefer_v4_hint));
     race_connect(
         ordered,
         HAPPY_EYEBALLS_STEP,
         tcp_timeout,
         |addr| async move {
-            let stream = TcpStream::connect(addr).await?;
-            configure_tcp_stream(&stream);
-            Ok(stream)
+            match TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    configure_tcp_stream(&stream);
+                    Ok(stream)
+                }
+                Err(e) => {
+                    if addr.is_ipv6() {
+                        record_ipv6_failure();
+                    }
+                    Err(e)
+                }
+            }
         },
     )
     .await
+}
+
+pub(super) async fn tcp_connect_addrs(
+    addrs: Vec<SocketAddr>,
+    tcp_timeout: Duration,
+) -> io::Result<TcpStream> {
+    tcp_connect_addrs_with_v4_priority(addrs, tcp_timeout, false).await
 }
 
 /// Resolves the entry host once, checks EVERY address (see [`crate::routing::net`]) and connects to
@@ -230,19 +274,20 @@ pub(super) async fn socks5_handshake(
 }
 
 /// `CONNECT` handshake over any stream (plain TCP for `http`, TLS for `https`).
+/// Returns any pipelined bytes buffered beyond `\r\n\r\n` so callers never lose tunneled payload.
 pub(super) async fn http_connect_handshake<S>(
     stream: &mut S,
     entry: &Entry,
     target_host: &str,
     target_port: u16,
-) -> io::Result<()>
+) -> io::Result<Vec<u8>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (code, status_line) =
+    let (code, status_line, leftover) =
         http_connect_exchange(stream, entry, target_host, target_port).await?;
     match code.as_str() {
-        "200" => Ok(()),
+        "200" => Ok(leftover),
         "407" => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "proxy authentication required (407): check the key credentials",
@@ -258,14 +303,14 @@ where
     }
 }
 
-/// Sends `CONNECT` and reads the proxy's answer head: `(status code, status line)`. An `Err` is a
-/// transport failure (nothing, or no complete answer, came back); an answer of any status is `Ok`.
+/// Sends `CONNECT` and reads the proxy's answer head using buffered `BufReader`:
+/// `(status code, status line, leftover bytes after \r\n\r\n)`.
 pub(super) async fn http_connect_exchange<S>(
     stream: &mut S,
     entry: &Entry,
     target_host: &str,
     target_port: u16,
-) -> io::Result<(String, String)>
+) -> io::Result<(String, String, Vec<u8>)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -280,10 +325,8 @@ where
     stream.write_all(req.as_bytes()).await?;
     stream.flush().await?;
 
-    // Read headers byte-by-byte up to \r\n\r\n so no tunneled payload is swallowed.
+    let mut reader = BufReader::new(stream);
     let mut header = Vec::with_capacity(512);
-    let mut b = [0u8; 1];
-    let mut matched = 0;
     loop {
         if header.len() >= 8192 {
             return Err(io::Error::new(
@@ -291,22 +334,24 @@ where
                 "HTTP proxy response headers too large",
             ));
         }
-        let n = stream.read(&mut b).await?;
+        let n = reader.read_until(b'\n', &mut header).await?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "HTTP proxy closed connection prematurely",
             ));
         }
-        header.push(b[0]);
-        matched = match (matched, b[0]) {
-            (0, b'\r') | (2, b'\r') => matched + 1,
-            (1, b'\n') => 2,
-            (3, b'\n') => break,
-            (_, b'\r') => 1,
-            _ => 0,
-        };
+        if header.len() > 8192 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP proxy response headers too large",
+            ));
+        }
+        if header.ends_with(b"\r\n\r\n") {
+            break;
+        }
     }
+    let leftover = reader.buffer().to_vec();
 
     let resp = String::from_utf8_lossy(&header);
     let status_line: String = resp
@@ -321,5 +366,5 @@ where
         .nth(1)
         .unwrap_or("")
         .to_string();
-    Ok((code, status_line))
+    Ok((code, status_line, leftover))
 }

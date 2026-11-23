@@ -193,16 +193,8 @@ pub fn evaluate_ip_reputation(
         .with_ip_type(ip_type);
     }
 
-    // 3. The user said this is their own server.
-    if is_pinned {
-        return CheckResult::ok(
-            "ASN_VERIFIED_PINNED",
-            "IP подтвержден и закреплен как ваш личный выделенный VPS.",
-        )
-        .with_ip_type(ip_type);
-    }
-
-    // 4. A pool of a mass VPN: many people share the address.
+    // 3. A pool of a mass VPN: many people share the address (checked BEFORE `is_pinned` so
+    // `PINNED_BY_ZASTAVA_KEY` or pinning never masks a mass-VPN exit as `ASN_VERIFIED_PINNED`).
     if ip_type == IpType::Vpn {
         let (title, reason) = id
             .asn
@@ -214,13 +206,25 @@ pub fn evaluate_ip_reputation(
                     String::new(),
                 )
             });
+        let hint = if is_pinned {
+            "Закрепление не скрывает пул массового VPN: адрес делят многие пользователи."
+        } else {
+            "Выберите свой личный сервер или другой VPN-адрес."
+        };
         return CheckResult::warning(
             "HIGH_RISK_MASS_VPN_ASN",
-            format!(
-                "Адрес из пула, который часто используют многие люди: {title}. {reason} Если это ваш личный сервер, нажмите «Закрепить IP», чтобы убрать предупреждение."
-            )
-            .replace("  ", " "),
+            format!("Адрес из пула, который часто используют многие люди: {title}. {reason} {hint}")
+                .replace("  ", " "),
             Some(GUIDE_PERSONAL_VPN.to_string()),
+        )
+        .with_ip_type(ip_type);
+    }
+
+    // 4. The user said this is their own server (and it is neither Tor nor a known mass-VPN pool).
+    if is_pinned {
+        return CheckResult::ok(
+            "ASN_VERIFIED_PINNED",
+            "IP подтвержден и закреплен как ваш личный выделенный VPS.",
         )
         .with_ip_type(ip_type);
     }
@@ -242,31 +246,18 @@ pub fn evaluate_ip_reputation(
         (None, None) => unreachable!("handled above: no ASN and no name is Unknown"),
     };
 
-    // 6. Not Tor can only be said with the list in hand.
-    match tor {
-        TorLookup::Unavailable(reason) => {
-            return CheckResult::unknown(
-                "TOR_LIST_UNAVAILABLE",
-                format!(
-                    "Не удалось проверить, не выход ли это сети Tor: список выходных узлов не загрузился. Тип адреса по провайдеру {who}: {}.",
-                    ip_type.label_ru()
-                ),
-                reason,
-            )
-            .with_ip_type(ip_type);
-        }
-        TorLookup::NotApplicable => {
-            return CheckResult::unknown(
-                "IP_TYPE_IPV6_NOT_APPLICABLE",
-                format!(
-                    "Не применимо к IPv6: список выходных узлов Tor содержит только адреса IPv4, поэтому про Tor сказать нельзя. Тип адреса по провайдеру {who}: {}.",
-                    ip_type.label_ru()
-                ),
-                UnknownReason::NotApplicable,
-            )
-            .with_ip_type(ip_type);
-        }
-        TorLookup::Listed | TorLookup::NotListed => {}
+    // 6. Not Tor can only be said with the IPv4 list in hand; IPv6 (`NotApplicable`) still
+    // classifies Hosting / Residential / ASN_CLEAN without downloading the IPv4-only Tor list.
+    if let TorLookup::Unavailable(reason) = tor {
+        return CheckResult::unknown(
+            "TOR_LIST_UNAVAILABLE",
+            format!(
+                "Не удалось проверить, не выход ли это сети Tor: список выходных узлов не загрузился. Тип адреса по провайдеру {who}: {}.",
+                ip_type.label_ru()
+            ),
+            reason,
+        )
+        .with_ip_type(ip_type);
     }
 
     match ip_type {

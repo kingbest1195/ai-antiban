@@ -170,6 +170,7 @@ async fn test_resolve_retries_transient_system_dns_failure() {
         &backend,
         &cache,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -196,6 +197,7 @@ async fn test_resolve_falls_back_on_persistent_11001_and_enforces_check_entry_ip
         &backend,
         &cache,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -219,6 +221,7 @@ async fn test_resolve_falls_back_on_persistent_11001_and_enforces_check_entry_ip
         &evil_backend,
         &evil_cache,
         false,
+        false,
     )
     .await
     .unwrap_err();
@@ -237,24 +240,24 @@ async fn test_resolve_uses_fresh_cache_and_stale_on_error_fallback() {
     let node = entry("cached.example.com", 443);
 
     // 1. Initial lookup populates cache.
-    let first = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false)
+    let first = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false, false)
         .await
         .unwrap();
     assert_eq!(first, vec![addr]);
     assert_eq!(backend.system_calls.load(Ordering::SeqCst), 1);
 
-    // 2. Within TTL -> served from cache without calling resolvers.
-    tokio::time::advance(Duration::from_secs(30)).await;
-    let second = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false)
+    // 2. Within TTL (300s) -> served from cache without calling resolvers.
+    tokio::time::advance(Duration::from_secs(120)).await;
+    let second = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false, false)
         .await
         .unwrap();
     assert_eq!(second, vec![addr]);
     assert_eq!(backend.system_calls.load(Ordering::SeqCst), 1);
     assert_eq!(backend.fallback_calls.load(Ordering::SeqCst), 0);
 
-    // 3. Past fresh TTL (60s) but within stale TTL (900s), and all resolvers fail -> stale fallback.
-    tokio::time::advance(Duration::from_secs(40)).await;
-    let stale = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false)
+    // 3. Past fresh TTL (300s) but within stale TTL (900s), and all resolvers fail -> stale fallback.
+    tokio::time::advance(Duration::from_secs(200)).await;
+    let stale = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false, false)
         .await
         .unwrap();
     assert_eq!(stale, vec![addr]);
@@ -263,9 +266,10 @@ async fn test_resolve_uses_fresh_cache_and_stale_on_error_fallback() {
 
     // 4. Past normal stale TTL (900s) but within emergency stale TTL (7200s) -> emergency fallback + stale flag.
     tokio::time::advance(Duration::from_secs(900)).await;
-    let emergency = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false)
-        .await
-        .unwrap();
+    let emergency =
+        resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false, false)
+            .await
+            .unwrap();
     assert_eq!(emergency, vec![addr]);
     assert!(
         cache
@@ -278,7 +282,8 @@ async fn test_resolve_uses_fresh_cache_and_stale_on_error_fallback() {
 
     // 5. Past emergency stale TTL (7200s) and all resolvers fail -> returns error & records proxy:route dns.
     tokio::time::advance(Duration::from_secs(6400)).await;
-    let expired = resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false).await;
+    let expired =
+        resolve_entry_checked_with(&node, false, 8899, &backend, &cache, false, false).await;
     assert!(expired.is_err());
     assert!(
         crate::diagnostics::dump()
@@ -306,6 +311,7 @@ async fn test_resolve_timeout_on_system_dns_skips_second_system_attempt() {
         &backend,
         &cache,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -326,9 +332,9 @@ async fn test_resolve_policy_rejection_on_system_and_fallback_does_not_use_stale
         gateway_port: 8899,
     };
     cache.insert(key, vec![good_addr]);
-    // Force stale by backdating resolved_at past fresh TTL.
+    // Force stale by backdating resolved_at past fresh TTL (300s).
     cache.entries.write().unwrap().values_mut().for_each(|v| {
-        v.resolved_at -= Duration::from_secs(120);
+        v.resolved_at -= Duration::from_secs(400);
     });
 
     let backend = FakeEntryDnsBackend::new(
@@ -341,6 +347,7 @@ async fn test_resolve_policy_rejection_on_system_and_fallback_does_not_use_stale
         8899,
         &backend,
         &cache,
+        false,
         false,
     )
     .await
@@ -365,6 +372,7 @@ async fn test_resolve_system_forbidden_ip_falls_back_to_public_dns_and_logs() {
             8899,
             &backend,
             &cache,
+            false,
             false,
         )
         .await
@@ -404,6 +412,7 @@ async fn test_resolve_fake_ipv6_and_ipv4_override_then_last_resort() {
         &backend_override,
         &cache,
         false,
+        false,
     )
     .await
     .unwrap();
@@ -422,6 +431,7 @@ async fn test_resolve_fake_ipv6_and_ipv4_override_then_last_resort() {
         &backend_last_resort,
         &EntryDnsCache::default(),
         false,
+        false,
     )
     .await
     .unwrap();
@@ -439,10 +449,27 @@ async fn test_resolve_fake_ipv6_and_ipv4_override_then_last_resort() {
         &backend_v4,
         &EntryDnsCache::default(),
         false,
+        false,
     )
     .await
     .unwrap();
     assert_eq!(res3, vec![fake_v4]);
+
+    // 3b. With chained proxy fast FakeIP path, fallback is not awaited synchronously.
+    let backend_fast = FakeEntryDnsBackend::new(vec![Ok(vec![fake_v4])], vec![]);
+    let res_fast = resolve_entry_checked_with(
+        &entry("tun-v4-chained.example.com", 443),
+        false,
+        8899,
+        &backend_fast,
+        &EntryDnsCache::default(),
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(res_fast, vec![fake_v4]);
+    assert_eq!(backend_fast.fallback_calls.load(Ordering::SeqCst), 0);
 
     // 4. Local LAN IP (fd12:3456::1) is NEVER accepted even if public DNS fails.
     let lan_v6: SocketAddr = "[fd12:3456::1]:443".parse().unwrap();
@@ -456,6 +483,7 @@ async fn test_resolve_fake_ipv6_and_ipv4_override_then_last_resort() {
         8899,
         &backend_lan,
         &EntryDnsCache::default(),
+        false,
         false,
     )
     .await
