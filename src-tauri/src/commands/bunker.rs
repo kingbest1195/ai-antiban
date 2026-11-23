@@ -8,6 +8,7 @@ use tauri::Manager;
 use super::AppContext;
 use crate::auditor::claude_exporter::get_home_dir;
 use crate::bunker::retention::{list_snapshots, prune_old_web_exports};
+use crate::bunker::teleport::run_context_teleport_in;
 use crate::bunker::web_helper::convert_web_export_to;
 use crate::bunker::{
     BunkerBackupResult, BunkerSettingsPatch, BunkerSnapshotMeta, BunkerStatus,
@@ -15,6 +16,7 @@ use crate::bunker::{
     clear_bunker_snapshots_in, generate_bunker_restore_prompt_in, get_bunker_status_in,
     run_bunker_backup_in,
 };
+use crate::core::context_teleport::{ContextTeleportResult, TeleportTarget};
 use crate::state::BunkerSettings;
 
 fn resolve_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -315,4 +317,24 @@ pub async fn verify_payment_passport(
     })
     .await
     .map_err(|e| format!("Verify PaymentPassport task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn run_context_teleport(
+    target: TeleportTarget,
+    destination_dir: Option<String>,
+    copy_only: Option<bool>,
+    app: tauri::AppHandle,
+) -> Result<ContextTeleportResult, String> {
+    let data_dir = resolve_data_dir(&app)?;
+    let home_dir = resolve_home_dir()?;
+    let dest = destination_dir
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    tokio::task::spawn_blocking(move || {
+        run_context_teleport_in(&data_dir, &home_dir, target, dest.as_deref(), copy_only)
+    })
+    .await
+    .map_err(|e| format!("Context teleport task failed: {e}"))?
 }

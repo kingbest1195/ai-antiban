@@ -64,3 +64,18 @@ export interface BunkerSettingsPatch {
   retention_count?: number;
   max_total_mb?: number;
 }
+
+export type TeleportTarget =
+  | "gemini_antigravity"
+  | "cursor"
+  | "chatgpt"
+  | "universal";
+
+export interface ContextTeleportResult {
+  target: TeleportTarget;
+  outputDir: string;
+  sourcesUsed: string[];
+  secretsRedactedCount: number;
+  primaryPasteText: string;
+  filesWritten: string[];
+}

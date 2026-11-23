@@ -4,6 +4,8 @@ import type {
   BunkerSettingsPatch,
   BunkerSnapshotMeta,
   BunkerStatus,
+  ContextTeleportResult,
+  TeleportTarget,
   WebExportConvertResult,
 } from "../../types";
 import { isTauri, tauriInvoke } from "./client";
@@ -14,6 +16,7 @@ import {
   mockGetBunkerStatus,
   mockListBunkerSnapshots,
   mockRunBunkerBackupNow,
+  mockRunContextTeleport,
   mockUpdateBunkerSettings,
 } from "./mocks/bunker";
 
@@ -90,4 +93,20 @@ export async function clearBunkerSnapshots(keepLatest = true): Promise<BunkerSta
     return await tauriInvoke<BunkerStatus>("clear_bunker_snapshots", { keepLatest });
   }
   return mockClearBunkerSnapshots();
+}
+
+/** Локально сконвертировать контекст в формат целевого ИИ-клиента без отправки в сеть. */
+export async function runContextTeleport(
+  target: TeleportTarget,
+  destinationDir?: string,
+  copyOnly?: boolean,
+): Promise<ContextTeleportResult> {
+  if (isTauri()) {
+    return await tauriInvoke<ContextTeleportResult>("run_context_teleport", {
+      target,
+      destinationDir: destinationDir ?? null,
+      copyOnly: copyOnly ?? null,
+    });
+  }
+  return mockRunContextTeleport(target, destinationDir, copyOnly);
 }

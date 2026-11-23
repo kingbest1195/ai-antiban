@@ -1,4 +1,5 @@
 import type {
+  CleanResult,
   PersonaRiskFactor,
   PersonaRiskLevel,
   PersonaRiskReport,
@@ -165,4 +166,18 @@ export function mockUpdatePersonaSelfCheck(patch: PersonaSelfCheckPatch): Person
     current.multi_account_same_browser = patch.multi_account_same_browser;
   }
   return mockGetPersonaRiskReport();
+}
+
+export function mockCleanAntigravityAuthCache(): CleanResult {
+  return {
+    provider: "gemini",
+    cleaned_targets: ["oauth_creds.json", "google_accounts.json"],
+    files_removed: 2,
+    bytes_freed: 4096,
+    success: true,
+    message:
+      "Кеш входа Antigravity / Gemini очищен (удалено файлов: 2); GEMINI.md, правила и MCP сохранены.",
+    found_dir: true,
+    locked_targets: [],
+  };
 }

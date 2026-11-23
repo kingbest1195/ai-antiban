@@ -135,11 +135,30 @@ export const cleanRoom = {
         "Без отдельного ключа все окна используют общий выход компьютера. Для нескольких аккаунтов одновременно привяжите отдельный ключ.",
       submit: "Создать и выбрать",
       creating: "Создаём…",
+      scenarioTitle: "Быстрый сценарий",
+      scenarios: {
+        claude: {
+          label: "Claude (прогрев и оплата)",
+          defaultName: "Claude · Прогрев и оплата",
+          hint: "Стартовый адрес claude.ai, 96 ч прогрева и защита оплаты.",
+        },
+        gemini: {
+          label: "Gemini / AI Studio (без гео-блока и смена квот)",
+          defaultName: "Gemini · AI Studio",
+          hint: "Стартовый адрес aistudio.google.com, изоляция от старых cookies и отдельных профилей для квот.",
+        },
+      },
+    },
+    quotaSwitcher: {
+      title: "Быстрое переключение профилей",
+      hint: "Переключайтесь между 2–3 изолированными профилями для смены квот без смешивания cookies и сторонних программ входа.",
+      activeTag: "Активен",
+      addReserveBtn: "Добавить резервный профиль Gemini",
     },
     providers: {
-      anthropic: "Claude (Anthropic)",
+      anthropic: "Claude (прогрев и оплата)",
       openai: "ChatGPT (OpenAI)",
-      gemini: "Gemini (Google)",
+      gemini: "Gemini / AI Studio (без гео-блока и смена квот)",
       custom: "Другой сервис",
     },
     status: {
@@ -216,6 +235,15 @@ export const cleanRoom = {
       launchBtn: "Открыть песочницу",
       customUrlLabel: "Адрес регистрации",
       customUrlPlaceholder: "https://claude.ai",
+      geminiLinksTitle: "Быстрый запуск сервисов Google в этом профиле",
+      geminiLinks: [
+        { id: "aistudio", label: "Открыть AI Studio", url: "https://aistudio.google.com" },
+        { id: "gemini", label: "Открыть Gemini", url: "https://gemini.google.com" },
+        { id: "notebooklm", label: "Открыть NotebookLM", url: "https://notebooklm.google.com" },
+      ],
+      scenarioNoteClaude: "Сценарий: Claude (прогрев и оплата) — откройте claude.ai только в этом окне.",
+      scenarioNoteGemini:
+        "Сценарий: Gemini / AI Studio (без гео-блока и смена квот) — держите 2–3 отдельных профиля без смешивания cookies.",
       checklistTitle: "Чеклист гигиены регистрации",
       checklist: [
         {

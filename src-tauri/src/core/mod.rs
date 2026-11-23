@@ -2,6 +2,8 @@
 //! `app`, `proxy`, `sysproxy`, `auditor`, or `state`.
 
 pub mod bin_radar;
+pub mod context_teleport;
+mod context_teleport_redact;
 pub mod country;
 pub mod net_safety;
 pub mod payment_advisor;

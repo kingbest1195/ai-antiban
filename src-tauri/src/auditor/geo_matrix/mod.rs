@@ -1,6 +1,8 @@
 mod domains;
 
-pub use domains::{PAYMENT_AND_KYC_DOMAINS, is_payment_or_kyc_host};
+pub use domains::{
+    AI_STUDIO_DOMAINS, PAYMENT_AND_KYC_DOMAINS, is_ai_studio_host, is_payment_or_kyc_host,
+};
 
 #[cfg(test)]
 mod tests;
@@ -362,5 +364,59 @@ pub fn evaluate_provider_geo(
             country_code,
             provider.display_name()
         ),
+    )
+}
+
+/// Evaluates IP/ASN stability for active Google AI Studio / Gemini API / Vertex AI sessions
+/// when `session_ip_stability_for_studio` is enabled in `provider_matrix.json`.
+pub fn evaluate_studio_session_ip_stability(
+    matrix: &ProviderMatrix,
+    provider: ProviderId,
+    target_host: Option<&str>,
+    prev_ip: Option<&str>,
+    current_ip: &str,
+    prev_asn: Option<u32>,
+    current_asn: Option<u32>,
+) -> CheckResult {
+    let stability_enabled = matrix
+        .get_provider_rules(provider.as_str())
+        .is_some_and(|r| r.session_ip_stability_for_studio);
+    if !stability_enabled || provider != ProviderId::Gemini {
+        return CheckResult::unknown(
+            "AI_STUDIO_STABILITY_NOT_APPLICABLE",
+            "Контроль стабильности IP AI Studio не применяется для этого провайдера.",
+            UnknownReason::NotApplicable,
+        );
+    }
+    if let Some(host) = target_host
+        && !is_ai_studio_host(host)
+    {
+        return CheckResult::ok(
+            "AI_STUDIO_IP_STABLE",
+            "Запрос не относится к хостам AI Studio / Vertex AI.",
+        );
+    }
+
+    let cur_ip = current_ip.trim();
+    let old_ip = prev_ip.map(str::trim).unwrap_or("");
+    let ip_changed = !old_ip.is_empty() && !cur_ip.is_empty() && old_ip != cur_ip;
+    let asn_changed = match (prev_asn.filter(|&a| a > 0), current_asn.filter(|&a| a > 0)) {
+        (Some(pa), Some(ca)) => pa != ca,
+        _ => false,
+    };
+
+    if ip_changed || asn_changed {
+        return CheckResult::warning(
+            "AI_STUDIO_IP_UNSTABLE",
+            format!(
+                "Смена IP/ASN во время активной сессии AI Studio ({old_ip} -> {cur_ip}). Для aistudio.google.com, generativelanguage.googleapis.com и aiplatform.googleapis.com держите один стабильный адрес, чтобы не получить FAILED_PRECONDITION или срез квот."
+            ),
+            Some(GUIDE_PERSONAL_VPN.to_string()),
+        );
+    }
+
+    CheckResult::ok(
+        "AI_STUDIO_IP_STABLE",
+        "Выходной IP и ASN стабильны для сессии AI Studio / Gemini API.",
     )
 }

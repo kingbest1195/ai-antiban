@@ -97,6 +97,7 @@ pub(crate) fn is_report_pinned_travel_only(
             "IMPOSSIBLE_TRAVEL_CRITICAL"
                 | "IMPOSSIBLE_TRAVEL_WARNING"
                 | "TRAVEL_ASN_JUMP_SAME_COUNTRY"
+                | "AI_STUDIO_IP_UNSTABLE"
         )
     };
     let has_non_travel_critical = report
@@ -209,13 +210,16 @@ pub(super) fn all_unrouted_session_or_excepted(
         })
 }
 
-/// True when `report` triggered a same-country ASN/datacenter jump without 4h pause.
+/// True when `report` triggered a same-country ASN/datacenter jump or AI Studio IP instability without 4h pause.
 pub(crate) fn has_same_country_asn_jump(report: &RiskReport) -> bool {
-    report.travel_result.code == "TRAVEL_ASN_JUMP_SAME_COUNTRY"
-        || report
-            .checks
-            .iter()
-            .any(|c| c.code == "TRAVEL_ASN_JUMP_SAME_COUNTRY")
+    let is_instability = |code: &str| {
+        matches!(
+            code,
+            "TRAVEL_ASN_JUMP_SAME_COUNTRY" | "AI_STUDIO_IP_UNSTABLE"
+        )
+    };
+    is_instability(&report.travel_result.code)
+        || report.checks.iter().any(|c| is_instability(&c.code))
 }
 
 pub(super) fn format_cooldown_gate_reason(remaining_secs: u64) -> String {
@@ -237,11 +241,13 @@ pub(super) fn resolve_gate_reason_with_cooldown(
     net_change: &NetworkChange,
     cooldown_reason: Option<&str>,
 ) -> String {
-    let has_high_priority_issue = report
-        .checks
-        .iter()
-        .any(|c| c.status.is_critical() || c.code == "TRAVEL_ASN_JUMP_SAME_COUNTRY")
-        || report.geo_result.status.is_critical()
+    let has_high_priority_issue = report.checks.iter().any(|c| {
+        c.status.is_critical()
+            || matches!(
+                c.code.as_str(),
+                "TRAVEL_ASN_JUMP_SAME_COUNTRY" | "AI_STUDIO_IP_UNSTABLE"
+            )
+    }) || report.geo_result.status.is_critical()
         || report.pinning_result.status.is_critical();
     if !has_high_priority_issue && let Some(reason) = cooldown_reason {
         return reason.to_string();
@@ -287,4 +293,23 @@ pub(crate) fn report_allowed_for_state(
         .pinned_ip_for_provider(pid, routed)
         .is_some_and(|pin| pin.trim() == report.telemetry.ip.trim());
     matches_pin && geo_ok && !has_non_travel_critical
+}
+
+/// Returns `true` when active AI Studio / Vertex AI traffic must be held on IP/ASN instability.
+pub(crate) fn should_hold_ai_studio_session(
+    provider: ProviderId,
+    host: &str,
+    report: &RiskReport,
+    st: &crate::state::AppStateData,
+    studio_stability_rule: bool,
+) -> bool {
+    studio_stability_rule
+        && provider == ProviderId::Gemini
+        && crate::auditor::geo_matrix::is_ai_studio_host(host)
+        && !st.is_ip_trusted_for_provider("gemini", &report.telemetry.ip)
+        && !is_report_pinned_travel_only(report, st)
+        && matches!(
+            report.travel_result.code.as_str(),
+            "IMPOSSIBLE_TRAVEL_WARNING" | "TRAVEL_ASN_JUMP_SAME_COUNTRY" | "AI_STUDIO_IP_UNSTABLE"
+        )
 }

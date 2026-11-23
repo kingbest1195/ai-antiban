@@ -204,7 +204,8 @@
         "UA": "Украина (UA) поддерживается на основной территории, но в Крыму и на временно оккупированных территориях сервисы Google Gemini и AI Studio заблокированы."
       },
       "strict_impossible_travel": false,
-      "max_country_switches_per_12h": 2
+      "max_country_switches_per_12h": 2,
+      "session_ip_stability_for_studio": true
     }
   }
 }

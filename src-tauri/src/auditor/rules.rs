@@ -27,6 +27,8 @@ pub struct ProviderRules {
     pub strict_impossible_travel: bool,
     #[serde(default)]
     pub max_country_switches_per_12h: u32,
+    #[serde(default)]
+    pub session_ip_stability_for_studio: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

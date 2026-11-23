@@ -25,9 +25,10 @@ import {
   listBunkerSnapshots,
   openBunkerFolder,
   runBunkerBackupNow,
+  runContextTeleport,
   updateBunkerSettings,
 } from "../../utils/api/bunker";
-import type { BunkerSnapshotMeta, BunkerStatus } from "../../types";
+import type { BunkerSnapshotMeta, BunkerStatus, TeleportTarget } from "../../types";
 import { WebExportHelper } from "./WebExportHelper";
 import "./bunker.css";
 
@@ -72,6 +73,8 @@ export function BunkerCard({ backup, onToast, refreshTrigger, initialStatus }: B
   const [backingUp, setBackingUp] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
+  const [teleportTarget, setTeleportTarget] = useState<TeleportTarget>("universal");
+  const [teleporting, setTeleporting] = useState(false);
   const [showWebHelper, setShowWebHelper] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
 
@@ -190,6 +193,25 @@ export function BunkerCard({ backup, onToast, refreshTrigger, initialStatus }: B
       }
     } catch (err) {
       onToast?.(copy.toasts.promptErrTitle, err instanceof Error ? err.message : String(err), "error");
+    }
+  };
+
+  const handleTeleport = async () => {
+    if (teleporting) return;
+    setTeleporting(true);
+    try {
+      const res = await runContextTeleport(teleportTarget);
+      await writeClipboard(res.primaryPasteText);
+      setCopiedPrompt(true);
+      onToast?.(
+        copy.actions.teleport.toastTitle,
+        copy.actions.teleport.toastText(res.filesWritten.length, res.secretsRedactedCount),
+        "success",
+      );
+    } catch (err) {
+      onToast?.(copy.actions.teleport.errTitle, err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setTeleporting(false);
     }
   };
 
@@ -315,14 +337,28 @@ export function BunkerCard({ backup, onToast, refreshTrigger, initialStatus }: B
             <div className="zs-bunker__prompt-box zs-bunker__block">
               <p className="zs-bunker__prompt-title">{copy.actions.promptBoxTitle}</p>
               <p className="zs-bunker__prompt-sub">{copy.actions.copyPromptSub}</p>
+              <Select
+                label={copy.actions.teleport.formatLabel}
+                value={teleportTarget}
+                options={[...copy.actions.teleport.options]}
+                onChange={(e) => {
+                  setTeleportTarget(e.target.value as TeleportTarget);
+                  setCopiedPrompt(false);
+                }}
+              />
               <Button
                 size="sm"
                 variant="secondary"
                 icon={copiedPrompt ? "check" : "copy"}
                 className="zs-bunker__prompt-btn"
-                onClick={() => void handleCopyPrompt()}
+                disabled={teleporting}
+                onClick={() => void handleTeleport()}
               >
-                {copiedPrompt ? copy.actions.copiedPromptBtn : copy.actions.copyPromptBtn}
+                {teleporting
+                  ? copy.actions.teleport.exportingBtn
+                  : copiedPrompt
+                    ? copy.actions.teleport.doneBtn
+                    : copy.actions.teleport.exportBtn}
               </Button>
             </div>
 

@@ -14,8 +14,7 @@ use super::run_check::{blocking_check, run_check};
 use super::{
     AuditProgress, AuditProtectionContext, AuditProtectionFlags, Auditor, ProgressSink, ProviderId,
     RiskReport, check_all_dnsbl_with_doh, check_ipv6_leak_with_route,
-    check_os_location_services_with, dnsbl, evaluate_dnsbl_report,
-    evaluate_impossible_travel_with_pin_and_exit, evaluate_ip_pinning_for_route,
+    check_os_location_services_with, dnsbl, evaluate_dnsbl_report, evaluate_ip_pinning_for_route,
     evaluate_ip_reputation, evaluate_provider_geo, evaluate_reverse_dns_ptr_with_dns, leaks,
     lookup_tor, network, score_checks, seams,
 };
@@ -134,8 +133,11 @@ impl Auditor {
                 let current_ip = telemetry.ip.clone();
                 let current_asn = telemetry.asn;
                 let pinned_for_travel = is_pinned && geo_allows_travel_grace;
+                let studio_stability = matrix
+                    .get_provider_rules(provider.as_str())
+                    .is_some_and(|r| r.session_ip_stability_for_studio);
                 async move {
-                    evaluate_impossible_travel_with_pin_and_exit(
+                    crate::auditor::history::evaluate_impossible_travel_with_pin_exit_and_studio(
                         &history,
                         &country,
                         Some(&current_ip),
@@ -143,6 +145,7 @@ impl Auditor {
                         resolved_at,
                         provider,
                         pinned_for_travel,
+                        studio_stability,
                     )
                 }
             }),

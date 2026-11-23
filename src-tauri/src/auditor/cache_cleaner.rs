@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 pub use process::{
     filter_windows_claude_desktop_pids, is_macos_claude_desktop_cmd, is_windows_claude_desktop_exe,
-    soft_close_ai_client,
+    soft_close_ai_client, soft_close_antigravity,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +262,145 @@ fn remove_dir_contents_with(
         }
     }
     Ok((count, bytes))
+}
+
+const ANTIGRAVITY_AUTH_ALLOWLIST: &[&str] = &[
+    "oauth_creds.json",
+    "google_accounts.json",
+    "oauth_tokens.json",
+    "auth_cache.json",
+    "auth-cache.json",
+    "token_cache.json",
+    "session_cache.json",
+    "mcp_oauth_tokens.json",
+    "mcp-oauth-tokens.json",
+    "auth_cache",
+    "auth-cache",
+    "oauth_cache",
+];
+
+fn is_antigravity_preserved(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return true;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower == "gemini.md"
+        || lower.ends_with(".md")
+        || lower == "settings.json"
+        || lower == "mcp.json"
+        || lower == "mcp_config.json"
+        || matches!(lower.as_str(), "rules" | "projects" | "skills" | "agents")
+}
+
+/// Clears ONLY allowlisted OAuth/session auth caches in `~/.gemini/` and `~/.antigravity/`,
+/// strictly preserving `GEMINI.md`, rules, MCP configs, and projects.
+pub fn clean_antigravity_auth_cache() -> CleanResult {
+    let _ = soft_close_antigravity();
+    let Some(home) = crate::auditor::claude_exporter::get_home_dir() else {
+        return CleanResult {
+            provider: ProviderId::Gemini,
+            cleaned_targets: Vec::new(),
+            files_removed: 0,
+            bytes_freed: 0,
+            success: true,
+            message: "Домашняя папка пользователя не найдена.".to_string(),
+            found_dir: false,
+            locked_targets: Vec::new(),
+        };
+    };
+    clean_antigravity_auth_cache_in_home(&home)
+}
+
+pub fn clean_antigravity_auth_cache_in_home(home_dir: &Path) -> CleanResult {
+    let dirs = [home_dir.join(".gemini"), home_dir.join(".antigravity")];
+    clean_antigravity_auth_cache_in_dirs(&dirs)
+}
+
+pub fn clean_antigravity_auth_cache_in_dirs(dirs: &[PathBuf]) -> CleanResult {
+    let existing: Vec<&PathBuf> = dirs.iter().filter(|d| d.is_dir()).collect();
+    if existing.is_empty() {
+        return CleanResult {
+            provider: ProviderId::Gemini,
+            cleaned_targets: Vec::new(),
+            files_removed: 0,
+            bytes_freed: 0,
+            success: true,
+            message: "Папки ~/.gemini и ~/.antigravity не найдены.".to_string(),
+            found_dir: false,
+            locked_targets: Vec::new(),
+        };
+    }
+
+    let mut cleaned_targets = Vec::new();
+    let mut locked_targets = Vec::new();
+    let mut files_removed = 0usize;
+    let mut bytes_freed = 0u64;
+
+    for dir in existing {
+        for target in ANTIGRAVITY_AUTH_ALLOWLIST {
+            let path = dir.join(target);
+            if is_antigravity_preserved(&path) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let ft = meta.file_type();
+            if ft.is_dir() {
+                let mut dir_locked = Vec::new();
+                if let Ok((c, b)) = remove_dir_contents_with(
+                    &path,
+                    target,
+                    &|p| std::fs::remove_file(p),
+                    &mut dir_locked,
+                ) {
+                    files_removed += c;
+                    bytes_freed += b;
+                    if dir_locked.is_empty() && std::fs::remove_dir_all(&path).is_ok() {
+                        push_unique(&mut cleaned_targets, (*target).to_string());
+                    } else {
+                        for item in dir_locked {
+                            push_unique(&mut locked_targets, item);
+                        }
+                    }
+                }
+            } else if ft.is_file() || ft.is_symlink() {
+                let size = if ft.is_file() { meta.len() } else { 0 };
+                if std::fs::remove_file(&path).is_ok() {
+                    files_removed += 1;
+                    bytes_freed += size;
+                    push_unique(&mut cleaned_targets, (*target).to_string());
+                } else {
+                    push_unique(&mut locked_targets, (*target).to_string());
+                }
+            }
+        }
+    }
+
+    let success = locked_targets.is_empty();
+    let message = if !success {
+        format!(
+            "Часть файлов входа Antigravity / Gemini заблокирована ({} не удалено).",
+            locked_targets.len()
+        )
+    } else if files_removed == 0 {
+        "Кеши входа в ~/.gemini и ~/.antigravity уже чисты.".to_string()
+    } else {
+        format!(
+            "Кеш входа Antigravity / Gemini очищен (удалено файлов: {files_removed}); GEMINI.md, правила и MCP сохранены."
+        )
+    };
+
+    CleanResult {
+        provider: ProviderId::Gemini,
+        cleaned_targets,
+        files_removed,
+        bytes_freed,
+        success,
+        message,
+        found_dir: true,
+        locked_targets,
+    }
 }
 
 #[cfg(test)]

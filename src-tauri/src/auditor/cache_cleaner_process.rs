@@ -76,6 +76,14 @@ pub fn soft_close_ai_client(provider: ProviderId) -> usize {
     }
 }
 
+/// Soft-closes Antigravity desktop processes without touching unrelated terminals or LOLBins.
+pub fn soft_close_antigravity() -> usize {
+    if !crate::sysproxy::os_effects_enabled() {
+        return 0;
+    }
+    soft_close_antigravity_impl()
+}
+
 #[cfg(target_os = "windows")]
 fn query_windows_claude_desktop_pids() -> Vec<u32> {
     let Ok(entries) = crate::win_native::process::list_processes() else {
@@ -130,6 +138,25 @@ fn soft_close_chatgpt_desktop() -> usize {
     })
 }
 
+#[cfg(target_os = "windows")]
+fn soft_close_antigravity_impl() -> usize {
+    terminate_windows_pids_and_wait(|| {
+        let Ok(entries) = crate::win_native::process::list_processes() else {
+            return Vec::new();
+        };
+        entries
+            .into_iter()
+            .filter(|p| p.pid > 0 && p.exe_name.eq_ignore_ascii_case("antigravity.exe"))
+            .filter(|p| {
+                crate::win_native::process::query_process_image_path(p.pid)
+                    .map(|path| path.to_ascii_lowercase().contains("antigravity"))
+                    .unwrap_or(true)
+            })
+            .map(|p| p.pid)
+            .collect()
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn collect_macos_desktop_pids(app: &str) -> Vec<String> {
     let Ok(out) = crate::sysproxy::silent_command("ps")
@@ -151,6 +178,9 @@ fn collect_macos_desktop_pids(app: &str) -> Vec<String> {
                 "ChatGPT" => cmd
                     .to_ascii_lowercase()
                     .contains("chatgpt.app/contents/macos/chatgpt"),
+                "Antigravity" => cmd
+                    .to_ascii_lowercase()
+                    .contains("antigravity.app/contents/macos/antigravity"),
                 _ => false,
             };
             matched.then(|| pid.trim().to_string())
@@ -194,6 +224,11 @@ fn soft_close_chatgpt_desktop() -> usize {
     soft_close_macos_app("ChatGPT")
 }
 
+#[cfg(target_os = "macos")]
+fn soft_close_antigravity_impl() -> usize {
+    soft_close_macos_app("Antigravity")
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn soft_close_claude_desktop() -> usize {
     0
@@ -201,5 +236,10 @@ fn soft_close_claude_desktop() -> usize {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn soft_close_chatgpt_desktop() -> usize {
+    0
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn soft_close_antigravity_impl() -> usize {
     0
 }

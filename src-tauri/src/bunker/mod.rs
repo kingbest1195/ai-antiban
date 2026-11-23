@@ -7,6 +7,7 @@ pub mod payment_passport;
 pub mod restore_prompt;
 pub mod retention;
 pub mod scheduler;
+pub mod teleport;
 pub mod web_helper;
 
 mod sanitize;
