@@ -286,4 +286,39 @@ impl ProxyServer {
             other => other,
         }
     }
+
+    pub(super) async fn should_hold_studio_session(
+        &self,
+        provider: ProviderId,
+        host: &str,
+        report: &crate::auditor::RiskReport,
+        st: &crate::state::AppStateData,
+    ) -> bool {
+        let studio_rule = self
+            .auditor
+            .rules
+            .provider_matrix
+            .read()
+            .await
+            .get_provider_rules("gemini")
+            .is_some_and(|r| r.session_ip_stability_for_studio);
+        crate::proxy::guard::should_hold_ai_studio_session(provider, host, report, st, studio_rule)
+    }
+}
+
+pub(super) async fn active_payment_route_selection(
+    state: &crate::state::AppState,
+    snapshot: &crate::state::AppStateData,
+) -> crate::routing::RouteSelection {
+    for provider in [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+    ] {
+        if snapshot.is_provider_disabled(provider.as_str()) {
+            continue;
+        }
+        return state.route_selection(provider.as_str()).await;
+    }
+    crate::routing::RouteSelection::Direct
 }

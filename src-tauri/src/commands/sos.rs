@@ -81,3 +81,11 @@ pub async fn update_persona_self_check(
     state.save_async().await.map_err(|e| e.to_string())?;
     Ok(build_persona_risk_report(&app, &state, &auditor).await)
 }
+
+#[tauri::command]
+pub async fn clean_antigravity_auth_cache()
+-> Result<crate::auditor::cache_cleaner::CleanResult, String> {
+    tokio::task::spawn_blocking(crate::auditor::cache_cleaner::clean_antigravity_auth_cache)
+        .await
+        .map_err(|e| format!("Clean Antigravity auth cache task failed: {e}"))
+}

@@ -78,6 +78,12 @@ const OPENAI_DOMAINS: &[&str] = &[
     "chat.mistral.ai",
 ];
 
+pub const AI_STUDIO_DOMAINS: &[&str] = &[
+    "aistudio.google.com",
+    "generativelanguage.googleapis.com",
+    "aiplatform.googleapis.com",
+];
+
 const GEMINI_DOMAINS: &[&str] = &[
     "gemini.google.com",
     "gemini.google",
@@ -153,6 +159,11 @@ pub fn is_payment_or_kyc_host(raw_host: &str) -> bool {
     PAYMENT_AND_KYC_DOMAINS
         .iter()
         .any(|d| matches_domain(&host, d))
+}
+
+pub fn is_ai_studio_host(raw_host: &str) -> bool {
+    let host = normalize_host(raw_host);
+    !host.is_empty() && AI_STUDIO_DOMAINS.iter().any(|d| matches_domain(&host, d))
 }
 
 pub(super) fn match_provider_host(raw_host: &str) -> Option<ProviderId> {

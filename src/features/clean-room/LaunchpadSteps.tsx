@@ -108,11 +108,11 @@ export function LaunchpadSteps({
     void persistStep(step, next);
   };
 
-  const handleLaunchSignup = async () => {
+  const handleLaunchSignup = async (overrideUrl?: string) => {
     if (!activeProfile || !canLaunchStep2 || launching) return;
     setLaunching(true);
     try {
-      const res = await launchCleanBrowser(activeProfile.id, signupUrl);
+      const res = await launchCleanBrowser(activeProfile.id, overrideUrl ?? signupUrl);
       toast?.(
         copy.sandbox.toast.launched,
         copy.sandbox.toast.launchedText(res.browser_engine, res.alias_port),
@@ -221,6 +221,12 @@ export function LaunchpadSteps({
           <div>
             <h4 className="zs-t-heading cr-step-head__title">{copy.launchpad.step2.title}</h4>
             <p className="zs-t-body cr-step-head__text">{copy.launchpad.step2.text}</p>
+            {activeProfile?.provider === "anthropic" && (
+              <p className="zs-t-caption cr-step-head__text">{copy.launchpad.step2.scenarioNoteClaude}</p>
+            )}
+            {activeProfile?.provider === "gemini" && (
+              <p className="zs-t-caption cr-step-head__text">{copy.launchpad.step2.scenarioNoteGemini}</p>
+            )}
           </div>
           {activeProfile?.provider === "custom" && (
             <Field
@@ -243,6 +249,24 @@ export function LaunchpadSteps({
               {launching ? copy.sandbox.profileCard.launching : copy.launchpad.step2.launchBtn}
             </Button>
           </div>
+          {activeProfile?.provider === "gemini" && (
+            <div className="cr-quota-switcher">
+              <p className="cr-form__title">{copy.launchpad.step2.geminiLinksTitle}</p>
+              <div className="cr-row-inline">
+                {copy.launchpad.step2.geminiLinks.map((link) => (
+                  <Button
+                    key={link.id}
+                    size="sm"
+                    variant="secondary"
+                    disabled={!canLaunchStep2 || launching}
+                    onClick={() => void handleLaunchSignup(link.url)}
+                  >
+                    {link.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
           <div>
             <p className="zs-t-heading cr-step-head__title">{copy.launchpad.step2.checklistTitle}</p>
             <ul className="cr-checklist">

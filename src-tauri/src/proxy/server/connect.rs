@@ -83,8 +83,11 @@ impl ProxyServer {
                         )
                         .await;
                     }
-                    let pay_selection =
-                        active_payment_route_selection(&self.state, &st_snapshot).await;
+                    let pay_selection = super::http_handler::active_payment_route_selection(
+                        &self.state,
+                        &st_snapshot,
+                    )
+                    .await;
                     match &pay_selection {
                         RouteSelection::Missing(id) => {
                             return self
@@ -385,7 +388,14 @@ impl ProxyServer {
 
         // Step 4: Allow silently when verdict is Green, Yellow (`no_critical_and_geo_ok`),
         // `(provider, exit_ip)` is in `trusted_exceptions`, or IP matches pinned IP on allowed geo.
-        if crate::proxy::guard::report_allowed_for_state(&report, &st_after_audit, route.is_some())
+        if !self
+            .should_hold_studio_session(provider, &host, &report, &st_after_audit)
+            .await
+            && crate::proxy::guard::report_allowed_for_state(
+                &report,
+                &st_after_audit,
+                route.is_some(),
+            )
         {
             if is_canary {
                 return self
@@ -479,21 +489,4 @@ impl ProxyServer {
         )
         .await
     }
-}
-
-async fn active_payment_route_selection(
-    state: &crate::state::AppState,
-    snapshot: &crate::state::AppStateData,
-) -> RouteSelection {
-    for provider in [
-        ProviderId::Anthropic,
-        ProviderId::Openai,
-        ProviderId::Gemini,
-    ] {
-        if snapshot.is_provider_disabled(provider.as_str()) {
-            continue;
-        }
-        return state.route_selection(provider.as_str()).await;
-    }
-    RouteSelection::Direct
 }

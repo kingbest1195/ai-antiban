@@ -273,11 +273,13 @@ pub fn run() {
             commands::bunker::open_bunker_folder,
             commands::bunker::convert_web_export,
             commands::bunker::generate_bunker_restore_prompt,
+            commands::bunker::run_context_teleport,
             commands::bunker::get_payment_passport,
             commands::bunker::save_payment_passport,
             commands::bunker::verify_payment_passport,
             commands::sos::get_persona_risk_report,
-            commands::sos::update_persona_self_check
+            commands::sos::update_persona_self_check,
+            commands::sos::clean_antigravity_auth_cache
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

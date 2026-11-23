@@ -5,6 +5,8 @@ import type {
   BunkerSnapshotMeta,
   BunkerSourceSummary,
   BunkerStatus,
+  ContextTeleportResult,
+  TeleportTarget,
   WebExportConvertResult,
 } from "../../../types";
 import { mockState } from "./state";
@@ -189,4 +191,67 @@ export function mockGenerateBunkerRestorePrompt(): string {
     "- Настройки: `~/.cursor/mcp.json`, `settings.json`",
     "- Продолжи работу с последнего зафиксированного состояния без потери контекста.",
   ].join("\n");
+}
+
+export function mockRunContextTeleport(
+  target: TeleportTarget,
+  destinationDir?: string,
+  copyOnly?: boolean,
+): ContextTeleportResult {
+  const stamp = new Date(nowSec() * 1000).toISOString().replace(/[-:]/g, "").slice(0, 15);
+  const outputDir = copyOnly
+    ? ""
+    : destinationDir?.trim() || `~/.zastava/bunker/teleports/${stamp}`;
+
+  const primaryByTarget: Record<TeleportTarget, string> = {
+    gemini_antigravity: [
+      "# GEMINI.md — Project Context & Rules (Zastava Teleport)",
+      "",
+      "## Active Projects",
+      "- `zastava` (`~/local-projects/zastava` · sessions: 4): Zastava v3.2.0",
+      "",
+      "## MCP Servers (names only, secrets excluded)",
+      "- `filesystem`",
+    ].join("\n"),
+    cursor: [
+      "---",
+      "description: Migrated workspace context, memory, and rules from Zastava Bunker",
+      "globs:",
+      "alwaysApply: true",
+      "---",
+      "",
+      "# Migrated AI Workspace Context",
+      "- `zastava` (`~/local-projects/zastava`): Zastava v3.2.0",
+    ].join("\n"),
+    chatgpt: [
+      "=== Block 1: What would you like ChatGPT to know about you? ===",
+      "Workspace: zastava (~/local-projects/zastava). MCP servers: filesystem.",
+      "",
+      "=== Block 2: How would you like ChatGPT to respond? ===",
+      "Act as a senior engineer continuing this workspace without rewriting working modules.",
+    ].join("\n"),
+    universal: mockGenerateBunkerRestorePrompt(),
+  };
+
+  const filesByTarget: Record<TeleportTarget, string[]> = {
+    gemini_antigravity: [
+      `${outputDir}/GEMINI.md`,
+      `${outputDir}/SYSTEM_INSTRUCTIONS_GEMINI.txt`,
+    ],
+    cursor: [`${outputDir}/.cursor/rules/migrated-context.mdc`],
+    chatgpt: [
+      `${outputDir}/CHATGPT_CUSTOM_INSTRUCTIONS.txt`,
+      `${outputDir}/MEMORY_SEED.md`,
+    ],
+    universal: [`${outputDir}/RESTORE_PROMPT.md`],
+  };
+
+  return {
+    target,
+    outputDir,
+    sourcesUsed: ["claude_code", "claude_desktop", "cursor"],
+    secretsRedactedCount: 2,
+    primaryPasteText: primaryByTarget[target],
+    filesWritten: copyOnly ? [] : filesByTarget[target],
+  };
 }

@@ -1,6 +1,10 @@
-import type { PersonaRiskReport, PersonaSelfCheckPatch } from "../../types";
+import type { CleanResult, PersonaRiskReport, PersonaSelfCheckPatch } from "../../types";
 import { isTauri, tauriInvoke } from "./client";
-import { mockGetPersonaRiskReport, mockUpdatePersonaSelfCheck } from "./mocks/sos";
+import {
+  mockCleanAntigravityAuthCache,
+  mockGetPersonaRiskReport,
+  mockUpdatePersonaSelfCheck,
+} from "./mocks/sos";
 
 /** Получить расчёт проактивного «Индекса риска Persona» (технические сигналы + self-check). */
 export async function getPersonaRiskReport(): Promise<PersonaRiskReport> {
@@ -18,4 +22,12 @@ export async function updatePersonaSelfCheck(
     return await tauriInvoke<PersonaRiskReport>("update_persona_self_check", { patch });
   }
   return mockUpdatePersonaSelfCheck(patch);
+}
+
+/** Безопасно очистить только кеш входа в ~/.gemini и ~/.antigravity, сохраняя правила и проекты. */
+export async function cleanAntigravityAuthCache(): Promise<CleanResult> {
+  if (isTauri()) {
+    return await tauriInvoke<CleanResult>("clean_antigravity_auth_cache");
+  }
+  return mockCleanAntigravityAuthCache();
 }

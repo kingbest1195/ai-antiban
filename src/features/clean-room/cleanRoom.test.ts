@@ -419,4 +419,33 @@ describe("v3.0.1 Clean Room UX: дедупликация tainted-IP, споко�
     expect(html).not.toContain("READY · Можно запускать");
     expect(html).not.toContain("Launchpad нового аккаунта");
   });
+
+  it("поддерживает единую Чистую комнату для Claude + Gemini/AI Studio и переключение 2–3 профилей", () => {
+    expect(providerSignupUrl("anthropic")).toBe("https://claude.ai");
+    expect(providerSignupUrl("gemini")).toBe("https://aistudio.google.com");
+
+    const geminiState = makeState({
+      clean_room: {
+        profiles: [
+          makeProfile({ id: "g1", label: "Gemini — Основной", provider: "gemini", launchpad_step: 2 }),
+          makeProfile({ id: "g2", label: "Gemini — Резерв", provider: "gemini" }),
+        ],
+        active_profile_id: "g1",
+        tainted_ips: {},
+      },
+    });
+    const html = renderToStaticMarkup(
+      createElement(CleanRoomScreen, {
+        state: geminiState,
+        initialAudit: makeAudit(),
+        initialBrowsers: AVAILABLE_BROWSERS,
+      }),
+    );
+    expect(html).toContain(copy.sandbox.quotaSwitcher.title);
+    expect(html).toContain("Gemini — Основной");
+    expect(html).toContain("Gemini — Резерв");
+    expect(html).toContain("Открыть AI Studio");
+    expect(html).toContain("Открыть Gemini");
+    expect(html).toContain("Открыть NotebookLM");
+  });
 });

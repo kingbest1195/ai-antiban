@@ -14,13 +14,16 @@ import { openExternal } from "../../utils/opener";
 import { Badge, Button, Card, ConfirmModal, EmptyState, ExpandRow, Field, InfoTip, Mono, Rows, Select } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
-import { countryName, formatRouteOptionLabel } from "../../shared/lib/country";
+import { countryName } from "../../shared/lib/country";
 import { formatIp } from "../../shared/lib/format";
 import { QuarantineOverrideModal } from "../subscription/QuarantineOverrideModal";
 import { useQuarantineGuard } from "../subscription/useQuarantineGuard";
+import { QuotaProfileSwitcher } from "./QuotaProfileSwitcher";
 import {
   DIRECT_VALUE,
   STATUS_TONE,
+  buildRouteSelectOptions,
+  nextScenarioLabel,
   providerLabel,
   resolveBoundRouteLabel,
   resolveSandboxBlockReason,
@@ -165,17 +168,7 @@ export function SandboxProfilesCard({
   };
 
   const taintedEntries = Object.keys(taintedIps);
-  const routeSelectOptions = [
-    ...routes.map((r) => ({
-      value: r.id,
-      label: formatRouteOptionLabel({
-        label: r.label,
-        country: r.country,
-        ipOrHost: r.exit_ip ? formatIp(r.exit_ip, hideIpMode) : null,
-      }),
-    })),
-    { value: DIRECT_VALUE, label: copy.sandbox.form.directOption },
-  ];
+  const routeSelectOptions = buildRouteSelectOptions(routes, hideIpMode, copy.sandbox.form.directOption);
 
   return (
     <Card
@@ -217,6 +210,30 @@ export function SandboxProfilesCard({
           {showCreate && (
             <form className="cr-form" onSubmit={handleCreate}>
               <p className="cr-form__title">{copy.sandbox.form.title}</p>
+              <div className="cr-scenario-pills" role="group" aria-label={copy.sandbox.form.scenarioTitle}>
+                {(["anthropic", "gemini"] as const).map((sc) => (
+                  <Button
+                    key={sc}
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    aria-pressed={provider === sc}
+                    onClick={() => {
+                      setProvider(sc);
+                      setLabel((prev) => nextScenarioLabel(prev, sc));
+                    }}
+                  >
+                    {sc === "gemini" ? copy.sandbox.form.scenarios.gemini.label : copy.sandbox.form.scenarios.claude.label}
+                  </Button>
+                ))}
+              </div>
+              {(provider === "anthropic" || provider === "gemini") && (
+                <p className="zs-t-caption" style={{ margin: 0 }}>
+                  {provider === "gemini"
+                    ? copy.sandbox.form.scenarios.gemini.hint
+                    : copy.sandbox.form.scenarios.claude.hint}
+                </p>
+              )}
               <Field label={copy.sandbox.form.labelField} value={label} onChange={(e) => setLabel(e.target.value)} placeholder={copy.sandbox.form.labelPlaceholder} />
               <Select
                 label={copy.sandbox.form.providerField}
@@ -258,7 +275,11 @@ export function SandboxProfilesCard({
                   </p>
                 </div>
               )}
-              <Button type="submit" variant="primary" disabled={busyId === "__create__"}>
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={busyId === "__create__"}
+              >
                 {busyId === "__create__" ? copy.sandbox.form.creating : copy.sandbox.form.submit}
               </Button>
             </form>
@@ -276,99 +297,107 @@ export function SandboxProfilesCard({
               }
             />
           ) : (
-            <ul className="cr-profile-list">
-              {profiles.map((profile) => {
-                const isActive = profile.id === activeProfileId;
-                const blockReason = resolveSandboxBlockReason(profile, readyToLaunch, manualKillswitch);
-                const canLaunch = blockReason === null;
-                const maskedExitIp = profile.last_exit_ip ? formatIp(profile.last_exit_ip, hideIpMode) : null;
-                const exitCountryLabel = profile.last_exit_country
-                  ? countryName(profile.last_exit_country) || profile.last_exit_country
-                  : "";
-                const ipMeta = maskedExitIp
-                  ? `${maskedExitIp}${exitCountryLabel ? ` (${exitCountryLabel})` : ""}`
-                  : copy.sandbox.profileCard.neverOpened;
-                return (
-                  <li
-                    key={profile.id}
-                    className={`cr-profile-card ${isActive ? "cr-profile-card--active" : ""} ${profile.status === "tainted" ? "cr-profile-card--tainted" : ""}`.trim()}
-                  >
-                    <div className="cr-row-between">
-                      <p className="cr-profile-card__title">{profile.label}</p>
-                      <Badge tone={STATUS_TONE[profile.status]} icon={profile.status === "tainted" ? "alert" : profile.status === "ready" ? "check" : undefined}>
-                        {copy.sandbox.status[profile.status]}
-                      </Badge>
-                    </div>
-                    <div className="cr-profile-card__meta">
-                      <span>{providerLabel(profile.provider)}</span>
-                      <Mono>{profile.browser_engine}</Mono>
-                    </div>
-                    <div className="cr-profile-card__meta">
-                      <span>{copy.sandbox.profileCard.routeLabel}:</span>
-                      <span>{resolveBoundRouteLabel(profile.bound_route_id, routes, hideIpMode)}</span>
-                    </div>
-                    <div className="cr-profile-card__meta">
-                      <span>{copy.sandbox.profileCard.lastIp}</span>
-                      <Mono>{ipMeta}</Mono>
-                    </div>
-                    <Select
-                      label={copy.sandbox.profileCard.routeLabel}
-                      value={profile.bound_route_id ?? DIRECT_VALUE}
-                      disabled={busyId !== null}
-                      onChange={(e) => handleChangeProfileRoute(profile.id, e.target.value)}
-                      options={routeSelectOptions}
-                    />
-                    {blockReason && <p className="cr-blocked-reason">{blockReason}</p>}
-                    <div className="cr-row-inline">
-                      <Button
-                        size="sm"
-                        variant={isActive && !showCreate ? "primary" : "secondary"}
-                        icon="shield"
-                        disabled={!canLaunch || busyId !== null}
-                        aria-disabled={!canLaunch ? "true" : undefined}
-                        title={blockReason ?? undefined}
-                        onClick={() =>
-                          void runAction(profile.id, async () => {
-                            const res = await launchCleanBrowser(profile.id);
-                            toast?.(copy.sandbox.toast.launched, copy.sandbox.toast.launchedText(res.browser_engine, res.alias_port), "success");
-                            onProfileLaunched?.(profile);
-                            await onProfilesChanged?.();
-                          })
-                        }
-                      >
-                        {busyId === profile.id ? copy.sandbox.profileCard.launching : copy.sandbox.profileCard.launchBtn}
-                      </Button>
-                      {!isActive && (
-                        <Button size="sm" variant="secondary" onClick={() => onSelectProfile(profile.id)}>
-                          {copy.sandbox.profileCard.select}
+            <>
+              <QuotaProfileSwitcher
+                profiles={profiles}
+                activeProfileId={activeProfileId}
+                onSelectProfile={onSelectProfile}
+                onQuickAddGemini={() => {
+                  const nextIdx = profiles.filter((p) => p.provider === "gemini").length + 1;
+                  setProvider("gemini");
+                  setLabel(`Gemini · Квота ${nextIdx}`);
+                  setShowCreate(true);
+                }}
+              />
+              <ul className="cr-profile-list">
+                {profiles.map((profile) => {
+                  const isActive = profile.id === activeProfileId;
+                  const blockReason = resolveSandboxBlockReason(profile, readyToLaunch, manualKillswitch);
+                  const canLaunch = blockReason === null;
+                  const maskedExitIp = profile.last_exit_ip ? formatIp(profile.last_exit_ip, hideIpMode) : null;
+                  const exitCountryLabel = profile.last_exit_country
+                    ? countryName(profile.last_exit_country) || profile.last_exit_country
+                    : "";
+                  const ipMeta = maskedExitIp
+                    ? `${maskedExitIp}${exitCountryLabel ? ` (${exitCountryLabel})` : ""}`
+                    : copy.sandbox.profileCard.neverOpened;
+                  return (
+                    <li
+                      key={profile.id}
+                      className={`cr-profile-card ${isActive ? "cr-profile-card--active" : ""} ${profile.status === "tainted" ? "cr-profile-card--tainted" : ""}`.trim()}
+                    >
+                      <div className="cr-row-between">
+                        <p className="cr-profile-card__title">{profile.label}</p>
+                        <Badge tone={STATUS_TONE[profile.status]} icon={profile.status === "tainted" ? "alert" : profile.status === "ready" ? "check" : undefined}>
+                          {copy.sandbox.status[profile.status]}
+                        </Badge>
+                      </div>
+                      <div className="cr-profile-card__meta">
+                        <span>{providerLabel(profile.provider)}</span>
+                        <Mono>{profile.browser_engine}</Mono>
+                      </div>
+                      <div className="cr-profile-card__meta">
+                        <span>{copy.sandbox.profileCard.routeLabel}:</span>
+                        <span>{resolveBoundRouteLabel(profile.bound_route_id, routes, hideIpMode)}</span>
+                      </div>
+                      <div className="cr-profile-card__meta">
+                        <span>{copy.sandbox.profileCard.lastIp}</span>
+                        <Mono>{ipMeta}</Mono>
+                      </div>
+                      <Select
+                        label={copy.sandbox.profileCard.routeLabel}
+                        value={profile.bound_route_id ?? DIRECT_VALUE}
+                        disabled={busyId !== null}
+                        onChange={(e) => handleChangeProfileRoute(profile.id, e.target.value)}
+                        options={routeSelectOptions}
+                      />
+                      {blockReason && <p className="cr-blocked-reason">{blockReason}</p>}
+                      <div className="cr-row-inline">
+                        <Button
+                          size="sm"
+                          variant={isActive && !showCreate ? "primary" : "secondary"}
+                          icon="shield"
+                          disabled={!canLaunch || busyId !== null}
+                          aria-disabled={!canLaunch ? "true" : undefined}
+                          title={blockReason ?? undefined}
+                          onClick={() =>
+                            void runAction(profile.id, async () => {
+                              const res = await launchCleanBrowser(profile.id);
+                              toast?.(copy.sandbox.toast.launched, copy.sandbox.toast.launchedText(res.browser_engine, res.alias_port), "success");
+                              onProfileLaunched?.(profile);
+                              await onProfilesChanged?.();
+                            })
+                          }
+                        >
+                          {busyId === profile.id ? copy.sandbox.profileCard.launching : copy.sandbox.profileCard.launchBtn}
                         </Button>
-                      )}
-                      {profile.status !== "tainted" && (
+                        {!isActive && (
+                          <Button size="sm" variant="secondary" onClick={() => onSelectProfile(profile.id)}>
+                            {copy.sandbox.profileCard.select}
+                          </Button>
+                        )}
+                        {profile.status !== "tainted" && (
+                          <Button size="sm" variant="quiet" disabled={busyId !== null} onClick={() => setConfirmTaint(profile)}>
+                            {copy.sandbox.profileCard.taintBtn}
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="quiet"
                           disabled={busyId !== null}
-                          onClick={() => setConfirmTaint(profile)}
+                          onClick={() => {
+                            setTaintExitIpOnDelete(false);
+                            setConfirmDelete(profile);
+                          }}
                         >
-                          {copy.sandbox.profileCard.taintBtn}
+                          {copy.sandbox.profileCard.deleteBtn}
                         </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="quiet"
-                        disabled={busyId !== null}
-                        onClick={() => {
-                          setTaintExitIpOnDelete(false);
-                          setConfirmDelete(profile);
-                        }}
-                      >
-                        {copy.sandbox.profileCard.deleteBtn}
-                      </Button>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
           )}
 
           <p className="cr-honesty-note">{copy.audit.honestyNote}</p>
@@ -430,9 +459,7 @@ export function SandboxProfilesCard({
         }}
         onCancel={() => setConfirmTaint(null)}
       >
-        <p style={{ margin: 0 }}>
-          {confirmTaint ? copy.sandbox.profileCard.taintText(confirmTaint.label) : ""}
-        </p>
+        <p style={{ margin: 0 }}>{confirmTaint ? copy.sandbox.profileCard.taintText(confirmTaint.label) : ""}</p>
       </ConfirmModal>
 
       <ConfirmModal
@@ -446,16 +473,10 @@ export function SandboxProfilesCard({
           setTaintExitIpOnDelete(false);
         }}
       >
-        <p style={{ margin: 0 }}>
-          {confirmDelete ? copy.sandbox.profileCard.deleteText(confirmDelete.label) : ""}
-        </p>
+        <p style={{ margin: 0 }}>{confirmDelete ? copy.sandbox.profileCard.deleteText(confirmDelete.label) : ""}</p>
         {confirmDelete?.last_exit_ip && (
           <label className="cr-checkbox-label">
-            <input
-              type="checkbox"
-              checked={taintExitIpOnDelete}
-              onChange={(e) => setTaintExitIpOnDelete(e.target.checked)}
-            />
+            <input type="checkbox" checked={taintExitIpOnDelete} onChange={(e) => setTaintExitIpOnDelete(e.target.checked)} />
             <span>{copy.sandbox.profileCard.deleteTaintCheckbox}</span>
           </label>
         )}

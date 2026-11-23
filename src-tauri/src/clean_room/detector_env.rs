@@ -18,6 +18,12 @@ pub trait DetectorEnv {
     fn claude_data_dirs(&self) -> Vec<PathBuf>;
     fn chatgpt_data_dirs(&self) -> Vec<PathBuf>;
     fn cursor_data_dirs(&self) -> Vec<PathBuf>;
+    fn windsurf_data_dirs(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+    fn read_text_limited(&self, _path: &Path) -> Option<String> {
+        None
+    }
     fn is_windows(&self) -> bool;
 }
 
@@ -48,6 +54,18 @@ impl DetectorEnv for RealDetectorEnv {
         default_cursor_data_dirs()
     }
 
+    fn windsurf_data_dirs(&self) -> Vec<PathBuf> {
+        default_windsurf_data_dirs()
+    }
+
+    fn read_text_limited(&self, path: &Path) -> Option<String> {
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() || meta.len() > 512 * 1024 {
+            return None;
+        }
+        std::fs::read_to_string(path).ok()
+    }
+
     fn is_windows(&self) -> bool {
         cfg!(target_os = "windows")
     }
@@ -75,16 +93,69 @@ fn default_browser_profile_dirs() -> Vec<(&'static str, PathBuf)> {
 }
 
 fn default_cursor_data_dirs() -> Vec<PathBuf> {
+    default_ide_data_dirs("Cursor")
+}
+
+fn default_windsurf_data_dirs() -> Vec<PathBuf> {
+    default_ide_data_dirs("Windsurf")
+}
+
+fn default_ide_data_dirs(app_name: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     #[cfg(target_os = "windows")]
     if let Ok(appdata) = std::env::var("APPDATA") {
-        dirs.push(PathBuf::from(appdata).join("Cursor"));
+        dirs.push(PathBuf::from(appdata).join(app_name));
     }
     #[cfg(target_os = "macos")]
     if let Ok(home) = std::env::var("HOME") {
-        dirs.push(PathBuf::from(home).join("Library/Application Support/Cursor"));
+        dirs.push(
+            PathBuf::from(home)
+                .join("Library/Application Support")
+                .join(app_name),
+        );
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join(".config").join(app_name));
     }
     dirs
+}
+
+/// Strictly read-only inspection for Cursor / Windsurf `storage.json` device IDs
+/// (`telemetry.machineId` / `devDeviceId`). Never modifies any third-party files.
+pub fn detect_ide_machine_id_storage<E: DetectorEnv + ?Sized>(
+    env: &E,
+) -> Option<(&'static str, PathBuf)> {
+    let candidates = env
+        .cursor_data_dirs()
+        .into_iter()
+        .map(|d| ("Cursor", d))
+        .chain(
+            env.windsurf_data_dirs()
+                .into_iter()
+                .map(|d| ("Windsurf", d)),
+        );
+
+    for (ide_name, base_dir) in candidates {
+        for rel in [
+            "User/globalStorage/storage.json",
+            "globalStorage/storage.json",
+            "storage.json",
+        ] {
+            let p = base_dir.join(rel);
+            if !env.path_exists(&p) {
+                continue;
+            }
+            if let Some(raw) = env.read_text_limited(&p)
+                && (raw.contains("telemetry.machineId")
+                    || raw.contains("devDeviceId")
+                    || raw.contains("machineId"))
+            {
+                return Some((ide_name, p));
+            }
+        }
+    }
+    None
 }
 
 /// Parses `PID|Name|ExecutablePath` lines (from Win32_Process) and flags only Claude Desktop

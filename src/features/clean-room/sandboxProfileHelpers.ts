@@ -48,3 +48,34 @@ export function resolveBoundRouteLabel(
     fallbackLabel: found.id,
   });
 }
+
+export function buildRouteSelectOptions(
+  routes: readonly RouteView[],
+  hideIpMode: boolean,
+  directLabel: string,
+): Array<{ value: string; label: string }> {
+  return [
+    ...routes.map((r) => ({
+      value: r.id,
+      label: formatRouteOptionLabel({
+        label: r.label,
+        country: r.country,
+        ipOrHost: r.exit_ip ? formatIp(r.exit_ip, hideIpMode) : null,
+      }),
+    })),
+    { value: DIRECT_VALUE, label: directLabel },
+  ];
+}
+
+export function nextScenarioLabel(
+  currentLabel: string,
+  targetProvider: "anthropic" | "gemini",
+): string {
+  const claudeDef = copy.sandbox.form.scenarios.claude.defaultName;
+  const geminiDef = copy.sandbox.form.scenarios.gemini.defaultName;
+  const trimmed = currentLabel.trim();
+  if (!trimmed || trimmed === claudeDef || trimmed === geminiDef) {
+    return targetProvider === "gemini" ? geminiDef : claudeDef;
+  }
+  return currentLabel;
+}

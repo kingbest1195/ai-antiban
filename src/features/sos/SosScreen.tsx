@@ -3,6 +3,7 @@ import { HintCard, Section, TabPanel, Tabs } from "../../ui";
 import { sosCopy as copy } from "../../shared/copy/ru/sos";
 import type { ShowToast } from "../../shared/hooks";
 import { BannedBranch } from "./BannedBranch";
+import { Gemini403Card } from "./Gemini403Card";
 import { PaymentBranch } from "./PaymentBranch";
 import { PersonaBranch } from "./PersonaBranch";
 import { SmsBranch } from "./SmsBranch";
@@ -90,6 +91,8 @@ export function SosScreen({
             onNavigateToCleanRoom={onNavigateToCleanRoom}
           />
         </TabPanel>
+
+        <Gemini403Card onToast={onToast} />
       </div>
     </Section>
   );

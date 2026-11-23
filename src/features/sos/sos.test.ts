@@ -3,9 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { subscription } from "../../shared/copy/ru";
 import { listCleanProfiles } from "../../utils/api/cleanRoom";
+import { cleanAntigravityAuthCache } from "../../utils/api/sos";
 import { setMockScenario } from "../../utils/api/mocks/state";
 import {
   BannedBranch,
+  Gemini403Card,
   PaymentBranch,
   PersonaBranch,
   SmsBranch,
@@ -100,5 +102,25 @@ describe("sos feature: 4-branch decision tree & Safety Charter", () => {
     expect(html).toContain("SMS на номер");
     expect(html).toContain("Ошибка оплаты");
     expect(html).toContain("Бан аккаунта");
+    expect(html).toContain("Ошибка 403 в Antigravity / Gemini");
+    expect(html).toContain("myaccount.google.com/connections");
+    expect(html).toContain("OpenCode");
+  });
+
+  it("Gemini403Card и BannedBranch: 1-клик сброс кеша входа 403 и перенос памяти", async () => {
+    const cleanRes = await cleanAntigravityAuthCache();
+    expect(cleanRes.success).toBe(true);
+    expect(cleanRes.provider).toBe("gemini");
+
+    const cardHtml = renderToStaticMarkup(createElement(Gemini403Card, { onToast: vi.fn() }));
+    expect(cardHtml).toContain("One-Time Appeal Policy");
+    expect(cardHtml).toContain("Сбросить кеш входа (1 клик)");
+    expect(cardHtml).toContain("GEMINI.md");
+
+    const bannedHtml = renderToStaticMarkup(
+      createElement(BannedBranch, { onToast: vi.fn(), onNavigateToCleanRoom: vi.fn() }),
+    );
+    expect(bannedHtml).toContain("Перенести память и правила в другой ИИ");
+    expect(bannedHtml).toContain("Скопировать промпт и выгрузить");
   });
 });

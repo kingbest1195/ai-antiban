@@ -7,6 +7,7 @@ import {
   generateBunkerRestorePrompt,
   getBunkerStatus,
   runBunkerBackupNow,
+  runContextTeleport,
   updateBunkerSettings,
 } from "../../utils/api/bunker";
 import { getPersonaRiskReport, updatePersonaSelfCheck } from "../../utils/api/sos";
@@ -48,6 +49,32 @@ describe("bunker feature: BunkerCard, WebExportHelper & PersonaRiskCard", () => 
 
     const prompt = await generateBunkerRestorePrompt();
     expect(prompt.length).toBeGreaterThan(10);
+  });
+
+  it("runContextTeleport: все 4 формата (Gemini/Cursor/ChatGPT <=1500/Universal), copyOnly и переключатель в BunkerCard", async () => {
+    const gem = await runContextTeleport("gemini_antigravity");
+    expect(gem.filesWritten.some((f) => f.endsWith("GEMINI.md"))).toBe(true);
+    expect(gem.filesWritten.some((f) => f.endsWith("SYSTEM_INSTRUCTIONS_GEMINI.txt"))).toBe(true);
+
+    const cur = await runContextTeleport("cursor");
+    expect(cur.primaryPasteText).toContain("alwaysApply: true");
+
+    const gpt = await runContextTeleport("chatgpt");
+    const blocks = gpt.primaryPasteText.split("\n\n=== Block ");
+    expect(blocks.length).toBe(2);
+    for (const blk of blocks) {
+      expect(blk.length).toBeLessThanOrEqual(1500);
+    }
+
+    const memOnly = await runContextTeleport("universal", undefined, true);
+    expect(memOnly.filesWritten).toEqual([]);
+    expect(memOnly.outputDir).toBe("");
+
+    const status = await getBunkerStatus();
+    const html = renderToStaticMarkup(createElement(BunkerCard, { initialStatus: status, onToast: vi.fn() }));
+    expect(html).toContain("Формат выгрузки памяти");
+    expect(html).toContain("Gemini и Antigravity");
+    expect(html).toContain("Скопировать промпт и выгрузить");
   });
 
   it("WebExportHelper рендерит EmptyState с инструкциями для Claude.ai / ChatGPT и формой пути", () => {

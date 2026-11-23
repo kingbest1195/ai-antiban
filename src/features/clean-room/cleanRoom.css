@@ -226,6 +226,24 @@
   color: var(--ink);
 }
 
+.cr-scenario-pills,
+.cr-quota-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.cr-quota-switcher {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+}
+
 .cr-profile-list {
   list-style: none;
   margin: var(--space-3) 0 0;

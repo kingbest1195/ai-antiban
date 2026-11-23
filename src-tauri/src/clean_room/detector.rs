@@ -45,7 +45,7 @@ pub fn run_clean_room_audit_with<E: DetectorEnv>(
 ) -> CleanRoomAuditReport {
     let mut findings = Vec::new();
 
-    check_browser_traces(env, &mut findings);
+    check_browser_traces(env, input.target_provider, &mut findings);
     check_desktop_app_traces(env, input.target_provider, &mut findings);
     check_cursor_traces(env, &mut findings);
     check_running_processes(env, input.target_provider, &mut findings);
@@ -100,7 +100,11 @@ pub fn run_clean_room_audit_with<E: DetectorEnv>(
     }
 }
 
-fn check_browser_traces<E: DetectorEnv>(env: &E, findings: &mut Vec<CleanRoomFinding>) {
+fn check_browser_traces<E: DetectorEnv>(
+    env: &E,
+    target_provider: ProviderId,
+    findings: &mut Vec<CleanRoomFinding>,
+) {
     let found: Vec<&'static str> = env
         .browser_profile_dirs()
         .into_iter()
@@ -108,14 +112,22 @@ fn check_browser_traces<E: DetectorEnv>(env: &E, findings: &mut Vec<CleanRoomFin
         .map(|(name, _)| name)
         .collect();
     if !found.is_empty() {
+        let detail = if target_provider == ProviderId::Gemini {
+            format!(
+                "Найдены обычные браузеры ({}). В личном браузере и старом РФ-аккаунте (куки PREF/NID, регион Google Play, номер +7) Gemini, AI Studio и NotebookLM часто блокируются по стране даже с VPN, а при привязке карты срабатывает проверка платежей (OR-CCSEH-21 / OR-HDT-16). Работайте в окне «Чистой комнаты» и не регистрируйте аккаунты на одноразовые виртуальные SMS.",
+                found.join(", ")
+            )
+        } else {
+            format!(
+                "На компьютере найдены профили ({}). Для нового аккаунта используйте изолированное окно «Чистой комнаты» вместо личного браузера.",
+                found.join(", ")
+            )
+        };
         findings.push(CleanRoomFinding {
             id: "personal_browsers_present".to_string(),
             category: "browser".to_string(),
             title: "Обнаружены обычные браузеры".to_string(),
-            detail: format!(
-                "На компьютере найдены профили ({}). Для нового аккаунта используйте изолированное окно «Чистой комнаты» вместо личного браузера.",
-                found.join(", ")
-            ),
+            detail,
             severity: TraceSeverity::Warning,
             path_hint: None,
             fix_action: Some(CleanRoomFixAction::AcknowledgeSandboxIsolation),
@@ -209,6 +221,21 @@ fn check_cursor_traces<E: DetectorEnv>(env: &E, findings: &mut Vec<CleanRoomFind
                 }
                 .to_string(),
             }),
+        });
+    }
+
+    if let Some((ide_name, storage_path)) = super::detector_env::detect_ide_machine_id_storage(env)
+    {
+        findings.push(CleanRoomFinding {
+            id: "ide_machine_id_note".to_string(),
+            category: "desktop_traces".to_string(),
+            title: format!("Редактор {ide_name} хранит идентификатор устройства локально"),
+            detail: format!(
+                "В {ide_name} обнаружен файл storage.json с telemetry.machineId / devDeviceId (Застава не изменяет чужие файлы). Частая смена пробных аккаунтов на одном компьютере приводит к блокировке."
+            ),
+            severity: TraceSeverity::Warning,
+            path_hint: Some(mask_path_hint(&storage_path)),
+            fix_action: None,
         });
     }
 }

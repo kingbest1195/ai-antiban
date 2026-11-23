@@ -53,6 +53,24 @@ export const bunkerCopy = {
     copyPromptBtn: "Скопировать промпт",
     copiedPromptBtn: "Скопировано",
     copyPromptSub: "Готовый текст с проектами и правилами — вставьте в новый чат ИИ",
+    teleport: {
+      formatLabel: "Формат выгрузки памяти",
+      options: [
+        { value: "universal", label: "Универсальный бэкап" },
+        { value: "gemini_antigravity", label: "Gemini и Antigravity" },
+        { value: "cursor", label: "Cursor" },
+        { value: "chatgpt", label: "ChatGPT" },
+      ],
+      exportBtn: "Скопировать промпт и выгрузить",
+      exportingBtn: "Готовим перенос…",
+      doneBtn: "Выгружено и скопировано",
+      toastTitle: "Контекст подготовлен для переноса",
+      toastText: (filesCount: number, redacted: number) =>
+        redacted > 0
+          ? `Сохранено файлов: ${filesCount} · Скрыто ключей: ${redacted}. Текст скопирован в буфер.`
+          : `Сохранено файлов: ${filesCount}. Текст скопирован в буфер.`,
+      errTitle: "Не удалось выгрузить контекст",
+    },
     clearOld: "Очистить старые",
     clearingOld: "Очищаем…",
     toggleWebHelperShow: "Веб-экспорт (Claude.ai / ChatGPT)",

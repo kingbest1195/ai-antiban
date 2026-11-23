@@ -7,3 +7,5 @@ export { PaymentBranch } from "./PaymentBranch";
 export type { PaymentBranchProps } from "./PaymentBranch";
 export { BannedBranch, executeBannedCleanRoomJump } from "./BannedBranch";
 export type { BannedBranchProps } from "./BannedBranch";
+export { Gemini403Card } from "./Gemini403Card";
+export type { Gemini403CardProps } from "./Gemini403Card";

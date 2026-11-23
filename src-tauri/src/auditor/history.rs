@@ -203,8 +203,61 @@ fn is_blocked_country_for_travel_grace(country_raw: &str) -> bool {
 fn is_travel_anomaly_code(code: &str) -> bool {
     matches!(
         code,
-        "IMPOSSIBLE_TRAVEL_CRITICAL" | "IMPOSSIBLE_TRAVEL_WARNING" | "TRAVEL_ASN_JUMP_SAME_COUNTRY"
+        "IMPOSSIBLE_TRAVEL_CRITICAL"
+            | "IMPOSSIBLE_TRAVEL_WARNING"
+            | "TRAVEL_ASN_JUMP_SAME_COUNTRY"
+            | "AI_STUDIO_IP_UNSTABLE"
     )
+}
+
+/// Evaluates impossible travel / ASN jump, plus same-country IP stability for Gemini AI Studio
+/// when `session_ip_stability_for_studio` is enabled.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_impossible_travel_with_pin_exit_and_studio(
+    history: &[IpHistoryEntry],
+    current_country_raw: &str,
+    current_ip_raw: Option<&str>,
+    current_asn: Option<u32>,
+    current_timestamp: u64,
+    provider: ProviderId,
+    is_pinned: bool,
+    session_ip_stability_for_studio: bool,
+) -> CheckResult {
+    let res = evaluate_impossible_travel_with_pin_and_exit(
+        history,
+        current_country_raw,
+        current_ip_raw,
+        current_asn,
+        current_timestamp,
+        provider,
+        is_pinned,
+    );
+    if !session_ip_stability_for_studio
+        || provider != ProviderId::Gemini
+        || is_pinned
+        || res.code != "TRAVEL_NORMAL"
+    {
+        return res;
+    }
+    if let Some(prev) = history.last() {
+        let elapsed_secs = current_timestamp.saturating_sub(prev.timestamp);
+        let prev_ip = prev.ip.trim();
+        let cur_ip = current_ip_raw.map(str::trim).unwrap_or("");
+        if elapsed_secs < IMPOSSIBLE_TRAVEL_WINDOW_SECS
+            && !prev_ip.is_empty()
+            && !cur_ip.is_empty()
+            && prev_ip != cur_ip
+        {
+            return CheckResult::warning(
+                "AI_STUDIO_IP_UNSTABLE",
+                format!(
+                    "Смена IP во время активной сессии AI Studio ({prev_ip} -> {cur_ip}). Для aistudio.google.com, generativelanguage.googleapis.com и aiplatform.googleapis.com сохраняйте стабильный IP/ASN."
+                ),
+                Some(GUIDE_PERSONAL_VPN.to_string()),
+            );
+        }
+    }
+    res
 }
 
 /// Pin-aware variant of [`evaluate_impossible_travel`]: returning to an explicitly pinned IP on
