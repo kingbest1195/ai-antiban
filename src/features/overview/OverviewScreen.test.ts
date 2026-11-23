@@ -7,6 +7,7 @@ import { checkCliProtectionStatus, toggleSysproxy, toggleSysproxyPrivileged } fr
 import { CoverageSection } from "../coverage/CoverageSection";
 import { executeAllowSequence, OverviewScreen } from "./OverviewScreen";
 import type { OverviewScreenProps } from "./OverviewScreen";
+import { ServiceRow } from "./ServiceRow";
 
 const ok = (code: string): CheckResult => ({ status: "ok", code, message: "ok" });
 
@@ -214,5 +215,45 @@ describe("WP-4 & WP-5: OverviewScreen, CoverageSection и CLI sync", () => {
     expect(copy.service.forceHint).toContain("постоянное исключение");
     expect(copy.service.forceHint).toContain("Настройках");
     expect(copy.service.confirm.text("Claude")).toContain("Настройках");
+  });
+
+  it("§7.6: ServiceRow разделяет подписи для trusted_exception, session и pinned_travel без ложного исключения", () => {
+    const trustedHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "openai", status: "allowed", allowReason: "trusted_exception" },
+        report: report({ provider: "openai" }),
+        state: null,
+        blockedByUser: false,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(trustedHtml).toContain(copy.service.session);
+
+    const sessionHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "openai", status: "allowed", allowReason: "session" },
+        report: report({ provider: "openai" }),
+        state: null,
+        blockedByUser: false,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(sessionHtml).toContain(copy.service.sessionOnly);
+    expect(sessionHtml).not.toContain("исключение в Настройках");
+
+    const pinnedHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "anthropic", status: "allowed", allowReason: "pinned_travel" },
+        report: report({ provider: "anthropic" }),
+        state: null,
+        blockedByUser: false,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(pinnedHtml).toContain(copy.service.pinnedTravel);
+    expect(pinnedHtml).not.toContain("исключение в Настройках");
   });
 });

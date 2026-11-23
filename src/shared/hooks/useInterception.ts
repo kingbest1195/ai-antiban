@@ -22,19 +22,28 @@ export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }
     setAllowError(null);
   }, [payloadId]);
 
-  const handleAllowInterception = useCallback(async () => {
-    if (!interceptPayload) return;
-    setAllowError(null);
-    try {
-      await resolveInterception(interceptPayload.id, "AllowSession", interceptPayload.provider, interceptPayload.scope);
-      showToast(t.intercept.allowedTitle, t.intercept.allowedText, "success");
-      setInterceptPayload(null);
-      runFullAudit(false);
-    } catch (err) {
-      // Бэкенд отказал: баннер остаётся, запросы остановлены.
-      setAllowError(allowErrorText(classifyAllowError(err)));
-    }
-  }, [interceptPayload, runFullAudit, showToast]);
+  const handleAllowInterception = useCallback(
+    async (persistException = false) => {
+      if (!interceptPayload) return;
+      setAllowError(null);
+      try {
+        await resolveInterception(
+          interceptPayload.id,
+          "AllowSession",
+          interceptPayload.provider,
+          interceptPayload.scope,
+          persistException,
+        );
+        showToast(t.intercept.allowedTitle, t.intercept.allowedText, "success");
+        setInterceptPayload(null);
+        runFullAudit(false);
+      } catch (err) {
+        // Бэкенд отказал: баннер остаётся, запросы остановлены.
+        setAllowError(allowErrorText(classifyAllowError(err)));
+      }
+    },
+    [interceptPayload, runFullAudit, showToast],
+  );
 
   const handlePauseUntilNetworkChange = useCallback(async () => {
     if (!interceptPayload) return;

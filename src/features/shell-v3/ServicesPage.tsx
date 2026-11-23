@@ -21,6 +21,7 @@ export function ServicesPage({
   onDismissHint?: (hintId: string) => Promise<unknown> | void;
 }) {
   const [forceAllowTarget, setForceAllowTarget] = useState<ProviderId | null>(null);
+  const [persistForceException, setPersistForceException] = useState<boolean>(false);
   const [verifyingAllow, setVerifyingAllow] = useState<ProviderId | null>(null);
   const [localDismissed, setLocalDismissed] = useState<string[]>(
     () => overview.state?.dismissed_hints ?? [],
@@ -41,6 +42,7 @@ export function ServicesPage({
   const requestAllow = (service: import("../overview/useOverviewModel").ServiceModel, report: import("../../types").RiskReport | undefined, blockedByUser: boolean) => {
     const provider = service.id;
     if (needsForceConfirm(service.status, report)) {
+      setPersistForceException(false);
       setForceAllowTarget(provider);
       return;
     }
@@ -171,14 +173,36 @@ export function ServicesPage({
         onConfirm={() => {
           if (forceAllowTarget) {
             const target = forceAllowTarget;
+            const persist = persistForceException;
             const blockedByUser = Boolean(overview.state?.blocked_providers?.includes(target));
             setForceAllowTarget(null);
-            void executeAllowSequence(target, blockedByUser, overview.onUnblockProvider, overview.onAllowProvider);
+            setPersistForceException(false);
+            void executeAllowSequence(
+              target,
+              blockedByUser,
+              overview.onUnblockProvider,
+              (p) => overview.onAllowProvider(p, persist),
+            );
           }
         }}
-        onCancel={() => setForceAllowTarget(null)}
+        onCancel={() => {
+          setForceAllowTarget(null);
+          setPersistForceException(false);
+        }}
       >
-        {forceAllowTarget ? copy.service.confirm.text(providerCopy[forceAllowTarget].name) : ""}
+        {forceAllowTarget ? (
+          <>
+            <p>{copy.service.confirm.text(providerCopy[forceAllowTarget].name)}</p>
+            <label className="zs-t-caption mt-2 flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={persistForceException}
+                onChange={(e) => setPersistForceException(e.target.checked)}
+              />
+              <span>{copy.service.confirm.persistLabel}</span>
+            </label>
+          </>
+        ) : ""}
       </ConfirmModal>
     </>
   );

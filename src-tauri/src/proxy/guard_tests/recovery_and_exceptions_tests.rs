@@ -94,7 +94,7 @@ async fn test_trusted_exception_survives_restart_and_network_change_no_alert() {
         .expect("initial ready alert on Critical non-excepted IP");
     let id = ev.0["id"].as_str().unwrap().to_string();
     guard1
-        .allow_network_alert(&id, &["anthropic".to_string()])
+        .allow_network_alert_with(&id, &["anthropic".to_string()], true)
         .await
         .unwrap();
     assert!(

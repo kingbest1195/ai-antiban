@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Справочник типов адресов выхода (хостинг / массовый VPN), спам-базы DNSBL и ключевые слова домашних провайдеров РФ. Тип «vpn» даёт замечание (пул, который делят многие люди); тип «hosting» не штрафуется: личный VPS — нормальный сценарий. У каждой записи типа в поле source указан источник и лицензия: записи без источника не включаются.",
   "dnsbl_zones": [
     {
@@ -54,6 +54,62 @@
       "type": "vpn",
       "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
       "reason": "Используется в массовых коммерческих VPN-сервисах."
+    },
+    {
+      "asn": 13335,
+      "name": "Cloudflare, Inc. (Cloudflare WARP)",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Публичный пул Cloudflare WARP и CDN-прокси: миллионы пользователей выходят через общие адреса."
+    },
+    {
+      "asn": 136787,
+      "name": "TEFINCOM S.A. (NordVPN)",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Крупный коммерческий VPN-пул (NordVPN): адреса разделяются между тысячами пользователей."
+    },
+    {
+      "asn": 13678,
+      "name": "Nordsec Ltd (NordVPN)",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Корпоративный пул коммерческого VPN (NordVPN)."
+    },
+    {
+      "asn": 39351,
+      "name": "31173 Services AB (Mullvad VPN)",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Магистральная сеть коммерческого VPN (Mullvad): публичные выходные узлы с высокой плотностью пользователей."
+    },
+    {
+      "asn": 216025,
+      "name": "Mullvad VPN AB",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Собственный пул коммерческого VPN (Mullvad VPN)."
+    },
+    {
+      "asn": 209854,
+      "name": "Cyberzone S.A. (Surfshark)",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Коммерческий VPN-пул (Surfshark): общие адреса для массовой аудитории."
+    },
+    {
+      "asn": 209103,
+      "name": "Proton AG (Proton VPN)",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Коммерческий и бесплатный VPN-пул (Proton VPN): повышенный риск проверок из-за общих выходных адресов."
+    },
+    {
+      "asn": 44477,
+      "name": "Stark Industries Solutions Ltd (PQ Hosting)",
+      "type": "vpn",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)",
+      "reason": "Массовый хостинг с высокой долей публичных VPN, прокси и автоматического трафика."
     },
     {
       "asn": 20473,
@@ -150,9 +206,73 @@
       "name": "Hostinger International Limited",
       "type": "hosting",
       "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 210644,
+      "name": "Aeza Group LLC",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 137409,
+      "name": "GSL Networks Pty Ltd",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 62240,
+      "name": "Clouvider Limited",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 396356,
+      "name": "Latitude.sh Ltda",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 49981,
+      "name": "WorldStream B.V.",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
+    },
+    {
+      "asn": 36352,
+      "name": "ColoCrossing",
+      "type": "hosting",
+      "source": "Zastava editorial assessment (project's own classification); ASN owner name from the public RIR registries (facts, no database copy); license: MIT (this repository)"
     }
   ],
   "isp_keyword_groups": [
+    {
+      "type": "vpn",
+      "keywords": [
+        "vpn",
+        "warp",
+        "nordvpn",
+        "tefincom",
+        "mullvad",
+        "surfshark",
+        "expressvpn",
+        "protonvpn",
+        "proton vpn",
+        "cyberghost",
+        "private internet access",
+        "windscribe",
+        "tunnelbear",
+        "vyprvpn",
+        "ipvanish",
+        "hotspot shield",
+        "adguard vpn",
+        "anonymizer",
+        "openproxy",
+        "tor exit",
+        "tor-exit",
+        "torproject"
+      ],
+      "source": "Zastava editorial assessment (project's own classification); generic VPN/anonymizer words and commercial VPN names in ISP/organisation names; license: MIT (this repository)"
+    },
     {
       "type": "hosting",
       "keywords": [

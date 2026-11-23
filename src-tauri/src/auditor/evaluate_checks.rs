@@ -20,6 +20,8 @@ use super::{
 pub(super) const CHECK_LIMIT_LOCAL: Duration = Duration::from_secs(2);
 /// Time limit of a check that talks to the network or runs a child process.
 pub(super) const CHECK_LIMIT_IO: Duration = Duration::from_secs(4);
+/// Extended time limit for network checks routed through a Zastava key (double tunnel).
+pub(super) const CHECK_LIMIT_IO_ROUTED: Duration = Duration::from_secs(10);
 
 /// Runs a check future and reports its result to the sink (if any) when it completes.
 pub(super) async fn tracked<F>(sink: &Option<ProgressSink>, index: usize, check: F) -> CheckResult

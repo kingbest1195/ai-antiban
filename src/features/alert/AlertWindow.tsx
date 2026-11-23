@@ -53,6 +53,7 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
   const [demoFeedback, setDemoFeedback] = useState<string | null>(null);
   const [allowError, setAllowError] = useState<string | null>(null);
   const [confirmForce, setConfirmForce] = useState<boolean>(false);
+  const [persistException, setPersistException] = useState<boolean>(false);
   const [stateHideIpMode, setStateHideIpMode] = useState<boolean | null>(null);
 
   const { payload } = state;
@@ -126,6 +127,7 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
     setAllowError(null);
     setDemoFeedback(null);
     setConfirmForce(false);
+    setPersistException(false);
   }, [generation]);
 
   const isDemo = Boolean(payload && (payload.is_simulation || payload.id.startsWith("sim-")));
@@ -165,7 +167,13 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
       }
 
       try {
-        const applied = await resolveInterception(payload.id, action, payload.provider, payload.scope);
+        const applied = await resolveInterception(
+          payload.id,
+          action,
+          payload.provider,
+          payload.scope,
+          action === "AllowSession" ? persistException : false,
+        );
         if (applied && action === "BlockUntilNetworkChange" && payload.scope !== "network") {
           await pauseUntilNetworkChange(payload.gate_reason ?? undefined).catch(() => {});
         }
@@ -283,6 +291,15 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
   const inlineConfirm = confirmForce ? (
     <>
       <p className="zs-dialog__confirm-text">{copy.confirmForceText}</p>
+      <label className="zs-dialog__confirm-text mt-2 flex items-start gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={persistException}
+          disabled={locked}
+          onChange={(e) => setPersistException(e.target.checked)}
+        />
+        <span>{copy.persistExceptionLabel}</span>
+      </label>
       <div className="zs-dialog__confirm-actions">
         <Button size="md" onClick={() => setConfirmForce(false)} disabled={locked}>
           {copy.confirmForceCancel}

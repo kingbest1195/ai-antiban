@@ -6,10 +6,12 @@ import { overview as copy } from "../../shared/copy/ru";
 import type { HeroTone, TabItem } from "../../ui";
 
 export type ServiceStatus = "ok" | "allowed" | "warn" | "critical" | "missing" | "checking" | "disabled";
+export type ServiceAllowReason = "trusted_exception" | "session" | "pinned_travel";
 
 export interface ServiceModel {
   id: ProviderId;
   status: ServiceStatus;
+  allowReason?: ServiceAllowReason;
 }
 
 export type BannerKind = "stopped" | "frozen" | "leak" | "timezone" | "review" | "incomplete" | "update";
@@ -93,26 +95,29 @@ export function useOverviewModel({
       enabledProviderIds.map((id) => reports[id]).find(Boolean) ??
       null;
 
-    const isAllowedFor = (id: ProviderId): boolean => {
-      if (disabledSet.has(id)) return false;
-      if (state?.session_allowed_providers?.includes(id)) return true;
+    const allowReasonFor = (id: ProviderId): ServiceAllowReason | null => {
+      if (disabledSet.has(id)) return null;
       const exitIp = reports[id]?.telemetry?.ip || (currentIp !== "--" ? currentIp : "");
-      if (!exitIp) return false;
       const trimmedExit = exitIp.trim();
-      if (state?.trusted_exceptions?.[id]?.some((ip) => ip.trim() === trimmedExit)) {
-        return true;
+      if (trimmedExit && state?.trusted_exceptions?.[id]?.some((ip) => ip.trim() === trimmedExit)) {
+        return "trusted_exception";
       }
+      if (state?.session_allowed_providers?.includes(id)) {
+        return "session";
+      }
+      if (!trimmedExit) return null;
       const pinned = resolvePinnedIp(state, id);
       if (pinned && pinned.trim() === trimmedExit && !state?.blocked_providers?.includes(id)) {
         const list = checksOf(reports[id] ?? null);
         const criticals = list.filter((c) => classify(c) === "crit");
         // Закреплённый IP в разрешённой локации перекрывает только IMPOSSIBLE_TRAVEL_CRITICAL.
         if (criticals.length > 0 && criticals.every((c) => c.code === "IMPOSSIBLE_TRAVEL_CRITICAL")) {
-          return true;
+          return "pinned_travel";
         }
       }
-      return false;
+      return null;
     };
+    const isAllowedFor = (id: ProviderId): boolean => allowReasonFor(id) !== null;
 
     const anyRed = enabledProviderIds.some(
       (id) => (reports[id]?.overall_status === "red" && !isAllowedFor(id)) || Boolean(state?.blocked_providers?.includes(id)),
@@ -185,7 +190,8 @@ export function useOverviewModel({
       }
       const report = reports[id];
       const isBlocked = state?.blocked_providers?.includes(id);
-      const isAllowed = isAllowedFor(id);
+      const allowReason = allowReasonFor(id);
+      const isAllowed = allowReason !== null;
       const list = checksOf(report ?? null);
       const hasCritical = list.some((c) => classify(c) === "crit");
       // Непроверенное не считаем чистым (кроме сбоя самого DNS-резолвера): сервис получает статус «Нужна проверка».
@@ -201,7 +207,7 @@ export function useOverviewModel({
       else if (!report) status = refreshing ? "checking" : "missing";
       else if (report.overall_status === "red" || hasCritical) status = "critical";
       else if ((report.overall_status === "yellow" && !isYellowOnlyUnknown(report, list)) || hasWarning) status = "warn";
-      return { id, status };
+      return status === "allowed" && allowReason ? { id, status, allowReason } : { id, status };
     });
 
     return {

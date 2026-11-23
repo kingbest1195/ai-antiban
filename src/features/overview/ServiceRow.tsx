@@ -40,7 +40,12 @@ export function ServiceRow({
       break;
     case "allowed":
       badge = <Badge tone="ok">{words.available}</Badge>;
-      note = copy.service.session;
+      note =
+        service.allowReason === "trusted_exception"
+          ? copy.service.session
+          : service.allowReason === "pinned_travel"
+            ? copy.service.pinnedTravel
+            : copy.service.sessionOnly;
       break;
     case "warn":
       badge = (

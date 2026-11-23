@@ -9,9 +9,9 @@ use crate::auditor::network::NEUTRAL_USER_AGENT;
 use crate::auditor::seams::{LookupOutcome, is_usable_nameserver};
 use crate::core::net_safety::{is_forbidden_ip, is_tun_fake_ip};
 
-const HICKORY_DNS_TIMEOUT: Duration = Duration::from_millis(1200);
-const DOH_DNS_TIMEOUT: Duration = Duration::from_millis(1800);
-const FALLBACK_DNS_TIMEOUT: Duration = Duration::from_millis(2500);
+const HICKORY_DNS_TIMEOUT: Duration = Duration::from_millis(1000);
+const DOH_DNS_TIMEOUT: Duration = Duration::from_millis(1200);
+const FALLBACK_DNS_TIMEOUT: Duration = Duration::from_millis(1500);
 const CLOUDFLARE_DOH_JSON_URL: &str = "https://1.1.1.1/dns-query";
 const GOOGLE_DOH_JSON_URL: &str = "https://dns.google/resolve";
 

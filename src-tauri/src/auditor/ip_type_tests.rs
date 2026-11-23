@@ -153,19 +153,36 @@ async fn a_known_name_of_no_known_kind_is_ok_with_unknown_type() {
 }
 
 #[tokio::test]
-async fn mass_vpn_pool_is_a_warning_and_pinning_excuses_it() {
+async fn mass_vpn_pool_is_a_warning_and_pinning_does_not_mask_it() {
     let probe = list_probe();
-    let r = verdict(&probe, OTHER_IP, Some(9009), Some("M247"), false).await;
+    for pinned in [false, true] {
+        let r = verdict(&probe, OTHER_IP, Some(9009), Some("M247"), pinned).await;
+        assert_eq!(
+            (r.status, r.code.as_str()),
+            (CheckStatus::Warning, "HIGH_RISK_MASS_VPN_ASN"),
+            "pinned={pinned}"
+        );
+        assert_eq!(type_of(&r), Some(IpType::Vpn));
+        assert!(r.message.contains("AS9009"), "{}", r.message);
+    }
+    // Hosting ASN with pinning still returns ASN_VERIFIED_PINNED.
+    let hosting_pinned = verdict(
+        &probe,
+        OTHER_IP,
+        Some(24940),
+        Some("Hetzner Online GmbH"),
+        true,
+    )
+    .await;
     assert_eq!(
-        (r.status, r.code.as_str()),
-        (CheckStatus::Warning, "HIGH_RISK_MASS_VPN_ASN")
-    );
-    assert_eq!(type_of(&r), Some(IpType::Vpn));
-    assert!(r.message.contains("AS9009"), "{}", r.message);
-    let r = verdict(&probe, OTHER_IP, Some(9009), Some("M247"), true).await;
-    assert_eq!(
-        (r.status, r.code.as_str()),
+        (hosting_pinned.status, hosting_pinned.code.as_str()),
         (CheckStatus::Ok, "ASN_VERIFIED_PINNED")
+    );
+    // Cloudflare WARP (AS13335) and keyword-detected VPN are also caught even when pinned.
+    let warp = verdict(&probe, OTHER_IP, Some(13335), Some("Cloudflare, Inc."), true).await;
+    assert_eq!(
+        (warp.status, warp.code.as_str()),
+        (CheckStatus::Warning, "HIGH_RISK_MASS_VPN_ASN")
     );
 }
 
@@ -238,9 +255,9 @@ async fn an_unavailable_list_is_unknown_never_ok_and_never_a_block() {
 }
 
 #[tokio::test]
-async fn an_ipv6_exit_is_not_applicable_and_the_list_is_not_downloaded() {
+async fn an_ipv6_exit_continues_classification_without_downloading_tor_list() {
     let probe = list_probe();
-    let r = verdict(
+    let hosting = verdict(
         &probe,
         "2001:db8::9",
         Some(24940),
@@ -249,19 +266,33 @@ async fn an_ipv6_exit_is_not_applicable_and_the_list_is_not_downloaded() {
     )
     .await;
     assert_eq!(
-        (r.status, r.reason),
-        (CheckStatus::Unknown, Some(UnknownReason::NotApplicable))
+        (hosting.status, hosting.code.as_str()),
+        (CheckStatus::Ok, "IP_TYPE_HOSTING")
     );
-    assert!(r.is_not_applicable());
-    assert!(
-        r.message.starts_with("Не применимо к IPv6"),
-        "{}",
-        r.message
-    );
-    assert_eq!(type_of(&r), Some(IpType::Hosting));
+    assert_eq!(type_of(&hosting), Some(IpType::Hosting));
     assert_eq!(probe.calls(), 0);
-    // Not applicable costs nothing.
-    assert_eq!(crate::auditor::score_checks(&[r], false).trust_score, 100);
+    assert_eq!(crate::auditor::score_checks(&[hosting], false).trust_score, 100);
+
+    let residential = verdict(
+        &probe,
+        "2001:db8::10",
+        Some(64500),
+        Some("Example Broadband Ltd"),
+        false,
+    )
+    .await;
+    assert_eq!(
+        (residential.status, residential.code.as_str()),
+        (CheckStatus::Ok, "IP_TYPE_RESIDENTIAL")
+    );
+    assert_eq!(type_of(&residential), Some(IpType::Residential));
+
+    let clean = verdict(&probe, "2001:db8::11", Some(64500), Some("Example Net"), false).await;
+    assert_eq!(
+        (clean.status, clean.code.as_str()),
+        (CheckStatus::Ok, "ASN_CLEAN")
+    );
+    assert_eq!(probe.calls(), 0);
 }
 
 #[tokio::test]

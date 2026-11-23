@@ -410,4 +410,9 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
     expect(html).toContain("•••.•••.•••.40");
     expect(html).toContain("•••.•••.•••.5");
   });
+
+  it("§7.6: по умолчанию persistException выключен и текст подтверждения не обещает автосохранение исключения", () => {
+    expect(alertDialog.persistExceptionLabel).toContain("постоянное исключение");
+    expect(alertDialog.confirmForceText).not.toContain("Сохранить исключение для этого адреса автоматически");
+  });
 });

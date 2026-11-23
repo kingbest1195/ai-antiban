@@ -324,6 +324,28 @@ impl ProxyServer {
                 }
                 Err(e) if route.is_some() => {
                     let r = route.as_ref().expect("checked");
+                    let health_ok = self
+                        .state
+                        .route_health()
+                        .get(&r.id)
+                        .is_some_and(|h| h.reachable == Some(true));
+                    let cached_tel = self.auditor.resolver.last_known_telemetry_for_route(r).await;
+                    let geo_ok = !r
+                        .country
+                        .as_deref()
+                        .is_some_and(crate::core::sanctions::is_blocked_geo_code)
+                        && !cached_tel
+                            .as_ref()
+                            .is_some_and(|t| crate::core::sanctions::is_blocked_geo_code(&t.country_code));
+                    if !is_canary && (health_ok || cached_tel.is_some()) && geo_ok {
+                        crate::diagnostics::record(
+                            "proxy:route",
+                            &format!("route={} phase=audit_soft_bypass err={e}", r.id),
+                        );
+                        return self
+                            .tunnel_to_target(client, &host, port, Some(provider), &selection)
+                            .await;
+                    }
                     return self
                         .refuse_route_down(
                             client,

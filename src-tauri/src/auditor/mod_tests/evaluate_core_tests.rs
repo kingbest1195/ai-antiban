@@ -482,14 +482,11 @@ async fn evaluate_all_ipv6_exit_marks_the_report_and_the_two_checks_not_applicab
         report.dnsbl_result
     );
     assert_eq!(report.dnsbl_result.code, "DNSBL_IPV6_UNSUPPORTED");
-    assert!(
-        report.asn_result.is_not_applicable(),
-        "{:?}",
-        report.asn_result
-    );
-    assert_eq!(report.asn_result.code, "IP_TYPE_IPV6_NOT_APPLICABLE");
+    // IPv6 exit continues classification without downloading the IPv4-only Tor list.
+    assert_eq!(report.asn_result.status, CheckStatus::Ok);
+    assert_eq!(report.asn_result.code, "ASN_CLEAN");
     // The probe times out for everything: had the Tor list been asked for, the check would
-    // be a real Unknown (TOR_LIST_UNAVAILABLE), not "not applicable".
+    // be a real Unknown (TOR_LIST_UNAVAILABLE), not classified.
     assert_ne!(report.asn_result.code, "TOR_LIST_UNAVAILABLE");
 }
 

@@ -174,6 +174,10 @@ impl Auditor {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    pub fn env_probe_for_routes(&self) -> Arc<dyn seams::IpProbe> {
+        self.env.probe.clone()
+    }
+
     /// An auditor whose DNS, probe and host reads come from `env` (tests: no network, no processes).
     pub fn with_env(env: AuditEnv) -> Result<Self, String> {
         Ok(Self {

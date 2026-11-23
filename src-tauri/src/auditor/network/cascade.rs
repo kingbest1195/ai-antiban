@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use super::exit_probe::parse_cloudflare_trace;
 use super::resolver::NetworkResolver;
-use super::{NEUTRAL_USER_AGENT, NetworkTelemetry, REQUEST_TIMEOUT_MS, current_timestamp};
+use super::{
+    NEUTRAL_USER_AGENT, NetworkTelemetry, REQUEST_TIMEOUT_MS, ROUTE_REQUEST_TIMEOUT_MS,
+    current_timestamp,
+};
 use crate::routing::net::resolve_entry_checked;
 use crate::routing::{Entry, EntryProto, Route};
 use crate::state::UpstreamProxyConfig;
@@ -46,19 +49,34 @@ fn url_host(host: &str) -> String {
 ///
 /// Credentials never go into error messages.
 fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::ClientBuilder, String> {
-    let scheme = match entry.proto {
+    entry_client_builder_with(entry, addr, REQUEST_TIMEOUT_MS, 0, false)
+}
+
+fn entry_client_builder_with(
+    entry: &Entry,
+    addr: SocketAddr,
+    timeout_ms: u64,
+    pool_idle_per_host: usize,
+    force_http_plain: bool,
+) -> Result<reqwest::ClientBuilder, String> {
+    let eff_proto = if force_http_plain {
+        EntryProto::Http
+    } else {
+        entry.proto
+    };
+    let scheme = match eff_proto {
         EntryProto::Socks5 => "socks5h",
         EntryProto::Http => "http",
         EntryProto::Https => "https",
     };
-    let url_name = match entry.proto {
+    let url_name = match eff_proto {
         EntryProto::Https => url_host(entry.tls_server_name()),
         _ => url_host(&addr.ip().to_string()),
     };
     let mut proxy_url = url::Url::parse(&format!("{scheme}://{url_name}:{}", addr.port()))
         .map_err(|_| "Invalid entry address for the audit client".to_string())?;
 
-    if entry.proto == EntryProto::Socks5 {
+    if eff_proto == EntryProto::Socks5 {
         // reqwest takes SOCKS credentials from the URL userinfo only, and requires
         // `url.password().is_some()` (even `Some("")`) or it silently drops SOCKS5 auth.
         if let Some(u) = entry.username.as_deref() {
@@ -73,18 +91,18 @@ fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::Clie
 
     let mut proxy = reqwest::Proxy::all(proxy_url.as_str())
         .map_err(|_| format!("Failed to configure {scheme} entry proxy for the audit client"))?;
-    if entry.proto != EntryProto::Socks5
+    if eff_proto != EntryProto::Socks5
         && let Some(u) = entry.username.as_deref()
     {
         proxy = proxy.basic_auth(u, entry.password.as_deref().unwrap_or(""));
     }
 
     let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
-        .pool_max_idle_per_host(0)
+        .timeout(Duration::from_millis(timeout_ms))
+        .pool_max_idle_per_host(pool_idle_per_host)
         .user_agent(NEUTRAL_USER_AGENT)
         .proxy(proxy);
-    if entry.proto == EntryProto::Https {
+    if eff_proto == EntryProto::Https {
         let name = entry.tls_server_name();
         if name.parse::<IpAddr>().is_err() {
             builder = builder.resolve(name, addr);
@@ -96,6 +114,7 @@ fn entry_client_builder(entry: &Entry, addr: SocketAddr) -> Result<reqwest::Clie
 /// Audit client going through the given route entry (same entry the gateway uses). The entry host
 /// is resolved here, every address is checked against the entry policy (see
 /// [`crate::routing::net`]) and the client is pinned to the checked address.
+/// Uses extended routed timeouts and keep-alive connection pooling within the audit pass.
 pub async fn build_entry_client(
     entry: &Entry,
     allow_local: bool,
@@ -103,17 +122,23 @@ pub async fn build_entry_client(
 ) -> Result<reqwest::Client, String> {
     if let Some(cp) = crate::sysproxy::get_chained_proxy().filter(|cp| {
         !crate::sysproxy::is_gateway_host_port(cp, (gateway_port > 0).then_some(gateway_port))
-    }) && (entry.proto != EntryProto::Https
-        || entry.tls_server_name().parse::<IpAddr>().is_err())
-        && let Some(relay_addr) =
-            super::entry_relay::spawn_entry_relay(entry, &cp, allow_local, gateway_port).await?
+    }) && let Some(relay_addr) =
+        super::entry_relay::spawn_entry_relay(entry, &cp, allow_local, gateway_port).await?
     {
-        return entry_client_builder(entry, relay_addr)?
-            .build()
-            .map_err(|e| format!("Failed to build chained audit client: {e}"));
+        let ip_literal_https =
+            entry.proto == EntryProto::Https && entry.tls_server_name().parse::<IpAddr>().is_ok();
+        return entry_client_builder_with(
+            entry,
+            relay_addr,
+            ROUTE_REQUEST_TIMEOUT_MS,
+            4,
+            ip_literal_https,
+        )?
+        .build()
+        .map_err(|e| format!("Failed to build chained audit client: {e}"));
     }
     let addr = checked_entry_addr(entry, allow_local, gateway_port).await?;
-    entry_client_builder(entry, addr)?
+    entry_client_builder_with(entry, addr, ROUTE_REQUEST_TIMEOUT_MS, 4, false)?
         .build()
         .map_err(|e| format!("Failed to build audit client: {e}"))
 }
@@ -236,26 +261,39 @@ impl NetworkResolver {
         client: &reqwest::Client,
     ) -> Result<NetworkTelemetry, String> {
         let mut errors = Vec::new();
+        let mut no_meta_fallback: Option<NetworkTelemetry> = None;
 
-        // 1. Primary: ipwho.is
-        match self.query_ipwhois(client).await {
-            Ok(t) => return Ok(t),
-            Err(e) => errors.push(format!("ipwho.is failed: {e}")),
+        // 1. Primary: ipwho.is, then ipinfo.io, then freeipapi.com.
+        // If a provider returns ip/country without ASN/ISP/org metadata, keep querying rich
+        // sources instead of stopping early with empty provider metadata.
+        for (name, res) in [
+            ("ipwho.is", self.query_ipwhois(client).await),
+            ("ipinfo.io", self.query_ipinfo(client).await),
+            ("freeipapi.com", self.query_freeipapi(client).await),
+        ] {
+            match res {
+                Ok(mut t) if t.has_provider_metadata() => {
+                    if t.timezone.is_none()
+                        && let Some(tz) = no_meta_fallback.as_ref().and_then(|f| f.timezone.clone())
+                    {
+                        t.timezone = Some(tz);
+                    }
+                    return Ok(t);
+                }
+                Ok(t) => {
+                    if no_meta_fallback.is_none() {
+                        no_meta_fallback = Some(t);
+                    }
+                }
+                Err(e) => errors.push(format!("{name} failed: {e}")),
+            }
         }
 
-        // 2. Fallback 1: ipinfo.io
-        match self.query_ipinfo(client).await {
-            Ok(t) => return Ok(t),
-            Err(e) => errors.push(format!("ipinfo.io failed: {e}")),
+        if let Some(t) = no_meta_fallback {
+            return Ok(t);
         }
 
-        // 3. Fallback 2: freeipapi.com (rich metadata with ASN/ISP/Timezone)
-        match self.query_freeipapi(client).await {
-            Ok(t) => return Ok(t),
-            Err(e) => errors.push(format!("freeipapi.com failed: {e}")),
-        }
-
-        // 4. Fallback 3: 1.1.1.1/cdn-cgi/trace
+        // 4. Last resort (no ASN/ISP/org): 1.1.1.1/cdn-cgi/trace
         match self.query_cloudflare_trace(client).await {
             Ok(t) => return Ok(t),
             Err(e) => errors.push(format!("1.1.1.1/cdn-cgi/trace failed: {e}")),
@@ -313,24 +351,11 @@ impl NetworkResolver {
             .ok_or("ipinfo.io missing 'country'")?
             .to_uppercase();
 
-        let mut asn = None;
-        let mut org_name = None;
-
-        if let Some(org_str) = parsed.org {
-            // E.g. "AS20473 The Constant Company, LLC"
-            let trimmed = org_str.trim();
-            if let Some(rest) = trimmed.strip_prefix("AS") {
-                let mut parts = rest.splitn(2, ' ');
-                if let Some(asn_str) = parts.next() {
-                    asn = asn_str.parse::<u32>().ok();
-                }
-                if let Some(name) = parts.next() {
-                    org_name = Some(name.to_string());
-                }
-            } else {
-                org_name = Some(trimmed.to_string());
-            }
-        }
+        let (asn, org_name) = parsed
+            .org
+            .as_deref()
+            .map(parse_as_org)
+            .unwrap_or((None, None));
 
         Ok(NetworkTelemetry {
             ip,
@@ -361,11 +386,7 @@ impl NetworkResolver {
             .ok_or("freeipapi.com missing 'countryCode'")?
             .to_uppercase();
 
-        let asn = parsed.asn.and_then(|s| {
-            let trimmed = s.trim();
-            let digits = trimmed.strip_prefix("AS").unwrap_or(trimmed);
-            digits.parse::<u32>().ok()
-        });
+        let asn = parsed.asn.and_then(|s| parse_as_org(&s).0);
         let org = parsed.asn_organization;
         let timezone = parsed.time_zones.and_then(|mut v| {
             if v.is_empty() {
@@ -415,4 +436,20 @@ impl NetworkResolver {
             resolved_at: current_timestamp(),
         })
     }
+}
+
+pub(super) fn parse_as_org(org_str: &str) -> (Option<u32>, Option<String>) {
+    let trimmed = org_str.trim();
+    if trimmed.len() >= 2 && trimmed[..2].eq_ignore_ascii_case("AS") {
+        let rest = &trimmed[2..];
+        let digits_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digits_len > 0 {
+            let asn = rest[..digits_len].parse::<u32>().ok();
+            let name = rest[digits_len..].trim();
+            let org_name = (!name.is_empty()).then(|| name.to_string());
+            return (asn, org_name);
+        }
+    }
+    let org_name = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    (None, org_name)
 }

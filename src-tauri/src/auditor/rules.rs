@@ -116,7 +116,11 @@ impl DangerousAsns {
         let lower = text.to_lowercase();
         self.isp_keyword_groups
             .iter()
-            .find(|g| g.keywords.iter().any(|k| lower.contains(&k.to_lowercase())))
+            .find(|g| {
+                g.keywords
+                    .iter()
+                    .any(|k| contains_word_boundary(&lower, &k.to_lowercase()))
+            })
             .map(|g| g.kind)
     }
 
@@ -129,6 +133,34 @@ impl DangerousAsns {
         }
         None
     }
+}
+
+fn contains_word_boundary(haystack_lower: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return false;
+    }
+    let mut offset = 0;
+    while let Some(pos) = haystack_lower[offset..].find(needle_lower) {
+        let start = offset + pos;
+        let end = start + needle_lower.len();
+        let left_ok = haystack_lower[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let right_ok = haystack_lower[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if left_ok && right_ok {
+            return true;
+        }
+        let step = haystack_lower[start..]
+            .chars()
+            .next()
+            .map_or(1, char::len_utf8);
+        offset = start + step;
+    }
+    false
 }
 
 /// Unified RuleSet wrapped in thread-safe memory storage
@@ -185,9 +217,13 @@ mod tests {
         assert!(matrix.providers.contains_key("gemini"));
 
         let asns = rules.dangerous_asns.blocking_read();
-        assert_eq!(asns.version, "1.2.0");
+        assert_eq!(asns.version, "1.3.0");
         assert_eq!(asns.dnsbl_zones.len(), 5);
         assert_eq!(asns.asn_entry(9009).map(|e| e.kind), Some(NetworkKind::Vpn));
+        assert_eq!(
+            asns.asn_entry(13335).map(|e| e.kind),
+            Some(NetworkKind::Vpn)
+        );
         assert_eq!(
             asns.asn_entry(24940).map(|e| e.kind),
             Some(NetworkKind::Hosting)
@@ -279,5 +315,22 @@ mod tests {
             Some(NetworkKind::Residential)
         );
         assert_eq!(asns.keyword_kind("Example Net"), None);
+    }
+
+    #[test]
+    fn keyword_kind_uses_word_boundaries_and_vpn_wins() {
+        let asns = DangerousAsns::load_bundled().unwrap();
+        assert_eq!(
+            asns.keyword_kind("Example VPN Hosting"),
+            Some(NetworkKind::Vpn)
+        );
+        assert_eq!(
+            asns.keyword_kind("NordVPN Server"),
+            Some(NetworkKind::Vpn)
+        );
+        // Substrings inside larger words must not falsely trigger VPN or hosting.
+        assert_eq!(asns.keyword_kind("Vector Telecom"), Some(NetworkKind::Residential));
+        assert_eq!(asns.keyword_kind("Subvpnware Ltd"), None);
+        assert_eq!(asns.keyword_kind("Cloudflare Inc."), None);
     }
 }

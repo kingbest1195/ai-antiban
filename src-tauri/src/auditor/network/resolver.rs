@@ -160,6 +160,20 @@ impl NetworkResolver {
         self.cache.write().await.remove(&Some(route_id.to_string()));
     }
 
+    /// Returns last known telemetry for `route` (matching its fingerprint if recorded) regardless
+    /// of TTL, so transient external GeoIP timeouts do not tear down an otherwise live tunnel.
+    pub async fn last_known_telemetry_for_route(&self, route: &Route) -> Option<NetworkTelemetry> {
+        let fp = route_fingerprint(route);
+        let r = self.cache.read().await;
+        let entry = r.get(&Some(route.id.clone()))?;
+        if let Some(cached_fp) = entry.route_fp
+            && cached_fp != fp
+        {
+            return None;
+        }
+        Some(entry.telemetry.clone())
+    }
+
     /// Returns the cached direct-path country code when direct telemetry is fresh and matches `ip`.
     pub async fn cached_direct_country(&self, ip: &str) -> Option<String> {
         let target = ip.trim();

@@ -1,5 +1,6 @@
 //! Route (key) management commands. Responses never contain passwords or raw keys.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,8 @@ pub struct RouteTestResult {
     /// `None` when the key declares no `exit_ip`.
     pub exit_ip_matches: Option<bool>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_reputation: Option<auditor::CheckResult>,
 }
 
 async fn snapshot(state: &AppContext) -> RoutesSnapshot {
@@ -244,6 +247,7 @@ pub async fn test_route(
             latency_ms: None,
             exit_ip_matches: None,
             error: Some(msg),
+            ip_reputation: None,
         });
     }
     drop(tunnel);
@@ -251,17 +255,21 @@ pub async fn test_route(
     state.route_health().record_latency(&id, latency_ms);
 
     match auditor.resolve_route(&route, &state, true).await {
-        Ok(tel) => Ok(RouteTestResult {
-            ok: true,
-            exit_ip_matches: route
-                .exit_ip
-                .as_deref()
-                .map(|expected| routing::ip_equal(expected, &tel.ip)),
-            exit_ip: Some(tel.ip),
-            country: Some(tel.country_code),
-            latency_ms: Some(latency_ms),
-            error: None,
-        }),
+        Ok(tel) => {
+            let reputation = evaluate_route_exit_reputation(&auditor, &route, &tel).await;
+            Ok(RouteTestResult {
+                ok: true,
+                exit_ip_matches: route
+                    .exit_ip
+                    .as_deref()
+                    .map(|expected| routing::ip_equal(expected, &tel.ip)),
+                exit_ip: Some(tel.ip),
+                country: Some(tel.country_code),
+                latency_ms: Some(latency_ms),
+                error: None,
+                ip_reputation: Some(reputation),
+            })
+        }
         // The tunnel works but the geo lookup through it failed: report it, keep the route reachable.
         Err(e) => Ok(RouteTestResult {
             ok: false,
@@ -270,6 +278,33 @@ pub async fn test_route(
             latency_ms: Some(latency_ms),
             exit_ip_matches: None,
             error: Some(e),
+            ip_reputation: None,
         }),
     }
+}
+
+async fn evaluate_route_exit_reputation(
+    auditor: &auditor::Auditor,
+    route: &routing::Route,
+    tel: &auditor::NetworkTelemetry,
+) -> auditor::CheckResult {
+    let asns = auditor.rules.dangerous_asns.read().await.clone();
+    let tor_probe: Arc<dyn auditor::seams::IpProbe> =
+        match auditor.resolver.client_for_route(route).await {
+            Some(c) => Arc::new(auditor::seams::ClientIpProbe(c)),
+            None => auditor.env_probe_for_routes(),
+        };
+    let tor = auditor::lookup_tor(&auditor.resolver.check_cache().tor, &*tor_probe, &tel.ip).await;
+    auditor::evaluate_ip_reputation(
+        &auditor::ExitIdentity {
+            ip: &tel.ip,
+            country_code: &tel.country_code,
+            asn: tel.asn,
+            isp: tel.isp.as_deref(),
+            org: tel.org.as_deref(),
+        },
+        &asns,
+        tor,
+        false,
+    )
 }

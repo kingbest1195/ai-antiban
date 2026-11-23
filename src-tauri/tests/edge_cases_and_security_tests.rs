@@ -142,10 +142,15 @@ fn test_edge_case_vps_pinning_and_russian_telecom() {
     let res_unpinned = rep(9009, "M247 Europe SRL", false);
     assert_eq!(res_unpinned.status, CheckStatus::Warning);
 
-    // 2. User pinned this IP as their personal dedicated VPS -> suppressed (Ok)
-    let res_pinned = rep(9009, "M247 Europe SRL", true);
-    assert_eq!(res_pinned.status, CheckStatus::Ok);
-    assert_eq!(res_pinned.code, "ASN_VERIFIED_PINNED");
+    // 2. Mass VPN pools (M247: AS9009) are NOT suppressed by pinning (§7.4),
+    // while a personal dedicated VPS (DigitalOcean: AS14061) IS `ASN_VERIFIED_PINNED`.
+    let res_pinned_vpn = rep(9009, "M247 Europe SRL", true);
+    assert_eq!(res_pinned_vpn.status, CheckStatus::Warning);
+    assert_eq!(res_pinned_vpn.code, "HIGH_RISK_MASS_VPN_ASN");
+
+    let res_pinned_vps = rep(14061, "DigitalOcean, LLC", true);
+    assert_eq!(res_pinned_vps.status, CheckStatus::Ok);
+    assert_eq!(res_pinned_vps.code, "ASN_VERIFIED_PINNED");
 
     // 3. BUT Russian domestic telecom (Rostelecom, MTS, MegaFon) is NEVER suppressed by pinning!
     let res_pinned_ru = rep(12389, "PJSC Rostelecom", true);

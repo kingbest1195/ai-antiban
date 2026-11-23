@@ -308,20 +308,17 @@ async fn relay(
     provider: Option<ProviderId>,
 ) -> Result<(), std::io::Error> {
     let (mut cr, mut cw) = client.split();
-    match target {
+    if let UpstreamStream::Plain(tcp) = target {
         // Zero-overhead split for plain TCP (direct, SOCKS5, HTTP entries).
-        UpstreamStream::Plain(tcp) => {
-            let (mut tr, mut tw) = tcp.split();
-            let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
-            let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
-            tokio::try_join!(c2t, t2c)?;
-        }
-        UpstreamStream::Tls(tls) => {
-            let (mut tr, mut tw) = tokio::io::split(tls.as_mut());
-            let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
-            let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
-            tokio::try_join!(c2t, t2c)?;
-        }
+        let (mut tr, mut tw) = tcp.split();
+        let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
+        let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
+        tokio::try_join!(c2t, t2c)?;
+    } else {
+        let (mut tr, mut tw) = tokio::io::split(target);
+        let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
+        let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
+        tokio::try_join!(c2t, t2c)?;
     }
     Ok(())
 }

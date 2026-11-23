@@ -284,54 +284,29 @@ impl ProxyServer {
         };
 
         let head = req.build_head(RequestForm::Origin);
-        let write_res = match &mut target {
-            UpstreamStream::Plain(tcp) => tcp.write_all(&head).await,
-            UpstreamStream::Tls(tls) => tls.write_all(&head).await,
-        };
+        let write_res = target.write_all(&head).await;
         if let Err(e) = write_res {
             send_bad_gateway(client, "Failed to send request to target via alias.").await?;
             return Err(e);
         }
 
-        let relay_res = match &mut target {
-            UpstreamStream::Plain(tcp) => {
-                let relay = relay_exchange(
-                    client,
-                    tcp,
-                    &req.body,
-                    body_prefix,
-                    Duration::from_secs(PLAIN_HTTP_IDLE_TIMEOUT_SECS),
-                );
-                tokio::select! {
-                    res = relay => res,
-                    _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
-                    _ = shutdown_aborted(&mut shutdown_rx) => Err(alias_route_changed()),
-                    _ = wait_optional_alias_route_stale(&self.state, route_snapshot.as_ref(), &mut routing_rx) => {
-                        Err(alias_route_changed())
-                    }
-                    _ = wait_optional_stop(&mut stop_rx) => {
-                        Err(alias_route_changed())
-                    }
+        let relay_res = {
+            let relay = relay_exchange(
+                client,
+                &mut target,
+                &req.body,
+                body_prefix,
+                Duration::from_secs(PLAIN_HTTP_IDLE_TIMEOUT_SECS),
+            );
+            tokio::select! {
+                res = relay => res,
+                _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+                _ = shutdown_aborted(&mut shutdown_rx) => Err(alias_route_changed()),
+                _ = wait_optional_alias_route_stale(&self.state, route_snapshot.as_ref(), &mut routing_rx) => {
+                    Err(alias_route_changed())
                 }
-            }
-            UpstreamStream::Tls(tls) => {
-                let relay = relay_exchange(
-                    client,
-                    tls.as_mut(),
-                    &req.body,
-                    body_prefix,
-                    Duration::from_secs(PLAIN_HTTP_IDLE_TIMEOUT_SECS),
-                );
-                tokio::select! {
-                    res = relay => res,
-                    _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
-                    _ = shutdown_aborted(&mut shutdown_rx) => Err(alias_route_changed()),
-                    _ = wait_optional_alias_route_stale(&self.state, route_snapshot.as_ref(), &mut routing_rx) => {
-                        Err(alias_route_changed())
-                    }
-                    _ = wait_optional_stop(&mut stop_rx) => {
-                        Err(alias_route_changed())
-                    }
+                _ = wait_optional_stop(&mut stop_rx) => {
+                    Err(alias_route_changed())
                 }
             }
         };
