@@ -158,6 +158,8 @@ async fn resolve_os_tz_and_sync_tz_fall_back_across_providers_when_anthropic_lac
         country: Some("FR".into()),
         exit_ip: Some("136.244.114.42".into()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![Entry {
             proto: EntryProto::Http,
             host: "136.244.114.42".into(),
@@ -258,6 +260,8 @@ fn diagnostic_bundle_serializes_routes_and_checks_without_secrets_or_ips() {
         country: Some("NL".to_string()),
         exit_ip: Some("185.10.20.30".to_string()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![routing::Entry {
             proto: routing::EntryProto::Socks5,
             host: "198.51.100.9".to_string(),

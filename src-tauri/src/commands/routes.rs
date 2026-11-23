@@ -23,6 +23,8 @@ pub struct RouteTestResult {
     /// `None` when the key declares no `exit_ip`.
     pub exit_ip_matches: Option<bool>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub grace_extended: bool,
 }
 
 async fn snapshot(state: &AppContext) -> RoutesSnapshot {
@@ -219,10 +221,22 @@ pub async fn test_route(
                 .to_string(),
         );
     }
-    let route = state
+    let mut route = state
         .get_route(&id)
         .await
         .ok_or_else(|| format!("Маршрут не найден: {id}"))?;
+
+    if route.sub_url.is_some()
+        && matches!(
+            super::routes_sub::refresh_route_subscription_inner(&state, &id, None, None).await,
+            Ok(true)
+        )
+    {
+        auditor.resolver.invalidate_route(&id).await;
+        if let Some(refreshed) = state.get_route(&id).await {
+            route = refreshed;
+        }
+    }
 
     let started = Instant::now();
     let tunnel = proxy::upstream::connect_via_route(
@@ -244,11 +258,25 @@ pub async fn test_route(
             latency_ms: None,
             exit_ip_matches: None,
             error: Some(msg),
+            grace_extended: false,
         });
     }
     drop(tunnel);
     state.route_health().mark_reachable(&id);
     state.route_health().record_latency(&id, latency_ms);
+
+    let now = current_timestamp();
+    let mut grace_extended = route.grace_extended;
+    if route.sub_url.is_none()
+        && route.is_raw_expired_at(now)
+        && !route.grace_extended
+        && matches!(state.mark_route_grace_extended(&id, true).await, Ok(true))
+    {
+        grace_extended = true;
+        if let Some(updated) = state.get_route(&id).await {
+            route = updated;
+        }
+    }
 
     match auditor.resolve_route(&route, &state, true).await {
         Ok(tel) => Ok(RouteTestResult {
@@ -261,6 +289,7 @@ pub async fn test_route(
             country: Some(tel.country_code),
             latency_ms: Some(latency_ms),
             error: None,
+            grace_extended,
         }),
         // The tunnel works but the geo lookup through it failed: report it, keep the route reachable.
         Err(e) => Ok(RouteTestResult {
@@ -270,6 +299,7 @@ pub async fn test_route(
             latency_ms: Some(latency_ms),
             exit_ip_matches: None,
             error: Some(e),
+            grace_extended,
         }),
     }
 }

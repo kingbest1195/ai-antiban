@@ -60,6 +60,8 @@ export const settings = {
       title: "Часовой пояс системы (браузеры и Claude Desktop)",
       notSynced: (current: string | null) =>
         current ? `Текущий пояс системы: ${current}. Не синхронизирован с IP.` : "Часовой пояс системы не синхронизирован.",
+      alreadyMatches: (current: string | null) =>
+        current ? `Совпадает с IP (${current})` : "Совпадает с IP",
       synced: (orig: string | null, target: string | null) =>
         orig && target ? `Синхронизирован: ${orig} -> ${target}` : `Синхронизирован (${target ?? "система"})`,
       restartHint: "Перезапустите браузер и Claude Desktop, чтобы они применили новый часовой пояс.",

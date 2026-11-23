@@ -18,8 +18,8 @@ use deep_links::{
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use watchers::{
-    spawn_bunker_scheduler, spawn_cowork_guard_watcher, spawn_tray_status_watcher,
-    spawn_update_checker,
+    spawn_bunker_scheduler, spawn_cowork_guard_watcher, spawn_route_subscription_refresher,
+    spawn_tray_status_watcher, spawn_update_checker,
 };
 
 pub fn run() {
@@ -91,6 +91,7 @@ pub fn run() {
             spawn_update_checker(app, &app_state);
             spawn_cowork_guard_watcher(app);
             spawn_bunker_scheduler(app, &app_state);
+            spawn_route_subscription_refresher(app, &risk_auditor, &app_state);
 
             // Window starts hidden (`visible: false` in tauri.conf.json) so `--minimized`
             // keeps Zastava strictly in the tray; show it on interactive launches.
@@ -231,6 +232,7 @@ pub fn run() {
             commands::routes::bind_provider_route,
             commands::routes::set_default_route,
             commands::routes::test_route,
+            commands::routes_sub::refresh_route_subscription,
             commands::payment::set_warmup_timer,
             commands::audit::get_gateway_stats,
             commands::audit::get_split_tunnel_mode,

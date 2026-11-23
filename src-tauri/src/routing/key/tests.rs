@@ -306,3 +306,36 @@ fn accepts_uppercase_zastava_scheme_and_preserves_trailing_slash_in_password() {
     let slash_pass = parse_route_key("socks5://proxy.example.com:1080:demo_user:paSs/", 0).unwrap();
     assert_eq!(slash_pass.entries[0].password.as_deref(), Some("paSs/"));
 }
+
+#[test]
+fn test_v2_sub_url_validation_and_backwards_compat() {
+    let valid = zkey(
+        r#"{"v":2,"id":"sub-1","expires_at":1800000000,"sub_url":"https://sub.example.net/keys/sub-1","entry":[{"proto":"https","host":"entry.example.net","port":443}]}"#,
+    );
+    let r = parse_route_key(&valid, 10).unwrap();
+    assert_eq!(
+        r.sub_url.as_deref(),
+        Some("https://sub.example.net/keys/sub-1")
+    );
+    assert!(!r.grace_extended);
+
+    // Old KeyV2 without sub_url stays 100% compatible.
+    let legacy = zkey(
+        r#"{"v":2,"id":"old-1","entry":[{"proto":"socks5","host":"185.10.10.2","port":1080}]}"#,
+    );
+    let r_old = parse_route_key(&legacy, 10).unwrap();
+    assert!(r_old.sub_url.is_none());
+
+    // Reject http://, private/loopback IP, and embedded credentials in sub_url.
+    for bad_sub in [
+        "http://sub.example.net/keys/1",
+        "https://127.0.0.1/keys/1",
+        "https://10.0.0.5/keys/1",
+        "https://user:pass@sub.example.net/keys/1",
+    ] {
+        let k = zkey(&format!(
+            r#"{{"v":2,"sub_url":"{bad_sub}","entry":[{{"proto":"https","host":"entry.example.net","port":443}}]}}"#
+        ));
+        assert!(parse_route_key(&k, 10).is_err(), "must reject {bad_sub}");
+    }
+}

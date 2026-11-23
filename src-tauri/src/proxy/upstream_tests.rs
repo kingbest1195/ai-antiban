@@ -471,6 +471,8 @@ fn route_of(entries: Vec<Entry>) -> Route {
         country: None,
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries,
         raw_key: String::new(),
         enabled: true,

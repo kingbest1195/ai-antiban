@@ -32,6 +32,8 @@ fn socks_route(id: &str, port: u16, enabled: bool) -> Route {
         country: Some("US".to_string()),
         exit_ip: Some("198.51.100.10".to_string()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![Entry {
             proto: EntryProto::Socks5,
             host: "127.0.0.1".to_string(),

@@ -129,6 +129,7 @@ export function AppShell() {
     gatewayStats: stats.gatewayStats,
     updateInfo: updater.updateInfo,
     coverageSnapshot: gw.coverageSnapshot,
+    onCoverageSnapshot: gw.setCoverageSnapshot,
     routesSnapshot: gw.routesSnapshot,
     hideIpMode,
     dataAgeMinutes: gw.dataAgeMinutes,
@@ -366,6 +367,7 @@ export function AppShell() {
               provider={nav.checksProvider}
               state={gw.state}
               coverageSnapshot={gw.coverageSnapshot}
+              onCoverageSnapshot={gw.setCoverageSnapshot}
               hideIpMode={hideIpMode}
               protection={toggles.protection}
               onToast={showToast}

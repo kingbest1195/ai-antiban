@@ -389,6 +389,23 @@ pub(super) fn spawn_bunker_scheduler(app: &tauri::App, app_state: &state::AppSta
     });
 }
 
+/// Non-blocking startup refresh for routes that carry a `sub_url` subscription metadata link.
+pub(super) fn spawn_route_subscription_refresher(
+    app: &tauri::App,
+    risk_auditor: &auditor::Auditor,
+    app_state: &state::AppState,
+) {
+    let handle = app.handle().clone();
+    let auditor = risk_auditor.clone();
+    let state = app_state.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if commands::routes_sub::refresh_all_route_subscriptions_bg(&state, &auditor).await {
+            let _ = handle.emit("routes://updated", ());
+        }
+    });
+}
+
 #[cfg(test)]
 #[path = "watchers_tests.rs"]
 mod tests;

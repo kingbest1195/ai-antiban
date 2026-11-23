@@ -20,6 +20,8 @@ fn socks_route(id: &str, port: u16) -> Route {
         country: Some("NL".to_string()),
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![Entry {
             proto: EntryProto::Socks5,
             host: "127.0.0.1".to_string(),
@@ -307,6 +309,8 @@ fn public_socks_route(id: &str, host: &str, port: u16) -> Route {
         country: Some("NL".to_string()),
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![Entry {
             proto: EntryProto::Socks5,
             host: host.to_string(),

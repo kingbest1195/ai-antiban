@@ -95,6 +95,8 @@ export async function upsertRoute(
     country: "NL",
     exit_ip: "185.212.102.40",
     expires_at: null,
+    has_sub_url: false,
+    grace_extended: false,
     enabled: true,
     added_at: Math.floor(Date.now() / 1000),
     entries: [
@@ -215,6 +217,17 @@ export async function bindProviderRoute(
   return getRoutesSnapshot();
 }
 
+export async function refreshRouteSubscription(routeId: string): Promise<RouteView> {
+  if (isTauri()) {
+    return await tauriInvoke<RouteView>("refresh_route_subscription", { id: routeId });
+  }
+  const found = mockRoutesSnapshot.routes.find((item) => item.id === routeId);
+  if (!found) {
+    throw new Error(`Маршрут не найден: ${routeId}`);
+  }
+  return { ...found };
+}
+
 export async function testRoute(rawOrId: string): Promise<RouteTestResult> {
   if (isTauri()) {
     return await tauriInvoke<RouteTestResult>("test_route", { id: rawOrId });
@@ -227,5 +240,6 @@ export async function testRoute(rawOrId: string): Promise<RouteTestResult> {
     latency_ms: 38,
     exit_ip_matches: true,
     error: null,
+    grace_extended: false,
   };
 }

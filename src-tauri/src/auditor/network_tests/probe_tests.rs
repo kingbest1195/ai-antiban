@@ -196,6 +196,8 @@ async fn probe_provider_exit_gemini_direct_is_not_applicable_and_bound_route_use
         country: Some("DE".to_string()),
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![],
         raw_key: String::new(),
         enabled: true,

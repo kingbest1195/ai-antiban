@@ -9,6 +9,7 @@ vi.mock("../../ui/Modal", () => ({
 }));
 
 import { SettingsModal } from "./SettingsModal";
+import { TerminalSection } from "./sections/TerminalSection";
 
 describe("SettingsModal: мониторинг сервисов и сохранённые исключения", () => {
   it("рендерит переключатели мониторинга Claude, ChatGPT, Gemini и пояснение про домены Google", () => {
@@ -85,5 +86,60 @@ describe("SettingsModal: мониторинг сервисов и сохранё
     expect(html).not.toContain("split tunneling");
     expect(html).not.toContain("Start = 2");
     expect(html).not.toContain("--minimized");
+  });
+
+  it("§7.1: TerminalSection показывает «Совпадает с IP» и скрывает кнопку синхронизации при already_matches_target=true", () => {
+    const htmlMatches = renderToStaticMarkup(
+      createElement(TerminalSection, {
+        cliMode: "ai_only",
+        syncTz: true,
+        keepOsTzOnExit: true,
+        terminalBusy: false,
+        osTzStatus: {
+          synced: false,
+          already_matches_target: true,
+          current_os_tz: "Europe/London",
+          original_os_tz: null,
+          synced_target_tz: null,
+          target_tz: "Europe/London",
+          auto_restore_pending: false,
+        },
+        osTzLoading: false,
+        osTzError: null,
+        onCliModeChange: vi.fn(),
+        onToggleSyncTz: vi.fn(),
+        onSyncOsTimezone: vi.fn(async () => {}),
+        onRestoreOsTimezone: vi.fn(async () => {}),
+      }),
+    );
+    expect(htmlMatches).toContain(copy.terminal.osTz.alreadyMatches("Europe/London"));
+    expect(htmlMatches).not.toContain("Не синхронизирован с IP");
+    expect(htmlMatches).not.toContain(`>${copy.terminal.osTz.syncAction}<`);
+
+    const htmlMismatch = renderToStaticMarkup(
+      createElement(TerminalSection, {
+        cliMode: "ai_only",
+        syncTz: true,
+        keepOsTzOnExit: true,
+        terminalBusy: false,
+        osTzStatus: {
+          synced: false,
+          already_matches_target: false,
+          current_os_tz: "Europe/Moscow",
+          original_os_tz: null,
+          synced_target_tz: null,
+          target_tz: "Europe/London",
+          auto_restore_pending: false,
+        },
+        osTzLoading: false,
+        osTzError: null,
+        onCliModeChange: vi.fn(),
+        onToggleSyncTz: vi.fn(),
+        onSyncOsTimezone: vi.fn(async () => {}),
+        onRestoreOsTimezone: vi.fn(async () => {}),
+      }),
+    );
+    expect(htmlMismatch).toContain("Не синхронизирован с IP");
+    expect(htmlMismatch).toContain(copy.terminal.osTz.syncAction);
   });
 });

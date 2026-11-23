@@ -94,11 +94,13 @@ interface RouteListSectionProps {
   error: string | null;
   connecting: boolean;
   testingId: string | null;
+  refreshingId?: string | null;
   togglingId: string | null;
   deletingId: string | null;
   onAddKey: () => void;
   onToggleRoute: (routeId: string, enabled: boolean) => void;
   onTestRoute: (routeId: string) => void;
+  onRefreshSubscription?: (routeId: string) => void;
   onSetDefaultRoute: (routeId: string) => void;
   onRemoveRoute: (routeId: string) => void;
   onLegacyToggle: () => void;
@@ -119,11 +121,13 @@ export function RouteListSection({
   error,
   connecting,
   testingId,
+  refreshingId,
   togglingId,
   deletingId,
   onAddKey,
   onToggleRoute,
   onTestRoute,
+  onRefreshSubscription,
   onSetDefaultRoute,
   onRemoveRoute,
   onLegacyToggle,
@@ -144,11 +148,13 @@ export function RouteListSection({
           <Rows>
             {routes.map((r) => {
               const isTesting = testingId === r.id;
+              const isRefreshingSub = refreshingId === r.id;
               const isToggling = togglingId === r.id;
               const isDeleting = deletingId === r.id;
+              const isGraceExtended = Boolean(r.grace_extended);
               const expiryUrgency = getRouteExpiryUrgency(r.expires_at);
-              const isExpired = r.status === "expired" || expiryUrgency === "expired";
-              const showRenew = expiryUrgency !== "none" || isExpired;
+              const isExpired = !isGraceExtended && (r.status === "expired" || expiryUrgency === "expired");
+              const showRenew = expiryUrgency !== "none" || isExpired || isGraceExtended;
 
               const statusTone: BadgeTone =
                 r.status === "active"
@@ -185,7 +191,10 @@ export function RouteListSection({
                         {r.is_default && <Badge tone="info">{copy.key.defaultBadge}</Badge>}
                         {r.is_profile_route && <Badge tone="neutral">{copy.key.profileBadge}</Badge>}
                         <Badge tone={statusTone}>{statusText}</Badge>
-                        {(expiryUrgency === "soon" || expiryUrgency === "critical") && r.expires_at && (
+                        {isGraceExtended && r.status === "active" && (
+                          <Badge tone="info">{copy.key.graceExtendedBadge}</Badge>
+                        )}
+                        {!isGraceExtended && (expiryUrgency === "soon" || expiryUrgency === "critical") && r.expires_at && (
                           <Badge tone={expiryUrgency === "critical" ? "danger" : "warn"}>
                             {copy.key.expiringSoon(formatRemainingTimeRu(r.expires_at))}
                           </Badge>
@@ -211,9 +220,19 @@ export function RouteListSection({
                   />
 
                   <div className="flex items-center gap-2 pl-9 flex-wrap">
-                    <Button size="sm" variant="secondary" disabled={isTesting} onClick={() => onTestRoute(r.id)}>
+                    <Button size="sm" variant="secondary" disabled={isTesting || isRefreshingSub} onClick={() => onTestRoute(r.id)}>
                       {isTesting ? copy.key.testing : copy.key.test}
                     </Button>
+                    {r.has_sub_url && onRefreshSubscription && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={isRefreshingSub || isTesting}
+                        onClick={() => onRefreshSubscription(r.id)}
+                      >
+                        {isRefreshingSub ? copy.key.refreshingSub : copy.key.refreshSub}
+                      </Button>
+                    )}
                     {showRenew && (
                       <Button
                         size="sm"

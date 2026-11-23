@@ -341,6 +341,8 @@ async fn test_resolver_cache_keyed_by_route_id() {
         country: None,
         exit_ip: None,
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![],
         raw_key: String::new(),
         enabled: true,

@@ -59,6 +59,7 @@ export interface OverviewScreenProps {
   gatewayStats: GatewayStatsSnapshot | null;
   updateInfo: UpdateCheckResult | null;
   coverageSnapshot?: CoverageSnapshot | null;
+  onCoverageSnapshot?: (snapshot: CoverageSnapshot) => void;
   routesSnapshot?: RoutesSnapshot | null;
   /** Скрывать ли реальный IP-адрес на экране для безопасных скриншотов. */
   hideIpMode?: boolean;
@@ -401,6 +402,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
         pending={startupPending}
         protection={props.protection}
         onToast={props.onToast}
+        onSnapshotChange={props.onCoverageSnapshot}
       />
 
       <Section title={copy.sectionToday}>

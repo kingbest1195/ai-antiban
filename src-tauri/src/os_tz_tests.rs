@@ -419,3 +419,53 @@ fn macos_auto_tz_missing_key_returns_none_instead_of_false() {
     );
     assert_eq!(macos::parse_defaults_auto_tz_output(true, "weird"), None);
 }
+
+#[test]
+fn already_matches_target_when_no_baseline_and_keep_on_exit_skips_os_mutation() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeOsTzPlatform::new("Europe/London", Some("GMT Standard Time"), Some(true));
+
+    // Status check with matching target_tz reports already_matches_target=true and synced=false.
+    let status = get_os_timezone_sync_status_with_keep_and_target(
+        &fake,
+        dir.path(),
+        true,
+        Some("Europe/London"),
+    )
+    .unwrap();
+    assert!(!status.synced);
+    assert!(status.already_matches_target);
+    assert_eq!(status.current_os_tz.as_deref(), Some("Europe/London"));
+    assert_eq!(status.target_tz.as_deref(), Some("Europe/London"));
+
+    // Alias equivalence (Europe/Kiev vs Europe/Kyiv) also sets already_matches_target=true.
+    let fake_kyiv = FakeOsTzPlatform::new("Europe/Kiev", None, None);
+    let alias_status = get_os_timezone_sync_status_with_keep_and_target(
+        &fake_kyiv,
+        dir.path(),
+        true,
+        Some("Europe/Kyiv"),
+    )
+    .unwrap();
+    assert!(!alias_status.synced);
+    assert!(alias_status.already_matches_target);
+
+    // Mismatched target sets already_matches_target=false.
+    let mismatch = get_os_timezone_sync_status_with_keep_and_target(
+        &fake,
+        dir.path(),
+        true,
+        Some("Europe/Amsterdam"),
+    )
+    .unwrap();
+    assert!(!mismatch.synced);
+    assert!(!mismatch.already_matches_target);
+
+    // Syncing when already matching does not call apply_timezone or write os_tz_baseline.json.
+    let sync_res = sync_os_timezone_with_keep(&fake, dir.path(), "Europe/London", true).unwrap();
+    assert!(!sync_res.synced);
+    assert!(sync_res.already_matches_target);
+    assert_eq!(sync_res.target_tz.as_deref(), Some("Europe/London"));
+    assert!(fake.apply_calls.lock().unwrap().is_empty());
+    assert!(read_baseline(dir.path()).unwrap().is_none());
+}

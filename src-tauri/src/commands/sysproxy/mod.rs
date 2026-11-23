@@ -333,13 +333,18 @@ pub async fn restore_os_timezone_cmd(
 #[tauri::command]
 pub async fn get_os_timezone_sync_status_cmd(
     app: tauri::AppHandle,
+    state: tauri::State<'_, state::AppState>,
+    target_tz: Option<String>,
 ) -> Result<os_tz::OsTzSyncStatus, String> {
     let data_dir = os_tz::resolve_app_data_dir(Some(&app))
         .ok_or_else(|| "Не удалось определить каталог данных приложения.".to_string())?;
+    let resolved_target = helpers::resolve_os_tz_target_cached(&state, target_tz).await;
 
-    tokio::task::spawn_blocking(move || os_tz::get_os_timezone_sync_status(&data_dir))
-        .await
-        .map_err(|e| format!("os_tz status task failed: {e}"))?
+    tokio::task::spawn_blocking(move || {
+        os_tz::get_os_timezone_sync_status_for_target(&data_dir, resolved_target.as_deref())
+    })
+    .await
+    .map_err(|e| format!("os_tz status task failed: {e}"))?
 }
 
 #[tauri::command]

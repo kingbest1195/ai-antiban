@@ -9,7 +9,7 @@ use super::types::{
     Verdict, pac_url_for, steps, steps_of,
 };
 use crate::state::CliMode;
-use crate::sysproxy::browser_policies::detect_browser_pac_status_with;
+use crate::sysproxy::browser_policies::detect_browser_pac_status_with_confirmed;
 use crate::sysproxy::platform::{Platform, PlatformError, ServiceKind, classify_services};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -37,15 +37,17 @@ pub(super) fn compute_config_facts(
     cli_mode: CliMode,
     os: Os,
     probe: &dyn SystemProbe,
+    browser_traffic_confirmed: bool,
 ) -> ConfigFacts {
     let pac_url = gateway.map(pac_url_for);
-    let browser_pac = detect_browser_pac_status_with(
+    let browser_pac = detect_browser_pac_status_with_confirmed(
         env.files,
         os,
         probe,
         pac_url.as_deref(),
         env.policy_store,
         env.platform,
+        browser_traffic_confirmed,
     );
     let browser_pac_policy_active = !browser_pac.browsers_pac_active.is_empty();
 

@@ -264,6 +264,8 @@ async fn active_payment_route_selection_follows_anthropic_direct_without_openai_
             country: Some("US".to_string()),
             exit_ip: None,
             expires_at: None,
+            sub_url: None,
+            grace_extended: false,
             entries: vec![crate::routing::Entry {
                 proto: crate::routing::EntryProto::Socks5,
                 host: "127.0.0.1".to_string(),

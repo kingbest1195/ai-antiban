@@ -105,6 +105,8 @@ impl MockZastavaEntry {
             exit_ip: Some("185.100.10.2".to_string()),
             country: Some("DE".to_string()),
             expires_at: None,
+            sub_url: None,
+            grace_extended: false,
             enabled: true,
             added_at: 0,
         }
@@ -126,6 +128,8 @@ impl MockZastavaEntry {
             exit_ip: Some("185.100.10.2".to_string()),
             country: Some("DE".to_string()),
             expires_at: None,
+            sub_url: None,
+            grace_extended: false,
             enabled: true,
             added_at: 0,
         }

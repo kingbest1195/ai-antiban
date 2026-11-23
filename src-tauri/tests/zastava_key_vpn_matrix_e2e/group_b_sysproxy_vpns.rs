@@ -271,6 +271,8 @@ async fn e2e_incy_v2rayn_shadowrocket_socks5_sysproxy_macos_and_windows() {
         exit_ip: None,
         country: Some("DE".into()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         enabled: true,
         added_at: 0,
     };

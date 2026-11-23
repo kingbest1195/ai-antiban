@@ -68,7 +68,7 @@ export function ProblemBanner({
                 <Button
                   size="sm"
                   variant="secondary"
-                  disabled={osTzLoading || !targetTz}
+                  disabled={osTzLoading || !targetTz || Boolean(!osTzStatus?.synced && osTzStatus?.already_matches_target)}
                   onClick={onSyncOsTimezone}
                 >
                   {osTzLoading ? copy.banner.timezone.syncingOs : copy.banner.timezone.syncOs}

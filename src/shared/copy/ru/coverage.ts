@@ -73,6 +73,11 @@ export const coverage = {
       unsupportedText: "Перезапустите браузер вручную, чтобы он подхватил настройки PAC Заставы.",
       nothingToRestartTitle: "Перезапуск не потребовался",
       nothingToRestartText: "Запущенных браузеров без PAC больше не осталось.",
+      skippedTitle: "Закройте браузеры вручную",
+      skippedText: (skipped: string) =>
+        `Не удалось закрыть автоматически: ${skipped}. Закройте браузеры вручную через Cmd+Q и нажмите «Перепроверить».`,
+      skippedPartialText: (restarted: string, skipped: string) =>
+        `Перезапущены: ${restarted}. Остальные не закрылись автоматически: ${skipped} — закройте их вручную через Cmd+Q и нажмите «Перепроверить».`,
       relaunchErrorTitle: "Ошибка перезапуска браузеров",
     },
     overridden: {

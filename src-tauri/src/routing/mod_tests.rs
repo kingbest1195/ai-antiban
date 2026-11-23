@@ -7,6 +7,8 @@ fn route(id: &str) -> Route {
         country: Some("NL".into()),
         exit_ip: Some("185.10.10.1".into()),
         expires_at: None,
+        sub_url: None,
+        grace_extended: false,
         entries: vec![Entry {
             proto: EntryProto::Socks5,
             host: "185.10.10.2".into(),
@@ -168,4 +170,30 @@ fn test_explicit_direct_sentinel_overrides_default_without_dangling() {
     // Removing the explicit direct override returns Gemini to default "a".
     d.provider_routes.remove("gemini");
     assert_eq!(select_route_id(&d, "gemini").as_deref(), Some("a"));
+}
+
+#[test]
+fn test_grace_extended_lifts_expired_only_without_sub_url() {
+    let mut r = route("legacy-1");
+    let now = 2_000;
+    r.expires_at = Some(now - 10);
+    r.sub_url = None;
+    r.grace_extended = false;
+
+    assert!(r.is_raw_expired_at(now));
+    assert!(r.is_expired_at(now));
+    assert_eq!(compute_status(&r, None, now), RouteStatus::Expired);
+    assert_eq!(r.check_usable(now), Err(RouteDownReason::Expired));
+
+    // Once verified alive by handshake, grace_extended unlocks the legacy route.
+    r.grace_extended = true;
+    assert!(r.is_raw_expired_at(now));
+    assert!(!r.is_expired_at(now));
+    assert_eq!(compute_status(&r, None, now), RouteStatus::Active);
+    assert!(r.check_usable(now).is_ok());
+
+    // Routes with sub_url rely on subscription metadata instead of grace_extended.
+    r.sub_url = Some("https://sub.example.net/1".into());
+    assert!(r.is_expired_at(now));
+    assert_eq!(compute_status(&r, None, now), RouteStatus::Expired);
 }

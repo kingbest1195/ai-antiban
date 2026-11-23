@@ -407,4 +407,42 @@ describe("Bug #6: Route Toggle OFF UX, profile_route_id guard и Disabled banner
     );
     expect((htmlEmpty.match(/zs-btn--primary/g) ?? []).length).toBeLessThanOrEqual(1);
   });
+
+  it("§7.2: RouteListSection показывает кнопку обновления подписки при has_sub_url и снимает бейдж истечения при grace_extended", () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const subRoute: RouteView = {
+      ...makeRoute("sub-1", "NL", "185.212.102.40", "Подписка NL"),
+      has_sub_url: true,
+      expires_at: nowSec + 86_400 * 10,
+    };
+    const graceRoute: RouteView = {
+      ...makeRoute("legacy-1", "DE", "145.241.12.8", "Старый ключ"),
+      expires_at: nowSec - 3600,
+      status: "active",
+      grace_extended: true,
+      has_sub_url: false,
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(ConnectScreen, {
+        state: null,
+        routesSnapshot: {
+          routes: [subRoute, graceRoute],
+          default_route_id: "sub-1",
+          provider_routes: {},
+          effective: {},
+          dangling: [],
+        },
+        currentIp: "95.165.10.22",
+        currentCountry: "RU",
+        onRefreshState: vi.fn(async () => {}),
+        onOpenGuide: vi.fn(),
+        onToast: vi.fn(),
+      }),
+    );
+
+    expect(html).toContain(copy.key.refreshSub);
+    expect(html).toContain(copy.key.graceExtendedBadge);
+    expect(html).not.toContain(copy.key.expired);
+  });
 });

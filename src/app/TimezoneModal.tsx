@@ -96,7 +96,7 @@ export function TimezoneModal({
             <Badge tone="neutral">{copy.osBadge}</Badge>
           </p>
           <p className="zs-modal-text">{copy.osText}</p>
-          {hasBrowserTraffic && !osStatus?.synced && (
+          {hasBrowserTraffic && !osStatus?.synced && !osStatus?.already_matches_target && (
             <Banner tone="info" title={copy.osBrowserHintTitle}>
               {copy.osBrowserHintText}
             </Banner>
@@ -107,7 +107,7 @@ export function TimezoneModal({
             </p>
           )}
 
-          {osStatus?.synced && (
+          {osStatus?.synced ? (
             <>
               <p className="zs-modal-text">
                 <Badge tone="ok" icon="check">
@@ -116,7 +116,13 @@ export function TimezoneModal({
               </p>
               <Banner tone="info" title={copy.osRestartHint} />
             </>
-          )}
+          ) : osStatus?.already_matches_target ? (
+            <p className="zs-modal-text">
+              <Badge tone="ok" icon="check">
+                {copy.osAlreadyMatchesBadge(osStatus.current_os_tz ?? osStatus.target_tz ?? null)}
+              </Badge>
+            </p>
+          ) : null}
 
           {osError && (
             <Banner tone="warn" title={copy.osErrorTitle}>
@@ -133,7 +139,7 @@ export function TimezoneModal({
               >
                 {osLoading ? copy.restoringOs : copy.restoreOs}
               </Button>
-            ) : (
+            ) : osStatus?.already_matches_target ? null : (
               <Button
                 variant="secondary"
                 disabled={osLoading}

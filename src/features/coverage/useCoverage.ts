@@ -11,7 +11,10 @@ const isVisible = () => typeof document === "undefined" || document.visibilitySt
  * обновляет снимок при возврате фокуса, по таймеру (5 с при неподтверждённых, 30 с иначе, ничего при скрытом окне)
  * и по кнопке «Проверить снова». Клиентское «ожидаем подтверждения» держит здесь же.
  */
-export function useCoverage(initial?: CoverageSnapshot | null) {
+export function useCoverage(
+  initial?: CoverageSnapshot | null,
+  onSnapshotChange?: (snap: CoverageSnapshot) => void,
+) {
   const [snapshot, setSnapshot] = useState<CoverageSnapshot | null>(initial ?? null);
   const [failed, setFailed] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -22,6 +25,8 @@ export function useCoverage(initial?: CoverageSnapshot | null) {
   const seq = useRef(0);
   const applied = useRef(0);
   const alive = useRef(true);
+  const onSnapshotChangeRef = useRef(onSnapshotChange);
+  onSnapshotChangeRef.current = onSnapshotChange;
 
   useEffect(() => {
     alive.current = true;
@@ -34,6 +39,7 @@ export function useCoverage(initial?: CoverageSnapshot | null) {
     if (!alive.current || id < applied.current) return;
     applied.current = id;
     setSnapshot(snap);
+    onSnapshotChangeRef.current?.(snap);
     setFailed(false);
     setNow(Date.now());
     setWaiting((prev) => resolveWaiting(prev, snap.apps));

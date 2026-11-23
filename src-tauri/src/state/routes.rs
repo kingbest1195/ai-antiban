@@ -2,7 +2,45 @@
 
 use super::AppState;
 use super::schema::{AppStateData, KNOWN_PROVIDERS, StateError, UpstreamProxyConfig};
-use crate::routing::{DIRECT_ROUTE_ID, Route, RouteSelection, select_route, select_route_id};
+use crate::routing::{
+    DIRECT_ROUTE_ID, Entry, Route, RouteSelection, select_route, select_route_id,
+};
+
+type EntrySignature = (
+    u8,
+    String,
+    u16,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn is_generated_raw_key_id(id: &str) -> bool {
+    id.len() == 26 && id.starts_with("r-") && id[2..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn normalized_entries_signature(entries: &[Entry]) -> Vec<EntrySignature> {
+    let mut sig: Vec<EntrySignature> = entries
+        .iter()
+        .map(|e| {
+            let proto = match e.proto {
+                crate::routing::EntryProto::Https => 0,
+                crate::routing::EntryProto::Socks5 => 1,
+                crate::routing::EntryProto::Http => 2,
+            };
+            (
+                proto,
+                e.host.trim().to_ascii_lowercase(),
+                e.port,
+                e.username.clone(),
+                e.password.clone(),
+                e.sni.as_deref().map(|s| s.trim().to_ascii_lowercase()),
+            )
+        })
+        .collect();
+    sig.sort();
+    sig
+}
 
 impl AppStateData {
     /// Known providers whose traffic currently goes through a route (fixed exit).
@@ -66,9 +104,12 @@ impl AppState {
         {
             let mut w = self.inner.write().await;
             let previous = w.legacy_route_id.clone();
-            let id = route.id.clone();
-            let enabled = route.enabled;
-            Self::upsert_route_locked(&mut w, route, false);
+            let id = Self::upsert_route_locked(&mut w, route, false);
+            let enabled = w
+                .routes
+                .iter()
+                .find(|r| r.id == id)
+                .is_some_and(|r| r.enabled);
             w.legacy_route_id = Some(id.clone());
             if enabled {
                 w.default_route_id = Some(id.clone());
@@ -153,18 +194,43 @@ impl AppState {
         Ok(out)
     }
 
-    /// Inserts or replaces (same id) a route. `preserve_enabled`: a re-import of an existing key
-    /// must not silently re-enable a route the user disabled.
-    fn upsert_route_locked(w: &mut AppStateData, mut route: Route, preserve_enabled: bool) {
+    /// Inserts or replaces (by id or normalized entries signature) a route, returning the stored id.
+    /// `preserve_enabled`: a re-import of an existing key must not silently re-enable a disabled route.
+    fn upsert_route_locked(
+        w: &mut AppStateData,
+        mut route: Route,
+        preserve_enabled: bool,
+    ) -> String {
         if let Some(existing) = w.routes.iter_mut().find(|r| r.id == route.id) {
             route.added_at = existing.added_at;
             if preserve_enabled {
                 route.enabled = existing.enabled;
             }
+            let id = route.id.clone();
             *existing = route;
-        } else {
-            w.routes.push(route);
+            return id;
         }
+        if is_generated_raw_key_id(&route.id) {
+            let incoming_sig = normalized_entries_signature(&route.entries);
+            if !incoming_sig.is_empty()
+                && let Some(existing) = w
+                    .routes
+                    .iter_mut()
+                    .find(|r| normalized_entries_signature(&r.entries) == incoming_sig)
+            {
+                route.id = existing.id.clone();
+                route.added_at = existing.added_at;
+                if preserve_enabled {
+                    route.enabled = existing.enabled;
+                }
+                let id = route.id.clone();
+                *existing = route;
+                return id;
+            }
+        }
+        let id = route.id.clone();
+        w.routes.push(route);
+        id
     }
 
     pub async fn get_routes(&self) -> Vec<Route> {
@@ -181,8 +247,8 @@ impl AppState {
             .cloned()
     }
 
-    /// Adds or replaces (same id) a route; an existing route keeps its `enabled` flag. No
-    /// validation here: keys are validated by the parser.
+    /// Adds or replaces (same id or matching entries) a route; an existing route keeps its `id` and
+    /// `enabled` flag. No validation here: keys are validated by the parser.
     pub async fn upsert_route(&self, route: Route) -> Result<String, StateError> {
         if route.id == DIRECT_ROUTE_ID {
             return Err(StateError::PathError(format!(
@@ -190,16 +256,82 @@ impl AppState {
                 route.id
             )));
         }
-        let id = route.id.clone();
-        {
+        let id = {
             let mut w = self.inner.write().await;
-            Self::upsert_route_locked(&mut w, route, true);
+            let id = Self::upsert_route_locked(&mut w, route, true);
             w.sync_legacy_mirror();
             self.route_health.remove(&id);
             self.bump_routing();
-        }
+            id
+        };
         self.save_async().await?;
         Ok(id)
+    }
+
+    /// Updates a route's subscription metadata (`expires_at` or refreshed key payload) in place.
+    pub async fn apply_route_subscription_update(
+        &self,
+        id: &str,
+        updated_route: Option<Route>,
+        new_expires_at: Option<u64>,
+    ) -> Result<bool, StateError> {
+        let changed = {
+            let mut w = self.inner.write().await;
+            let Some(existing) = w.routes.iter_mut().find(|r| r.id == id) else {
+                return Ok(false);
+            };
+            let before = existing.clone();
+            if let Some(mut next) = updated_route {
+                next.id = existing.id.clone();
+                next.added_at = existing.added_at;
+                next.enabled = existing.enabled;
+                if next.sub_url.is_none() {
+                    next.sub_url = existing.sub_url.clone();
+                }
+                if next.expires_at.is_none() {
+                    next.expires_at = new_expires_at;
+                }
+                next.grace_extended = false;
+                *existing = next;
+            } else if let Some(ts) = new_expires_at {
+                existing.expires_at = Some(ts);
+                existing.grace_extended = false;
+            }
+            let changed = *existing != before;
+            if changed {
+                w.sync_legacy_mirror();
+                self.bump_routing();
+            }
+            changed
+        };
+        if changed {
+            self.save_async().await?;
+        }
+        Ok(changed)
+    }
+
+    /// Marks or clears `grace_extended` on a legacy route without `sub_url` after live verification.
+    pub async fn mark_route_grace_extended(
+        &self,
+        id: &str,
+        extended: bool,
+    ) -> Result<bool, StateError> {
+        let changed = {
+            let mut w = self.inner.write().await;
+            let Some(existing) = w.routes.iter_mut().find(|r| r.id == id) else {
+                return Ok(false);
+            };
+            if existing.grace_extended == extended {
+                return Ok(false);
+            }
+            existing.grace_extended = extended;
+            self.bump_routing();
+            true
+        };
+        if changed {
+            self.save_async().await?;
+        }
+        Ok(changed)
     }
 
     /// Removes a route. Bindings that point to it are NOT cleaned up: they become `Missing` and the
@@ -314,8 +446,7 @@ impl AppState {
         {
             let mut w = self.inner.write().await;
             route.enabled = true;
-            let id = route.id.clone();
-            Self::upsert_route_locked(&mut w, route, false);
+            let id = Self::upsert_route_locked(&mut w, route, false);
             w.profile_route_id = Some(id.clone());
             w.profile_route_invalid = None;
             w.sync_legacy_mirror();

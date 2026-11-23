@@ -161,6 +161,7 @@ export function ServicesPage({
         pending={overview.startupPending}
         protection={overview.protection}
         onToast={overview.onToast}
+        onSnapshotChange={overview.onCoverageSnapshot}
         legend
       />
 

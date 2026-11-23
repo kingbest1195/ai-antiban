@@ -109,7 +109,9 @@ export function TerminalSection({
           sub={
             osTzStatus?.synced
               ? `${copy.terminal.osTz.synced(osTzStatus.original_os_tz, osTzStatus.synced_target_tz)} — ${copy.terminal.osTz.restartHint}`
-              : copy.terminal.osTz.notSynced(osTzStatus?.current_os_tz ?? null)
+              : osTzStatus?.already_matches_target
+                ? copy.terminal.osTz.alreadyMatches(osTzStatus.current_os_tz ?? osTzStatus.target_tz ?? null)
+                : copy.terminal.osTz.notSynced(osTzStatus?.current_os_tz ?? null)
           }
           trail={
             osTzStatus?.synced ? (
@@ -121,7 +123,7 @@ export function TerminalSection({
               >
                 {osTzLoading ? copy.terminal.osTz.restoringAction : copy.terminal.osTz.restoreAction}
               </Button>
-            ) : (
+            ) : osTzStatus?.already_matches_target ? null : (
               <Button
                 size="sm"
                 variant="secondary"

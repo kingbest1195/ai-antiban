@@ -23,12 +23,57 @@ use crate::sysproxy::{Os, SystemProbe};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+fn is_system_or_guest_profile(path: &std::path::Path) -> bool {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name == "Guest Profile" || name == "System Profile")
+}
+
+fn is_active_profile_prefs(fs: &dyn Fs, path: &std::path::Path) -> bool {
+    let Ok(Some(bytes)) = fs.read(path) else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return true;
+    };
+    let Some(obj) = val.as_object() else {
+        return true;
+    };
+    if obj.is_empty() {
+        return false;
+    }
+    [
+        "proxy",
+        "profile",
+        "browser",
+        "extensions",
+        "account_info",
+        "session",
+        "sync",
+    ]
+    .iter()
+    .any(|k| obj.contains_key(*k))
+}
+
 fn all_prefs_match_pac(fs: &dyn Fs, prefs_files: &[PathBuf], expected_pac_url: &str) -> bool {
-    if prefs_files.is_empty() {
+    let non_system: Vec<&PathBuf> = prefs_files
+        .iter()
+        .filter(|p| !is_system_or_guest_profile(p))
+        .collect();
+    if non_system.is_empty() {
+        return false;
+    }
+    let active: Vec<&PathBuf> = non_system
+        .iter()
+        .copied()
+        .filter(|p| is_active_profile_prefs(fs, p))
+        .collect();
+    if active.is_empty() {
         return false;
     }
     let mut matched = 0usize;
-    for path in prefs_files {
+    for path in &active {
         match read_browser_proxy_pref(fs, path) {
             Ok(Some(raw)) => {
                 if extract_pac_url_from_proxy_json(&raw)
@@ -42,7 +87,7 @@ fn all_prefs_match_pac(fs: &dyn Fs, prefs_files: &[PathBuf], expected_pac_url: &
             Ok(None) | Err(_) => return false,
         }
     }
-    matched == prefs_files.len()
+    matched == active.len()
 }
 
 /// Returns `true` when WinINet's `AutoConfigURL` registry value points to `pac_url`.
@@ -90,6 +135,20 @@ pub fn detect_browser_pac_status_with(
     store: &dyn PolicyStore,
     platform: &dyn Platform,
 ) -> BrowserPacStatus {
+    detect_browser_pac_status_with_confirmed(ctx, os, probe, pac_url, store, platform, false)
+}
+
+/// Inspects whether browsers are actively enforcing `pac_url`, optionally incorporating live
+/// confirmed browser traffic from `CoverageTracker` alongside macOS managed `PolicyStore` rules.
+pub fn detect_browser_pac_status_with_confirmed(
+    ctx: Option<&FileCtx>,
+    os: Os,
+    probe: &dyn SystemProbe,
+    pac_url: Option<&str>,
+    store: &dyn PolicyStore,
+    platform: &dyn Platform,
+    browser_traffic_confirmed: bool,
+) -> BrowserPacStatus {
     let Some(expected) = clean_pac_url(pac_url) else {
         return BrowserPacStatus::default();
     };
@@ -109,10 +168,12 @@ pub fn detect_browser_pac_status_with(
     for browser in &CHROMIUM_BROWSERS {
         let prefs_files = browser_prefs_files_in(browser, ctx, os);
         let all_prefs_ok = all_prefs_match_pac(&*ctx.fs, &prefs_files, expected);
+        let policy_active =
+            browser_traffic_confirmed && is_pac_policy_active_in(store, &[browser.id], expected);
         let info = running_map.get(browser.id).copied().unwrap_or_default();
 
         if info.running {
-            if info.has_pac_flag || all_prefs_ok {
+            if info.has_pac_flag || all_prefs_ok || policy_active {
                 status
                     .browsers_pac_active
                     .push(browser.display_name.to_string());
@@ -121,7 +182,7 @@ pub fn detect_browser_pac_status_with(
                     .browsers_needing_restart
                     .push(browser.display_name.to_string());
             }
-        } else if all_prefs_ok {
+        } else if all_prefs_ok || policy_active {
             status
                 .browsers_pac_active
                 .push(browser.display_name.to_string());

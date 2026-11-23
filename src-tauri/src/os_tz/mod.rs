@@ -25,11 +25,12 @@ use std::sync::{Mutex, OnceLock};
 pub use baseline::{baseline_path, read_baseline, remove_baseline, write_baseline_atomic};
 pub use mapping::{
     allowlisted_windows_tz_id, canonicalize_iana_tz, iana_to_windows_tz, validate_iana_tz,
-    windows_to_iana_tz,
+    windows_to_iana_tz, zones_equivalent,
 };
 pub use sync::{
-    get_os_timezone_sync_status, get_os_timezone_sync_status_with,
-    get_os_timezone_sync_status_with_keep, recover_baseline_on_start,
+    get_os_timezone_sync_status, get_os_timezone_sync_status_for_target,
+    get_os_timezone_sync_status_with, get_os_timezone_sync_status_with_keep,
+    get_os_timezone_sync_status_with_keep_and_target, recover_baseline_on_start,
     recover_baseline_on_start_with, recover_baseline_on_start_with_keep,
     restore_if_synced_on_disable, restore_if_synced_on_disable_with,
     restore_if_synced_on_disable_with_keep, restore_on_exit_once, restore_on_exit_once_with_keep,
@@ -114,6 +115,10 @@ pub struct OsTzSyncStatus {
     pub original_os_tz: Option<String>,
     pub synced_target_tz: Option<String>,
     pub auto_restore_pending: bool,
+    #[serde(default)]
+    pub already_matches_target: bool,
+    #[serde(default)]
+    pub target_tz: Option<String>,
 }
 
 /// Platform abstraction for reading/setting the OS system timezone without running real OS

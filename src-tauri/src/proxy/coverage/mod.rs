@@ -69,24 +69,44 @@ impl CoverageTracker {
         let gateway = self.gateway_addr();
         let cli_mode = self.cli_mode();
 
+        let stats_map = self.stats.lock().map(|l| l.clone()).unwrap_or_default();
+        let browser_confirmed = stats_map.iter().any(|(id, t)| {
+            (id == "browsers" || t.category == "browser")
+                && t.ai_requests > 0
+                && now.saturating_sub(t.last_seen_ms) < CONFIRM_TTL_MS
+        });
+
         let facts = {
             let mut guard = self.facts.lock().unwrap_or_else(|e| e.into_inner());
             let fresh = match &*guard {
-                Some((at, f)) => {
-                    !force && now.saturating_sub(*at) < PROD_FACTS_TTL_MS && f.gateway == gateway
+                Some((at, confirmed, f)) => {
+                    !force
+                        && *confirmed == browser_confirmed
+                        && now.saturating_sub(*at) < PROD_FACTS_TTL_MS
+                        && f.gateway == gateway
                 }
                 None => false,
             };
             if !fresh {
                 *guard = Some((
                     now,
-                    compute_config_facts(env, gateway, cli_mode, self.os, &*self.probe),
+                    browser_confirmed,
+                    compute_config_facts(
+                        env,
+                        gateway,
+                        cli_mode,
+                        self.os,
+                        &*self.probe,
+                        browser_confirmed,
+                    ),
                 ));
             }
-            guard.as_ref().map(|(_, f)| f.clone()).unwrap_or_default()
+            guard
+                .as_ref()
+                .map(|(_, _, f)| f.clone())
+                .unwrap_or_default()
         };
 
-        let stats_map = self.stats.lock().map(|l| l.clone()).unwrap_or_default();
         let mut apps = Vec::new();
 
         // The agent of Antigravity 2.x talks to the gateway under its own process name. It is

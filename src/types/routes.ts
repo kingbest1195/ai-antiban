@@ -34,6 +34,8 @@ export interface RouteView {
   country?: string | null;
   exit_ip?: string | null;
   expires_at?: number | null;
+  has_sub_url?: boolean;
+  grace_extended?: boolean;
   enabled: boolean;
   added_at: number;
   entries: EntryView[];
@@ -67,6 +69,7 @@ export interface RouteTestResult {
   latency_ms?: number | null;
   exit_ip_matches?: boolean | null;
   error?: string | null;
+  grace_extended?: boolean;
 }
 
 export interface RouteUnavailablePayload {

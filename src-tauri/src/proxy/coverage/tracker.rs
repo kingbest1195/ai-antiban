@@ -25,7 +25,7 @@ pub struct CoverageTracker {
     pub(super) stats: Mutex<HashMap<String, AppTrafficStats>>,
     lookups: Mutex<LookupState>,
     gateway: Mutex<Option<SocketAddr>>,
-    pub(super) facts: Mutex<Option<(u64, ConfigFacts)>>,
+    pub(super) facts: Mutex<Option<(u64, bool, ConfigFacts)>>,
     /// The CLI mode the facts are computed for (see [`CoverageSnapshot::cli_mode`]).
     cli_mode: Mutex<CliMode>,
     /// Is Antigravity running: `(time of the answer, answer)`, see [`PROCESS_CHECK_TTL_MS`].

@@ -39,6 +39,8 @@ export interface CoverageSectionProps {
   /** Явные «включить» и «выключить» защиты; без них кнопка защиты в карточке не показывается. */
   protection?: ProtectionActions;
   onToast?: ShowToast;
+  /** Синхронизация обновлённого снимка покрытия обратно в AppShell / HomeHub (`gw.setCoverageSnapshot`). */
+  onSnapshotChange?: (snapshot: CoverageSnapshot) => void;
   /** Показать сворачиваемую расшифровку статусов под заголовком. */
   legend?: boolean;
 }
@@ -50,9 +52,13 @@ export function CoverageSection({
   pending,
   protection,
   onToast,
+  onSnapshotChange,
   legend = true,
 }: CoverageSectionProps) {
-  const { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup, applySnapshot } = useCoverage(initialSnapshot);
+  const { snapshot, failed, checking, waiting, now, refresh, recheck, confirmSetup, applySnapshot } = useCoverage(
+    initialSnapshot,
+    onSnapshotChange,
+  );
   const { copiedId, copy: copyText } = useCopy(onToast);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<{ kind: ProtectionKind; action: "enable" | "disable" } | null>(null);

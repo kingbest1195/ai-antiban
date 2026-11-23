@@ -146,6 +146,10 @@ pub struct RouteView {
     pub country: Option<String>,
     pub exit_ip: Option<String>,
     pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub has_sub_url: bool,
+    #[serde(default)]
+    pub grace_extended: bool,
     pub enabled: bool,
     pub added_at: u64,
     pub entries: Vec<EntryView>,
@@ -242,6 +246,8 @@ pub fn route_view(
         country: route.country.clone(),
         exit_ip: route.exit_ip.clone(),
         expires_at: route.expires_at,
+        has_sub_url: route.sub_url.is_some(),
+        grace_extended: route.grace_extended,
         enabled: route.enabled,
         added_at: route.added_at,
         entries: route
