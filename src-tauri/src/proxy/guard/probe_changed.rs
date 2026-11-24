@@ -12,7 +12,7 @@ use crate::proxy::hold_queue::{
 
 use super::policy::{
     all_excepted, all_pinned_or_excepted_for, all_unrouted_session_or_excepted,
-    is_blocked_geo_code, network_change, now_unix_ms,
+    any_blocked_pinned_or_excepted_for, is_blocked_geo_code, network_change, now_unix_ms,
 };
 use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, NetworkGuard, PauseMode, Pending};
 
@@ -259,11 +259,8 @@ impl NetworkGuard {
         if self.pause_mode() == PauseMode::UntilNetworkChange && inner.pending_pause_ip_bind {
             if let Some(ref new_ip) = probed {
                 let unrouted = st.enabled_unrouted_providers();
-                let matches_pin = !unrouted.is_empty()
-                    && unrouted.iter().all(|p| {
-                        st.pinned_ip_for_provider(p, false)
-                            .is_some_and(|pin| pin.trim() == new_ip.trim())
-                    });
+                let matches_pin = all_pinned_or_excepted_for(&st, &unrouted, new_ip)
+                    || any_blocked_pinned_or_excepted_for(&st, &unrouted, new_ip);
                 if !matches_pin {
                     inner.last_probe = Some(Instant::now());
                     inner.observed_ip = Some(new_ip.clone());
@@ -351,8 +348,7 @@ impl NetworkGuard {
                     self.spawn_verify_restored_baseline(&env, new_ip, cur_epoch);
                 } else {
                     drop(inner);
-                    self.verify_and_restore_baseline(&env, &new_ip, was_blocked)
-                        .await;
+                    Box::pin(self.verify_and_restore_baseline(&env, &new_ip, was_blocked)).await;
                 }
                 return;
             }
@@ -439,7 +435,12 @@ impl NetworkGuard {
                 )
             }
             None => {
-                if inner.handled_ip.as_deref() == Some(new_ip.as_str()) && !needs_reaudit {
+                let has_blocked_match =
+                    any_blocked_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
+                if inner.handled_ip.as_deref() == Some(new_ip.as_str())
+                    && !needs_reaudit
+                    && !has_blocked_match
+                {
                     self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
                     return;
                 }

@@ -5,13 +5,11 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 
 use crate::proxy::hold_queue::HoldResolution;
-use crate::state::IpHistoryEntry;
 
 use super::audit_summary::summarize_for_state;
 use super::policy::{
-    all_pinned_or_excepted_for, is_pinned_transient_unknown_geo, is_report_pinned_travel_only,
-    network_change, report_allowed_for_state, report_no_critical_and_geo_ok,
-    resolve_gate_reason_with_cooldown,
+    all_pinned_or_excepted_for, any_pinned_or_excepted_for, is_provider_pinned_or_excepted,
+    network_change, report_allowed_for_state, resolve_gate_reason_with_cooldown,
 };
 use super::types::{AuditResults, Baseline, Env, Inner, NetworkGuard, PauseMode};
 
@@ -42,15 +40,20 @@ impl NetworkGuard {
             return;
         }
         let all_pinned = all_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
+        let any_pinned = any_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
 
         let trusted_baseline_ip = old_baseline.filter(|b| b.trusted).map(|b| b.ip.as_str());
         let Some(mut summary) =
             summarize_for_state(results, &enabled_unrouted, &st, trusted_baseline_ip)
         else {
-            let newly_failed: Vec<&'static str> = enabled_unrouted
+            let unpinned_newly_failed: Vec<&'static str> = enabled_unrouted
                 .iter()
                 .copied()
-                .filter(|p| !was_blocked_set.contains(*p) && !st.blocked_providers.contains(*p))
+                .filter(|p| {
+                    !was_blocked_set.contains(*p)
+                        && !st.blocked_providers.contains(*p)
+                        && !is_provider_pinned_or_excepted(&st, p, &new_ip)
+                })
                 .collect();
             let already_blocked_vec: Vec<&'static str> = enabled_unrouted
                 .iter()
@@ -76,15 +79,20 @@ impl NetworkGuard {
                     let _ = env.state.block_provider(p).await;
                 }
             }
-            if newly_failed.is_empty() {
+            if unpinned_newly_failed.is_empty() {
                 if let Some(p) = inner.invalidate_alert() {
                     env.hold_queue.remove(&p.id).await;
                 }
-                inner.handled_ip = Some(new_ip.clone());
-                inner.needs_reaudit = false;
-                if !self.is_manual_killswitch() {
-                    self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
-                    inner.paused_ip = Some(new_ip);
+                if any_pinned {
+                    inner.handled_ip = None;
+                    inner.needs_reaudit = true;
+                } else {
+                    inner.handled_ip = Some(new_ip.clone());
+                    inner.needs_reaudit = false;
+                    if !self.is_manual_killswitch() {
+                        self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
+                        inner.paused_ip = Some(new_ip);
+                    }
                 }
                 let st_after = env.state.get_data().await;
                 self.sync_gates_with_state_and_pending(&st_after, None);
@@ -99,7 +107,7 @@ impl NetworkGuard {
                         new_ip,
                         alert_id,
                         &already_blocked_vec,
-                        &newly_failed,
+                        &unpinned_newly_failed,
                         &[],
                         t0,
                     )
@@ -111,7 +119,7 @@ impl NetworkGuard {
                         old_baseline,
                         new_ip,
                         &already_blocked_vec,
-                        &newly_failed,
+                        &unpinned_newly_failed,
                         &[],
                         existing_id,
                         t0,
@@ -126,19 +134,24 @@ impl NetworkGuard {
                     "Не удалось проверить новую сеть после смены IP — запросы временно остановлены"
                         .to_string(),
                 ));
-                for p in &newly_failed {
+                for p in &unpinned_newly_failed {
                     let _ = env.state.block_provider(p).await;
                 }
                 let st_after = env.state.get_data().await;
                 let all_blocked = enabled_unrouted
                     .iter()
                     .all(|p| st_after.blocked_providers.contains(*p));
-                if all_blocked && !self.is_manual_killswitch() {
-                    self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
-                    inner.paused_ip = Some(new_ip.clone());
+                if any_pinned {
+                    inner.handled_ip = None;
+                    inner.needs_reaudit = true;
+                } else {
+                    if all_blocked && !self.is_manual_killswitch() {
+                        self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
+                        inner.paused_ip = Some(new_ip.clone());
+                    }
+                    inner.handled_ip = Some(new_ip);
+                    inner.needs_reaudit = false;
                 }
-                inner.handled_ip = Some(new_ip);
-                inner.needs_reaudit = false;
                 self.sync_gates_with_state_and_pending(&st_after, None);
                 self.hide_popup(env);
                 env.io.tray_status("red", None);
@@ -189,27 +202,11 @@ impl NetworkGuard {
         }
 
         // Record history only for non-critical, geo-allowed healthy providers (or pinned returns).
-        let now = crate::auditor::network::current_timestamp();
-        for p in &summary.healthy_providers {
-            if let Some(r) = summary.reports.get(p)
-                && (report_no_critical_and_geo_ok(r) || is_report_pinned_travel_only(r, &st))
-            {
-                let entry = IpHistoryEntry::new(
-                    r.telemetry.ip.clone(),
-                    r.telemetry.country_code.clone(),
-                    r.telemetry.asn,
-                    now,
-                );
-                let _ = env
-                    .state
-                    .record_ip_history_for_selection(
-                        p,
-                        &crate::routing::RouteSelection::Direct,
-                        entry,
-                    )
-                    .await;
-            }
-        }
+        summary.record_healthy_history(&env.state, &st).await;
+
+        let has_transient_blocked = already_blocked
+            .iter()
+            .any(|p| summary.is_transient_pinned_error(&st, p, &new_ip));
 
         if newly_affected.is_empty() {
             // If previously-blocked providers switched onto a clean new IP under AskPopup (e.g.
@@ -278,8 +275,16 @@ impl NetworkGuard {
                     let _ = env.state.block_provider(p).await;
                 }
             }
+            if !summary.healthy_providers.is_empty() && !self.is_manual_killswitch() {
+                self.clear_until_network_change_locked(inner);
+                inner.baseline = Some(Baseline {
+                    ip: new_ip.clone(),
+                    country: Some(summary.tel.country_code.clone()),
+                    trusted: true,
+                });
+            }
             let st_after = env.state.get_data().await;
-            if all_pinned && !summary.failed_providers.is_empty() {
+            if (all_pinned && !summary.failed_providers.is_empty()) || has_transient_blocked {
                 inner.handled_ip = None;
                 inner.needs_reaudit = true;
             } else {
@@ -297,29 +302,28 @@ impl NetworkGuard {
             return;
         }
 
-        // Transient audit errors or unknown geo on a saved pinned IP must retry silently without
-        // blocking, alerting, or locking `PauseMode` onto the pinned IP.
-        let is_transient_pinned = |p: &str| -> bool {
-            let is_pinned = st
-                .pinned_ip_for_provider(p, false)
-                .is_some_and(|pin| pin.trim() == new_ip.trim());
-            if !is_pinned {
-                return false;
-            }
-            summary.failed_providers.contains(&p)
-                || summary
-                    .reports
-                    .get(p)
-                    .is_some_and(|r| is_pinned_transient_unknown_geo(r, &st, false))
-        };
-        let has_transient_pinned = newly_affected.iter().any(|p| is_transient_pinned(p));
+        let has_transient_pinned = has_transient_blocked
+            || newly_affected
+                .iter()
+                .any(|p| summary.is_transient_pinned_error(&st, p, &new_ip));
         let newly_affected: Vec<&'static str> = newly_affected
             .into_iter()
-            .filter(|p| !is_transient_pinned(p))
+            .filter(|p| !summary.is_transient_pinned_error(&st, p, &new_ip))
             .collect();
         if newly_affected.is_empty() {
             if let Some(p) = inner.invalidate_alert() {
                 env.hold_queue.remove(&p.id).await;
+            }
+            if !summary.healthy_providers.is_empty() && !self.is_manual_killswitch() {
+                self.clear_until_network_change_locked(inner);
+                inner.baseline = Some(Baseline {
+                    ip: new_ip,
+                    country: Some(summary.tel.country_code.clone()),
+                    trusted: true,
+                });
+                if already_blocked.is_empty() {
+                    self.set_gate_reason(None);
+                }
             }
             inner.handled_ip = None;
             inner.needs_reaudit = true;

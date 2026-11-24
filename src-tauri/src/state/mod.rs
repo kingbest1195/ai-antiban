@@ -21,6 +21,7 @@ use crate::routing::RouteHealthRegistry;
 #[cfg(test)]
 use crate::routing::{DIRECT_ROUTE_ID, RouteSelection, select_route, select_route_id};
 
+pub(crate) use exceptions::normalize_ip_str;
 pub use persistence::init_app_state;
 pub use pinning::{ip_history_key_for_selection, ip_history_scope_key};
 pub use schema::{

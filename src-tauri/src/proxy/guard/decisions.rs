@@ -60,32 +60,42 @@ impl NetworkGuard {
     /// Opens the guard gate (when not under a manual kill-switch) after a single provider was
     /// verified and unblocked, without touching remaining entries in `blocked_providers`.
     pub async fn ensure_open_for_verified(self: &Arc<Self>, tel: &NetworkTelemetry) {
-        let Some(env) = self.env.get() else {
-            return;
-        };
         if self.is_manual_killswitch() {
             return;
         }
         let mut inner = self.inner.lock().await;
-        if let Some(p) = inner.invalidate_alert() {
-            env.hold_queue.remove(&p.id).await;
-        }
         inner.handled_ip = None;
         inner.needs_reaudit = false;
         self.clear_until_network_change_locked(&mut inner);
         self.set_gate_reason(None);
+        inner.observed_ip = Some(tel.ip.clone());
         inner.baseline = Some(Baseline {
             ip: tel.ip.clone(),
             country: Some(tel.country_code.clone()),
             trusted: true,
         });
+        let Some(env) = self.env.get() else {
+            if let Some(p) = inner.invalidate_alert() {
+                let _ = p;
+            }
+            self.set_gate(Gate::Open);
+            return;
+        };
+        if let Some(p) = inner.invalidate_alert() {
+            env.hold_queue.remove(&p.id).await;
+        }
         let st = env.state.get_data().await;
         self.sync_gates_with_state_and_pending(&st, None);
         if !self.any_provider_gate_closed() && st.blocked_providers.is_empty() {
             self.restore_epoch.fetch_add(1, Ordering::SeqCst);
             env.hold_queue.cancel_all_superseded().await;
+        } else if !st.blocked_providers.is_empty() {
+            self.force_reaudit.store(true, Ordering::SeqCst);
+            self.wake();
         }
         self.hide_popup(env);
+        env.emit("network://changed", &());
+        self.spawn_refresh_tray(env);
     }
 
     /// The previous (trusted) or fully healthy/excepted network is active: resume traffic.

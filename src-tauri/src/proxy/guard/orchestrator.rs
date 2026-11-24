@@ -18,7 +18,8 @@ use crate::state::KNOWN_PROVIDERS;
 use super::audit_summary::audit_enabled;
 use super::fingerprint::compute_local_route_fingerprint;
 use super::policy::{
-    all_excepted, all_pinned_or_excepted_for, is_blocked_geo_code, network_change, now_unix_ms,
+    all_excepted, all_pinned_or_excepted_for, any_blocked_pinned_or_excepted_for,
+    is_blocked_geo_code, network_change, now_unix_ms,
 };
 use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, GuardCtx, Inner, NetworkGuard, Pending};
 
@@ -148,15 +149,21 @@ impl NetworkGuard {
         }
 
         let old = inner.baseline.clone();
+        let all_pinned = all_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
+        let has_blocked_pin_match =
+            any_blocked_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
         if self.pause_mode() == super::types::PauseMode::UntilNetworkChange
             && !inner.pending_pause_ip_bind
-            && inner.paused_ip.as_deref() != Some(new_ip.as_str())
+            && (inner.paused_ip.as_deref() != Some(new_ip.as_str())
+                || all_pinned
+                || has_blocked_pin_match)
         {
             self.clear_until_network_change_locked(inner);
         }
         // Never abort/restart an in-flight audit or already-handled check for the exact same IP
-        // unless `needs_reaudit` was explicitly armed (e.g. route unbind / exception removed).
+        // unless `needs_reaudit` was explicitly armed or a blocked provider matches pin/exception.
         if !inner.needs_reaudit
+            && !has_blocked_pin_match
             && (inner
                 .pending
                 .as_ref()
@@ -184,7 +191,6 @@ impl NetworkGuard {
 
         // Fast-path 2: return-to-pinned IP for all enabled unrouted providers whose geo is already
         // known non-sanctioned -> recover immediately without flashing Gate::Pending or popup.
-        let all_pinned = all_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
         if all_pinned {
             self.clear_until_network_change_locked(inner);
             let cached_cc = env.auditor.resolver.cached_direct_country(&new_ip).await;

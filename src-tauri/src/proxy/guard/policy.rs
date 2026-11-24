@@ -6,6 +6,34 @@ use super::types::Baseline;
 
 pub(crate) use crate::core::sanctions::is_blocked_geo_code;
 
+pub(super) fn ips_equal(a: &str, b: &str) -> bool {
+    let na = crate::state::normalize_ip_str(a);
+    let nb = crate::state::normalize_ip_str(b);
+    !na.is_empty() && na == nb
+}
+
+fn is_travel_anomaly_code(code: &str) -> bool {
+    matches!(
+        code,
+        "IMPOSSIBLE_TRAVEL_CRITICAL"
+            | "IMPOSSIBLE_TRAVEL_WARNING"
+            | "TRAVEL_ASN_JUMP_SAME_COUNTRY"
+            | "AI_STUDIO_IP_UNSTABLE"
+    )
+}
+
+fn has_non_travel_critical_checks(report: &RiskReport) -> bool {
+    report
+        .checks
+        .iter()
+        .any(|c| c.status.is_critical() && !is_travel_anomaly_code(&c.code))
+        || (report.pinning_result.status.is_critical()
+            && !is_travel_anomaly_code(&report.pinning_result.code))
+        || report.dnsbl_result.status.is_critical()
+        || report.asn_result.status.is_critical()
+        || report.ipv6_result.status.is_critical()
+}
+
 /// Returns `true` when `exit_ip` matches the saved/routed pin for `provider_id`.
 pub(crate) fn is_ip_pinned_for_state(
     st: &crate::state::AppStateData,
@@ -18,14 +46,13 @@ pub(crate) fn is_ip_pinned_for_state(
     );
     if is_routed {
         if let Some(pin) = st.pinned_ip_for_provider(provider_id.as_str(), true) {
-            return pin == exit_ip.trim();
+            return ips_equal(pin, exit_ip);
         }
         // A bound Zastava key already locks this provider to the key endpoint IP.
         return true;
     }
     st.pinned_ip_for_provider(provider_id.as_str(), false)
-        .map(|p| p == exit_ip.trim())
-        .unwrap_or(false)
+        .is_some_and(|p| ips_equal(p, exit_ip))
 }
 
 pub(super) fn severity(report: &RiskReport) -> u8 {
@@ -77,10 +104,10 @@ pub(crate) fn is_report_pinned_travel_only(
     let routed = crate::routing::select_route_id(st, pid).is_some();
     let is_pinned = if routed {
         st.pinned_ip_for_provider(pid, true)
-            .is_none_or(|pin| pin.trim() == report.telemetry.ip.trim())
+            .is_none_or(|pin| ips_equal(pin, &report.telemetry.ip))
     } else {
         st.pinned_ip_for_provider(pid, false)
-            .is_some_and(|pin| pin.trim() == report.telemetry.ip.trim())
+            .is_some_and(|pin| ips_equal(pin, &report.telemetry.ip))
     };
     if !is_pinned {
         return false;
@@ -91,25 +118,7 @@ pub(crate) fn is_report_pinned_travel_only(
     {
         return false;
     }
-    let is_travel_anomaly = |code: &str| {
-        matches!(
-            code,
-            "IMPOSSIBLE_TRAVEL_CRITICAL"
-                | "IMPOSSIBLE_TRAVEL_WARNING"
-                | "TRAVEL_ASN_JUMP_SAME_COUNTRY"
-                | "AI_STUDIO_IP_UNSTABLE"
-        )
-    };
-    let has_non_travel_critical = report
-        .checks
-        .iter()
-        .any(|c| c.status.is_critical() && !is_travel_anomaly(&c.code))
-        || (report.pinning_result.status.is_critical()
-            && !is_travel_anomaly(&report.pinning_result.code))
-        || report.dnsbl_result.status.is_critical()
-        || report.asn_result.status.is_critical()
-        || report.ipv6_result.status.is_critical();
-    !has_non_travel_critical
+    !has_non_travel_critical_checks(report)
 }
 
 /// True when `report` matches the provider's pinned IP and the ONLY failure preventing admission
@@ -123,21 +132,12 @@ pub(super) fn is_pinned_transient_unknown_geo(
     let pid = report.provider.as_str();
     let matches_pin = st
         .pinned_ip_for_provider(pid, routed)
-        .is_some_and(|pin| pin.trim() == report.telemetry.ip.trim());
-    let has_non_travel_critical = report
-        .checks
-        .iter()
-        .any(|c| c.status.is_critical() && c.code != "IMPOSSIBLE_TRAVEL_CRITICAL")
-        || (report.pinning_result.status.is_critical()
-            && report.pinning_result.code != "IMPOSSIBLE_TRAVEL_CRITICAL")
-        || report.dnsbl_result.status.is_critical()
-        || report.asn_result.status.is_critical()
-        || report.ipv6_result.status.is_critical();
+        .is_some_and(|pin| ips_equal(pin, &report.telemetry.ip));
     matches_pin
         && report.geo_result.status.is_unknown()
         && !report.geo_result.status.is_critical()
         && !is_blocked_geo_code(&report.telemetry.country_code)
-        && !has_non_travel_critical
+        && !has_non_travel_critical_checks(report)
 }
 
 /// Downgrades a `Red` report for tray display when traffic is actually flowing (`!has_blocked`):
@@ -186,17 +186,45 @@ pub(super) fn all_excepted(
             .all(|p| st.is_ip_trusted_for_provider(p, ip))
 }
 
+pub(super) fn is_provider_pinned_or_excepted(
+    st: &crate::state::AppStateData,
+    provider: &str,
+    ip: &str,
+) -> bool {
+    st.pinned_ip_for_provider(provider, false)
+        .is_some_and(|pin| ips_equal(pin, ip))
+        || st.is_ip_trusted_for_provider(provider, ip)
+}
+
 pub(super) fn all_pinned_or_excepted_for(
     st: &crate::state::AppStateData,
     unrouted: &[&'static str],
     ip: &str,
 ) -> bool {
     !unrouted.is_empty()
-        && unrouted.iter().all(|p| {
-            st.pinned_ip_for_provider(p, false)
-                .is_some_and(|pin| pin.trim() == ip.trim())
-                || st.is_ip_trusted_for_provider(p, ip)
-        })
+        && unrouted
+            .iter()
+            .all(|p| is_provider_pinned_or_excepted(st, p, ip))
+}
+
+pub(super) fn any_pinned_or_excepted_for(
+    st: &crate::state::AppStateData,
+    unrouted: &[&'static str],
+    ip: &str,
+) -> bool {
+    unrouted
+        .iter()
+        .any(|p| is_provider_pinned_or_excepted(st, p, ip))
+}
+
+pub(super) fn any_blocked_pinned_or_excepted_for(
+    st: &crate::state::AppStateData,
+    unrouted: &[&'static str],
+    ip: &str,
+) -> bool {
+    unrouted
+        .iter()
+        .any(|p| st.blocked_providers.contains(*p) && is_provider_pinned_or_excepted(st, p, ip))
 }
 
 pub(super) fn all_unrouted_session_or_excepted(
@@ -272,10 +300,7 @@ pub(crate) fn report_allowed_for_state(
     let geo_ok = !is_blocked_geo_code(&report.telemetry.country_code)
         && !report.geo_result.status.is_critical()
         && !report.geo_result.status.is_unknown();
-    let has_non_travel_critical = report
-        .checks
-        .iter()
-        .any(|c| c.status.is_critical() && c.code != "IMPOSSIBLE_TRAVEL_CRITICAL");
+    let has_non_travel_critical = has_non_travel_critical_checks(report);
     if has_same_country_asn_jump(report) {
         let pinned = is_ip_pinned_for_state(st, report.provider, &report.telemetry.ip);
         return pinned && geo_ok && !has_non_travel_critical;
@@ -283,7 +308,7 @@ pub(crate) fn report_allowed_for_state(
     if report_no_critical_and_geo_ok(report) {
         if st.strict_pinning_enabled
             && let Some(pin) = st.pinned_ip_for_provider(pid, routed)
-            && pin.trim() != report.telemetry.ip.trim()
+            && !ips_equal(pin, &report.telemetry.ip)
         {
             return false;
         }
@@ -291,7 +316,7 @@ pub(crate) fn report_allowed_for_state(
     }
     let matches_pin = st
         .pinned_ip_for_provider(pid, routed)
-        .is_some_and(|pin| pin.trim() == report.telemetry.ip.trim());
+        .is_some_and(|pin| ips_equal(pin, &report.telemetry.ip));
     matches_pin && geo_ok && !has_non_travel_critical
 }
 
@@ -317,11 +342,11 @@ pub(crate) fn report_allowed_on_network_switch(
     }
     if st
         .pinned_ip_for_provider(pid, false)
-        .is_some_and(|pin| pin.trim() == ip)
+        .is_some_and(|pin| ips_equal(pin, ip))
     {
         return true;
     }
-    if trusted_baseline_ip.is_some_and(|b| b.trim() == ip) {
+    if trusted_baseline_ip.is_some_and(|b| ips_equal(b, ip)) {
         return true;
     }
     st.interception_behavior == crate::state::InterceptionBehavior::AutoAllowTrusted

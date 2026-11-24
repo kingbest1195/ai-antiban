@@ -3,6 +3,7 @@ use tauri::Emitter;
 use tokio::net::TcpStream;
 
 use crate::auditor::geo_matrix::ProviderId;
+use crate::proxy::guard::{Gate, PauseMode};
 use crate::proxy::upstream::connect_via_route_with_chained;
 use crate::routing::{Route, RouteDownReason, RouteSelection};
 
@@ -15,33 +16,92 @@ use super::{
 };
 
 impl ProxyServer {
-    pub(super) async fn try_silent_recovery_on_startup(
-        &self,
+    pub(super) fn try_silent_recovery_on_startup<'a>(
+        &'a self,
         provider: ProviderId,
-        selection: &RouteSelection,
+        selection: &'a RouteSelection,
         routed: bool,
-    ) -> bool {
-        if self.guard.is_manual_killswitch()
-            || self.guard.pause_mode() != crate::proxy::guard::PauseMode::None
-            || self.guard.has_baseline().await
-            || !self.state.is_provider_blocked(provider.as_str()).await
-        {
-            return false;
-        }
-        let Ok(report) = self
-            .auditor
-            .evaluate_all_with(provider, &self.state, selection, false)
-            .await
-        else {
-            return false;
-        };
-        let st = self.state.get_data().await;
-        if crate::proxy::guard::report_allowed_for_state(&report, &st, routed) {
-            let _ = self.state.unblock_provider(provider.as_str()).await;
-            self.guard.ensure_open_for_verified(&report.telemetry).await;
-            return true;
-        }
-        false
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.guard.is_manual_killswitch() {
+                return false;
+            }
+            let is_blocked = self.state.is_provider_blocked(provider.as_str()).await
+                || self.guard.gate_for(provider) == Gate::Blocked;
+            if !is_blocked {
+                return false;
+            }
+
+            let is_cold_startup =
+                !self.guard.has_baseline().await && self.guard.pause_mode() == PauseMode::None;
+            if is_cold_startup && !self.state.is_provider_blocked(provider.as_str()).await {
+                return false;
+            }
+            let st_pre = self.state.get_data().await;
+            if !is_cold_startup && !routed {
+                let has_pin_or_exception = st_pre
+                    .pinned_ip_for_provider(provider.as_str(), false)
+                    .is_some()
+                    || st_pre.has_trusted_exceptions_for(provider.as_str());
+                if !has_pin_or_exception {
+                    return false;
+                }
+                if self.guard.is_env_installed() {
+                    let Some(live_ip) = self.guard.probe_current_ip().await else {
+                        return false;
+                    };
+                    let matches_pin_or_exception = st_pre
+                        .pinned_ip_for_provider(provider.as_str(), false)
+                        .is_some_and(|p| {
+                            crate::state::normalize_ip_str(p)
+                                == crate::state::normalize_ip_str(&live_ip)
+                        })
+                        || st_pre.is_ip_trusted_for_provider(provider.as_str(), &live_ip);
+                    if !matches_pin_or_exception {
+                        return false;
+                    }
+                    if self
+                        .auditor
+                        .resolver
+                        .cached_direct_country(&live_ip)
+                        .await
+                        .is_none()
+                    {
+                        self.auditor.resolver.invalidate_direct_cache().await;
+                    }
+                }
+            }
+
+            let Ok(report) =
+                Box::pin(
+                    self.auditor
+                        .evaluate_all_with(provider, &self.state, selection, false),
+                )
+                .await
+            else {
+                return false;
+            };
+            let st = self.state.get_data().await;
+            let allowed = if is_cold_startup {
+                crate::proxy::guard::report_allowed_for_state(&report, &st, routed)
+            } else {
+                let pinned_or_excepted = st
+                    .pinned_ip_for_provider(provider.as_str(), routed)
+                    .is_some_and(|p| {
+                        crate::state::normalize_ip_str(p)
+                            == crate::state::normalize_ip_str(&report.telemetry.ip)
+                    })
+                    || st.is_ip_trusted_for_provider(provider.as_str(), &report.telemetry.ip);
+                pinned_or_excepted
+                    && crate::proxy::guard::report_allowed_for_state(&report, &st, routed)
+            };
+            if allowed {
+                let _ = self.state.unblock_provider(provider.as_str()).await;
+                self.guard.ensure_open_for_verified(&report.telemetry).await;
+                return true;
+            }
+            false
+        })
     }
 
     /// Fail-closed refusal for a provider whose route cannot carry traffic: records a

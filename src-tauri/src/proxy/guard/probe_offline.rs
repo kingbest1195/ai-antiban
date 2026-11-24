@@ -333,6 +333,22 @@ impl NetworkGuard {
         self.wake();
     }
 
+    /// Probes the current egress IP using the installed guard probe (`None` when offline or unstarted).
+    pub async fn probe_current_ip(&self) -> Option<String> {
+        let env = self.env.get()?;
+        self.probe(env).await
+    }
+
+    /// True when `report` matches the provider's pinned IP and fails only due to transient `Unknown` geo.
+    pub fn is_transient_pinned_report(
+        &self,
+        report: &crate::auditor::RiskReport,
+        st: &crate::state::AppStateData,
+        routed: bool,
+    ) -> bool {
+        super::policy::is_pinned_transient_unknown_geo(report, st, routed)
+    }
+
     /// Strict Step-4 admission for `CONNECT`: rejects silent pass-through if an unrouted
     /// connection observes a new unpinned/unexcepted IP that differs from `baseline` under
     /// `AskPopup` or `AutoLockSilent`.
