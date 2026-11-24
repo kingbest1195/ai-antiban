@@ -6,14 +6,14 @@ import { allowErrorText, classifyAllowError } from "../../features/alert/alertSt
 import type { ShowToast } from "./useToasts";
 
 interface Options {
-  runFullAudit: (force?: boolean, silentError?: boolean) => Promise<void>;
+  runFullAudit?: (force?: boolean, silentError?: boolean) => Promise<void>;
   showToast: ShowToast;
   /** В браузере без Tauri после симуляции показываем окно-диалог поверх страницы. */
   onSimulateInBrowser?: () => void;
 }
 
 /** Перехват запроса к ИИ в главном окне: баннер «Снять паузу», ручное разрешение, тест перехвата. */
-export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }: Options) {
+export function useInterception({ showToast, onSimulateInBrowser }: Options) {
   const [interceptPayload, setInterceptPayload] = useState<RiskInterceptPayload | null>(null);
 
   const [allowError, setAllowError] = useState<string | null>(null);
@@ -36,13 +36,12 @@ export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }
         );
         showToast(t.intercept.allowedTitle, t.intercept.allowedText, "success");
         setInterceptPayload(null);
-        runFullAudit(false);
       } catch (err) {
         // Бэкенд отказал: баннер остаётся, запросы остановлены.
         setAllowError(allowErrorText(classifyAllowError(err)));
       }
     },
-    [interceptPayload, runFullAudit, showToast],
+    [interceptPayload, showToast],
   );
 
   const handlePauseUntilNetworkChange = useCallback(async () => {
