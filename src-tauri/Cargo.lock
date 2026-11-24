@@ -5678,6 +5678,7 @@ dependencies = [
  "chrono",
  "hickory-resolver",
  "iana-time-zone",
+ "libc",
  "rcgen",
  "reqwest 0.12.28",
  "ring",

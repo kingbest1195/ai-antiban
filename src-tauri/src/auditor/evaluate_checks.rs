@@ -4,16 +4,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::cache::{
-    CheckCache, GEO_TTL, OS_TTL, RESOLVER_UNKNOWN_TTL, UDP_TTL, WHOAMI_TTL, cached_check,
+    CheckCache, EXTERNAL_LIST_UNKNOWN_TTL, GEO_TTL, OS_TTL, RDNS_TTL, RESOLVER_UNKNOWN_TTL,
+    UDP_TTL, WHOAMI_TTL, cached_check,
 };
 use super::probes::stun;
 use super::probes::whoami::{self, ResolverView};
-use super::rules::DangerousAsns;
+use super::rules::{DangerousAsns, ProviderMatrix};
 use super::run_check::{blocking_check, run_check};
 use super::{
-    AuditEnv, AuditProgress, AuditProtectionContext, CheckResult, NetworkResolver, ProgressSink,
-    check_dns_leak_with, evaluate_dns_resolver_for_route_with_protection,
-    evaluate_locale_env_hygiene_with, evaluate_system_timezone_with_sync,
+    AuditEnv, AuditProgress, AuditProtectionContext, CheckResult, CheckStatus, NetworkResolver,
+    NetworkTelemetry, ProgressSink, ProviderId, UnknownReason, check_dns_leak_with,
+    evaluate_dns_resolver_for_route_with_protection, evaluate_locale_env_hygiene_with,
+    evaluate_provider_geo, evaluate_reverse_dns_ptr_with_dns, evaluate_system_timezone_with_sync,
 };
 
 /// Time limit of a check that only computes (no I/O of its own).
@@ -201,6 +203,80 @@ pub(super) async fn run_udp_stun_check(
         .await
     })
     .await
+}
+
+pub(super) async fn run_reverse_dns_check(
+    cache: Arc<CheckCache>,
+    tel: NetworkTelemetry,
+    dns: Arc<dyn super::seams::DnsLookup>,
+) -> CheckResult {
+    run_check("Reverse DNS", CHECK_LIMIT_IO, async move {
+        let key = format!(
+            "rdns:{}|{}|{}|{}",
+            tel.ip.trim(),
+            tel.hostname.as_deref().unwrap_or_default(),
+            tel.isp.as_deref().unwrap_or_default(),
+            tel.org.as_deref().unwrap_or_default()
+        );
+        cache
+            .rdns
+            .get_or_compute_with_unknown_ttl(
+                &key,
+                RDNS_TTL,
+                EXTERNAL_LIST_UNKNOWN_TTL,
+                |r| !r.is_unknown(),
+                async move { evaluate_reverse_dns_ptr_with_dns(&tel, &*dns).await },
+            )
+            .await
+    })
+    .await
+}
+
+pub(super) fn evaluate_gemini_exit_from_telemetry(
+    telemetry: &NetworkTelemetry,
+    matrix: &ProviderMatrix,
+) -> CheckResult {
+    let via_label = "gemini (маршрут ключа)".to_string();
+    let cc = telemetry.country_code.trim();
+    if cc.is_empty() {
+        return CheckResult::unknown(
+            "PROVIDER_EXIT_NO_DATA",
+            "Реальный выход Gemini не содержит код страны в телеметрии маршрута.",
+            UnknownReason::NoData,
+        )
+        .with_measured_via(via_label);
+    }
+    let geo = evaluate_provider_geo(matrix, ProviderId::Gemini, cc);
+    if geo.status == CheckStatus::Critical {
+        return CheckResult::critical(
+            "PROVIDER_EXIT_BLOCKED_COUNTRY",
+            format!(
+                "Реальный выход Gemini определён как {cc} ({}): {}",
+                telemetry.ip, geo.message
+            ),
+            geo.guide_ref,
+        )
+        .with_measured_via(via_label);
+    }
+    if geo.status == CheckStatus::Warning {
+        return CheckResult::warning(
+            "PROVIDER_EXIT_GEO_WARNING",
+            format!(
+                "Реальный выход Gemini ({}, {cc}): {}",
+                telemetry.ip, geo.message
+            ),
+            geo.guide_ref,
+        )
+        .with_measured_via(via_label);
+    }
+    CheckResult::ok(
+        "PROVIDER_EXIT_VERIFIED",
+        format!(
+            "Реальный выход Gemini подтвержден: {} ({cc}).",
+            telemetry.ip
+        ),
+    )
+    .with_measured_via(via_label)
 }
 
 /// When `via_zastava_key` is active and the key exit itself (`geo`, `travel`, `ipv6`, `claude_exit`)

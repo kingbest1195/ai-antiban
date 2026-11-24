@@ -1,9 +1,12 @@
 //! Entry-node HTTP client builders and cascading geo-telemetry queries.
 
-use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
+use super::cascade_models::FreeIpApiResponse;
+#[cfg(test)]
+pub(super) use super::cascade_models::parse_as_org;
+pub(super) use super::cascade_models::{IpInfoResponse, IpWhoIsResponse};
 use super::exit_probe::parse_cloudflare_trace;
 use super::resolver::NetworkResolver;
 use super::{
@@ -178,55 +181,28 @@ pub(super) async fn build_entry_client_with_root(
         .map_err(|e| format!("Failed to build audit client: {e}"))
 }
 
-// Models for ipwho.is
-#[derive(Deserialize)]
-pub(super) struct IpWhoIsResponse {
-    pub(super) ip: Option<String>,
-    pub(super) country_code: Option<String>,
-    pub(super) connection: Option<IpWhoIsConnection>,
-    pub(super) timezone: Option<IpWhoIsTimezone>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct IpWhoIsConnection {
-    pub(super) asn: Option<u32>,
-    pub(super) org: Option<String>,
-    pub(super) isp: Option<String>,
-    pub(super) domain: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct IpWhoIsTimezone {
-    pub(super) id: Option<String>,
-}
-
-// Models for ipinfo.io
-#[derive(Deserialize)]
-pub(super) struct IpInfoResponse {
-    pub(super) ip: Option<String>,
-    pub(super) hostname: Option<String>,
-    pub(super) country: Option<String>,
-    pub(super) org: Option<String>,
-    pub(super) timezone: Option<String>,
-}
-
-// Models for freeipapi.com
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FreeIpApiResponse {
-    ip_address: Option<String>,
-    country_code: Option<String>,
-    asn: Option<String>,
-    asn_organization: Option<String>,
-    time_zones: Option<Vec<String>>,
-}
+const CASCADE_STAGGER: Duration = Duration::from_millis(900);
+const CASCADE_PROBE_TIMEOUT: Duration = Duration::from_millis(4500);
 
 impl NetworkResolver {
+    fn active_chained_fp(&self) -> u64 {
+        let gw = self.gateway_port();
+        let cp = crate::sysproxy::get_chained_proxy()
+            .filter(|cp| !crate::sysproxy::is_gateway_host_port(cp, (gw > 0).then_some(gw)));
+        super::resolver::direct_chained_fingerprint(cp.as_deref())
+    }
+
     pub(crate) async fn client_for_route(&self, route: &Route) -> Option<reqwest::Client> {
+        let chained_fp = self.active_chained_fp();
+        if let Some(cached) = self.get_cached_route_client(route, chained_fp).await {
+            return Some(cached);
+        }
         let allow_local = route.allows_local_entries();
         let gateway_port = self.gateway_port();
         for entry in &route.entries {
             if let Ok(client) = build_entry_client(entry, allow_local, gateway_port).await {
+                self.set_cached_route_client(route, chained_fp, client.clone())
+                    .await;
                 return Some(client);
             }
         }
@@ -243,9 +219,14 @@ impl NetworkResolver {
         let mut errors = Vec::new();
         let allow_local = route.allows_local_entries();
         let gateway_port = self.gateway_port();
+        let chained_fp = self.active_chained_fp();
         for (i, entry) in route.entries.iter().enumerate() {
             let res = match build_entry_client(entry, allow_local, gateway_port).await {
-                Ok(client) => self.cascade_query(&client).await,
+                Ok(client) => {
+                    self.set_cached_route_client(route, chained_fp, client.clone())
+                        .await;
+                    self.cascade_query(&client).await
+                }
                 Err(e) => Err(e),
             };
             match res {
@@ -262,30 +243,72 @@ impl NetworkResolver {
     ) -> Result<NetworkTelemetry, String> {
         let mut errors = Vec::new();
         let mut no_meta_fallback: Option<NetworkTelemetry> = None;
+        let mut set: tokio::task::JoinSet<(&'static str, Result<NetworkTelemetry, String>)> =
+            tokio::task::JoinSet::new();
 
-        // 1. Primary: ipwho.is, then ipinfo.io, then freeipapi.com.
-        // If a provider returns ip/country without ASN/ISP/org metadata, keep querying rich
-        // sources instead of stopping early with empty provider metadata.
-        for (name, res) in [
-            ("ipwho.is", self.query_ipwhois(client).await),
-            ("ipinfo.io", self.query_ipinfo(client).await),
-            ("freeipapi.com", self.query_freeipapi(client).await),
-        ] {
-            match res {
-                Ok(mut t) if t.has_provider_metadata() => {
-                    if t.timezone.is_none()
-                        && let Some(tz) = no_meta_fallback.as_ref().and_then(|f| f.timezone.clone())
-                    {
-                        t.timezone = Some(tz);
+        let spawn_source = |set: &mut tokio::task::JoinSet<_>, idx: usize| {
+            let r = self.clone();
+            let c = client.clone();
+            set.spawn(async move {
+                let (name, res) = match idx {
+                    0 => (
+                        "ipwho.is",
+                        tokio::time::timeout(CASCADE_PROBE_TIMEOUT, r.query_ipwhois(&c)).await,
+                    ),
+                    1 => (
+                        "ipinfo.io",
+                        tokio::time::timeout(CASCADE_PROBE_TIMEOUT, r.query_ipinfo(&c)).await,
+                    ),
+                    _ => (
+                        "freeipapi.com",
+                        tokio::time::timeout(CASCADE_PROBE_TIMEOUT, r.query_freeipapi(&c)).await,
+                    ),
+                };
+                (
+                    name,
+                    match res {
+                        Ok(inner) => inner,
+                        Err(_) => Err(format!("{name} timed out")),
+                    },
+                )
+            });
+        };
+
+        let mut next_idx = 0usize;
+        spawn_source(&mut set, next_idx);
+        next_idx += 1;
+
+        while !set.is_empty() || next_idx < 3 {
+            let has_more = next_idx < 3;
+            tokio::select! {
+                joined = set.join_next(), if !set.is_empty() => {
+                    match joined {
+                        Some(Ok((_name, Ok(mut t)))) if t.has_provider_metadata() => {
+                            if t.timezone.is_none()
+                                && let Some(tz) = no_meta_fallback.as_ref().and_then(|f| f.timezone.clone())
+                            {
+                                t.timezone = Some(tz);
+                            }
+                            return Ok(t);
+                        }
+                        Some(Ok((_name, Ok(t)))) => {
+                            if no_meta_fallback.is_none() {
+                                no_meta_fallback = Some(t);
+                            }
+                        }
+                        Some(Ok((name, Err(e)))) => errors.push(format!("{name} failed: {e}")),
+                        Some(Err(e)) => errors.push(format!("geo task failed: {e}")),
+                        None => {}
                     }
-                    return Ok(t);
-                }
-                Ok(t) => {
-                    if no_meta_fallback.is_none() {
-                        no_meta_fallback = Some(t);
+                    if next_idx < 3 {
+                        spawn_source(&mut set, next_idx);
+                        next_idx += 1;
                     }
                 }
-                Err(e) => errors.push(format!("{name} failed: {e}")),
+                _ = tokio::time::sleep(CASCADE_STAGGER), if has_more => {
+                    spawn_source(&mut set, next_idx);
+                    next_idx += 1;
+                }
             }
         }
 
@@ -294,9 +317,11 @@ impl NetworkResolver {
         }
 
         // 4. Last resort (no ASN/ISP/org): 1.1.1.1/cdn-cgi/trace
-        match self.query_cloudflare_trace(client).await {
-            Ok(t) => return Ok(t),
-            Err(e) => errors.push(format!("1.1.1.1/cdn-cgi/trace failed: {e}")),
+        match tokio::time::timeout(CASCADE_PROBE_TIMEOUT, self.query_cloudflare_trace(client)).await
+        {
+            Ok(Ok(t)) => return Ok(t),
+            Ok(Err(e)) => errors.push(format!("1.1.1.1/cdn-cgi/trace failed: {e}")),
+            Err(_) => errors.push("1.1.1.1/cdn-cgi/trace timed out".to_string()),
         }
 
         Err(format!("All geo resolvers failed: {}", errors.join("; ")))
@@ -354,7 +379,7 @@ impl NetworkResolver {
         let (asn, org_name) = parsed
             .org
             .as_deref()
-            .map(parse_as_org)
+            .map(super::cascade_models::parse_as_org)
             .unwrap_or((None, None));
 
         Ok(NetworkTelemetry {
@@ -386,7 +411,9 @@ impl NetworkResolver {
             .ok_or("freeipapi.com missing 'countryCode'")?
             .to_uppercase();
 
-        let asn = parsed.asn.and_then(|s| parse_as_org(&s).0);
+        let asn = parsed
+            .asn
+            .and_then(|s| super::cascade_models::parse_as_org(&s).0);
         let org = parsed.asn_organization;
         let timezone = parsed.time_zones.and_then(|mut v| {
             if v.is_empty() {
@@ -436,20 +463,4 @@ impl NetworkResolver {
             resolved_at: current_timestamp(),
         })
     }
-}
-
-pub(super) fn parse_as_org(org_str: &str) -> (Option<u32>, Option<String>) {
-    let trimmed = org_str.trim();
-    if trimmed.len() >= 2 && trimmed[..2].eq_ignore_ascii_case("AS") {
-        let rest = &trimmed[2..];
-        let digits_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
-        if digits_len > 0 {
-            let asn = rest[..digits_len].parse::<u32>().ok();
-            let name = rest[digits_len..].trim();
-            let org_name = (!name.is_empty()).then(|| name.to_string());
-            return (asn, org_name);
-        }
-    }
-    let org_name = (!trimmed.is_empty()).then(|| trimmed.to_string());
-    (None, org_name)
 }

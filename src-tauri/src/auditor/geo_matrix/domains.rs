@@ -100,8 +100,6 @@ const GEMINI_DOMAINS: &[&str] = &[
     "deepmind.google",
     "jules.google.com",
     "accounts.google.com",
-    "ogs.google.com",
-    "apis.google.com",
     "daily-cloudcode-pa.googleapis.com",
     "cloudcode-pa.googleapis.com",
     "daily-cloudcode-pa.sandbox.googleapis.com",
@@ -119,16 +117,8 @@ const GEMINI_DOMAINS: &[&str] = &[
     "idx.google.com",
     "opal.google.com",
     "labs.google",
-    "www.google.com",
-    "play.google.com",
-    "footprints-pa.googleapis.com",
-    "people-pa.googleapis.com",
-    "signaler-pa.googleapis.com",
-    "jnn-pa.googleapis.com",
     "oauth2.googleapis.com",
     "iamcredentials.googleapis.com",
-    "myactivity.google.com",
-    "myaccount.google.com",
 ];
 
 fn normalize_host(raw_host: &str) -> String {

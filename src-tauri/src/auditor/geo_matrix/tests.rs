@@ -302,18 +302,8 @@ fn test_gemini_full_domain_coverage_and_subdomains() {
         "deepmind.google",
         "jules.google.com",
         "accounts.google.com",
-        "ogs.google.com",
-        "apis.google.com",
-        "www.google.com",
-        "play.google.com",
-        "footprints-pa.googleapis.com",
-        "people-pa.googleapis.com",
-        "signaler-pa.googleapis.com",
-        "jnn-pa.googleapis.com",
         "oauth2.googleapis.com",
         "iamcredentials.googleapis.com",
-        "myactivity.google.com",
-        "myaccount.google.com",
     ] {
         assert_eq!(
             ProviderId::from_host(host),
@@ -324,6 +314,24 @@ fn test_gemini_full_domain_coverage_and_subdomains() {
             ProviderId::from_host_with_custom(host, &["custom-ai.corp".to_string()]),
             Some(ProviderId::Gemini),
             "expected {host} with custom domains to match Gemini"
+        );
+    }
+    for noisy in [
+        "www.google.com",
+        "play.google.com",
+        "ogs.google.com",
+        "apis.google.com",
+        "footprints-pa.googleapis.com",
+        "people-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "jnn-pa.googleapis.com",
+        "myactivity.google.com",
+        "myaccount.google.com",
+    ] {
+        assert_eq!(
+            ProviderId::from_host(noisy),
+            None,
+            "noisy non-AI domain {noisy} must bypass AI proxy"
         );
     }
 }

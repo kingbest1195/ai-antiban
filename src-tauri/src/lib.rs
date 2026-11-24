@@ -23,7 +23,7 @@ pub mod win_reg;
 
 // Backward-compatible re-exports: these used to live in the crate root.
 #[cfg(any(test, feature = "test-support"))]
-pub use app::reconcile_active_profile_binding_async;
+pub use app::{raise_nofile_limit, reconcile_active_profile_binding_async};
 pub use commands::AppContext;
 pub use commands::coverage::get_coverage_snapshot;
 pub use commands::crash_test::CrashTestStepResult;
@@ -65,5 +65,6 @@ pub fn try_handle_early_cli_args(args: &[String]) -> Option<i32> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    app::raise_nofile_limit();
     app::run()
 }

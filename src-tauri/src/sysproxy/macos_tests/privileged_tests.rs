@@ -40,7 +40,7 @@ fn privileged_disable_batches_pac_and_chain_and_preserves_journal_on_cancel() {
             script.contains("-setautoproxystate 'Wi-Fi' off"),
             "{script}"
         );
-        assert!(script.contains("-setautoproxyurl 'Wi-Fi' ''"), "{script}");
+        assert!(!script.contains("-setautoproxyurl 'Wi-Fi' ''"), "{script}");
         assert!(script.contains("-setwebproxystate 'Wi-Fi' on"), "{script}");
         Ok(())
     });
@@ -66,4 +66,25 @@ fn real_platform_set_pac_and_set_chain_stay_isolated_in_dry_run_tests() {
         .set_chain(&wifi(), &ChainState::default())
         .unwrap();
     assert!(crate::sysproxy::dry_run_blocked_calls() >= before + 2);
+}
+
+#[test]
+fn privileged_script_clears_pac_via_state_off_without_empty_url() {
+    let (_fs, p) = setup();
+    let script = build_privileged_networksetup_script(
+        &p,
+        &[(
+            Resource::Pac { service: wifi() },
+            Value::Pac(PacState {
+                url: Some(String::new()),
+                enabled: None,
+            }),
+        )],
+    )
+    .unwrap();
+    assert!(
+        script.contains("-setautoproxystate 'Wi-Fi' off"),
+        "{script}"
+    );
+    assert!(!script.contains("-setautoproxyurl"), "{script}");
 }

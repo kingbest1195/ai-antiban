@@ -100,6 +100,30 @@ where
     FSys: Fn(&str, u16, Duration) -> io::Result<Vec<SocketAddr>> + Send + Sync,
     FPub: Fn(&str, u16) -> io::Result<Vec<SocketAddr>> + Send + Sync,
 {
+    resolve_entry_checked_with_closures_opts(
+        entry,
+        allow_local,
+        gateway_port,
+        false,
+        system_fn,
+        fallback_fn,
+    )
+    .await
+}
+
+/// Variant of [`resolve_entry_checked_with_closures`] with explicit `fast_fake_ip` toggle.
+pub async fn resolve_entry_checked_with_closures_opts<FSys, FPub>(
+    entry: &Entry,
+    allow_local: bool,
+    gateway_port: u16,
+    fast_fake_ip: bool,
+    system_fn: FSys,
+    fallback_fn: FPub,
+) -> io::Result<Vec<SocketAddr>>
+where
+    FSys: Fn(&str, u16, Duration) -> io::Result<Vec<SocketAddr>> + Send + Sync,
+    FPub: Fn(&str, u16) -> io::Result<Vec<SocketAddr>> + Send + Sync,
+{
     let backend = ClosureDnsBackend {
         system_fn,
         fallback_fn,
@@ -112,7 +136,7 @@ where
         &backend,
         &cache,
         false,
-        false,
+        fast_fake_ip,
     )
     .await
 }
