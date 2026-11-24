@@ -162,6 +162,13 @@ pub fn build_gate_reason(
     if let Some(nc) = network_change {
         match (nc.old_country.as_deref(), nc.new_country.as_deref()) {
             (Some(old_cc), Some(new_cc)) if !old_cc.is_empty() && !new_cc.is_empty() => {
+                if let (Some(old_ip), Some(new_ip)) = (nc.old_ip.as_deref(), nc.new_ip.as_deref())
+                    && old_ip != new_ip
+                {
+                    return format!(
+                        "Смена IP ({old_ip}, {old_cc} -> {new_ip}, {new_cc}) — новый адрес не закреплён, требуется подтверждение"
+                    );
+                }
                 return format!(
                     "Смена сети ({old_cc} -> {new_cc}) — требуется подтверждение безопасности"
                 );

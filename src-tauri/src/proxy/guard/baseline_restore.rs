@@ -12,6 +12,47 @@ use super::policy::{
 };
 use super::types::{Baseline, Env, Gate, NetworkGuard, PauseMode};
 
+fn is_transient_pinned_error(
+    summary: &super::audit_summary::AuditSummary,
+    st: &crate::state::AppStateData,
+    p: &str,
+    ip: &str,
+) -> bool {
+    let is_pinned = st
+        .pinned_ip_for_provider(p, false)
+        .is_some_and(|pin| pin.trim() == ip.trim());
+    is_pinned
+        && (summary.failed_providers.contains(&p)
+            || summary
+                .reports
+                .get(p)
+                .is_some_and(|r| is_pinned_transient_unknown_geo(r, st, false)))
+}
+
+async fn record_healthy_history(
+    env: &Env,
+    summary: &super::audit_summary::AuditSummary,
+    st: &crate::state::AppStateData,
+) {
+    let now = crate::auditor::network::current_timestamp();
+    for p in &summary.healthy_providers {
+        if let Some(r) = summary.reports.get(p)
+            && (report_no_critical_and_geo_ok(r) || is_report_pinned_travel_only(r, st))
+        {
+            let entry = IpHistoryEntry::new(
+                r.telemetry.ip.clone(),
+                r.telemetry.country_code.clone(),
+                r.telemetry.asn,
+                now,
+            );
+            let _ = env
+                .state
+                .record_ip_history_for_selection(p, &crate::routing::RouteSelection::Direct, entry)
+                .await;
+        }
+    }
+}
+
 impl NetworkGuard {
     /// Re-audits the baseline IP after a prior block, recovery, route unbind, or monitoring toggle.
     /// Silently clears `blocked_providers` and opens gates for any provider meeting
@@ -102,10 +143,9 @@ impl NetworkGuard {
         }
         let inner = &mut *inner_guard;
 
-        let Some(summary) = audited
-            .ok()
-            .and_then(|results| summarize_for_state(&results, &enabled_unrouted, &st_before))
-        else {
+        let Some(summary) = audited.ok().and_then(|r| {
+            summarize_for_state(&r, &enabled_unrouted, &st_before, Some(baseline_ip))
+        }) else {
             self.drain_pending_route_sync_locked(Some(env), inner).await;
             let st_cur = env.state.get_data().await;
             inner.handled_ip = None;
@@ -135,28 +175,7 @@ impl NetworkGuard {
                     b.country = Some(summary.tel.country_code.clone());
                 }
             }
-            let now = crate::auditor::network::current_timestamp();
-            for p in &summary.healthy_providers {
-                if let Some(r) = summary.reports.get(p)
-                    && (report_no_critical_and_geo_ok(r)
-                        || is_report_pinned_travel_only(r, &st_before))
-                {
-                    let entry = IpHistoryEntry::new(
-                        r.telemetry.ip.clone(),
-                        r.telemetry.country_code.clone(),
-                        r.telemetry.asn,
-                        now,
-                    );
-                    let _ = env
-                        .state
-                        .record_ip_history_for_selection(
-                            p,
-                            &crate::routing::RouteSelection::Direct,
-                            entry,
-                        )
-                        .await;
-                }
-            }
+            record_healthy_history(env, &summary, &st_before).await;
             self.restore_locked(env, inner).await;
             self.update_tray(env, &summary.tray).await;
             return;
@@ -200,25 +219,12 @@ impl NetworkGuard {
 
         // Transient failures (`Err` / unknown geo during `utun` stabilization) on a saved pinned
         // IP must retry silently without blocking, alerting, or locking `PauseMode` onto `baseline_ip`.
-        let is_transient_pinned_failure = |p: &str| -> bool {
-            let is_pinned = st_before
-                .pinned_ip_for_provider(p, false)
-                .is_some_and(|pin| pin.trim() == baseline_ip.trim());
-            if !is_pinned {
-                return false;
-            }
-            summary.failed_providers.contains(&p)
-                || summary
-                    .reports
-                    .get(p)
-                    .is_some_and(|r| is_pinned_transient_unknown_geo(r, &st_before, false))
-        };
         let has_transient_pinned = newly_affected
             .iter()
-            .any(|p| is_transient_pinned_failure(p));
+            .any(|p| is_transient_pinned_error(&summary, &st_before, p, baseline_ip));
         let newly_affected: Vec<&'static str> = newly_affected
             .into_iter()
-            .filter(|p| !is_transient_pinned_failure(p))
+            .filter(|p| !is_transient_pinned_error(&summary, &st_before, p, baseline_ip))
             .collect();
         if newly_affected.is_empty() {
             if let Some(p) = inner.invalidate_alert() {
@@ -410,7 +416,10 @@ impl NetworkGuard {
             }
             let st = env.state.get_data().await;
             let cur_unrouted = st.enabled_unrouted_providers();
-            let Some(summary) = summarize_for_state(&results, &cur_unrouted, &st) else {
+            let trusted_base = inner.trusted_baseline_ip().map(str::to_string);
+            let Some(summary) =
+                summarize_for_state(&results, &cur_unrouted, &st, trusted_base.as_deref())
+            else {
                 if all_pinned_or_excepted_for(&st, &cur_unrouted, &ip) {
                     inner.handled_ip = None;
                     inner.needs_reaudit = true;
@@ -418,28 +427,18 @@ impl NetworkGuard {
                 return;
             };
             guard.update_tray(&env, &summary.tray).await;
-            let is_transient_pinned = |p: &str| -> bool {
-                let is_pinned = st
-                    .pinned_ip_for_provider(p, false)
-                    .is_some_and(|pin| pin.trim() == ip.trim());
-                if !is_pinned {
-                    return false;
-                }
-                summary.failed_providers.contains(&p)
-                    || summary
-                        .reports
-                        .get(p)
-                        .is_some_and(|r| is_pinned_transient_unknown_geo(r, &st, false))
-            };
             let any_transient_pinned = summary
                 .affected_providers
                 .iter()
-                .any(|p| is_transient_pinned(p));
+                .any(|p| is_transient_pinned_error(&summary, &st, p, &ip));
             let real_violations: Vec<&'static str> = summary
                 .affected_providers
                 .iter()
                 .copied()
-                .filter(|p| !summary.failed_providers.contains(p) && !is_transient_pinned(p))
+                .filter(|p| {
+                    !summary.failed_providers.contains(p)
+                        && !is_transient_pinned_error(&summary, &st, p, &ip)
+                })
                 .collect();
             if real_violations.is_empty() {
                 if !summary.failed_providers.is_empty() || any_transient_pinned {
@@ -451,28 +450,7 @@ impl NetworkGuard {
                     b.country = Some(summary.tel.country_code.clone());
                     b.trusted = true;
                 }
-                let now = crate::auditor::network::current_timestamp();
-                for p in &summary.healthy_providers {
-                    if let Some(r) = summary.reports.get(p)
-                        && (report_no_critical_and_geo_ok(r)
-                            || is_report_pinned_travel_only(r, &st))
-                    {
-                        let entry = IpHistoryEntry::new(
-                            r.telemetry.ip.clone(),
-                            r.telemetry.country_code.clone(),
-                            r.telemetry.asn,
-                            now,
-                        );
-                        let _ = env
-                            .state
-                            .record_ip_history_for_selection(
-                                p,
-                                &crate::routing::RouteSelection::Direct,
-                                entry,
-                            )
-                            .await;
-                    }
-                }
+                record_healthy_history(&env, &summary, &st).await;
                 return;
             }
 

@@ -294,4 +294,35 @@ impl NetworkGuard {
         }
         self.wake();
     }
+
+    /// Strict Step-4 admission for `CONNECT`: rejects silent pass-through if an unrouted
+    /// connection observes a new unpinned/unexcepted IP that differs from `baseline` under
+    /// `AskPopup` or `AutoLockSilent`.
+    pub async fn is_report_allowed_for_connect(
+        &self,
+        report: &crate::auditor::RiskReport,
+        st: &crate::state::AppStateData,
+        routed: bool,
+    ) -> bool {
+        if routed {
+            return super::policy::report_allowed_for_state(report, st, true);
+        }
+        if !self.is_env_installed() || st.split_tunnel_mode {
+            return super::policy::report_allowed_for_state(report, st, false);
+        }
+        let trusted_baseline_ip = {
+            let inner = self.inner.lock().await;
+            inner
+                .baseline
+                .as_ref()
+                .filter(|b| b.trusted)
+                .map(|b| b.ip.clone())
+        };
+        match trusted_baseline_ip {
+            Some(ref base_ip) if base_ip.trim() != report.telemetry.ip.trim() => {
+                super::policy::report_allowed_on_network_switch(report, st, Some(base_ip.as_str()))
+            }
+            _ => super::policy::report_allowed_for_state(report, st, false),
+        }
+    }
 }

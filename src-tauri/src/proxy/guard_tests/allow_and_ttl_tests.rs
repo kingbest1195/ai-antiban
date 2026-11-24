@@ -352,3 +352,73 @@ async fn test_killswitch_mid_alert_really_cancels_the_audit() {
     assert_eq!(h.io.count("interceptor://enriched"), 0);
     assert_eq!(h.guard.gate(), Gate::Blocked);
 }
+
+#[tokio::test(start_paused = true)]
+async fn test_confirm_provider_session_routed_does_not_mark_direct_baseline_trusted() {
+    let resolve_calls = Arc::new(AtomicUsize::new(0));
+    let resolve_calls2 = Arc::clone(&resolve_calls);
+    let h = harness_env(
+        slow_audit(Duration::from_millis(10), "5.5.5.5", OverallStatus::Red),
+        "5.5.5.5",
+        move |env| {
+            env.resolve = Some(Arc::new(move || {
+                resolve_calls2.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(
+                        test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU")
+                            .telemetry,
+                    )
+                })
+            }));
+        },
+    )
+    .await;
+
+    // Direct baseline is an untrusted RU IP.
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.baseline = Some(Baseline {
+            ip: "5.5.5.5".to_string(),
+            country: Some("RU".to_string()),
+            trusted: false,
+        });
+    }
+
+    // Bind Anthropic to a route (OpenAI remains direct/unrouted), then confirm Anthropic
+    // with `tel = None` (as `resolve_exit_ip_for_provider` does for routed providers).
+    let route = crate::routing::parse_route_key("socks5://10.0.0.1:1080#nl", 1).unwrap();
+    let route_id = h.state.upsert_route(route).await.unwrap();
+    h.state
+        .bind_provider_route("anthropic", Some(&route_id))
+        .await
+        .unwrap();
+
+    h.guard.confirm_provider_session("anthropic", None).await;
+    assert_eq!(resolve_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !h.guard
+            .inner
+            .lock()
+            .await
+            .baseline
+            .as_ref()
+            .unwrap()
+            .trusted,
+        "confirming a routed provider must NOT trust an untrusted direct baseline"
+    );
+
+    // Also when all providers are routed, confirm_provider_session must not resolve direct egress.
+    h.state.set_default_route(Some(&route_id)).await.unwrap();
+    h.guard.confirm_provider_session("openai", None).await;
+    assert_eq!(resolve_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !h.guard
+            .inner
+            .lock()
+            .await
+            .baseline
+            .as_ref()
+            .unwrap()
+            .trusted
+    );
+}

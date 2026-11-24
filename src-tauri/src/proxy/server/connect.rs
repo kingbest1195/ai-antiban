@@ -390,16 +390,18 @@ impl ProxyServer {
             }
         };
 
-        // Step 4: Allow silently when verdict is Green, Yellow (`no_critical_and_geo_ok`),
-        // `(provider, exit_ip)` is in `trusted_exceptions`, or IP matches pinned IP on allowed geo.
+        // Step 4: Allow silently only when guard admission permits (strict switch check for unrouted).
+        let step4_allowed = self
+            .guard
+            .is_report_allowed_for_connect(&report, &st_after_audit, route.is_some())
+            .await;
+        if !step4_allowed && route.is_none() && !is_canary {
+            self.guard.wake_immediate_probe().await;
+        }
         if !self
             .should_hold_studio_session(provider, &host, &report, &st_after_audit)
             .await
-            && crate::proxy::guard::report_allowed_for_state(
-                &report,
-                &st_after_audit,
-                route.is_some(),
-            )
+            && step4_allowed
         {
             if is_canary {
                 return self

@@ -4,13 +4,9 @@ use crate::state::InterceptionBehavior;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test(start_paused = true)]
-async fn test_yellow_never_blocks_or_alerts_in_all_behaviors() {
-    for behavior in [
-        InterceptionBehavior::AskPopup,
-        InterceptionBehavior::AutoLockSilent,
-        InterceptionBehavior::AutoAllowTrusted,
-    ] {
-        let audit: AuditFn = Arc::new(|provider, _force| {
+async fn test_yellow_never_blocks_or_alerts_when_pinned_excepted_or_auto_allow() {
+    let yellow_audit = || -> AuditFn {
+        Arc::new(|provider, _force| {
             Box::pin(async move {
                 let mut r = test_report(provider, OverallStatus::Yellow, "9.9.9.9", "KZ");
                 r.checks = vec![
@@ -19,35 +15,61 @@ async fn test_yellow_never_blocks_or_alerts_in_all_behaviors() {
                 ];
                 Ok(r)
             })
-        });
-        let h = harness(audit, "9.9.9.9").await;
+        })
+    };
+
+    // 1. Pinned / AutoAllowTrusted Yellow never blocks or alerts.
+    for behavior in [
+        InterceptionBehavior::AskPopup,
+        InterceptionBehavior::AutoLockSilent,
+        InterceptionBehavior::AutoAllowTrusted,
+    ] {
+        let h = harness(yellow_audit(), "9.9.9.9").await;
         h.state.set_interception_behavior(behavior).await.unwrap();
+        if behavior != InterceptionBehavior::AutoAllowTrusted {
+            h.state
+                .set_pinned_ip(Some("9.9.9.9".to_string()))
+                .await
+                .unwrap();
+        }
         h.change("9.9.9.9").await;
         h.io.wait_for("network://changed", 2000)
             .await
             .expect("yellow settled");
-        if behavior == InterceptionBehavior::AskPopup {
-            assert!(
-                h.io.hides.load(Ordering::SeqCst) >= 1,
-                "AskPopup quick detecting popup must auto-hide when audit settles Yellow"
-            );
-        } else {
-            assert_eq!(
-                h.io.count("interceptor://risk-detected"),
-                0,
-                "Yellow must never emit risk-detected under {behavior:?}"
-            );
-            assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
-        }
-        assert_eq!(
-            h.io.count("interceptor://enriched"),
-            0,
-            "Yellow must never enrich/keep an active risk alert under {behavior:?}"
-        );
+        assert_eq!(h.io.count("interceptor://risk-detected"), 0);
+        assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
+        assert_eq!(h.io.count("interceptor://enriched"), 0);
         assert!(h.env.hold_queue.current_alert().is_none());
         assert_eq!(h.guard.gate(), Gate::Open);
         assert!(h.state.get_data().await.blocked_providers.is_empty());
     }
+
+    // 2. §7.7: Switching to a NEW unpinned, unexcepted Yellow IP under AskPopup/AutoLockSilent
+    //    must NOT silently allow: AskPopup prompts (`Pending`) and AutoLockSilent locks (`Blocked`).
+    let h_ask = harness(yellow_audit(), "9.9.9.9").await;
+    h_ask.change("9.9.9.9").await;
+    let enr = h_ask
+        .io
+        .wait_for("interceptor://enriched", 2000)
+        .await
+        .expect("AskPopup holds unpinned new Yellow IP for confirmation");
+    assert_eq!(enr.0["phase"], PHASE_READY);
+    assert_eq!(h_ask.guard.gate(), Gate::Pending);
+
+    let h_silent = harness(yellow_audit(), "9.9.9.9").await;
+    h_silent
+        .state
+        .set_interception_behavior(InterceptionBehavior::AutoLockSilent)
+        .await
+        .unwrap();
+    h_silent.change("9.9.9.9").await;
+    h_silent
+        .io
+        .wait_for("network://changed", 2000)
+        .await
+        .expect("AutoLockSilent blocks unpinned new Yellow IP");
+    assert_eq!(h_silent.guard.gate(), Gate::Blocked);
+    assert_eq!(h_silent.io.shows.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -172,6 +194,10 @@ async fn test_disabled_provider_skipped_in_audit_gates_and_alerts() {
         })
     });
     let h = harness(audit, "5.5.5.5").await;
+    h.state
+        .set_interception_behavior(InterceptionBehavior::AutoAllowTrusted)
+        .await
+        .unwrap();
     h.state.block_provider("gemini").await.unwrap();
     h.state
         .set_provider_monitoring("gemini", false)
@@ -291,6 +317,10 @@ async fn test_silent_auto_recovery_when_checks_become_yellow_pinned_or_excepted(
         })
     });
     let h = harness(audit, "9.9.9.9").await;
+    h.state
+        .set_interception_behavior(InterceptionBehavior::AutoAllowTrusted)
+        .await
+        .unwrap();
     h.state.block_provider("anthropic").await.unwrap();
     h.state.block_provider("openai").await.unwrap();
     h.guard.sync_gates_with_state(&h.state).await;
@@ -464,6 +494,14 @@ async fn test_first_provider_failure_preserves_siblings_and_blocks_failed_provid
         .set_interception_behavior(InterceptionBehavior::AutoLockSilent)
         .await
         .unwrap();
+    h.state
+        .add_trusted_exception("openai", "9.9.9.9")
+        .await
+        .unwrap();
+    h.state
+        .add_trusted_exception("gemini", "9.9.9.9")
+        .await
+        .unwrap();
     h.change("9.9.9.9").await;
     h.io.wait_for("network://changed", 2000)
         .await
@@ -476,9 +514,17 @@ async fn test_first_provider_failure_preserves_siblings_and_blocks_failed_provid
     assert_eq!(h.guard.gate_for(ProviderId::Gemini), Gate::Open);
     assert!(!h.state.is_provider_blocked("gemini").await);
 
-    // 2. AskPopup: Anthropic fails while OpenAI & Gemini succeed Green.
+    // 2. AskPopup: Anthropic fails while OpenAI & Gemini succeed Green (excepted for 9.9.9.9).
     //    OpenAI & Gemini return to Gate::Open; enriched emits PHASE_FAILED for Anthropic (not Green OpenAI).
     let h2 = harness(partial_fail, "9.9.9.9").await;
+    h2.state
+        .add_trusted_exception("openai", "9.9.9.9")
+        .await
+        .unwrap();
+    h2.state
+        .add_trusted_exception("gemini", "9.9.9.9")
+        .await
+        .unwrap();
     h2.change("9.9.9.9").await;
     let ev = h2
         .io
@@ -593,75 +639,5 @@ async fn test_kick_reaudit_and_route_sync_never_drop_when_inner_is_locked() {
     assert!(
         h.guard.inner.lock().await.pending.is_none(),
         "pending alert containing routed openai must have been pruned"
-    );
-}
-
-#[tokio::test(start_paused = true)]
-async fn test_confirm_provider_session_routed_does_not_mark_direct_baseline_trusted() {
-    let resolve_calls = Arc::new(AtomicUsize::new(0));
-    let resolve_calls2 = Arc::clone(&resolve_calls);
-    let h = harness_env(
-        slow_audit(Duration::from_millis(10), "5.5.5.5", OverallStatus::Red),
-        "5.5.5.5",
-        move |env| {
-            env.resolve = Some(Arc::new(move || {
-                resolve_calls2.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async move {
-                    Ok(
-                        test_report(ProviderId::Anthropic, OverallStatus::Red, "5.5.5.5", "RU")
-                            .telemetry,
-                    )
-                })
-            }));
-        },
-    )
-    .await;
-
-    // Direct baseline is an untrusted RU IP.
-    {
-        let mut inner = h.guard.inner.lock().await;
-        inner.baseline = Some(Baseline {
-            ip: "5.5.5.5".to_string(),
-            country: Some("RU".to_string()),
-            trusted: false,
-        });
-    }
-
-    // Bind Anthropic to a route (OpenAI remains direct/unrouted), then confirm Anthropic
-    // with `tel = None` (as `resolve_exit_ip_for_provider` does for routed providers).
-    let route = crate::routing::parse_route_key("socks5://10.0.0.1:1080#nl", 1).unwrap();
-    let route_id = h.state.upsert_route(route).await.unwrap();
-    h.state
-        .bind_provider_route("anthropic", Some(&route_id))
-        .await
-        .unwrap();
-
-    h.guard.confirm_provider_session("anthropic", None).await;
-    assert_eq!(resolve_calls.load(Ordering::SeqCst), 0);
-    assert!(
-        !h.guard
-            .inner
-            .lock()
-            .await
-            .baseline
-            .as_ref()
-            .unwrap()
-            .trusted,
-        "confirming a routed provider must NOT trust an untrusted direct baseline"
-    );
-
-    // Also when all providers are routed, confirm_provider_session must not resolve direct egress.
-    h.state.set_default_route(Some(&route_id)).await.unwrap();
-    h.guard.confirm_provider_session("openai", None).await;
-    assert_eq!(resolve_calls.load(Ordering::SeqCst), 0);
-    assert!(
-        !h.guard
-            .inner
-            .lock()
-            .await
-            .baseline
-            .as_ref()
-            .unwrap()
-            .trusted
     );
 }

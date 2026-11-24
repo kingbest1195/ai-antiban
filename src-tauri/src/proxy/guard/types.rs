@@ -277,6 +277,13 @@ impl Inner {
                 .as_ref()
                 .is_some_and(|p| p.id == id && p.epoch == epoch)
     }
+
+    pub(super) fn trusted_baseline_ip(&self) -> Option<&str> {
+        self.baseline
+            .as_ref()
+            .filter(|b| b.trusted)
+            .map(|b| b.ip.as_str())
+    }
 }
 
 pub struct NetworkGuard {

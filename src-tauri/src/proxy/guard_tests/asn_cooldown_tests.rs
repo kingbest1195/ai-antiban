@@ -163,8 +163,12 @@ async fn guard_enforces_ip_change_cooldown_under_ask_popup_and_auto_lock_silent(
             .is_some_and(|r| r.contains("охлаждения"))
     );
 
-    // 3. Clearing cooldown allows subsequent Green IP change silently.
+    // 3. Clearing cooldown under AutoAllowTrusted allows subsequent Green IP change silently.
     h2.state.clear_ip_change_cooldown().await.unwrap();
+    h2.state
+        .set_interception_behavior(InterceptionBehavior::AutoAllowTrusted)
+        .await
+        .unwrap();
     h2.change("7.7.7.7").await;
     h2.io
         .wait_for_count("network://changed", 2, 2000)

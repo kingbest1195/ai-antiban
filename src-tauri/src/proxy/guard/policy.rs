@@ -295,6 +295,38 @@ pub(crate) fn report_allowed_for_state(
     matches_pin && geo_ok && !has_non_travel_critical
 }
 
+/// Returns `true` when `report` may auto-open on a network switch to a new IP without
+/// prompting (`AskPopup`) or silently locking (`AutoLockSilent`).
+///
+/// Explicit `trusted_exceptions`, matching `pinned_ip`/`pinned_ips`, returning to an
+/// already-trusted `baseline_ip`, or `InterceptionBehavior::AutoAllowTrusted` permit
+/// auto-admission when `report_allowed_for_state` holds; under `AskPopup` and
+/// `AutoLockSilent`, a new unpinned/unexcepted IP requires explicit user confirmation or lock.
+pub(crate) fn report_allowed_on_network_switch(
+    report: &RiskReport,
+    st: &crate::state::AppStateData,
+    trusted_baseline_ip: Option<&str>,
+) -> bool {
+    if !report_allowed_for_state(report, st, false) {
+        return false;
+    }
+    let pid = report.provider.as_str();
+    let ip = report.telemetry.ip.trim();
+    if st.is_ip_trusted_for_provider(pid, ip) {
+        return true;
+    }
+    if st
+        .pinned_ip_for_provider(pid, false)
+        .is_some_and(|pin| pin.trim() == ip)
+    {
+        return true;
+    }
+    if trusted_baseline_ip.is_some_and(|b| b.trim() == ip) {
+        return true;
+    }
+    st.interception_behavior == crate::state::InterceptionBehavior::AutoAllowTrusted
+}
+
 /// Returns `true` when active AI Studio / Vertex AI traffic must be held on IP/ASN instability.
 pub(crate) fn should_hold_ai_studio_session(
     provider: ProviderId,

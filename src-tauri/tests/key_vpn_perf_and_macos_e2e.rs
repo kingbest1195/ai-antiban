@@ -379,3 +379,81 @@ fn sec7_9_unix_rlimit_nofile_and_clear_pac_url_avoid_empty_url_param() {
     .unwrap();
     assert_eq!(plat.pac_of(&wifi).enabled, Some(false));
 }
+
+#[tokio::test]
+async fn sec7_8_unreachable_route_disables_soft_bypass_and_records_route_down() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let state = AppState::new_in_memory();
+    let route = socks_route("dead-cached", "127.0.0.1", dead_port);
+    state.upsert_route(route.clone()).await.unwrap();
+    state
+        .bind_provider_route("gemini", Some("dead-cached"))
+        .await
+        .unwrap();
+    // Simulate a route that had cached telemetry earlier, then failed reachability check.
+    state
+        .route_health()
+        .mark_unreachable("dead-cached", "connection refused");
+
+    let env = AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::Timeout)),
+        probe: Arc::new(FakeProbe::new(HttpProbeOutcome::Timeout)),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    };
+    let auditor = Auditor::with_env(env).unwrap();
+    auditor
+        .resolver
+        .set_cached_for_route(
+            Some(route.id.clone()),
+            NetworkTelemetry {
+                ip: "185.220.10.50".to_string(),
+                country_code: "NL".to_string(),
+                hostname: None,
+                asn: Some(20473),
+                org: Some("Choopa".to_string()),
+                isp: Some("Choopa".to_string()),
+                timezone: Some("Europe/Amsterdam".to_string()),
+                resolved_at: zastava_lib::auditor::network::current_timestamp(),
+            },
+        )
+        .await;
+
+    let server = Arc::new(
+        ProxyServer::bind_ephemeral(auditor, state.clone(), Arc::new(HoldQueue::new()), None)
+            .await
+            .unwrap(),
+    );
+    let srv = Arc::clone(&server);
+    tokio::spawn(async move { srv.run().await });
+
+    let mut client = tokio::net::TcpStream::connect(server.bound_addr)
+        .await
+        .unwrap();
+    client
+        .write_all(b"CONNECT gemini.google.com:443 HTTP/1.1\r\nHost: gemini.google.com:443\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 512];
+    let n = tokio::time::timeout(Duration::from_secs(3), client.read(&mut buf))
+        .await
+        .expect("unreachable route must fail fast without soft-bypass stall")
+        .unwrap();
+    let resp = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(
+        resp.contains("502") || resp.contains("unavailable"),
+        "expected fail-closed 502 route unavailable, got: {resp}"
+    );
+    assert!(
+        state
+            .stats()
+            .snapshot_sync()
+            .recent_events
+            .iter()
+            .any(|e| e.action == "ROUTE_DOWN"),
+        "ROUTE_DOWN must be recorded"
+    );
+}

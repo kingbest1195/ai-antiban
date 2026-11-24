@@ -296,7 +296,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
         </Card>
       ) : (
         <StatusHero
-          score={trustScore}
+          score={props.routeUnavailableBanner ? 0 : trustScore}
           tone={model.tone}
           title={model.verdict}
           ip={currentIp !== "--" ? formatIp(currentIp, props.hideIpMode) : undefined}

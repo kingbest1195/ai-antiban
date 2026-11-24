@@ -446,4 +446,26 @@ describe("§7.7 Fail-closed UI: проверка, инвалидация и rout
     expect(m.banner).toBe("stopped");
     expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("critical");
   });
+
+  it("partial blocked_providers в guardPauseStatus переводит заблокированный сервис в critical без потери остальных", () => {
+    const rGpt = report({ provider: "openai", overall_status: "green" });
+    const m = model({
+      reports: { openai: rGpt },
+      activeReport: rGpt,
+      sysproxyActive: true,
+      guardPauseStatus: {
+        paused: false,
+        mode: "none",
+        gate: "open",
+        gate_reason: "Смена IP — требуется подтверждение",
+        manual_killswitch: false,
+        pending_providers: [],
+        blocked_providers: ["anthropic"],
+      },
+    });
+    expect(m.tone).toBe("danger");
+    expect(m.verdict).toBe(copy.verdict.stopped);
+    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("critical");
+    expect(m.services.find((s) => s.id === "openai")?.status).toBe("ok");
+  });
 });

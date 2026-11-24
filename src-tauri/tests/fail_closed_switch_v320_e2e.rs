@@ -452,3 +452,197 @@ async fn e2e_unavailable_route_never_falls_back_to_direct_and_records_route_down
         "ROUTE_DOWN stat must be recorded"
     );
 }
+
+#[tokio::test]
+async fn e2e_switch_to_clean_unpinned_foreign_ip_never_auto_allows_under_ask_popup_or_silent() {
+    use zastava_lib::auditor::seams::IpProbe;
+    use zastava_lib::state::InterceptionBehavior;
+
+    zastava_lib::sysproxy::force_os_dry_run();
+    let Some((upstream_addr, upstream_hits)) = spawn_echo_upstream().await else {
+        return;
+    };
+
+    struct DynamicIpProbe(Arc<std::sync::Mutex<(String, String)>>);
+    impl IpProbe for DynamicIpProbe {
+        fn get<'a>(
+            &'a self,
+            url: &'a str,
+            _limit: Duration,
+        ) -> zastava_lib::auditor::seams::BoxFuture<'a, HttpProbeOutcome> {
+            let (ip, cc) = self.0.lock().unwrap().clone();
+            let body = if url.contains("ipwho.is") {
+                format!(
+                    r#"{{"success":true,"ip":"{ip}","country_code":"{cc}","connection":{{"asn":24940,"org":"Hetzner","isp":"Hetzner","domain":"hetzner.de"}},"timezone":{{"id":"Europe/Berlin"}}}}"#
+                )
+            } else {
+                format!("fl=1\nip={ip}\nloc={cc}\ncolo=FRA\n")
+            };
+            Box::pin(async move { HttpProbeOutcome::Response { status: 200, body } })
+        }
+    }
+
+    let exit = Arc::new(std::sync::Mutex::new((
+        "1.1.1.1".to_string(),
+        "DE".to_string(),
+    )));
+    let auditor = Auditor::with_env(AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+        probe: Arc::new(DynamicIpProbe(Arc::clone(&exit))),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    })
+    .unwrap();
+    auditor
+        .resolver
+        .set_cached(NetworkTelemetry {
+            ip: "1.1.1.1".to_string(),
+            country_code: "DE".to_string(),
+            hostname: Some("h1.hetzner.de".to_string()),
+            asn: Some(24940),
+            org: Some("Hetzner".to_string()),
+            isp: Some("Hetzner".to_string()),
+            timezone: Some("Europe/Berlin".to_string()),
+            resolved_at: current_timestamp(),
+        })
+        .await;
+
+    let state = AppState::new_in_memory();
+    assert_eq!(
+        state.get_interception_behavior().await,
+        InterceptionBehavior::AskPopup
+    );
+    let hold_queue = Arc::new(HoldQueue::new());
+    let server = Arc::new(
+        ProxyServer::bind_ephemeral(
+            auditor.clone(),
+            state.clone(),
+            hold_queue.clone(),
+            Some(upstream_addr),
+        )
+        .await
+        .unwrap(),
+    );
+
+    let exit_probe = Arc::clone(&exit);
+    server.guard.start_with_test_env(
+        auditor.clone(),
+        state.clone(),
+        hold_queue.clone(),
+        Some(Arc::new(move || {
+            let ip = exit_probe.lock().unwrap().0.clone();
+            Box::pin(async move { Some(ip) })
+        })),
+        None,
+    );
+    server
+        .guard
+        .seed_baseline_for_test("1.1.1.1", "DE", None)
+        .await;
+    server.guard.ensure_fresh().await;
+
+    let srv = Arc::clone(&server);
+    tokio::spawn(async move { srv.run().await });
+
+    // 1) Switch to a NEW, CLEAN foreign IP ("2.2.2.2", DE, NO pin, NO trusted_exceptions)
+    //    under default AskPopup -> MUST hold in Pending/alert-popup, NEVER silently open!
+    *exit.lock().unwrap() = ("2.2.2.2".to_string(), "DE".to_string());
+    auditor.resolver.invalidate_direct_cache().await;
+    server.guard.tick_test().await;
+    for _ in 0..200 {
+        if hold_queue
+            .current_alert()
+            .is_some_and(|a| a.phase == "ready")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Pending);
+    let alert = hold_queue.current_alert().expect("alert must stay open");
+    assert_eq!(alert.phase, "ready");
+    assert_eq!(
+        alert
+            .network_change
+            .as_ref()
+            .and_then(|n| n.new_ip.as_deref()),
+        Some("2.2.2.2")
+    );
+
+    // Denying the alert blocks Claude (`403`, 0 upstream hits).
+    assert!(hold_queue.resolve(&alert.id, HoldResolution::Block).await);
+    for _ in 0..100 {
+        if server.guard.gate_for(ProviderId::Anthropic) == Gate::Blocked {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let (_s_blk, resp_blk) = send_connect(server.bound_addr, "claude.ai").await;
+    assert!(resp_blk.contains("403"), "expected 403 block: {resp_blk}");
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
+
+    // 2) Switch to another clean DE/AS24940 IP ("3.3.3.3") under AutoLockSilent
+    //    -> MUST lock silently (`Gate::Blocked`) without popup (wait for `3.3.3.3` to finish).
+    state
+        .set_interception_behavior(InterceptionBehavior::AutoLockSilent)
+        .await
+        .unwrap();
+    *exit.lock().unwrap() = ("3.3.3.3".to_string(), "DE".to_string());
+    auditor.resolver.invalidate_direct_cache().await;
+    server.guard.tick_test().await;
+    for _ in 0..200 {
+        if server.guard.gate_for(ProviderId::Anthropic) == Gate::Blocked
+            && state.is_provider_blocked("anthropic").await
+            && server
+                .guard
+                .gate_reason()
+                .as_deref()
+                .is_some_and(|r| r.contains("3.3.3.3"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(hold_queue.current_alert().is_none());
+    let (_s_sil, resp_sil) = send_connect(server.bound_addr, "claude.ai").await;
+    assert!(
+        resp_sil.contains("403"),
+        "expected 403 silent lock: {resp_sil}"
+    );
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 0);
+
+    // 3) Under AutoAllowTrusted, clean DE/AS24940 IP ("4.4.4.4") DOES auto-open and tunnel!
+    state
+        .set_interception_behavior(InterceptionBehavior::AutoAllowTrusted)
+        .await
+        .unwrap();
+    *exit.lock().unwrap() = ("4.4.4.4".to_string(), "DE".to_string());
+    auditor.resolver.invalidate_direct_cache().await;
+    server.guard.tick_test().await;
+    for _ in 0..200 {
+        if server.guard.gate_for(ProviderId::Anthropic) == Gate::Open
+            && !state.is_provider_blocked("anthropic").await
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        (
+            server.guard.gate_for(ProviderId::Anthropic),
+            state.is_provider_blocked("anthropic").await,
+            server.guard.gate_reason()
+        ),
+        (Gate::Open, false, None)
+    );
+    let (mut s_ok, resp_ok) = send_connect(server.bound_addr, "claude.ai").await;
+    assert!(
+        resp_ok.contains("200 Connection Established"),
+        "AutoAllowTrusted should pass clean foreign IP: {resp_ok}"
+    );
+    s_ok.write_all(b"ok").await.unwrap();
+    let mut echo = [0u8; 2];
+    s_ok.read_exact(&mut echo).await.unwrap();
+    assert_eq!(&echo, b"ok");
+    assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+}

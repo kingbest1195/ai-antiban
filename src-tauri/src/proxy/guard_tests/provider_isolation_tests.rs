@@ -34,6 +34,10 @@ async fn test_red_claude_never_blocks_healthy_chatgpt_ask_popup() {
     });
 
     let h = harness(audit, "203.0.113.10").await;
+    h.state
+        .add_trusted_exception("openai", "203.0.113.10")
+        .await
+        .unwrap();
     // Bind Gemini to a Zastava key so only Anthropic & OpenAI are unrouted.
     let fr_route = crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
     let fr_id = h.state.upsert_route(fr_route).await.unwrap();
@@ -117,6 +121,12 @@ async fn test_red_claude_never_blocks_healthy_chatgpt_silent_and_auto_allow() {
             .await
             .unwrap();
         h.state.set_interception_behavior(behavior).await.unwrap();
+        if behavior == InterceptionBehavior::AutoLockSilent {
+            h.state
+                .add_trusted_exception("openai", "203.0.113.10")
+                .await
+                .unwrap();
+        }
 
         {
             let mut inner = h.guard.inner.lock().await;
@@ -162,6 +172,10 @@ async fn test_finish_audit_opens_all_healthy_providers_when_affected_is_empty() 
         })
     });
     let h = harness(audit, "145.241.193.245").await;
+    h.state
+        .set_interception_behavior(InterceptionBehavior::AutoAllowTrusted)
+        .await
+        .unwrap();
     let fr_route = crate::routing::parse_route_key("socks5://136.244.114.42:1080#fr", 1).unwrap();
     let fr_id = h.state.upsert_route(fr_route).await.unwrap();
     h.state

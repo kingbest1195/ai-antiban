@@ -222,3 +222,53 @@ async fn test_can_use_session_allowance_blocks_stale_session_and_unverified_stat
             .await
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn test_switch_from_blocked_ru_to_clean_unpinned_de_prompts_under_ask_popup() {
+    let current_ip = Arc::new(std::sync::Mutex::new("2.2.2.2".to_string()));
+    let audit_ip = Arc::clone(&current_ip);
+    let h = harness_env(
+        Arc::new(move |provider, _force| {
+            let ip = audit_ip.lock().unwrap().clone();
+            Box::pin(async move {
+                if ip == "5.5.5.5" {
+                    let mut r = test_report(provider, OverallStatus::Red, "5.5.5.5", "RU");
+                    r.geo_result = crate::auditor::CheckResult::critical("GEO_BLOCKED", "RU", None);
+                    r.checks = vec![r.geo_result.clone()];
+                    Ok(r)
+                } else {
+                    Ok(test_report(provider, OverallStatus::Green, &ip, "DE"))
+                }
+            })
+        }),
+        "2.2.2.2",
+        |_| {},
+    )
+    .await;
+    h.state.block_provider("anthropic").await.unwrap();
+    h.guard.sync_gates_with_state(&h.state).await;
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.baseline = Some(Baseline {
+            ip: "5.5.5.5".to_string(),
+            country: Some("RU".to_string()),
+            trusted: false,
+        });
+    }
+
+    h.change("2.2.2.2").await;
+    let enr =
+        h.io.wait_for("interceptor://enriched", 2000)
+            .await
+            .expect("AskPopup must prompt on clean unpinned DE after RU block");
+    assert_eq!(enr.0["phase"], PHASE_READY);
+    assert_eq!(enr.0["network_change"]["new_ip"], "2.2.2.2");
+    assert_eq!(enr.0["network_change"]["new_country"], "DE");
+    let id = enr.0["id"].as_str().unwrap().to_string();
+    h.guard
+        .allow_network_alert(&id, &all_providers())
+        .await
+        .unwrap();
+    assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+    assert!(!h.state.is_provider_blocked("anthropic").await);
+}

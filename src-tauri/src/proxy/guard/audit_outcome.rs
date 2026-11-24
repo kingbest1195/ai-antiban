@@ -10,7 +10,8 @@ use crate::state::IpHistoryEntry;
 use super::audit_summary::summarize_for_state;
 use super::policy::{
     all_pinned_or_excepted_for, is_pinned_transient_unknown_geo, is_report_pinned_travel_only,
-    network_change, report_no_critical_and_geo_ok, resolve_gate_reason_with_cooldown,
+    network_change, report_allowed_for_state, report_no_critical_and_geo_ok,
+    resolve_gate_reason_with_cooldown,
 };
 use super::types::{AuditResults, Baseline, Env, Inner, NetworkGuard, PauseMode};
 
@@ -42,7 +43,10 @@ impl NetworkGuard {
         }
         let all_pinned = all_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
 
-        let Some(mut summary) = summarize_for_state(results, &enabled_unrouted, &st) else {
+        let trusted_baseline_ip = old_baseline.filter(|b| b.trusted).map(|b| b.ip.as_str());
+        let Some(mut summary) =
+            summarize_for_state(results, &enabled_unrouted, &st, trusted_baseline_ip)
+        else {
             let newly_failed: Vec<&'static str> = enabled_unrouted
                 .iter()
                 .copied()
@@ -208,6 +212,64 @@ impl NetworkGuard {
         }
 
         if newly_affected.is_empty() {
+            // If previously-blocked providers switched onto a clean new IP under AskPopup (e.g.
+            // out of RU onto a clean unpinned foreign IP), ask the user to confirm the new network
+            // instead of leaving them silently trapped in PauseMode::UntilNetworkChange.
+            let clean_reconfirm: Vec<&'static str> = if st.interception_behavior
+                == crate::state::InterceptionBehavior::AskPopup
+                && old_baseline.is_some_and(|b| b.ip.trim() != new_ip.trim())
+            {
+                already_blocked
+                    .iter()
+                    .copied()
+                    .filter(|p| {
+                        summary
+                            .reports
+                            .get(p)
+                            .is_some_and(|r| report_allowed_for_state(r, &st, false))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if !clean_reconfirm.is_empty() {
+                let still_blocked: Vec<&'static str> = already_blocked
+                    .iter()
+                    .copied()
+                    .filter(|p| !clean_reconfirm.contains(p))
+                    .collect();
+                if existing_alert_emitted && let Some(ref alert_id) = existing_id {
+                    self.enrich_ready_alert_locked(
+                        env,
+                        inner,
+                        old_baseline,
+                        new_ip,
+                        alert_id,
+                        &summary,
+                        &still_blocked,
+                        &clean_reconfirm,
+                        cooldown_reason.as_deref(),
+                        t0,
+                    )
+                    .await;
+                } else {
+                    self.emit_ready_network_alert_locked(
+                        env,
+                        inner,
+                        old_baseline,
+                        new_ip,
+                        &summary,
+                        &still_blocked,
+                        &clean_reconfirm,
+                        existing_id,
+                        None,
+                        cooldown_reason.as_deref(),
+                        t0,
+                    )
+                    .await;
+                }
+                return;
+            }
             if let Some(p) = inner.invalidate_alert() {
                 env.hold_queue.remove(&p.id).await;
             }

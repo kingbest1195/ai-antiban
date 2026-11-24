@@ -282,8 +282,12 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
       .catch(() => {});
     onGuardPauseStatusChanged((snap) => {
       setGuardPauseStatus(snap);
-      if (snap.gate === "pending" || snap.paused || snap.manual_killswitch) {
-        invalidateReports(snap.pending_providers?.length ? snap.pending_providers : undefined, snap.manual_killswitch);
+      const affected = [
+        ...(snap.pending_providers ?? []),
+        ...(snap.blocked_providers ?? []),
+      ];
+      if (snap.gate !== "open" || snap.paused || snap.manual_killswitch || affected.length > 0) {
+        invalidateReports(affected.length > 0 ? affected : undefined, snap.manual_killswitch);
       }
       fetchAppState().then(setState).catch(() => {});
     })

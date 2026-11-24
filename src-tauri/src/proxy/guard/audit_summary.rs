@@ -8,7 +8,7 @@ use crate::auditor::{NetworkTelemetry, RiskReport};
 
 #[cfg(test)]
 use super::policy::report_no_critical_and_geo_ok;
-use super::policy::{report_allowed_for_state, severity};
+use super::policy::{report_allowed_on_network_switch, severity};
 use super::types::{AuditFn, AuditResults};
 
 async fn audit_one_with_retry(
@@ -86,9 +86,10 @@ fn provider_allowed_by_audit(
     _pid: &str,
     res: &Result<RiskReport, String>,
     st: &crate::state::AppStateData,
+    trusted_baseline_ip: Option<&str>,
 ) -> bool {
     match res {
-        Ok(r) => report_allowed_for_state(r, st, false),
+        Ok(r) => report_allowed_on_network_switch(r, st, trusted_baseline_ip),
         Err(_) => false,
     }
 }
@@ -181,7 +182,11 @@ impl AuditSummary {
 
 #[cfg(test)]
 pub(super) fn summarize(results: &AuditResults, unrouted: &[&'static str]) -> Option<AuditSummary> {
-    summarize_for_state(results, unrouted, &crate::state::AppStateData::default())
+    let st = crate::state::AppStateData {
+        interception_behavior: crate::state::InterceptionBehavior::AutoAllowTrusted,
+        ..Default::default()
+    };
+    summarize_for_state(results, unrouted, &st, None)
 }
 
 /// Returns `None` only when NO enabled unrouted provider produced a report (all failed or none
@@ -192,6 +197,7 @@ pub(super) fn summarize_for_state(
     results: &AuditResults,
     unrouted: &[&'static str],
     st: &crate::state::AppStateData,
+    trusted_baseline_ip: Option<&str>,
 ) -> Option<AuditSummary> {
     let relevant_id = |p: &ProviderId| unrouted.contains(&p.as_str());
     let relevant: Vec<&RiskReport> = results
@@ -236,7 +242,7 @@ pub(super) fn summarize_for_state(
         if res.is_err() {
             failed_providers.push(pid);
         }
-        if provider_allowed_by_audit(pid, res, st) {
+        if provider_allowed_by_audit(pid, res, st, trusted_baseline_ip) {
             healthy_providers.push(pid);
         } else {
             affected_providers.push(pid);

@@ -245,10 +245,11 @@ pub(super) async fn can_soft_bypass_audit(
     if is_canary {
         return false;
     }
-    let health_ok = state
-        .route_health()
-        .get(&route.id)
-        .is_some_and(|h| h.reachable == Some(true));
+    let health = state.route_health().get(&route.id);
+    if health.as_ref().is_some_and(|h| h.reachable == Some(false)) {
+        return false;
+    }
+    let health_ok = health.is_some_and(|h| h.reachable == Some(true));
     let cached_tel = auditor.resolver.last_known_telemetry_for_route(route).await;
     let geo_ok = !route
         .country
