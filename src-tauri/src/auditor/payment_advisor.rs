@@ -99,7 +99,10 @@ pub fn merge_local_bin_radar_reports_at(
         }
     }
 
-    for ((bin_prefix, service), samples) in grouped {
+    let mut remaining: Vec<_> = grouped.into_iter().collect();
+    remaining
+        .sort_by(|a, b| (a.0.0.as_str(), a.0.1.as_str()).cmp(&(b.0.0.as_str(), b.0.1.as_str())));
+    for ((bin_prefix, service), samples) in remaining {
         merged.entries.push(BinRadarEntry {
             bin_prefix,
             service,

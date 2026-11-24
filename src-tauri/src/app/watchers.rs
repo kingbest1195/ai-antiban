@@ -226,9 +226,11 @@ pub(super) fn spawn_tray_status_watcher(
                         .try_state::<Arc<crate::startup::StartupState>>()
                         .is_none_or(|s| s.is_ready());
                     if has_blocked {
-                        crate::tray::update_tray_from_guard_status(
+                        update_tray_from_report(
                             &watcher_handle,
-                            &watcher_guard.pause_status(),
+                            &tray_report,
+                            tray_is_pinned,
+                            true,
                         );
                     } else if startup_ready && !sysproxy::is_sysproxy_active() {
                         crate::tray::update_tray_protection_off(&watcher_handle);

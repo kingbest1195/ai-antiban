@@ -386,7 +386,10 @@ impl NetworkGuard {
             log_timing(id, "audit_dropped_stale", t0);
             return;
         }
-        if inner.deferred_recheck_fp.take().is_some() {
+        for _ in 0..5 {
+            if inner.deferred_recheck_fp.take().is_none() {
+                break;
+            }
             let settle_wait = inner
                 .last_fp_change_at
                 .map(|t| std::time::Duration::from_millis(350).saturating_sub(t.elapsed()))
@@ -411,7 +414,17 @@ impl NetworkGuard {
                 }
                 inner.handled_ip = None;
                 inner.needs_reaudit = true;
+                inner.route_dirty = true;
+                inner.dirty_since.get_or_insert_with(Instant::now);
+                self.wake();
+                return;
             }
+        }
+        if inner.deferred_recheck_fp.take().is_some() {
+            inner.route_dirty = true;
+            inner.dirty_since.get_or_insert_with(Instant::now);
+            inner.handled_ip = None;
+            inner.needs_reaudit = true;
         }
         inner.probe_abort = None;
         inner.audit_abort = None;

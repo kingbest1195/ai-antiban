@@ -201,11 +201,16 @@ pub fn update_tray_from_report(
 /// Immediately updates the tray icon, title, header, and killswitch directly from a
 /// `NetworkGuard` state transition without waiting for the periodic audit watcher.
 pub fn update_tray_from_guard_status(app: &tauri::AppHandle, status: &GuardPauseStatus) {
-    let view = TrayView::from_guard_status(
+    let startup_ready = app
+        .try_state::<Arc<crate::startup::StartupState>>()
+        .is_none_or(|s| s.is_ready());
+    let view = TrayView::resolve_guard_priority(
         status,
+        false,
         sysproxy::is_sysproxy_active(),
-        current_icon_is_green(),
-    );
+        startup_ready,
+    )
+    .unwrap_or_else(|| TrayView::from_guard_status(status, true, current_icon_is_green()));
     submit(app, view);
 }
 
@@ -221,17 +226,29 @@ pub fn update_tray_no_data(app: &tauri::AppHandle, last_checked: Option<&str>) {
 
 /// "Проверяем…": the first audit is still running. Safe to call from any thread.
 pub fn update_tray_checking(app: &tauri::AppHandle) {
+    if let Some(priority_view) = guard_priority_view_for_app(app, false) {
+        submit(app, priority_view);
+        return;
+    }
     submit(app, TrayView::checking());
 }
 
 /// Updates the system tray icon, menu bar title (macOS), and tooltip with a simple color and status title.
 /// Unknown color names degrade to yellow, never green.
 pub fn update_tray_status(app: &tauri::AppHandle, color: &str, title_override: Option<&str>) {
+    if let Some(priority_view) = guard_priority_view_for_app(app, false) {
+        submit(app, priority_view);
+        return;
+    }
     submit(app, TrayView::from_status(color, title_override));
 }
 
 /// Protection was turned off by the user (`!sysproxy_active`): shows the 4th gray tray icon.
 pub fn update_tray_protection_off(app: &tauri::AppHandle) {
+    if let Some(priority_view) = guard_priority_view_for_app(app, false) {
+        submit(app, priority_view);
+        return;
+    }
     submit(app, TrayView::protection_off());
 }
 

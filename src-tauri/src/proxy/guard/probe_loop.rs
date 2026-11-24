@@ -295,7 +295,12 @@ impl NetworkGuard {
         let mut inner = self.inner.lock().await;
         self.drain_pending_route_sync_locked(Some(env), &mut inner)
             .await;
-        let dirty = std::mem::take(&mut inner.route_dirty);
+        let deferred_dirty = if !inner.probe_in_flight && inner.audit_abort.is_none() {
+            inner.deferred_recheck_fp.take().is_some()
+        } else {
+            false
+        };
+        let dirty = std::mem::take(&mut inner.route_dirty) || deferred_dirty;
         let dirty_since = inner.dirty_since.take();
 
         if inner

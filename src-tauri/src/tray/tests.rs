@@ -340,4 +340,22 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         TrayView::resolve_guard_priority(&open, true, false, true).expect("blocked must win");
     assert_eq!(blk_view.icon, Some(TrayColor::Red));
     assert_eq!(blk_view.title.as_deref(), Some(STOP_TITLE));
+
+    // Before startup_ready, !sysproxy_active does not prematurely flash "Защита выключена".
+    assert!(TrayView::resolve_guard_priority(&open, false, false, false).is_none());
+
+    // Manual killswitch wins over !sysproxy_active and pending.
+    let manual_ks = GuardPauseStatus {
+        paused: true,
+        mode: PauseMode::Manual,
+        gate: "blocked".to_string(),
+        gate_reason: None,
+        manual_killswitch: true,
+        pending_providers: vec!["anthropic".to_string()],
+        blocked_providers: vec![],
+    };
+    let ks_view = TrayView::resolve_guard_priority(&manual_ks, false, false, true)
+        .expect("manual killswitch must win");
+    assert_eq!(ks_view.icon, Some(TrayColor::Red));
+    assert_eq!(ks_view.title.as_deref(), Some(STOP_TITLE));
 }

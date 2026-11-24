@@ -38,7 +38,9 @@ impl NetworkGuard {
     /// probe may have travelled over the old route, so it must never open the gate: the gate is
     /// kept closed and the next tick (fingerprint differs / `route_dirty`) handles the change.
     pub(super) fn probe_is_stale(&self, inner: &Inner, planned_fp: &str) -> bool {
-        let stale = inner.route_dirty || self.current_local_route_fingerprint() != planned_fp;
+        let stale = inner.route_dirty
+            || inner.deferred_recheck_fp.is_some()
+            || self.current_local_route_fingerprint() != planned_fp;
         if stale && self.gate() == Gate::Open {
             self.set_gate(Gate::Pending);
         }

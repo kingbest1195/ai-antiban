@@ -505,3 +505,93 @@ fn test_summarize_failure_rules() {
     let s = summarize(&r, &["anthropic", "gemini"]).unwrap();
     assert!(s.all_green);
 }
+
+#[tokio::test(start_paused = true)]
+async fn test_finish_audit_offline_after_deferred_recheck_does_not_open_gate() {
+    let h = harness(
+        slow_audit(Duration::from_millis(10), "9.9.9.9", OverallStatus::Green),
+        "9.9.9.9",
+    )
+    .await;
+    let mut env = h.env.clone();
+    env.probe = Some(Arc::new(|| Box::pin(async { None })));
+    let guard = Arc::new(NetworkGuard::new());
+    guard.install_env(env.clone());
+    guard.register_self_weak();
+    let (id, epoch) = {
+        let mut inner = guard.inner.lock().await;
+        inner.baseline = Some(Baseline {
+            ip: "1.1.1.1".to_string(),
+            country: Some("DE".to_string()),
+            trusted: true,
+        });
+        inner.epoch += 1;
+        let ep = inner.epoch;
+        let id = "deferred-offline-1".to_string();
+        inner.pending = Some(Pending {
+            id: id.clone(),
+            epoch: ep,
+            target_ip: "9.9.9.9".to_string(),
+            tel: None,
+            clear_old_state: None,
+            affected_providers: vec!["anthropic"],
+            already_blocked_providers: Vec::new(),
+            healthy_providers: Vec::new(),
+            alert_emitted: false,
+        });
+        inner.deferred_recheck_fp = Some("flapped-fp".to_string());
+        inner.last_fp_change_at = Some(Instant::now());
+        (id, ep)
+    };
+    guard.set_gate(Gate::Pending);
+
+    let results = vec![
+        (
+            ProviderId::Anthropic,
+            Ok(test_report(
+                ProviderId::Anthropic,
+                OverallStatus::Green,
+                "9.9.9.9",
+                "NL",
+            )),
+        ),
+        (
+            ProviderId::Openai,
+            Ok(test_report(
+                ProviderId::Openai,
+                OverallStatus::Green,
+                "9.9.9.9",
+                "NL",
+            )),
+        ),
+        (
+            ProviderId::Gemini,
+            Ok(test_report(
+                ProviderId::Gemini,
+                OverallStatus::Green,
+                "9.9.9.9",
+                "NL",
+            )),
+        ),
+    ];
+    guard
+        .finish_audit(
+            &env,
+            &id,
+            epoch,
+            "9.9.9.9".to_string(),
+            &["anthropic"],
+            Some(results),
+            Instant::now(),
+        )
+        .await;
+
+    assert_ne!(
+        guard.gate(),
+        Gate::Open,
+        "stale online audit must never open gate when deferred recheck probes offline"
+    );
+    let inner = guard.inner.lock().await;
+    assert!(inner.needs_reaudit);
+    assert!(inner.route_dirty);
+}
