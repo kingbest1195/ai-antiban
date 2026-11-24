@@ -2,9 +2,8 @@
 
 #[cfg(unix)]
 use std::ffi::CStr;
-use std::net::IpAddr;
 #[cfg(unix)]
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 fn udp_route_ip(bind: &str, target: &str) -> String {
     std::net::UdpSocket::bind(bind)
