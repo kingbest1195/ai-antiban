@@ -34,6 +34,8 @@ mod types;
 mod waiter;
 
 pub use fingerprint::compute_local_route_fingerprint;
+#[cfg(any(test, feature = "test-support"))]
+pub use fingerprint::format_windows_interfaces_signature;
 pub use killswitch::{gate_closed, shutdown_aborted, wait_open};
 pub(crate) use policy::{
     effective_tray_report, is_report_pinned_travel_only, report_allowed_for_state,

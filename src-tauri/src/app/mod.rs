@@ -55,12 +55,15 @@ pub fn run() {
                 }
                 Err(_) => None,
             };
-            init_alert_popup(app);
+            crate::popup::init_alert_popup(app);
             crate::proxy::popup_port::register_ui_hooks(
                 crate::popup::show_and_position_alert_popup_timed,
                 crate::popup::hide_alert_popup,
                 crate::update_tray_from_report,
                 crate::update_tray_status,
+            );
+            crate::proxy::popup_port::register_tray_guard_hook(
+                crate::tray::update_tray_from_guard_status,
             );
             let (app_state, risk_auditor) = init_services(app)?;
             reconcile_active_profile_on_startup(&app_state);
@@ -312,14 +315,6 @@ pub fn run() {
             }
             _ => {}
         });
-}
-
-/// Ensures alert-popup has no shadow/decorations and stays borderless.
-fn init_alert_popup(app: &tauri::App) {
-    if let Some(popup) = app.get_webview_window("alert-popup") {
-        let _ = popup.set_shadow(false);
-        let _ = popup.set_decorations(false);
-    }
 }
 
 /// Initializes persistent AppState, the Risk Auditor Engine and the Payment Geo Checker.

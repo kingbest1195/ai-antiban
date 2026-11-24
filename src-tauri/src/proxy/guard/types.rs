@@ -96,6 +96,7 @@ pub(crate) trait GuardIo: Send + Sync {
     fn hide_alert_popup(&self);
     fn tray_report(&self, report: &RiskReport, is_pinned: bool, has_blocked: bool);
     fn tray_status(&self, color: &str, title: Option<&str>);
+    fn tray_guard_status(&self, _status: &GuardPauseStatus) {}
 }
 
 pub(super) struct TauriIo {
@@ -126,6 +127,10 @@ impl GuardIo for TauriIo {
 
     fn tray_status(&self, color: &str, title: Option<&str>) {
         crate::proxy::popup_port::update_tray_status(&self.app, color, title);
+    }
+
+    fn tray_guard_status(&self, status: &GuardPauseStatus) {
+        crate::proxy::popup_port::update_tray_from_guard_status(&self.app, status);
     }
 }
 

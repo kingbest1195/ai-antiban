@@ -7,6 +7,7 @@ use tokio::time::Instant as TInstant;
 struct TestIo {
     events: std::sync::Mutex<Vec<(String, serde_json::Value, TInstant)>>,
     trays: std::sync::Mutex<Vec<String>>,
+    guard_trays: std::sync::Mutex<Vec<GuardPauseStatus>>,
     shows: AtomicUsize,
     hides: AtomicUsize,
 }
@@ -79,6 +80,10 @@ impl GuardIo for TestIo {
 
     fn tray_status(&self, color: &str, _title: Option<&str>) {
         self.trays.lock().unwrap().push(color.to_string());
+    }
+
+    fn tray_guard_status(&self, status: &GuardPauseStatus) {
+        self.guard_trays.lock().unwrap().push(status.clone());
     }
 }
 

@@ -277,19 +277,27 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   useEffect(() => {
     let off: (() => void) | undefined;
     let cancelled = false;
+    let pauseSeq = 0;
     getGuardPauseStatus()
       .then((snap) => !cancelled && setGuardPauseStatus(snap))
       .catch(() => {});
     onGuardPauseStatusChanged((snap) => {
+      const seq = ++pauseSeq;
       setGuardPauseStatus(snap);
-      const affected = [
-        ...(snap.pending_providers ?? []),
-        ...(snap.blocked_providers ?? []),
-      ];
+      setState((prev) =>
+        prev
+          ? { ...prev, manual_killswitch: snap.manual_killswitch, blocked_providers: snap.blocked_providers ?? prev.blocked_providers }
+          : prev,
+      );
+      const affected = [...(snap.pending_providers ?? []), ...(snap.blocked_providers ?? [])];
       if (snap.gate !== "open" || snap.paused || snap.manual_killswitch || affected.length > 0) {
         invalidateReports(affected.length > 0 ? affected : undefined, snap.manual_killswitch);
       }
-      fetchAppState().then(setState).catch(() => {});
+      fetchAppState()
+        .then((st) => {
+          if (!cancelled && seq === pauseSeq) setState(st);
+        })
+        .catch(() => {});
     })
       .then((un) => (cancelled ? un() : (off = un)))
       .catch(() => {});
@@ -379,10 +387,8 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    activeReport?.telemetry?.ip,
-    activeReport?.telemetry?.asn,
-    activeReport?.telemetry?.isp,
-    activeReport?.telemetry?.org,
+    activeReport?.telemetry?.ip, activeReport?.telemetry?.asn,
+    activeReport?.telemetry?.isp, activeReport?.telemetry?.org,
   ]);
 
   // Раз в 30 секунд пересчитываем возраст отчёта.
@@ -456,36 +462,13 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   const trustScore = activeReport?.trust_score ?? 100;
 
   return {
-    state,
-    setState,
-    reports,
-    refreshing,
-    scanLatencyMs,
-    sysproxyActive,
-    setSysproxyActive,
-    autoUpdateEnabled,
-    setAutoUpdateEnabled,
-    auditError,
-    startupPending,
-    partialAudit,
-    dataAgeMinutes,
-    activeReport,
-    checksReport,
-    currentIp,
-    currentCountry,
-    trustScore,
-    routesSnapshot,
-    setRoutesSnapshot,
-    refreshRoutes,
-    refreshState,
-    runFullAudit,
-    runProviderAudit,
-    coverageSnapshot,
-    setCoverageSnapshot,
-    refreshCoverage,
-    guardPauseStatus,
-    setGuardPauseStatus,
-    invalidateReports,
+    state, setState, reports, refreshing, scanLatencyMs,
+    sysproxyActive, setSysproxyActive, autoUpdateEnabled, setAutoUpdateEnabled,
+    auditError, startupPending, partialAudit, dataAgeMinutes,
+    activeReport, checksReport, currentIp, currentCountry, trustScore,
+    routesSnapshot, setRoutesSnapshot, refreshRoutes, runFullAudit, runProviderAudit,
+    refreshState, coverageSnapshot, setCoverageSnapshot, refreshCoverage,
+    guardPauseStatus, setGuardPauseStatus, invalidateReports,
   };
 }
 
