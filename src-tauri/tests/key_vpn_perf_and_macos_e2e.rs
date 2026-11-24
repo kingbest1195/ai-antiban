@@ -438,7 +438,13 @@ async fn sec7_8_unreachable_route_disables_soft_bypass_and_records_route_down() 
         .await
         .unwrap();
     let mut buf = [0u8; 512];
-    let n = tokio::time::timeout(Duration::from_secs(3), client.read(&mut buf))
+    let read_timeout = if cfg!(windows) {
+        // Windows loopback TCP connect to a closed port incurs ~2s SYN retransmission delay.
+        Duration::from_secs(8)
+    } else {
+        Duration::from_secs(3)
+    };
+    let n = tokio::time::timeout(read_timeout, client.read(&mut buf))
         .await
         .expect("unreachable route must fail fast without soft-bypass stall")
         .unwrap();

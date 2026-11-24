@@ -260,16 +260,14 @@ impl NetworkGuard {
             resolver.invalidate_direct_cache().await;
             return true;
         }
-        match cur_ip {
-            Some(ip) => {
-                if resolver.cached_direct_country(&ip).await.is_none() {
-                    resolver.invalidate_direct_cache().await;
-                    true
-                } else {
-                    false
-                }
-            }
-            None => false,
+        let Some(ip) = cur_ip else {
+            return false;
+        };
+        if resolver.cached_direct_country(&ip).await.is_none() {
+            resolver.invalidate_direct_cache().await;
+            true
+        } else {
+            false
         }
     }
 
