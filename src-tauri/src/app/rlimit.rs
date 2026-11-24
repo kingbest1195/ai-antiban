@@ -2,6 +2,7 @@
 //! child `networksetup` invocations never fail with `EMFILE` (`os error 24`).
 
 /// Desired minimum soft file-descriptor limit on Unix/macOS (`.app` bundles inherit `256`).
+#[cfg(unix)]
 pub const TARGET_NOFILE_LIMIT: u64 = 8192;
 
 /// Raises the soft `RLIMIT_NOFILE` up to `min(rlim_max, TARGET_NOFILE_LIMIT)` on Unix.
