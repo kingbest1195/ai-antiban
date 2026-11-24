@@ -342,3 +342,73 @@ async fn e2e_video_3_verify_restore_does_not_block_probe_loop_for_25s() {
     .await
     .expect("probe_loop must detect fp/IP change in < 500ms while verify_and_restore_baseline is running");
 }
+
+#[tokio::test]
+async fn e2e_video_4_try_auto_unblock_rejects_tor_and_vpn_even_on_green_report() {
+    let state = AppState::new_in_memory();
+    state
+        .set_pinned_ip_for("anthropic", Some("185.220.101.1".to_string()))
+        .await
+        .unwrap();
+    state.block_provider("anthropic").await.unwrap();
+
+    let exit = Arc::new(std::sync::Mutex::new(Some((
+        "185.220.101.1".to_string(),
+        "NL".to_string(),
+        24940u32,
+    ))));
+    let auditor = Auditor::with_env(AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+        probe: Arc::new(DynamicExitProbe(exit)),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    })
+    .unwrap();
+    let hold_queue = Arc::new(HoldQueue::new());
+    let guard = Arc::new(zastava_lib::proxy::NetworkGuard::new());
+    guard.start_with_test_env(auditor.clone(), state.clone(), hold_queue, None, None);
+
+    let mut tor_report = auditor
+        .evaluate_all(ProviderId::Anthropic, &state, true)
+        .await
+        .unwrap();
+    tor_report.overall_status = zastava_lib::auditor::OverallStatus::Green;
+    tor_report.incomplete = false;
+    tor_report.asn_result = tor_report
+        .asn_result
+        .with_ip_type(zastava_lib::auditor::IpType::Tor);
+
+    assert!(
+        !zastava_lib::proxy::try_auto_unblock_pinned_providers(&state, &guard, &[tor_report]).await,
+        "Tor exit must never be auto-unblocked even if overall_status is Green"
+    );
+    assert!(
+        state
+            .get_data()
+            .await
+            .blocked_providers
+            .contains("anthropic")
+    );
+
+    let mut vpn_report = auditor
+        .evaluate_all(ProviderId::Anthropic, &state, true)
+        .await
+        .unwrap();
+    vpn_report.overall_status = zastava_lib::auditor::OverallStatus::Green;
+    vpn_report.incomplete = false;
+    vpn_report.asn_result = vpn_report
+        .asn_result
+        .with_ip_type(zastava_lib::auditor::IpType::Vpn);
+
+    assert!(
+        !zastava_lib::proxy::try_auto_unblock_pinned_providers(&state, &guard, &[vpn_report]).await,
+        "Mass VPN exit must never be auto-unblocked even if overall_status is Green"
+    );
+    assert!(
+        state
+            .get_data()
+            .await
+            .blocked_providers
+            .contains("anthropic")
+    );
+}

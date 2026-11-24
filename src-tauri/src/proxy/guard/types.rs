@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::Weak;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -352,8 +352,8 @@ pub struct NetworkGuard {
     /// Per-provider `HoldQueue` entries record this epoch on registration so expired 60s holds
     /// from an earlier network cannot re-block after recovery.
     pub(super) restore_epoch: AtomicU64,
-    /// True while `verify_and_restore_baseline` or `spawn_verify_restored_baseline` is active.
-    pub(super) verify_in_flight: AtomicBool,
+    /// Non-zero while `verify_and_restore_baseline` or `spawn_verify_restored_baseline` is active.
+    pub(super) verify_in_flight: AtomicUsize,
     pub(super) client: reqwest::Client,
     /// Cached client configured with the current `chained_proxy` so ticks do not rebuild it.
     pub(super) chained_client: std::sync::Mutex<Option<(String, reqwest::Client)>>,

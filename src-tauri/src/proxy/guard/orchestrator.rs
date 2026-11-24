@@ -74,9 +74,7 @@ impl NetworkGuard {
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_probe_settled_for_test(&self) {
         for _ in 0..200 {
-            if !self.inner.lock().await.probe_in_flight
-                && !self.verify_in_flight.load(Ordering::SeqCst)
-            {
+            if !self.inner.lock().await.probe_in_flight && !self.is_verify_in_flight() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;

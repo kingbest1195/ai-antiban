@@ -23,10 +23,15 @@ impl NetworkGuard {
         self.emit_pause_status();
     }
 
+    /// Returns `true` when any background baseline verification task is currently active.
+    pub(super) fn is_verify_in_flight(&self) -> bool {
+        self.verify_in_flight.load(Ordering::SeqCst) > 0
+    }
+
     /// Non-blocking check whether a route transition, probe, or baseline verification is active.
     pub fn is_network_transition_active(&self) -> bool {
         self.any_provider_gate_pending()
-            || self.verify_in_flight.load(Ordering::SeqCst)
+            || self.is_verify_in_flight()
             || self
                 .inner
                 .try_lock()
@@ -82,7 +87,7 @@ impl NetworkGuard {
         baseline_ip: String,
         was_blocked: bool,
     ) {
-        if self.verify_in_flight.load(Ordering::SeqCst)
+        if self.is_verify_in_flight()
             && inner.verify_ip.as_deref() == Some(baseline_ip.as_str())
             && !self.force_reaudit.load(Ordering::SeqCst)
         {
@@ -92,10 +97,11 @@ impl NetworkGuard {
             old_abort.abort();
         }
         inner.verify_ip = Some(baseline_ip.clone());
-        self.verify_in_flight.store(true, Ordering::SeqCst);
+        let verify_guard = VerifyInFlightGuard::enter(Arc::clone(self));
         let guard = Arc::clone(self);
         let env = env.clone();
         let handle = tokio::spawn(async move {
+            let _verify_guard = verify_guard;
             guard
                 .verify_and_restore_baseline(&env, &baseline_ip, was_blocked)
                 .await;
@@ -112,10 +118,11 @@ impl NetworkGuard {
         ip: String,
         epoch: u64,
     ) {
+        let verify_guard = VerifyInFlightGuard::enter(Arc::clone(self));
         let guard = Arc::clone(self);
         let env = env.clone();
         tokio::spawn(async move {
-            let _verify_guard = VerifyInFlightGuard::enter(Arc::clone(&guard));
+            let _verify_guard = verify_guard;
             let st_before = env.state.get_data().await;
             let enabled_unrouted = st_before.enabled_unrouted_providers();
             if enabled_unrouted.is_empty() {
@@ -205,5 +212,47 @@ impl NetworkGuard {
                 )
                 .await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auditor::seams::LookupOutcome;
+    use crate::auditor::seams::fakes::{FakeDns, FakeProbe, FakeSystem, FakeUdp};
+    use crate::auditor::{AuditEnv, Auditor};
+    use crate::proxy::HoldQueue;
+    use crate::state::AppState;
+
+    #[tokio::test]
+    async fn verify_abort_before_first_poll_resets_verify_in_flight() {
+        let auditor = Auditor::with_env(AuditEnv {
+            dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+            probe: Arc::new(FakeProbe::body(200, "fl=1\nip=1.2.3.4\nloc=GB\ncolo=LHR\n")),
+            udp: Arc::new(FakeUdp::new()),
+            system: Arc::new(FakeSystem::healthy()),
+        })
+        .unwrap();
+        let state = AppState::new_in_memory();
+        let hold_queue = Arc::new(HoldQueue::new());
+        let guard = Arc::new(NetworkGuard::new());
+        guard.start_with_test_env(auditor, state, hold_queue, None, None);
+        let env = guard.env.get().unwrap().clone();
+
+        {
+            let mut inner = guard.inner.lock().await;
+            guard.spawn_verify_and_restore_baseline(&env, &mut inner, "1.2.3.4".into(), true);
+            assert!(guard.is_verify_in_flight());
+            // Abort BEFORE yielding to Tokio so the spawned task is dropped without ever polling.
+            if let Some(abort) = inner.verify_abort.take() {
+                abort.abort();
+            }
+        }
+        // Yield once so Tokio drops the aborted task.
+        tokio::task::yield_now().await;
+        assert!(
+            !guard.is_verify_in_flight(),
+            "verify_in_flight must reset to false even when aborted before first poll"
+        );
     }
 }

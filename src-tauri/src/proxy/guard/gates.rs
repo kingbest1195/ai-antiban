@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -54,7 +54,7 @@ impl NetworkGuard {
             force_reaudit: AtomicBool::new(false),
             pending_route_sync: std::sync::Mutex::new(HashMap::new()),
             restore_epoch: AtomicU64::new(0),
-            verify_in_flight: AtomicBool::new(false),
+            verify_in_flight: AtomicUsize::new(0),
             client,
             chained_client: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tokio::sync::MutexGuard;
@@ -329,7 +328,7 @@ impl NetworkGuard {
             let active_check_or_restore = inner.probe_in_flight
                 || inner.pending.is_some()
                 || inner.audit_abort.is_some()
-                || self.verify_in_flight.load(Ordering::SeqCst)
+                || self.is_verify_in_flight()
                 || self.any_provider_gate_pending();
             if !active_check_or_restore {
                 inner.last_probe = None;

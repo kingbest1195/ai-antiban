@@ -91,7 +91,22 @@ impl NetworkGuard {
             if !is_ip_pinned_for_state(&st, report.provider, &report.telemetry.ip) {
                 continue;
             }
-            if !report_no_critical_and_geo_ok(report) {
+            let has_tor_or_vpn_check = matches!(
+                report.asn_result.detail.as_ref().and_then(|d| d.ip_type),
+                Some(crate::auditor::IpType::Tor | crate::auditor::IpType::Vpn)
+            ) || report.checks.iter().any(|c| {
+                matches!(
+                    c.detail.as_ref().and_then(|d| d.ip_type),
+                    Some(crate::auditor::IpType::Tor | crate::auditor::IpType::Vpn)
+                )
+            });
+            if !report_no_critical_and_geo_ok(report)
+                || has_tor_or_vpn_check
+                || report.dnsbl_result.status.is_critical()
+                || report.asn_result.status.is_critical()
+                || report.ipv6_result.status.is_critical()
+                || report.pinning_result.status.is_critical()
+            {
                 continue;
             }
             if state.unblock_provider(pname).await.is_ok() {

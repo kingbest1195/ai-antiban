@@ -10,14 +10,14 @@ pub(super) struct VerifyInFlightGuard(Arc<NetworkGuard>);
 
 impl VerifyInFlightGuard {
     pub(super) fn enter(guard: Arc<NetworkGuard>) -> Self {
-        guard.verify_in_flight.store(true, Ordering::SeqCst);
+        guard.verify_in_flight.fetch_add(1, Ordering::SeqCst);
         Self(guard)
     }
 }
 
 impl Drop for VerifyInFlightGuard {
     fn drop(&mut self) {
-        self.0.verify_in_flight.store(false, Ordering::SeqCst);
+        self.0.verify_in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
