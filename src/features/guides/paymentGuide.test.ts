@@ -210,7 +210,10 @@ describe("PaymentGuide inside GuidesScreen", () => {
             estimated_fees: "Т-Банк и СберБанк Онлайн по курсу банка",
             provider_ids: ["tbank", "sberbank", "kupikod"],
             checklist: ["Отдельный аккаунт Apple (США) с безналоговым адресом."],
-            warnings: [],
+            warnings: [
+              "Первый совет по оплате.",
+              "Второй совет: автопонижение сервиса по статистике.",
+            ],
           },
           fallbacks: [
             {
@@ -237,6 +240,8 @@ describe("PaymentGuide inside GuidesScreen", () => {
     );
 
     expect(html).toContain("Рекомендуемый маршрут");
+    expect(html).toContain("Первый совет по оплате.");
+    expect(html).toContain("Второй совет: автопонижение сервиса по статистике.");
     expect(html).toContain("Опасный путь");
     expect(html).toContain("Google Pay");
     expect(html).not.toContain("zs-btn--primary");

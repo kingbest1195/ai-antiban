@@ -5671,7 +5671,7 @@ dependencies = [
 
 [[package]]
 name = "zastava"
-version = "3.1.1"
+version = "3.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

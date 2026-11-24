@@ -7,6 +7,35 @@
 
 ---
 
+## [3.2.0] — 2026-11-23
+
+Минорный релиз **Застава v3.2.0**: навигатор безопасной оплаты подписок ИИ (Claude, ChatGPT, Cursor и Gemini), локальная статистика проходимости карт и автопонижение ненадёжных провайдеров с криптографической проверкой бандлов, телепорт рабочего контекста в другой ИИ внутри Бункера, единая «Чистая комната» для Claude и Gemini / AI Studio с быстрым переключением профилей, 1-кликовый сброс кеша входа при ошибке 403 в Antigravity и 6 крупных платформенных исправлений стабильности на macOS и Windows.
+
+### Добавлено
+* **Статистика проходимости карт и автопонижение ненадёжных провайдеров (`core/bin_radar.rs`, `auditor/bin_radar_verify.rs`, `core/providers_manifest.rs`, `rules/bin_radar_snapshot.json`, `rules/providers_manifest.json`):**
+  * Полностью автономная (Offline-First) база статистики по первым 8 цифрам карты в разрезе каждого ИИ-сервиса (`Claude Pro`, `Claude Max`, `ChatGPT`, `Cursor`, `Gemini`) с порогом публикации `n >= 5`, экспоненциальным затуханием по окнам 14 и 30 дней и проверкой подписи Ed25519 через `ring`.
+  * Строго добровольный локальный отчёт (`bin_radar_opt_in: bool = false`, `#[serde(deny_unknown_fields)]`, только 8-значный префикс без персональных и платёжных данных).
+  * Автоматическое понижение провайдеров оплаты (включая партнёрских, с игнорированием `auto_demote_exempt`) при превышении порога 40% проверок паспорта или блокировок за 14 дней (`n >= 15`).
+* **Навигатор безопасной оплаты подписок (`core/payment_advisor.rs`, `auditor/payment_advisor.rs`, `SafePaymentAdvisorCard.tsx`, `PaymentGuide.tsx`):**
+  * Детерминированный подбор маршрута оплаты для всех 5 сценариев: отдельный US Apple ID (Т-Банк, СберБанк Онлайн, Kupikod), прямая оплата картой на сайте (WantToPay Easy/Smart, «Плати по миру» тариф «Для подписок»), перенаправление с токсичных карт (Wayment SG, Antarctic Wallet и др.), экосистема Google (Gemini / AI Studio / Antigravity, защита от ошибок `OR-CCSEH-21` / `OR-HDT-16`), а также ChatGPT и Cursor.
+  * Расширение каналов оплаты вариантом `GooglePlayIap` с полной обратной совместимостью сохранённых паспортов `v3.1.1`.
+* **Телепорт памяти в Бункере (`core/context_teleport.rs`, `bunker/teleport.rs`, `BunkerCard.tsx`, `BannedBranch.tsx`):**
+  * Выбор целевого формата выгрузки без внешних запросов к моделям ИИ: `Универсальный бэкап` (`RESTORE_PROMPT.md`), `Gemini и Antigravity` (`GEMINI.md` + `SYSTEM_INSTRUCTIONS_GEMINI.txt`), `Cursor` (`.cursor/rules/migrated-context.mdc`) и `ChatGPT` (`CHATGPT_CUSTOM_INSTRUCTIONS.txt` строго до 1 500 символов на блок + `MEMORY_SEED.md`).
+  * Строгая очистка секретных токенов (`sk-ant-*`, `sk-*`, `AIza*`, `ghp_*`, `xoxb-*`), исключение `.credentials.json` / `Cookies` / `state.vscdb` / `ant-device-registry.json` / `ccd-ids.json` и приватные права `0o700` / `0o600`.
+* **Единая «Чистая комната» для Claude и Gemini / AI Studio и 1-клик сброс `403` в Antigravity (`SandboxProfilesCard.tsx`, `QuotaProfileSwitcher.tsx`, `Gemini403Card.tsx`, `auditor/cache_cleaner.rs`, `rules/provider_matrix.json`):**
+  * Пресеты сценариев при создании профиля (`Claude` и `Gemini / AI Studio`), быстрый переключатель профилей для смены квот без смешивания cookies, контроль стабильности IP сессии для AI Studio (`session_ip_stability_for_studio`) и безопасная read-only подсказка для редакторов Cursor / Windsurf.
+  * 1-кликовая очистка кеша входа в `~/.gemini` и `~/.antigravity` (`clean_antigravity_auth_cache`) с полным сохранением `GEMINI.md`, правил и проектов и строгим соблюдением Zero-LOLBin на Windows.
+
+### Исправлено
+* **Часовой пояс на macOS (`os_tz/`, `TerminalSection.tsx`, `useTimezoneSync.ts`):** добавлено поле `already_matches_target` — если пояс ОС уже совпадает с поясом выходного IP без файла `os_tz_baseline.json`, интерфейс честно показывает «Совпадает с IP» и не запрашивает лишних прав администратора.
+* **Автообновление и разблокировка продлённых ключей Заставы (`routing/key`, `commands/routes_sub.rs`, `RouteListSection.tsx`):** добавлены `sub_url` (заголовок `subscription-userinfo` и JSON-метаданные), фоновое и ручное обновление срока действия, grace-разблокировка старых продлённых ключей после живой проверки туннеля и обновление существующего маршрута на месте при переимпорте без дубликатов.
+* **Перезапуск и определение PAC-политик браузеров (`relaunch.rs`, `reconcile.rs`, `coverageModel.ts`, `CoverageSection.tsx`):** увеличен таймаут закрытия браузеров до `9000 мс`, исправлен ложно-зелёный тост при непустом `skipped`, учтены активная политика `PolicyStore` и подтверждённый трафик при игнорировании неиспользуемых `Guest Profile` / `System Profile`, синхронизирован `gw.setCoverageSnapshot`.
+* **Детекция массовых VPN и IPv6 (`dangerous_asns.json`, `ip_type.rs`, `rules.rs`, `cascade.rs`, `routes.rs`):** расширен список массовых VPN и Cloudflare WARP (`AS13335`), добавлен word-boundary поиск, исключено сокрытие `IpType::Vpn` / `Tor` флагом `PINNED_BY_ZASTAVA_KEY`, исправлена классификация IPv6 при `TorLookup::NotApplicable`, а `test_route` возвращает оценку репутации выходного IP.
+* **Стабильность двойного туннеля поверх системного VPN (`cascade.rs`, `connect.rs`, `routing/net/`, `entry_relay.rs`, `handshakes.rs`):** раздельные таймауты и fail-soft обход таймаута внешнего GeoIP-пробера для живого маршрута, оптимизация DNS при `FakeIP` (`198.18.0.0/15`), IPv4-first Happy Eyeballs в `entry_relay`, staggered-старт по узлам маршрута и буферизованный `BufReader`.
+* **Строгие исключения `trusted_exceptions` и Kill-Switch (`decisions.rs`, `interception/helpers.rs`, `audit/helpers.rs`, `useOverviewModel.ts`, `ServiceRow.tsx`):** разрешение на сессию больше не сохраняет вечное исключение без явного согласия (`persist_exception`), запрещён захват устаревшего `observed_ip`, разделены статусы постоянного исключения, сессионного разрешения и закреплённого IP, а ручной Kill-Switch блокирует разрешение до любых изменений состояния.
+
+---
+
 ## [3.0.0] — 2026-11-20
 
 Крупный мажорный релиз **Застава v3.0.0**: новая оболочка «Разделы» с маскотом-сторожем и 4-состоянным треем, интерактивная «Чистая комната» с изолированной песочницей браузеров (пер-профильный loopback proxy alias), бесплатный локальный Бункер с экспортом Cursor и веб-чатов, антикризисный раздел «SOS-верификация» с индексом риска `Persona Risk Index`, очистка кэша Windows MSIX Claude, защита DNS-проб под TUN Fake-IPv6 (anti-SSRF) и SLSA-аттестации сборок GitHub Build Provenance.

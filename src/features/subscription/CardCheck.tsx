@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ChangeEvent, ClipboardEvent, FormEvent } from "react";
 import type { AiPaymentService, BinRadarLookupStats, BinReport, ClaudeWebVerdict } from "../../types";
 import { checkCardBin, getBinRadarStats } from "../../utils/api";
@@ -85,6 +85,19 @@ export function CardCheck({
   const [result, setResult] = useState<BinReport | null>(null);
   const [radarStats, setRadarStats] = useState<BinRadarLookupStats | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!result?.binPrefix) return;
+    let cancelled = false;
+    void getBinRadarStats(result.binPrefix, targetService)
+      .then((stats) => {
+        if (!cancelled) setRadarStats(stats);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [result?.binPrefix, targetService]);
 
   const handleInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     const decision = evaluateBinInput(e.target.value, binInput);

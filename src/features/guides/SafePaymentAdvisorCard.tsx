@@ -57,7 +57,11 @@ export function SafePaymentAdvisorCard({
     }
   }, [initialBin]);
 
-  const runAdvice = async () => {
+  const runAdvice = async (validatePartialBin = false) => {
+    if (validatePartialBin && binInput.length > 0 && binInput.length < 6) {
+      setBinError(subCopy.card.errors.tooShort);
+      return;
+    }
     setBusy(true);
     try {
       const resolvedCountry =
@@ -174,7 +178,7 @@ export function SafePaymentAdvisorCard({
               variant="secondary"
               size="sm"
               disabled={busy}
-              onClick={() => void runAdvice()}
+              onClick={() => void runAdvice(true)}
             >
               {t.submitBtn}
             </Button>
@@ -204,7 +208,15 @@ export function SafePaymentAdvisorCard({
             </div>
 
             {plan.primary.warnings && plan.primary.warnings.length > 0 && (
-              <Banner tone="info" icon="info" title={plan.primary.warnings[0]} />
+              <Banner tone="info" icon="info" title={plan.primary.warnings[0]}>
+                {plan.primary.warnings.length > 1 && (
+                  <ul className="guides-points__list">
+                    {plan.primary.warnings.slice(1).map((warn) => (
+                      <li key={warn}>{warn}</li>
+                    ))}
+                  </ul>
+                )}
+              </Banner>
             )}
 
             {plan.blocked_red_flags.length > 0 && (
