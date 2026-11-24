@@ -66,6 +66,13 @@ impl NetworkGuard {
         planned_fp: String,
     ) -> (Option<String>, String) {
         let mut active_fp = planned_fp;
+        if !self.is_manual_killswitch()
+            && !self.is_paused()
+            && !self.any_provider_gate_pending()
+            && self.gate() == super::types::Gate::Open
+        {
+            self.freeze_open_gates_pending();
+        }
         for _ in 0..FP_SETTLE_MAX_ROUNDS {
             let probed = self
                 .probe_with_offline_retries(env, alert_id, epoch, &active_fp)
@@ -158,8 +165,12 @@ impl NetworkGuard {
                     let epoch = inner.epoch;
                     self.spawn_verify_restored_baseline(env, ip.to_string(), epoch);
                 } else {
-                    drop(inner);
-                    Box::pin(self.verify_and_restore_baseline(env, ip, was_blocked)).await;
+                    self.spawn_verify_and_restore_baseline(
+                        env,
+                        &mut inner,
+                        ip.to_string(),
+                        was_blocked,
+                    );
                 }
             } else {
                 inner.handled_ip = None;
@@ -191,8 +202,7 @@ impl NetworkGuard {
             if self.probe_is_stale(&inner, planned_fp) {
                 return true;
             }
-            drop(inner);
-            self.verify_and_restore_baseline(env, ip, was_blocked).await;
+            self.spawn_verify_and_restore_baseline(env, &mut inner, ip.to_string(), was_blocked);
             return true;
         }
 
@@ -333,8 +343,7 @@ impl NetworkGuard {
             let still_blocked =
                 !st_after.blocked_providers.is_empty() || self.any_provider_gate_closed();
             if still_blocked && !self.is_manual_killswitch() {
-                drop(inner);
-                Box::pin(self.verify_and_restore_baseline(env, &ip, true)).await;
+                self.spawn_verify_and_restore_baseline(env, &mut inner, ip, true);
             }
             return;
         };

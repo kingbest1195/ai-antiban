@@ -17,7 +17,7 @@ pub use coverage::{
     AppCoverageItem, CoverageSnapshot, CoverageTracker, classify_process_name,
     lookup_process_name_by_port,
 };
-pub use guard::{ALL_PROVIDERS, Gate, GuardCtx, NetworkGuard};
+pub use guard::{ALL_PROVIDERS, Gate, GuardCtx, NetworkGuard, try_auto_unblock_pinned_providers};
 pub use hold_queue::{
     CheckoutRiskAlert, HoldQueue, HoldResolution, InterceptionAction, RiskInterceptPayload,
 };

@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -7,10 +6,10 @@ use super::audit_summary::{audit_enabled, summarize_for_state};
 use super::policy::all_pinned_or_excepted_for;
 use super::types::{Baseline, Env, Gate, NetworkGuard, PauseMode};
 
-struct VerifyInFlightGuard(Arc<NetworkGuard>);
+pub(super) struct VerifyInFlightGuard(Arc<NetworkGuard>);
 
 impl VerifyInFlightGuard {
-    fn enter(guard: Arc<NetworkGuard>) -> Self {
+    pub(super) fn enter(guard: Arc<NetworkGuard>) -> Self {
         guard.verify_in_flight.store(true, Ordering::SeqCst);
         Self(guard)
     }
@@ -127,6 +126,23 @@ impl NetworkGuard {
             inner_guard.last_route_fp = Some(self.current_local_route_fingerprint());
         }
         let inner = &mut *inner_guard;
+
+        let st_before = if let Ok(ref results) = audited {
+            let ok_reports: Vec<crate::auditor::RiskReport> = results
+                .iter()
+                .filter_map(|(_, r)| r.as_ref().ok().cloned())
+                .collect();
+            if self
+                .try_auto_unblock_pinned_providers_locked(&env.state, inner, &ok_reports)
+                .await
+            {
+                env.state.get_data().await
+            } else {
+                st_before
+            }
+        } else {
+            st_before
+        };
 
         let Some(summary) = audited.ok().and_then(|r| {
             summarize_for_state(&r, &enabled_unrouted, &st_before, Some(baseline_ip))
@@ -384,109 +400,5 @@ impl NetworkGuard {
                 self.update_tray(env, &summary.tray).await;
             }
         }
-    }
-
-    /// Background verification spawned immediately after instant auto-recovery onto a verified
-    /// baseline or pinned/excepted IP. Updates tray & Direct IP history; only re-blocks if a real
-    /// non-travel critical violation (`Ok(Red)`) is reported for the restored network.
-    pub(super) fn spawn_verify_restored_baseline(
-        self: &Arc<Self>,
-        env: &Env,
-        ip: String,
-        epoch: u64,
-    ) {
-        let guard = Arc::clone(self);
-        let env = env.clone();
-        tokio::spawn(async move {
-            let _verify_guard = VerifyInFlightGuard::enter(Arc::clone(&guard));
-            let st_before = env.state.get_data().await;
-            let enabled_unrouted = st_before.enabled_unrouted_providers();
-            if enabled_unrouted.is_empty() {
-                return;
-            }
-            let audited = tokio::time::timeout(
-                env.audit_timeout,
-                audit_enabled(&env.audit, &st_before.disabled_providers),
-            )
-            .await;
-            let Ok(results) = audited else {
-                let mut inner = guard.inner.lock().await;
-                if inner.epoch == epoch
-                    && !guard.is_manual_killswitch()
-                    && inner.observed_ip.as_deref() == Some(ip.as_str())
-                {
-                    let st = env.state.get_data().await;
-                    let cur_unrouted = st.enabled_unrouted_providers();
-                    if all_pinned_or_excepted_for(&st, &cur_unrouted, &ip) {
-                        inner.handled_ip = None;
-                        inner.needs_reaudit = true;
-                    }
-                }
-                return;
-            };
-            let mut inner = guard.inner.lock().await;
-            if inner.epoch != epoch
-                || guard.is_manual_killswitch()
-                || inner.observed_ip.as_deref() != Some(ip.as_str())
-            {
-                return;
-            }
-            let st = env.state.get_data().await;
-            let cur_unrouted = st.enabled_unrouted_providers();
-            let trusted_base = inner.trusted_baseline_ip().map(str::to_string);
-            let Some(summary) =
-                summarize_for_state(&results, &cur_unrouted, &st, trusted_base.as_deref())
-            else {
-                if all_pinned_or_excepted_for(&st, &cur_unrouted, &ip) {
-                    inner.handled_ip = None;
-                    inner.needs_reaudit = true;
-                }
-                return;
-            };
-            guard.update_tray(&env, &summary.tray).await;
-            let any_transient_pinned = summary
-                .affected_providers
-                .iter()
-                .any(|p| summary.is_transient_pinned_error(&st, p, &ip));
-            let real_violations: Vec<&'static str> = summary
-                .affected_providers
-                .iter()
-                .copied()
-                .filter(|p| {
-                    !summary.failed_providers.contains(p)
-                        && !summary.is_transient_pinned_error(&st, p, &ip)
-                })
-                .collect();
-            if real_violations.is_empty() {
-                if !summary.failed_providers.is_empty() || any_transient_pinned {
-                    inner.handled_ip = None;
-                    inner.needs_reaudit = true;
-                } else if let Some(b) = inner.baseline.as_mut()
-                    && b.ip == ip
-                {
-                    b.country = Some(summary.tel.country_code.clone());
-                    b.trusted = true;
-                }
-                summary.record_healthy_history(&env.state, &st).await;
-                return;
-            }
-
-            let old = inner.baseline.clone();
-            let empty_blocked = HashSet::new();
-            guard
-                .apply_audit_outcome_locked(
-                    &env,
-                    &mut inner,
-                    ip,
-                    old.as_ref(),
-                    &results,
-                    &empty_blocked,
-                    None,
-                    false,
-                    None,
-                    Instant::now(),
-                )
-                .await;
-        });
     }
 }

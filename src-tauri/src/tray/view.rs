@@ -212,7 +212,9 @@ impl TrayView {
                 ..Default::default()
             });
         }
-        if status.gate == "pending" || !status.pending_providers.is_empty() {
+        if (status.gate == "pending" || !status.pending_providers.is_empty())
+            && !status.has_active_risk_alert
+        {
             let ks = if status.blocked_providers.is_empty() && !blocked_in_state {
                 (KS_FREEZE_TEXT, TrayColor::Red)
             } else {
@@ -237,7 +239,11 @@ impl TrayView {
                 ..Default::default()
             });
         }
-        if status.gate == "blocked" || !status.blocked_providers.is_empty() || blocked_in_state {
+        if status.has_active_risk_alert
+            || status.gate == "blocked"
+            || !status.blocked_providers.is_empty()
+            || blocked_in_state
+        {
             let tip = status
                 .gate_reason
                 .as_deref()

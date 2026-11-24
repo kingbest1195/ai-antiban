@@ -84,6 +84,13 @@ impl NetworkGuard {
         }
     }
 
+    /// Integration-test driver to start the background `probe_loop` with a test `Env`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_loop_for_test(self: &Arc<Self>) {
+        self.register_self_weak();
+        self.start_loop();
+    }
+
     pub(super) fn start_loop(self: &Arc<Self>) {
         if self.loop_running.swap(true, Ordering::SeqCst) {
             return;
@@ -457,9 +464,32 @@ impl NetworkGuard {
             TickPlan::ProbeRegular(planned_fp) => {
                 let fast_fail = self.gate() == Gate::Open && !self.is_paused();
                 drop(tick_guard);
-                let probed = self.probe_for_regular_tick(env, fast_fail).await;
-                self.apply_regular_probe_unlocked(env, probed, &planned_fp, was_blocked)
-                    .await;
+                let mut fp_interval =
+                    tokio::time::interval(Duration::from_millis(ROUTE_CHECK_INTERVAL_MS));
+                fp_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                fp_interval.tick().await;
+                let probe_fut = self.probe_for_regular_tick(env, fast_fail);
+                tokio::pin!(probe_fut);
+                let probed = loop {
+                    tokio::select! {
+                        res = &mut probe_fut => break Some(res),
+                        _ = fp_interval.tick() => {
+                            if self.current_local_route_fingerprint() != planned_fp {
+                                break None;
+                            }
+                        }
+                    }
+                };
+                match probed {
+                    Some(ip_opt) => {
+                        self.apply_regular_probe_unlocked(env, ip_opt, &planned_fp, was_blocked)
+                            .await;
+                    }
+                    None => {
+                        self.handle_fp_moved_during_regular_probe(env, was_blocked)
+                            .await;
+                    }
+                }
             }
         }
     }

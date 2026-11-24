@@ -34,6 +34,19 @@ impl NetworkGuard {
         self.drain_pending_route_sync_locked(Some(env), inner).await;
         let st = env.state.get_data().await;
         self.unblock_disabled_and_routed(env, &st).await;
+        let ok_reports: Vec<crate::auditor::RiskReport> = results
+            .iter()
+            .filter_map(|(_, r)| r.as_ref().ok().cloned())
+            .collect();
+        let st = if !ok_reports.is_empty()
+            && self
+                .try_auto_unblock_pinned_providers_locked(&env.state, inner, &ok_reports)
+                .await
+        {
+            env.state.get_data().await
+        } else {
+            st
+        };
         let enabled_unrouted = st.enabled_unrouted_providers();
         if enabled_unrouted.is_empty() {
             self.restore_locked(env, inner).await;

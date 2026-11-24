@@ -77,26 +77,21 @@ async fn wait_next_tray_tick(
 ) {
     tokio::select! {
         _ = tokio::time::sleep(delay) => {}
-        res = gate_rx.changed() => {
-            if res.is_err() {
-                tokio::time::sleep(delay).await;
-            }
+        res = gate_rx.changed(), if !gate_rx.has_changed().unwrap_or(true) => {
+            if res.is_err() { tokio::time::sleep(delay).await; }
         }
-        res = kill_rx.changed() => {
-            if res.is_err() {
-                tokio::time::sleep(delay).await;
-            }
+        res = kill_rx.changed(), if !kill_rx.has_changed().unwrap_or(true) => {
+            if res.is_err() { tokio::time::sleep(delay).await; }
         }
     }
 }
 
 fn sync_tray_if_guard_active(handle: &tauri::AppHandle, guard: &proxy::NetworkGuard) -> bool {
-    if guard.is_paused() || guard.any_provider_gate_pending() {
+    let active = guard.is_paused() || guard.any_provider_gate_pending();
+    if active {
         crate::tray::update_tray_from_guard_status(handle, &guard.pause_status());
-        true
-    } else {
-        false
     }
+    active
 }
 
 /// Background tray status updater (network changes are handled by the NetworkGuard).
@@ -170,6 +165,16 @@ pub(super) fn spawn_tray_status_watcher(
                         )
                         .await;
                         continue;
+                    }
+                    let reports_slice = std::slice::from_ref(&report);
+                    if proxy::try_auto_unblock_pinned_providers(
+                        &watcher_state,
+                        &watcher_guard,
+                        reports_slice,
+                    )
+                    .await
+                    {
+                        let _ = watcher_handle.emit("network://changed", &report);
                     }
                     let st = watcher_state.get_data().await;
                     let is_pinned =

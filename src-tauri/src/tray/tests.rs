@@ -206,6 +206,7 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         manual_killswitch: false,
         pending_providers: vec!["anthropic".to_string()],
         blocked_providers: vec![],
+        has_active_risk_alert: false,
     };
     let v_pending = TrayView::from_guard_status(&pending, true, true);
     assert_eq!(v_pending.icon, Some(TrayColor::Yellow));
@@ -228,6 +229,7 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         manual_killswitch: false,
         pending_providers: vec![],
         blocked_providers: vec!["anthropic".to_string()],
+        has_active_risk_alert: false,
     };
     let v_paused = TrayView::from_guard_status(&paused, true, false);
     assert_eq!(v_paused.icon, Some(TrayColor::Gray));
@@ -260,6 +262,7 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         manual_killswitch: true,
         pending_providers: vec![],
         blocked_providers: vec!["anthropic".to_string(), "openai".to_string()],
+        has_active_risk_alert: false,
     };
     let v_manual = TrayView::from_guard_status(&manual, true, false);
     assert_eq!(v_manual.icon, Some(TrayColor::Red));
@@ -282,6 +285,7 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         manual_killswitch: false,
         pending_providers: vec![],
         blocked_providers: vec![],
+        has_active_risk_alert: false,
     };
     let v_open_from_red = TrayView::from_guard_status(&open, true, false);
     assert_eq!(v_open_from_red.icon, Some(TrayColor::Green));
@@ -314,6 +318,7 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         manual_killswitch: false,
         pending_providers: vec!["anthropic".to_string()],
         blocked_providers: vec!["openai".to_string()],
+        has_active_risk_alert: false,
     };
     let p_view = TrayView::resolve_guard_priority(&paused_and_pending, true, false, true)
         .expect("paused must win");
@@ -329,6 +334,7 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         manual_killswitch: false,
         pending_providers: vec!["anthropic".to_string()],
         blocked_providers: vec!["openai".to_string()],
+        has_active_risk_alert: false,
     };
     let pend_view = TrayView::resolve_guard_priority(&pending_and_blocked, true, false, true)
         .expect("pending must win");
@@ -353,9 +359,26 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         manual_killswitch: true,
         pending_providers: vec!["anthropic".to_string()],
         blocked_providers: vec![],
+        has_active_risk_alert: false,
     };
     let ks_view = TrayView::resolve_guard_priority(&manual_ks, false, false, true)
         .expect("manual killswitch must win");
     assert_eq!(ks_view.icon, Some(TrayColor::Red));
     assert_eq!(ks_view.title.as_deref(), Some(STOP_TITLE));
+
+    // Active ready/failed risk alert (even with pending_providers or open sibling providers) -> Red "СТОП СЕТИ".
+    let risk_alert_active = GuardPauseStatus {
+        paused: false,
+        mode: PauseMode::None,
+        gate: "open".to_string(),
+        gate_reason: Some("PINNED_IP_MISMATCH".to_string()),
+        manual_killswitch: false,
+        pending_providers: vec!["anthropic".to_string()],
+        blocked_providers: vec![],
+        has_active_risk_alert: true,
+    };
+    let alert_view = TrayView::resolve_guard_priority(&risk_alert_active, false, true, true)
+        .expect("active risk alert must win");
+    assert_eq!(alert_view.icon, Some(TrayColor::Red));
+    assert_eq!(alert_view.title.as_deref(), Some(STOP_TITLE));
 }

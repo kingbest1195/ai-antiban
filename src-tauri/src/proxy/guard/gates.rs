@@ -174,6 +174,15 @@ impl NetworkGuard {
         }
         pending_providers.sort();
         blocked_providers.sort();
+        let has_active_risk_alert = self
+            .env
+            .get()
+            .and_then(|env| env.hold_queue.current_alert())
+            .is_some_and(|a| {
+                !a.is_simulation
+                    && (a.phase == crate::proxy::hold_queue::PHASE_READY
+                        || a.phase == crate::proxy::hold_queue::PHASE_FAILED)
+            });
         GuardPauseStatus {
             paused: mode != PauseMode::None,
             mode,
@@ -182,6 +191,7 @@ impl NetworkGuard {
             manual_killswitch,
             pending_providers,
             blocked_providers,
+            has_active_risk_alert,
         }
     }
 
@@ -251,6 +261,10 @@ impl NetworkGuard {
             if fp != *old_fp {
                 g.last_route_fp = Some(fp.clone());
                 g.last_fp_change_at = Some(Instant::now());
+                if let Some(abort) = g.verify_abort.take() {
+                    abort.abort();
+                }
+                g.verify_ip = None;
                 let settling_pause = !self.is_manual_killswitch()
                     && g.pending_pause_ip_bind
                     && *self.pause_mode.lock().unwrap_or_else(|p| p.into_inner())
@@ -477,22 +491,5 @@ impl NetworkGuard {
             .as_ref()
             .filter(|p| p.id == id)
             .map(|p| p.affected_providers.iter().map(|s| s.to_string()).collect())
-    }
-
-    /// Returns the most recently observed egress IP, if any.
-    pub async fn current_observed_ip(&self) -> Option<String> {
-        let inner = self.inner.lock().await;
-        inner
-            .observed_ip
-            .clone()
-            .or_else(|| inner.baseline.as_ref().map(|b| b.ip.clone()))
-    }
-
-    pub fn is_env_installed(&self) -> bool {
-        self.env.get().is_some()
-    }
-
-    pub async fn has_baseline(&self) -> bool {
-        self.inner.lock().await.baseline.is_some()
     }
 }

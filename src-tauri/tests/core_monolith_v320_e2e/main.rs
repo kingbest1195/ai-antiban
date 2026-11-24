@@ -286,8 +286,12 @@ async fn e2e_five_rapid_fingerprint_flaps_single_checking_single_decision_zero_t
     }
     assert_eq!(
         titles,
-        vec![" Проверяем…".to_string(), " Пауза".to_string()],
-        "tray must transition once Checking -> Пауза with zero oscillations: {titles:?}"
+        vec![
+            " Проверяем…".to_string(),
+            " СТОП СЕТИ".to_string(),
+            " Пауза".to_string()
+        ],
+        "tray must transition Checking -> СТОП СЕТИ -> Пауза with zero oscillations: {titles:?}"
     );
 }
 
@@ -667,3 +671,5 @@ async fn e2e_multi_provider_isolation_manual_allow_anthropic_then_gemini_without
     assert_eq!(server.guard.gate_for(ProviderId::Gemini), Gate::Open);
     assert!(state.get_data().await.blocked_providers.is_empty());
 }
+
+mod video_regressions;

@@ -423,6 +423,7 @@ async fn test_startup_pinned_ip_and_stale_block_silent_clear_no_alert() {
         inner.last_route_fp = Some(compute_local_route_fingerprint(None));
     }
     h.guard.check_route_and_tick(&h.env).await;
+    h.guard.wait_probe_settled_for_test().await;
     assert_eq!(h.io.count("interceptor://risk-detected"), 0);
     assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
     assert_eq!(h.guard.gate(), Gate::Open);
@@ -629,6 +630,7 @@ async fn test_kick_reaudit_and_route_sync_never_drop_when_inner_is_locked() {
     }
 
     h.guard.check_route_and_tick(&h.env).await;
+    h.guard.wait_probe_settled_for_test().await;
 
     assert!(
         audit_calls.load(Ordering::SeqCst) >= 1,

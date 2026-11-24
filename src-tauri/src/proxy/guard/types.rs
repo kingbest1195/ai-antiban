@@ -64,6 +64,9 @@ pub struct GuardPauseStatus {
     pub pending_providers: Vec<String>,
     #[serde(default)]
     pub blocked_providers: Vec<String>,
+    /// True when a ready/failed risk-alert popup is currently active in `HoldQueue`.
+    #[serde(default)]
+    pub has_active_risk_alert: bool,
 }
 
 #[derive(Clone)]
@@ -246,6 +249,10 @@ pub(super) struct Inner {
     pub(super) probe_in_flight: bool,
     /// Background probe+audit task for `ProbeChanged` (cancelled on newer route change or kill-switch).
     pub(super) probe_abort: Option<AbortHandle>,
+    /// Background `verify_and_restore_baseline` task (cancelled on newer route change or alert invalidation).
+    pub(super) verify_abort: Option<AbortHandle>,
+    /// Exit IP currently being verified by `verify_abort`.
+    pub(super) verify_ip: Option<String>,
     /// Exit IP on which `PauseMode::UntilNetworkChange` was engaged (unchanged ticks stay paused).
     pub(super) paused_ip: Option<String>,
     /// True when `PauseMode::UntilNetworkChange` was engaged during `phase: "detecting"` before
@@ -270,6 +277,10 @@ impl Inner {
         if let Some(abort) = self.audit_abort.take() {
             abort.abort();
         }
+        if let Some(abort) = self.verify_abort.take() {
+            abort.abort();
+        }
+        self.verify_ip = None;
         self.pending.take()
     }
 
@@ -281,6 +292,10 @@ impl Inner {
         if let Some(abort) = self.audit_abort.take() {
             abort.abort();
         }
+        if let Some(abort) = self.verify_abort.take() {
+            abort.abort();
+        }
+        self.verify_ip = None;
         self.pending.take()
     }
 

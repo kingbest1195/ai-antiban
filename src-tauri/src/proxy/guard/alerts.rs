@@ -69,7 +69,6 @@ impl NetworkGuard {
         );
         let reason = resolve_gate_reason_with_cooldown(&worst_newly, &net_change, cooldown_reason);
         self.set_gate_reason(Some(reason.clone()));
-        self.update_tray(env, &worst_newly).await;
 
         let enriched = EnrichedPayload {
             id: id.to_string(),
@@ -80,6 +79,7 @@ impl NetworkGuard {
             gate_reason: Some(reason),
         };
         env.hold_queue.update_alert(&enriched);
+        self.update_tray(env, &worst_newly).await;
         env.emit("interceptor://enriched", &enriched);
         log_timing(id, "enriched_ready", t0);
         env.emit("network://changed", &worst_newly);

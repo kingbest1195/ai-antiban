@@ -59,6 +59,7 @@ impl ProxyServer {
 
             // Emit event to UI and bring emergency modal to front once per active provider hold.
             self.hold_queue.set_alert(payload.clone());
+            self.guard.notify_pause_status();
             if let Some(app) = &self.app_handle {
                 let _ = app.emit("interceptor://risk-detected", &payload);
                 crate::show_and_position_alert_popup(app);
@@ -89,6 +90,7 @@ impl ProxyServer {
                     provider.as_str(),
                     &report.telemetry.country_code,
                 );
+                self.guard.sync_gates_with_state(&self.state).await;
                 self.tunnel_to_target(client, host, port, Some(provider), selection)
                     .await
             }
@@ -100,6 +102,7 @@ impl ProxyServer {
                     crate::proxy::popup_port::hide_alert_popup(app);
                     let _ = app.emit("interceptor://resolved", "");
                 }
+                self.guard.sync_gates_with_state(&self.state).await;
                 let st_now = self.state.get_data().await;
                 let provider_disabled = st_now.is_provider_disabled(provider.as_str());
                 let provider_routed =

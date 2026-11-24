@@ -128,6 +128,7 @@ async fn test_probe_changed_offline_retries_and_transitions_to_failed_without_lo
     online.store(true, Ordering::SeqCst);
     h.guard.inner.lock().await.last_probe = None;
     h.guard.check_route_and_tick(&h.env).await;
+    h.guard.wait_probe_settled_for_test().await;
     assert_eq!(h.guard.gate(), Gate::Open);
     assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
     assert!(h.env.hold_queue.current_alert().is_none());

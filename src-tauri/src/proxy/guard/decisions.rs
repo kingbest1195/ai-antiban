@@ -2,12 +2,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::auditor::NetworkTelemetry;
 use crate::auditor::geo_matrix::ProviderId;
+use crate::auditor::{NetworkTelemetry, OverallStatus, RiskReport};
 use crate::proxy::allow_error::{AllowError, AllowErrorCode};
-use crate::state::IpHistoryEntry;
+use crate::proxy::hold_queue::HoldResolution;
+use crate::state::{AppState, IpHistoryEntry};
 
-use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, Inner, NetworkGuard};
+use super::policy::{is_ip_pinned_for_state, report_no_critical_and_geo_ok};
+use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, Inner, NetworkGuard, PauseMode};
 
 impl NetworkGuard {
     /// Confirms the current network as the new trusted baseline and resumes traffic.
@@ -55,6 +57,80 @@ impl NetworkGuard {
         self.hide_popup(env);
         env.emit("network://changed", &());
         self.spawn_refresh_tray(env);
+    }
+
+    /// Automatically unblocks any blocked unrouted provider whose fresh direct audit report for the
+    /// current `exit_ip` is Green (`!incomplete`, no critical checks, allowed geo) and matches
+    /// the provider's pinned IP (§7.4 invariant). Synchronizes guard gates, clears
+    /// `UntilNetworkChange` / `handled_ip` and closes stale `alert-popup` when all blocks clear.
+    pub(super) async fn try_auto_unblock_pinned_providers_locked(
+        self: &Arc<Self>,
+        state: &AppState,
+        inner: &mut Inner,
+        reports: &[RiskReport],
+    ) -> bool {
+        if self.is_manual_killswitch() || self.pause_mode() == PauseMode::Manual {
+            return false;
+        }
+        let st = state.get_data().await;
+        if st.blocked_providers.is_empty() {
+            return false;
+        }
+        let mut unblocked = Vec::new();
+        for report in reports {
+            let pname = report.provider.as_str();
+            if !st.blocked_providers.contains(pname) {
+                continue;
+            }
+            if crate::routing::select_route_id(&st, pname).is_some() {
+                continue;
+            }
+            if report.incomplete || report.overall_status != OverallStatus::Green {
+                continue;
+            }
+            if !is_ip_pinned_for_state(&st, report.provider, &report.telemetry.ip) {
+                continue;
+            }
+            if !report_no_critical_and_geo_ok(report) {
+                continue;
+            }
+            if state.unblock_provider(pname).await.is_ok() {
+                unblocked.push(pname);
+            }
+        }
+        if unblocked.is_empty() {
+            return false;
+        }
+        if let Some(env) = self.env.get() {
+            for p in &unblocked {
+                env.hold_queue
+                    .resolve_all_for_provider(p, HoldResolution::Superseded)
+                    .await;
+            }
+        }
+        let st_after = state.get_data().await;
+        if st_after.blocked_providers.is_empty() {
+            self.clear_until_network_change_locked(inner);
+            inner.handled_ip = None;
+            inner.needs_reaudit = false;
+            self.set_gate_reason(None);
+            if let Some(p) = inner.invalidate_alert()
+                && let Some(env) = self.env.get()
+            {
+                env.hold_queue.remove(&p.id).await;
+            }
+            if let Some(env) = self.env.get() {
+                self.hide_popup(env);
+                env.emit("network://changed", &());
+            }
+        }
+        self.sync_gates_with_state_and_pending(&st_after, inner.pending.as_ref());
+        if st_after.blocked_providers.is_empty()
+            && let Some(env) = self.env.get()
+        {
+            self.spawn_refresh_tray(env);
+        }
+        true
     }
 
     /// Opens the guard gate (when not under a manual kill-switch) after a single provider was
@@ -310,4 +386,20 @@ impl NetworkGuard {
         }
         Ok(())
     }
+}
+
+/// Public helper for auto-unblocking pinned unrouted providers upon a fresh Green direct audit
+/// (called from `baseline_restore`, `audit_outcome`, `audit_connection`, and `watchers`).
+pub async fn try_auto_unblock_pinned_providers(
+    state: &AppState,
+    guard: &Arc<NetworkGuard>,
+    reports: &[RiskReport],
+) -> bool {
+    if guard.is_manual_killswitch() || guard.pause_mode() == PauseMode::Manual {
+        return false;
+    }
+    let mut inner = guard.inner.lock().await;
+    guard
+        .try_auto_unblock_pinned_providers_locked(state, &mut inner, reports)
+        .await
 }

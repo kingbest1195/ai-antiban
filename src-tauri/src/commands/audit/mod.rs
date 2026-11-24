@@ -124,6 +124,10 @@ pub async fn audit_connection(
         }
     };
 
+    if proxy::try_auto_unblock_pinned_providers(&state, &guard, std::slice::from_ref(&report)).await
+    {
+        let _ = app.emit("network://changed", &report);
+    }
     let st = state.get_data().await;
     let is_pinned = finalize_audit_report_for_state(&st, provider_id, &mut report);
 

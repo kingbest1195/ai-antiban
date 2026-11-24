@@ -18,6 +18,7 @@ mod alerts;
 mod audit_outcome;
 mod audit_summary;
 mod baseline_restore;
+mod baseline_verify;
 mod decisions;
 mod fingerprint;
 mod gates;
@@ -33,6 +34,7 @@ mod session_confirm;
 mod types;
 mod waiter;
 
+pub use decisions::try_auto_unblock_pinned_providers;
 pub use fingerprint::compute_local_route_fingerprint;
 #[cfg(any(test, feature = "test-support"))]
 pub use fingerprint::format_windows_interfaces_signature;

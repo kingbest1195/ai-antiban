@@ -179,6 +179,13 @@ pub fn update_tray_from_report(
         submit(app, priority_view);
         return;
     }
+    if report.incomplete
+        && app
+            .try_state::<Arc<proxy::NetworkGuard>>()
+            .is_some_and(|g| g.is_network_transition_active())
+    {
+        return;
+    }
     let stats = app
         .try_state::<state::AppState>()
         .map(|s| s.stats().snapshot_sync())
