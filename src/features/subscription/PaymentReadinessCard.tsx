@@ -257,13 +257,17 @@ export function PaymentReadinessCard({
         { value: "directCard" as PaymentChannel, label: copy.channels.directCard },
         { value: "googlePayWeb" as PaymentChannel, label: copy.channels.googlePayWeb },
         { value: "applePayWeb" as PaymentChannel, label: copy.channels.applePayWeb },
+        { value: "googlePlayIap" as PaymentChannel, label: copy.channels.googlePlayIap },
       ]
     : [
         { value: "appleIAP" as PaymentChannel, label: copy.channels.appleIAP },
+        { value: "googlePlayIap" as PaymentChannel, label: copy.channels.googlePlayIap },
         { value: "directCard" as PaymentChannel, label: copy.channels.directCard },
         { value: "googlePayWeb" as PaymentChannel, label: copy.channels.googlePayWeb },
         { value: "applePayWeb" as PaymentChannel, label: copy.channels.applePayWeb },
       ];
+
+  const isStoreIap = channel === "appleIAP" || channel === "googlePlayIap";
 
   const effectiveAction =
     report?.recommendedAction || (report?.tier === "green" ? copy.greenDefaultAction : null);
@@ -287,6 +291,7 @@ export function PaymentReadinessCard({
       <div className="subs-readiness-controls">
         <Segmented<PaymentChannel>
           aria-label={copy.channelLabel}
+          className="subs-channel-seg"
           value={channel}
           onChange={setChannel}
           options={channelOptions}
@@ -305,7 +310,7 @@ export function PaymentReadinessCard({
           ]}
         />
 
-        {channel !== "appleIAP" && (
+        {!isStoreIap && (
           <Segmented<SubscriptionPlan>
             aria-label={copy.planLabel}
             value={plan}
@@ -317,7 +322,7 @@ export function PaymentReadinessCard({
           />
         )}
 
-        {channel !== "appleIAP" && !warmupStarted && (
+        {!isStoreIap && !warmupStarted && (
           <Segmented<AccountAgeChoice>
             aria-label={copy.accountAgeLabel}
             value={accountAge}
@@ -346,6 +351,16 @@ export function PaymentReadinessCard({
               ))}
             </optgroup>
           </Select>
+        ) : channel === "googlePlayIap" ? (
+          <Select
+            label={copy.googleProfileLabel}
+            value={googleProfileCountry}
+            onChange={(e) => {
+              setGoogleTouched(true);
+              setGoogleProfileCountry(e.target.value);
+            }}
+            options={googleOptions}
+          />
         ) : (
           <div className="subs-readiness-grid">
             <Select

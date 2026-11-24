@@ -3,25 +3,26 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use zastava_lib::auditor::bin_radar_verify::{
-    DEFAULT_BIN_RADAR_SNAPSHOT_JSON, DEFAULT_PROVIDERS_MANIFEST_JSON, MANIFEST_CACHE_FILE_NAME,
-    MANIFEST_FILE_NAME, SNAPSHOT_CACHE_FILE_NAME, SNAPSHOT_FILE_NAME, load_bin_radar_snapshot,
-    load_local_bin_radar_reports, load_providers_manifest, payshield_data_dir,
-    save_verified_manifest, save_verified_snapshot, submit_local_bin_radar_report,
-    verify_bin_radar_snapshot_json, verify_providers_manifest_json,
+    DEFAULT_BIN_RADAR_SNAPSHOT_JSON, DEFAULT_PROVIDERS_MANIFEST_JSON, LocalBinRadarReportRecord,
+    MANIFEST_CACHE_FILE_NAME, MANIFEST_FILE_NAME, SNAPSHOT_CACHE_FILE_NAME, SNAPSHOT_FILE_NAME,
+    load_bin_radar_snapshot, load_local_bin_radar_reports, load_providers_manifest,
+    payshield_data_dir, save_verified_manifest, save_verified_snapshot,
+    submit_local_bin_radar_report, verify_bin_radar_snapshot_json, verify_providers_manifest_json,
 };
 use zastava_lib::auditor::payment_advisor::{
     evaluate_advisor_plan, get_bin_radar_stats_for, get_evaluated_providers_manifest,
+    merge_local_bin_radar_reports_at,
 };
 use zastava_lib::auditor::payment_readiness::{
     PaymentChannel, PaymentReadinessInput, ReadinessTier, evaluate_payment_readiness,
 };
 use zastava_lib::bunker::payment_passport::{PassportChannel, PaymentPassport};
 use zastava_lib::core::bin_radar::{
-    AiPaymentService, BinRadarEntry, BinRadarSnapshot, BinRadarStatus, BinRadarWindowStats,
-    GeoMatchClass, PaymentChannel as RadarChannel, PaymentOutcome, TimestampedOutcome,
-    WINDOW_14D_DAYS, WINDOW_14D_HALF_LIFE_DAYS, WINDOW_30D_DAYS, WINDOW_30D_HALF_LIFE_DAYS,
-    WarmupBucket, compute_window_stats, decay_weight, lookup_bin_radar_stats,
-    parse_bin_radar_report_json,
+    AiPaymentService, BinRadarEntry, BinRadarReport, BinRadarSnapshot, BinRadarStatus,
+    BinRadarWindowStats, GeoMatchClass, PaymentChannel as RadarChannel, PaymentOutcome,
+    TimestampedOutcome, WINDOW_14D_DAYS, WINDOW_14D_HALF_LIFE_DAYS, WINDOW_30D_DAYS,
+    WINDOW_30D_HALF_LIFE_DAYS, WarmupBucket, compute_window_stats, decay_weight,
+    lookup_bin_radar_stats, parse_bin_radar_report_json,
 };
 use zastava_lib::core::payment_advisor::{
     AdvisorNetworkContext, AdvisorQuery, KycRiskTier, PaymentRail,
@@ -488,4 +489,101 @@ fn e2e_4_safe_payment_advisor_five_scenarios() {
     ] {
         assert!(blacklist_text.contains(banned), "missing {banned}");
     }
+}
+
+#[test]
+fn e2e_5_local_bin_radar_overlay_stats_and_auto_demote() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_dir = dir.path();
+
+    // 1. Brand-new BIN below n=5 stays InsufficientData, and reaches Sufficient at n=5.
+    let report_json = |bin: &str, svc: &str, outcome: &str| {
+        format!(
+            r#"{{"bin_prefix":"{bin}","service":"{svc}","channel":"stripe_web_card","geo_match":"full_match","warmup_bucket":"gt_96h","outcome":"{outcome}","client_version":"3.2.0"}}"#
+        )
+    };
+    for _ in 0..4 {
+        submit_local_bin_radar_report(app_dir, true, &report_json("55551200", "cursor", "success"))
+            .unwrap();
+    }
+    let n4 = get_bin_radar_stats_for(Some(app_dir), "55551200", AiPaymentService::Cursor);
+    assert_eq!(n4.status, BinRadarStatus::InsufficientData);
+    assert_eq!(n4.sample_size_14d, 4);
+
+    submit_local_bin_radar_report(app_dir, true, &report_json("55551200", "cursor", "success"))
+        .unwrap();
+    let n5 = get_bin_radar_stats_for(Some(app_dir), "55551200", AiPaymentService::Cursor);
+    assert_eq!(n5.status, BinRadarStatus::Sufficient);
+    assert_eq!(n5.sample_size_14d, 5);
+
+    // 2. Bundled 53787200 (Cursor, n=3 in 14d) + 2 local reports -> immediately reaches n=5 Sufficient.
+    assert_eq!(
+        get_bin_radar_stats_for(Some(app_dir), "53787200", AiPaymentService::Cursor).status,
+        BinRadarStatus::InsufficientData
+    );
+    for _ in 0..2 {
+        submit_local_bin_radar_report(
+            app_dir,
+            true,
+            &report_json("53787211", "cursor", "instant_kyc"),
+        )
+        .unwrap();
+    }
+    let merged_537 = get_bin_radar_stats_for(Some(app_dir), "53787211", AiPaymentService::Cursor);
+    assert_eq!(merged_537.status, BinRadarStatus::Sufficient);
+    assert_eq!(merged_537.sample_size_14d, 5);
+    assert!(merged_537.risk_pct_14d.unwrap() > 35.0);
+
+    // 3. Exponential time-decay & 14d/30d window boundaries are preserved in overlay merge.
+    let base_snap = load_bin_radar_snapshot(None);
+    let mk_rec = |reported_day: u64, outcome: PaymentOutcome| LocalBinRadarReportRecord {
+        reported_day,
+        report: BinRadarReport {
+            bin_prefix: "59990000".to_string(),
+            service: AiPaymentService::ClaudePro,
+            channel: RadarChannel::StripeWebCard,
+            geo_match: GeoMatchClass::FullMatch,
+            warmup_bucket: WarmupBucket::Gt96h,
+            outcome,
+            client_version: "3.2.0".to_string(),
+        },
+    };
+    let records = vec![
+        mk_rec(100, PaymentOutcome::InstantKyc),
+        mk_rec(100, PaymentOutcome::InstantKyc),
+        mk_rec(100, PaymentOutcome::InstantKyc),
+        mk_rec(95, PaymentOutcome::Success),
+        mk_rec(95, PaymentOutcome::Success),
+        mk_rec(80, PaymentOutcome::Success), // 20 days old -> excluded from 14d, included in 30d
+    ];
+    let merged_decay = merge_local_bin_radar_reports_at(&base_snap, &records, 100);
+    let decay_stats =
+        lookup_bin_radar_stats(&merged_decay, "59990000", AiPaymentService::ClaudePro);
+    assert_eq!(decay_stats.sample_size_14d, 5);
+    assert_eq!(decay_stats.sample_size_30d, 6);
+    // 3 * 1.0 / (3 * 1.0 + 2 * 0.5) = 75.0%
+    assert!((decay_stats.risk_pct_14d.unwrap() - 75.0).abs() < 0.2);
+
+    // 4. Local high-risk reports on WantToPay's BIN (48331200) immediately trigger Per-Service Auto-Demote.
+    for _ in 0..35 {
+        submit_local_bin_radar_report(
+            app_dir,
+            true,
+            &report_json("48331200", "claude_pro", "instant_kyc"),
+        )
+        .unwrap();
+    }
+    let evaluated = get_evaluated_providers_manifest(Some(app_dir));
+    let wanttopay = evaluated
+        .providers
+        .iter()
+        .find(|p| p.entry.id == "wanttopay")
+        .unwrap();
+    let claude_status = wanttopay
+        .per_service
+        .iter()
+        .find(|s| s.service == AiPaymentService::ClaudePro)
+        .unwrap();
+    assert_ne!(claude_status.status, ProviderStatus::Active);
+    assert!(claude_status.rate_14d > 0.40);
 }

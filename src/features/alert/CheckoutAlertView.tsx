@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { RiskInterceptPayload } from "../../types";
-import { allowCheckout15m, cancelAndInspect } from "../../utils/api";
+import type { AiPaymentService, BinRadarLookupStats, RiskInterceptPayload } from "../../types";
+import {
+  allowCheckout15m,
+  cancelAndInspect,
+  fetchAppState,
+  getBinRadarStats,
+  getPaymentPassport,
+} from "../../utils/api";
 import { maskIpsInText } from "../../shared/lib/format";
 import { alertDialog as copy } from "../../shared/copy/ru";
 import { Badge, Button, Icon, Kbd } from "../../ui";
@@ -11,6 +17,7 @@ export type CheckoutResolutionAction = "cancelAndInspect" | "allowCheckout15m";
 export interface CheckoutAlertViewProps {
   payload: RiskInterceptPayload;
   hideIpMode: boolean;
+  initialRadarStats?: BinRadarLookupStats | null;
   onResolved?: (action: CheckoutResolutionAction) => void;
 }
 
@@ -20,6 +27,37 @@ function tierTone(tier?: string): BadgeTone {
   return "danger";
 }
 
+function inferAiService(provider?: string, domain?: string): AiPaymentService {
+  const host = (domain ?? "").toLowerCase();
+  if (host.includes("pay.google") || host.includes("gemini") || host.includes("aistudio") || provider === "gemini") {
+    return "gemini";
+  }
+  if (host.includes("openai") || host.includes("chatgpt") || provider === "openai") {
+    return "chatgpt";
+  }
+  if (host.includes("cursor")) {
+    return "cursor";
+  }
+  return "claude_pro";
+}
+
+function cleanBinPrefix(raw?: string | null): string | null {
+  const digits = (raw ?? "").replace(/[\s-]+/g, "");
+  return /^\d{6,8}$/.test(digits) ? digits : null;
+}
+
+function radarBadgeTone(stats: BinRadarLookupStats): BadgeTone {
+  if (stats.criticalWarning || stats.status === "critical") return "danger";
+  if (stats.status === "sufficient") return "ok";
+  return "warn";
+}
+
+function radarBadgeLabel(stats: BinRadarLookupStats): string {
+  if (stats.criticalWarning || stats.status === "critical") return copy.checkout.radarCritical;
+  if (stats.status === "sufficient") return copy.checkout.radarOk;
+  return copy.checkout.radarInsufficient;
+}
+
 /**
  * Карточка предупреждения перед оплатой (440×470) без расшифровки HTTPS.
  * Кнопки: 1 — «Отменить и проверить» (primary), 2 — «Продолжить на свой риск (15 мин)» (secondary).
@@ -27,10 +65,12 @@ function tierTone(tier?: string): BadgeTone {
 export function CheckoutAlertView({
   payload,
   hideIpMode,
+  initialRadarStats,
   onResolved,
 }: CheckoutAlertViewProps) {
   const [busy, setBusy] = useState<boolean>(false);
   const [left, setLeft] = useState<number>(payload.ttl_seconds || 60);
+  const [radarStats, setRadarStats] = useState<BinRadarLookupStats | null>(initialRadarStats ?? null);
   const risk = payload.checkout_risk;
   const domain = risk?.domain || payload.host;
   const score = risk?.score ?? 35;
@@ -38,8 +78,50 @@ export function CheckoutAlertView({
   const rawReason = risk?.reason || payload.gate_reason || copy.checkout.fallbackReason;
   const reason = maskIpsInText(rawReason, hideIpMode);
   const rawAction = risk?.recommendedAction ? maskIpsInText(risk.recommendedAction, hideIpMode) : null;
+  const explicitBin = cleanBinPrefix(risk?.binPrefix);
+  const service = inferAiService(payload.provider, domain);
 
   const firedTimeoutRef = useRef(false);
+
+  useEffect(() => {
+    if (initialRadarStats !== undefined) {
+      setRadarStats(initialRadarStats);
+      return;
+    }
+    let cancelled = false;
+    const loadRadar = async () => {
+      let targetBin = explicitBin;
+      if (!targetBin) {
+        const appState = await fetchAppState().catch(() => null);
+        const candidates = Array.from(
+          new Set(
+            [
+              appState?.clean_room?.active_profile_id ?? null,
+              "default",
+              ...(appState?.clean_room?.profiles.map((p) => p.id) ?? []),
+            ].filter((id): id is string => Boolean(id && id.trim())),
+          ),
+        );
+        for (const profileId of candidates) {
+          const passport = await getPaymentPassport(profileId).catch(() => null);
+          const candidateBin = cleanBinPrefix(passport?.binPrefix);
+          if (candidateBin) {
+            targetBin = candidateBin;
+            break;
+          }
+        }
+      }
+      if (!targetBin || cancelled) return;
+      const stats = await getBinRadarStats(targetBin, service).catch(() => null);
+      if (!cancelled && stats) {
+        setRadarStats(stats);
+      }
+    };
+    void loadRadar();
+    return () => {
+      cancelled = true;
+    };
+  }, [explicitBin, initialRadarStats, payload.id, service]);
 
   useEffect(() => {
     firedTimeoutRef.current = false;
@@ -149,6 +231,17 @@ export function CheckoutAlertView({
           <span className="zs-tabular">{score} / 100</span>
         </Badge>
       </div>
+
+      {radarStats && (
+        <div className="zs-checkout-radar" data-testid="checkout-bin-radar">
+          <b>{copy.checkout.radarLabel}</b>
+          <span className="zs-mono">{radarStats.binPrefix}</span>
+          <span className="zs-checkout-radar__summary">{radarStats.summaryRu}</span>
+          <Badge tone={radarBadgeTone(radarStats)} icon={radarStats.status === "sufficient" ? "check" : "alert"}>
+            {radarBadgeLabel(radarStats)}
+          </Badge>
+        </div>
+      )}
 
       <div className="zs-dialog__actions">
         <Button

@@ -27,6 +27,7 @@ export interface PaymentFlowPanelProps {
   hideIpMode?: boolean;
   inCleanRoom: boolean;
   warmupStartedAt?: number | null;
+  binRadarOptIn?: boolean;
   /** При true кнопка «Проверить карту» — primary (SubscriptionScreen); при false — secondary (встраивание на экран с другой primary CTA). */
   compactPrimary?: boolean;
   onNavigateToPaymentGuide?: () => void;
@@ -51,6 +52,7 @@ export function PaymentFlowPanel({
   hideIpMode = false,
   inCleanRoom,
   warmupStartedAt,
+  binRadarOptIn,
   compactPrimary = true,
   onNavigateToPaymentGuide,
   onStateUpdated,
@@ -157,8 +159,13 @@ export function PaymentFlowPanel({
           <CardCheck
             exitCountry={exitCountry}
             targetService={targetService}
+            paymentChannel={webChannel}
+            billingCountry={billingCountry}
+            warmupStartedAt={warmupStartedAt}
+            initialOptIn={binRadarOptIn}
             ctaVariant={compactPrimary ? "primary" : "secondary"}
             onToast={onToast}
+            onOptInChange={() => void onStateUpdated?.()}
             onNavigateToPaymentGuide={onNavigateToPaymentGuide}
             onBinChecked={handleBinChecked}
           />

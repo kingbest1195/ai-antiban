@@ -106,6 +106,7 @@ export interface CheckoutRiskAlert {
   blockers: string[];
   warnings: string[];
   recommendedAction?: string | null;
+  binPrefix?: string | null;
 }
 
 export interface PostPaymentQuarantine {

@@ -82,6 +82,7 @@ export function SubscriptionScreen({
           hideIpMode={Boolean(state?.hide_ip_mode)}
           inCleanRoom={inCleanRoom}
           warmupStartedAt={effectiveWarmupStartedAt}
+          binRadarOptIn={state?.bin_radar_opt_in}
           onNavigateToPaymentGuide={onNavigateToPaymentGuide}
           onStateUpdated={onStateChange}
           onToast={onToast}

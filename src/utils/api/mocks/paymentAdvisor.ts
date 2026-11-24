@@ -34,10 +34,13 @@ const MOCK_STATS_DB: Array<{
   { prefix6: "537872", service: "cursor", n14: 3, success: 100.0, decline: 0, kyc: 0, ban: 0 },
 ];
 
-let mockOptIn = false;
+import { mockState } from "./state";
+
+let mockOptIn = Boolean(mockState.bin_radar_opt_in);
 
 export function setMockBinRadarOptIn(enabled: boolean): boolean {
   mockOptIn = enabled;
+  mockState.bin_radar_opt_in = enabled;
   return mockOptIn;
 }
 
