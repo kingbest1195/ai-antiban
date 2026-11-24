@@ -32,12 +32,12 @@ export function SectionList({ overview, view, state, personaRisk, onPushRoute }:
     <Sum tone="danger">Остановлены</Sum>
   ) : off ? (
     <Sum tone="danger">Без защиты</Sum>
-  ) : checking ? (
-    <Sum>Проверяем…</Sum>
   ) : blocked.length === model.services.length ? (
     <Sum tone="danger">Все заблокированы</Sum>
   ) : blocked.length ? (
     <Sum tone="danger">Заблокированы: {names(blocked)}</Sum>
+  ) : checking ? (
+    <Sum>Проверяем…</Sum>
   ) : review.length ? (
     <Sum tone="warn">Проверить: {names(review)}</Sum>
   ) : !overview.cliProtected ? (

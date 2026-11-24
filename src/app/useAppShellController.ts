@@ -103,6 +103,7 @@ export function useAppShellController() {
     openCrashTest: () => setCrashTestOpen(true),
     setKillswitchFrozen: toggles.setKillswitchFrozen,
     setInterceptPayload: intercept.setInterceptPayload,
+    invalidateReports: gw.invalidateReports,
     applyUpdateProgress: updater.applyUpdateProgress,
     applyUpdateAvailable: updater.applyUpdateAvailable,
     applyUpdateStatus: updater.applyUpdateStatus,

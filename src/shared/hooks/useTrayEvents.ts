@@ -38,6 +38,7 @@ export interface TrayEventHandlers {
   openCrashTest: () => void;
   setKillswitchFrozen: (frozen: boolean) => void;
   setInterceptPayload: Dispatch<SetStateAction<RiskInterceptPayload | null>>;
+  invalidateReports?: (onlyProviders?: string[], includeAll?: boolean) => void;
   applyUpdateProgress: (payload: UpdateProgressPayload) => void;
   applyUpdateAvailable: (payload: UpdateCheckResult) => void;
   applyUpdateStatus: (payload: UpdateStatusPayload) => void;
@@ -64,6 +65,39 @@ export function handleSysproxyAdminAuthRequired(
   const parsed = payload ? parseAdminAuthError(payload) : null;
   const detail = parsed ? `${parsed} Откройте «Нейросети и защита» → «Разрешить с паролем».` : t.sysproxy.adminAuthText;
   handlers.showToast(t.sysproxy.adminAuthTitle, detail, "warning");
+}
+
+/** Инвалидирует устаревшие отчёты при смене сети и запускает перепроверку. */
+export function handleNetworkChangedEvent(
+  handlers: Pick<TrayEventHandlers, "invalidateReports" | "runFullAudit">,
+): void {
+  handlers.invalidateReports?.();
+  void handlers.runFullAudit(true);
+}
+
+/** При `detecting` / `failed` / сетевом риске сбрасывает устаревшие отчёты, чтобы сервис не выглядел «Доступен». */
+export function handleRiskDetectedEvent(
+  handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload">,
+  payload: RiskInterceptPayload,
+): void {
+  if (payload.phase === "detecting" || payload.phase === "failed" || payload.scope === "network") {
+    const only = payload.scope === "provider" ? [payload.provider] : undefined;
+    handlers.invalidateReports?.(only, false);
+    void handlers.refreshState();
+  }
+  handlers.setInterceptPayload((prev) =>
+    prev && prev.id === payload.id && prev.phase !== "detecting" && payload.phase === "detecting" ? prev : payload,
+  );
+}
+
+/** После закрытия/разрешения алерта очищает устаревшие отчёты, обновляет state и запускает аудит. */
+export function handleInterceptorResolvedEvent(
+  handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload" | "runFullAudit">,
+): void {
+  handlers.setInterceptPayload(null);
+  handlers.invalidateReports?.();
+  void handlers.refreshState();
+  void handlers.runFullAudit(false);
 }
 
 /**
@@ -180,7 +214,7 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
     });
 
     on("network://changed", () => {
-      ref.current.runFullAudit(true);
+      handleNetworkChangedEvent(ref.current);
     });
 
     on<string>("sysproxy://admin-auth-required", (payload) => {
@@ -191,9 +225,7 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
     let enrichedEpoch: number | null = null;
     on<RiskInterceptPayload>("interceptor://risk-detected", (payload) => {
       enrichedEpoch = null;
-      ref.current.setInterceptPayload((prev) =>
-        prev && prev.id === payload.id && prev.phase !== "detecting" && payload.phase === "detecting" ? prev : payload,
-      );
+      handleRiskDetectedEvent(ref.current, payload);
     });
 
     on<EnrichedPayload>("interceptor://enriched", (enriched) => {
@@ -206,8 +238,7 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
     });
 
     on("interceptor://resolved", () => {
-      ref.current.setInterceptPayload(null);
-      ref.current.runFullAudit(false);
+      handleInterceptorResolvedEvent(ref.current);
     });
 
     return () => {

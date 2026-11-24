@@ -3,9 +3,11 @@ import type {
   AppStateData,
   CoverageSnapshot,
   GatewayStatsSnapshot,
+  GuardPauseStatus,
   PartialAudit,
   ProviderId,
   RiskReport,
+  RouteUnavailablePayload,
   RoutesSnapshot,
   UpdateCheckResult,
 } from "../../types";
@@ -61,6 +63,8 @@ export interface OverviewScreenProps {
   coverageSnapshot?: CoverageSnapshot | null;
   onCoverageSnapshot?: (snapshot: CoverageSnapshot) => void;
   routesSnapshot?: RoutesSnapshot | null;
+  guardPauseStatus?: GuardPauseStatus | null;
+  routeUnavailableBanner?: RouteUnavailablePayload | null;
   /** Скрывать ли реальный IP-адрес на экране для безопасных скриншотов. */
   hideIpMode?: boolean;
   /** Возраст данных в минутах, если отчёт устарел или аудит упал; иначе null. */
@@ -144,6 +148,8 @@ export function OverviewScreen(props: OverviewScreenProps) {
     updateInfo,
     refreshing: refreshing || loading,
     startupPending,
+    guardPauseStatus: props.guardPauseStatus,
+    routeUnavailable: props.routeUnavailableBanner,
   });
 
   const [pendingAllow, setPendingAllow] = useState<ProviderId | null>(null);

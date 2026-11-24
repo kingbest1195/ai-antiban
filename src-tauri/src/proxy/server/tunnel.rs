@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::auditor::geo_matrix::ProviderId;
-use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, shutdown_aborted, wait_open};
+use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, shutdown_aborted};
 use crate::proxy::route_watch::RouteWatch;
 use crate::proxy::upstream::{
     ChainedError, UpstreamStream, connect_via_chained_proxy, connect_via_route_with_chained,
@@ -226,6 +226,7 @@ impl ProxyServer {
             .await;
         }
 
+        let abort_rx = self.guard.subscribe_tunnel_abort();
         let connect_res = if let Some(redirect_addr) = self.upstream_redirect {
             self.direct_connects.fetch_add(1, Ordering::SeqCst);
             tokio::time::timeout(
@@ -248,6 +249,9 @@ impl ProxyServer {
         let mut target = match connect_res {
             Ok(s) => s,
             Err(e) => {
+                if provider.is_some() {
+                    self.guard.wake_immediate_probe().await;
+                }
                 let err_msg = format!("Failed to connect to target {host}:{port}: {e}");
                 send_bad_gateway(client, &err_msg).await?;
                 return Err(e);
@@ -258,6 +262,20 @@ impl ProxyServer {
             && w.is_stale().await
         {
             return send_routing_changed(client).await;
+        }
+        let gate_open = match provider {
+            Some(p) => self.guard.gate_for(p) == Gate::Open,
+            None => self.guard.gate() == Gate::Open,
+        };
+        if !gate_open
+            || self.guard.is_manual_killswitch()
+            || abort_rx.has_changed().unwrap_or(false)
+        {
+            return send_forbidden(
+                client,
+                "Network change blocked by Zastava Risk Auditor: connection interrupted during check.",
+            )
+            .await;
         }
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -373,11 +391,11 @@ where
     let mut buf = vec![0u8; 16 * 1024];
 
     loop {
-        // The manual kill-switch stops direct tunnels as well, whatever the gate says.
-        if *kill_rx.borrow_and_update() {
-            return Err(tunnel_stalled());
-        }
-        if !wait_open(&mut rx).await {
+        // The manual kill-switch or any gate exit from Open immediately tears down direct tunnels.
+        if *kill_rx.borrow_and_update()
+            || *rx.borrow_and_update() != Gate::Open
+            || abort_rx.has_changed().unwrap_or(false)
+        {
             return Err(tunnel_stalled());
         }
 
@@ -402,12 +420,16 @@ where
             return Ok(());
         }
 
-        // Data read right before the freeze is held back until the user decides.
+        // Data read right before the freeze is held back and the tunnel is torn down immediately.
         let current_gate = match provider {
             Some(p) => guard.gate_for(p),
             None => guard.gate(),
         };
-        if !wait_open(&mut rx).await || current_gate != Gate::Open || guard.is_manual_killswitch() {
+        if current_gate != Gate::Open
+            || *rx.borrow_and_update() != Gate::Open
+            || guard.is_manual_killswitch()
+            || abort_rx.has_changed().unwrap_or(false)
+        {
             return Err(tunnel_stalled());
         }
         writer.write_all(&buf[..n]).await?;

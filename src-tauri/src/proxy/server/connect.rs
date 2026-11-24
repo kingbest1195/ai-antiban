@@ -284,11 +284,12 @@ impl ProxyServer {
         }
 
         // Step 2: Check if provider has active session allowance
-        if self
+        let session_allowed = self
             .state
             .is_provider_session_allowed(provider.as_str())
             .await
-        {
+            && (route.is_some() || self.guard.can_use_session_allowance(provider).await);
+        if session_allowed {
             if is_canary {
                 return self
                     .canary_protected(client, &host, provider, route.as_ref(), "ALLOWED")
@@ -306,11 +307,16 @@ impl ProxyServer {
         // If `guard.restore_epoch()` advances mid-audit (network recovered cleanly while probing
         // the old network), re-run once against the restored state/cache before deciding.
         let mut attempt = 0u8;
+        let force_direct_refresh = route.is_none()
+            && self
+                .guard
+                .prepare_direct_audit_refresh(&self.auditor.resolver)
+                .await;
         let (report, st_after_audit) = loop {
             let pre_audit_epoch = self.guard.restore_epoch();
             let eval_res = self
                 .auditor
-                .evaluate_all_with(provider, &self.state, &selection, false)
+                .evaluate_all_with(provider, &self.state, &selection, force_direct_refresh)
                 .await;
             match eval_res {
                 Ok(r) => {
@@ -374,6 +380,7 @@ impl ProxyServer {
                         continue;
                     }
                     eprintln!("Auditor evaluation failed: {e}");
+                    self.guard.wake_immediate_probe().await;
                     self.state
                         .stats()
                         .record_intercepted(&host, provider.as_str(), "ERROR", "??");

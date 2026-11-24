@@ -56,28 +56,34 @@ pub async fn shutdown_aborted(rx: &mut watch::Receiver<bool>) {
 impl NetworkGuard {
     /// Engages the kill flag and blocks the gate as one step with respect to `set_gate`.
     fn engage_kill(&self) {
-        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
-        self.kill_tx.send_replace(true);
-        self.set_pause_mode_raw(PauseMode::Manual);
-        self.set_gate_reason(Some(
-            "Включён ручной Kill-Switch — все ИИ-запросы остановлены".to_string(),
-        ));
-        self.gate_tx.send_replace(Gate::Blocked);
-        for tx in self.provider_gates.values() {
-            tx.send_replace(Gate::Blocked);
+        {
+            let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+            self.kill_tx.send_replace(true);
+            self.set_pause_mode_raw(PauseMode::Manual);
+            self.set_gate_reason(Some(
+                "Включён ручной Kill-Switch — все ИИ-запросы остановлены".to_string(),
+            ));
+            self.gate_tx.send_replace(Gate::Blocked);
+            for tx in self.provider_gates.values() {
+                tx.send_replace(Gate::Blocked);
+            }
         }
+        self.emit_pause_status();
     }
 
     /// Lifts the kill flag and opens the gate as one step with respect to `set_gate`.
     fn release_kill(&self) {
-        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
-        self.kill_tx.send_replace(false);
-        self.set_pause_mode_raw(PauseMode::None);
-        self.set_gate_reason(None);
-        self.gate_tx.send_replace(Gate::Open);
-        for tx in self.provider_gates.values() {
-            tx.send_replace(Gate::Open);
+        {
+            let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+            self.kill_tx.send_replace(false);
+            self.set_pause_mode_raw(PauseMode::None);
+            self.set_gate_reason(None);
+            self.gate_tx.send_replace(Gate::Open);
+            for tx in self.provider_gates.values() {
+                tx.send_replace(Gate::Open);
+            }
         }
+        self.emit_pause_status();
     }
 
     /// Puts the guard in `PauseMode::UntilNetworkChange`: unrouted AI traffic stays paused

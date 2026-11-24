@@ -245,7 +245,7 @@ impl NetworkGuard {
             hold_queue,
             io: Arc::new(NoopIo),
             audit,
-            probe: None,
+            probe: Some(Arc::new(|| Box::pin(async { None }))),
             resolve: None,
             audit_timeout: Duration::from_secs(1),
         });

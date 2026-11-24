@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { toast as t } from "../copy/ru";
-import { handleSysproxyAdminAuthRequired, handleTrayProfileSwitched } from "./useTrayEvents";
+import type { RiskInterceptPayload } from "../../types";
+import {
+  handleInterceptorResolvedEvent,
+  handleNetworkChangedEvent,
+  handleRiskDetectedEvent,
+  handleSysproxyAdminAuthRequired,
+  handleTrayProfileSwitched,
+} from "./useTrayEvents";
 
 describe("handleTrayProfileSwitched", () => {
   it("берёт имя из payload.active_profile.name и обновляет состояние, маршруты и профили", async () => {
@@ -71,5 +78,58 @@ describe("handleSysproxyAdminAuthRequired", () => {
     handleSysproxyAdminAuthRequired({ showToast }, null);
 
     expect(showToast).toHaveBeenCalledWith(t.sysproxy.adminAuthTitle, t.sysproxy.adminAuthText, "warning");
+  });
+});
+
+describe("§7.7 fail-closed invalidation on network/guard events", () => {
+  it("handleNetworkChangedEvent сбрасывает устаревшие отчёты до запуска runFullAudit(true)", () => {
+    const order: string[] = [];
+    const invalidateReports = vi.fn(() => order.push("invalidate"));
+    const runFullAudit = vi.fn(async () => {
+      order.push("audit");
+    });
+    handleNetworkChangedEvent({ invalidateReports, runFullAudit });
+    expect(invalidateReports).toHaveBeenCalledTimes(1);
+    expect(runFullAudit).toHaveBeenCalledWith(true);
+    expect(order).toEqual(["invalidate", "audit"]);
+  });
+
+  it("handleRiskDetectedEvent при phase=detecting сбрасывает кэш отчётов и обновляет state", () => {
+    const invalidateReports = vi.fn();
+    const refreshState = vi.fn(async () => ({}));
+    const setInterceptPayload = vi.fn();
+    const payload: RiskInterceptPayload = {
+      id: "alert-1",
+      provider: "anthropic",
+      host: "claude.ai",
+      report: null,
+      ttl_seconds: 90,
+      scope: "network",
+      detected_at_ms: 1,
+      phase: "detecting",
+    };
+
+    handleRiskDetectedEvent({ invalidateReports, refreshState, setInterceptPayload }, payload);
+    expect(invalidateReports).toHaveBeenCalledWith(undefined, false);
+    expect(refreshState).toHaveBeenCalledTimes(1);
+    expect(setInterceptPayload).toHaveBeenCalledTimes(1);
+  });
+
+  it("handleInterceptorResolvedEvent сбрасывает устаревшие отчёты, обновляет state и запускает аудит", () => {
+    const invalidateReports = vi.fn();
+    const refreshState = vi.fn(async () => ({}));
+    const setInterceptPayload = vi.fn();
+    const runFullAudit = vi.fn(async () => {});
+
+    handleInterceptorResolvedEvent({
+      invalidateReports,
+      refreshState,
+      setInterceptPayload,
+      runFullAudit,
+    });
+    expect(setInterceptPayload).toHaveBeenCalledWith(null);
+    expect(invalidateReports).toHaveBeenCalledTimes(1);
+    expect(refreshState).toHaveBeenCalledTimes(1);
+    expect(runFullAudit).toHaveBeenCalledWith(false);
   });
 });

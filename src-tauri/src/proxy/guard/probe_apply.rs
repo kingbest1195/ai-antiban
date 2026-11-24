@@ -141,7 +141,9 @@ impl NetworkGuard {
         inner.last_probe = Some(Instant::now());
         let t0 = Instant::now();
         let Some(ip) = probed else {
-            return; // offline: nothing to compare
+            self.handle_regular_probe_offline_locked(env, &mut inner, planned_fp, was_blocked, t0)
+                .await;
+            return;
         };
         if inner.probe_in_flight {
             return;

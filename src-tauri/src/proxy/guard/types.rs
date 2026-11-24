@@ -60,6 +60,10 @@ pub struct GuardPauseStatus {
     pub gate: String,
     pub gate_reason: Option<String>,
     pub manual_killswitch: bool,
+    #[serde(default)]
+    pub pending_providers: Vec<String>,
+    #[serde(default)]
+    pub blocked_providers: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -317,20 +321,43 @@ pub struct NetworkGuard {
     pub(super) chained_client: std::sync::Mutex<Option<(String, reqwest::Client)>>,
 }
 
-/// Computes the local default-route network interface fingerprint in < 0.05ms
-/// using a local UDP routing table lookup without transmitting any network packet.
-pub fn compute_local_route_fingerprint(upstream_key: Option<&str>) -> String {
-    let local_ip = match std::net::UdpSocket::bind("0.0.0.0:0") {
-        Ok(socket) => match socket.connect("1.1.1.1:80") {
-            Ok(_) => match socket.local_addr() {
-                Ok(addr) => addr.ip().to_string(),
-                Err(_) => "0.0.0.0".to_string(),
-            },
-            Err(_) => "0.0.0.0".to_string(),
-        },
-        Err(_) => "0.0.0.0".to_string(),
+fn udp_route_ip(bind: &str, target: &str) -> String {
+    std::net::UdpSocket::bind(bind)
+        .ok()
+        .and_then(|s| s.connect(target).ok().and_then(|_| s.local_addr().ok()))
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn system_dns_signature() -> String {
+    let Ok((cfg, _)) = hickory_resolver::system_conf::read_system_conf() else {
+        return "none".to_string();
     };
-    format!("{local_ip}|upstream:{}", upstream_key.unwrap_or(""))
+    let mut ips: Vec<String> = cfg
+        .name_servers()
+        .iter()
+        .map(|ns| ns.ip.to_string())
+        .collect();
+    ips.sort();
+    ips.dedup();
+    if ips.is_empty() {
+        "none".to_string()
+    } else {
+        ips.join(",")
+    }
+}
+
+/// Computes the local default-route network & DNS fingerprint in < 0.1ms
+/// using local UDP routing lookups and OS resolver config without transmitting any packet.
+pub fn compute_local_route_fingerprint(upstream_key: Option<&str>) -> String {
+    let ip_cf = udp_route_ip("0.0.0.0:0", "1.1.1.1:80");
+    let ip_dns = udp_route_ip("0.0.0.0:0", "8.8.8.8:53");
+    let ip_v6 = udp_route_ip("[::]:0", "[2606:4700:4700::1111]:80");
+    let dns_sig = system_dns_signature();
+    format!(
+        "{ip_cf}|{ip_dns}|{ip_v6}|dns:{dns_sig}|upstream:{}",
+        upstream_key.unwrap_or("")
+    )
 }
 
 impl Default for NetworkGuard {

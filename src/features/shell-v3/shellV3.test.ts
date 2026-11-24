@@ -476,4 +476,71 @@ describe("HomeHub & HeaderBar & NotificationStack", () => {
     expect(htmlOk).not.toContain("Часовой пояс системы отличается от IP");
     expect(htmlOk).not.toContain("Часовой пояс не совпадает со страной IP");
   });
+
+  it("§7.7 при активном route://unavailable HomeHub переводит маскот в alert и НЕ показывает зелёный щит 100 из 100", () => {
+    expect(
+      resolveMascotState({
+        sysproxyActive: true,
+        killswitchFrozen: false,
+        overallStatus: "green",
+        routeUnavailable: true,
+      }),
+    ).toBe("alert");
+    expect(
+      resolveMascotState({
+        sysproxyActive: true,
+        killswitchFrozen: false,
+        guardGate: "pending",
+      }),
+    ).toBe("scanning");
+
+    const htmlBroken = renderToStaticMarkup(
+      createElement(HomeHub, {
+        togglingSysproxy: false,
+        coworkGuard: {
+          status: null,
+          needsRepair: false,
+          repairing: false,
+          error: null,
+          repair: vi.fn(async () => null),
+          refresh: vi.fn(async () => null),
+        },
+        personaRisk: null,
+        gatewayStats: null,
+        state: null,
+        routeUnavailableBanner: {
+          route_id: "key-1",
+          provider: "anthropic",
+          reason: "unreachable",
+          message: "Маршрут недоступен",
+        },
+        onPushRoute: vi.fn(),
+        onDismissRouteUnavailable: vi.fn(),
+        onRefreshRoutes: vi.fn(async () => {}),
+        onRefreshState: vi.fn(async () => {}),
+        onAuditRefresh: vi.fn(),
+        version: "3.2.0",
+        overview: makeBaseOverview({ trustScore: 100 }),
+        view: makeBaseView({
+          model: {
+            ...makeBaseView().model,
+            verdict: "Маршрут недоступен",
+            tone: "danger",
+            banner: "stopped",
+            services: [
+              { id: "anthropic", status: "critical" },
+              { id: "openai", status: "checking" },
+              { id: "gemini", status: "ok" },
+            ],
+          },
+        }),
+      }),
+    );
+
+    expect(htmlBroken).toContain("Маршрут недоступен");
+    expect(htmlBroken).toContain("0 из 100");
+    expect(htmlBroken).toContain("zs-v3-trust__num--danger");
+    expect(htmlBroken).not.toContain("100 из 100");
+    expect(htmlBroken).toContain("Заблокированы: Claude");
+  });
 });

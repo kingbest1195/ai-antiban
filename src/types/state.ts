@@ -193,6 +193,8 @@ export interface GuardPauseStatus {
   gate?: string | null;
   gate_reason?: string | null;
   manual_killswitch: boolean;
+  pending_providers?: string[];
+  blocked_providers?: string[];
 }
 
 export interface ProtectionChangePreviewItem {
