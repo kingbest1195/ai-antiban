@@ -13,7 +13,9 @@ use crate::routing::Entry;
 use crate::routing::net::resolve_entry_checked;
 
 const IPV6_DEGRADATION_COOLDOWN_SECS: u64 = 120;
+const IPV6_HEALTHY_TTL_SECS: u64 = 300;
 static LAST_IPV6_FAILURE_SECS: AtomicU64 = AtomicU64::new(0);
+static LAST_IPV6_SUCCESS_SECS: AtomicU64 = AtomicU64::new(0);
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -26,12 +28,25 @@ pub(crate) fn record_ipv6_failure() {
     LAST_IPV6_FAILURE_SECS.store(now_secs(), Ordering::Relaxed);
 }
 
+pub(crate) fn record_ipv6_success() {
+    LAST_IPV6_SUCCESS_SECS.store(now_secs(), Ordering::Relaxed);
+}
+
+fn has_working_ipv6() -> bool {
+    let ok = LAST_IPV6_SUCCESS_SECS.load(Ordering::Relaxed);
+    let fail = LAST_IPV6_FAILURE_SECS.load(Ordering::Relaxed);
+    ok > 0 && ok >= fail && now_secs().saturating_sub(ok) <= IPV6_HEALTHY_TTL_SECS
+}
+
 fn should_prefer_v4(prefer_v4_hint: bool) -> bool {
     if prefer_v4_hint || crate::sysproxy::get_chained_proxy().is_some() {
         return true;
     }
     let last = LAST_IPV6_FAILURE_SECS.load(Ordering::Relaxed);
-    last > 0 && now_secs().saturating_sub(last) <= IPV6_DEGRADATION_COOLDOWN_SECS
+    if last > 0 && now_secs().saturating_sub(last) <= IPV6_DEGRADATION_COOLDOWN_SECS {
+        return true;
+    }
+    !has_working_ipv6()
 }
 
 fn configure_tcp_stream(stream: &TcpStream) {
@@ -85,6 +100,9 @@ pub(crate) async fn tcp_connect_addrs_with_v4_priority(
         |addr| async move {
             match TcpStream::connect(addr).await {
                 Ok(stream) => {
+                    if addr.is_ipv6() {
+                        record_ipv6_success();
+                    }
                     configure_tcp_stream(&stream);
                     Ok(stream)
                 }
@@ -104,7 +122,7 @@ pub(super) async fn tcp_connect_addrs(
     addrs: Vec<SocketAddr>,
     tcp_timeout: Duration,
 ) -> io::Result<TcpStream> {
-    tcp_connect_addrs_with_v4_priority(addrs, tcp_timeout, false).await
+    tcp_connect_addrs_with_v4_priority(addrs, tcp_timeout, !has_working_ipv6()).await
 }
 
 /// Resolves the entry host once, checks EVERY address (see [`crate::routing::net`]) and connects to

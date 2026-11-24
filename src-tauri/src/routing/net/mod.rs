@@ -321,7 +321,11 @@ async fn resolve_entry_checked_with(
                     }
                     Ok(AddrsOutcome::FakeIp(fake)) => {
                         if fast_fake_ip_with_chained {
-                            if allow_bg_refresh {
+                            cache.insert(key.clone(), fake.clone());
+                            if allow_bg_refresh
+                                && cache
+                                    .mark_stale_and_claim_refresh(&key, EMERGENCY_REFRESH_COOLDOWN)
+                            {
                                 spawn_background_dns_refresh(
                                     entry.clone(),
                                     allow_local,
@@ -463,9 +467,9 @@ pub async fn resolve_entry_checked(
     if let Some(res) = test_support::check_test_dns_override(entry, allow_local, gateway_port) {
         return res;
     }
-    let has_chained = crate::sysproxy::get_chained_proxy().is_some_and(|cp| {
-        !crate::sysproxy::is_gateway_host_port(&cp, (gateway_port > 0).then_some(gateway_port))
-    });
+    // Always fast-accept validated TUN FakeIP (198.18.0.0/15, fc00::/18) and refresh real
+    // public DNS in the background — even when `chained_proxy == None` (pure TUN VPNs like
+    // V2BOX Pro / Happ TUN), avoiding 1500ms fallback DNS stalls per connect.
     resolve_entry_checked_with(
         entry,
         allow_local,
@@ -473,7 +477,7 @@ pub async fn resolve_entry_checked(
         &ProdEntryDnsBackend,
         global_entry_dns_cache(),
         true,
-        has_chained,
+        true,
     )
     .await
 }

@@ -16,9 +16,9 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::routing::net::resolve_entry_checked;
 use crate::routing::{Entry, EntryProto};
 
-const DIRECT_HEADSTART: Duration = Duration::from_millis(700);
+const DIRECT_HEADSTART: Duration = Duration::from_millis(400);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3500);
-const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChainedScheme {
@@ -202,6 +202,9 @@ async fn connect_hedged(
         return connect_via_chained(scheme, cp_host, cp_port, &entry.host, entry.port).await;
     };
 
+    let has_fake_ip = addrs
+        .iter()
+        .any(|a| crate::core::net_safety::is_tun_fake_ip(&a.ip()));
     let direct_fut = crate::proxy::upstream::handshakes::tcp_connect_addrs_with_v4_priority(
         addrs,
         CONNECT_TIMEOUT,
@@ -209,7 +212,11 @@ async fn connect_hedged(
     );
     tokio::pin!(direct_fut);
 
-    let headstart = tokio::time::sleep(DIRECT_HEADSTART);
+    let headstart = tokio::time::sleep(if has_fake_ip {
+        Duration::ZERO
+    } else {
+        DIRECT_HEADSTART
+    });
     tokio::pin!(headstart);
 
     tokio::select! {

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::auditor::cache::TtlCache;
+use crate::auditor::cache::{EXTERNAL_LIST_UNKNOWN_TTL, TtlCache};
 use crate::auditor::geo_matrix::{CheckResult, GUIDE_PERSONAL_VPN, UnknownReason};
 use crate::auditor::rules::{DangerousAsns, NetworkKind};
 use crate::auditor::seams::{HttpProbeOutcome, IpProbe};
@@ -109,7 +109,13 @@ pub async fn lookup_tor(cache: &TorListCache, probe: &dyn IpProbe, ip: &str) -> 
         return TorLookup::NotApplicable;
     }
     let list = cache
-        .get_or_compute("tor", TOR_LIST_TTL, |r| r.is_ok(), fetch_tor_list(probe))
+        .get_or_compute_with_unknown_ttl(
+            "tor",
+            TOR_LIST_TTL,
+            EXTERNAL_LIST_UNKNOWN_TTL,
+            |r| r.is_ok(),
+            fetch_tor_list(probe),
+        )
         .await;
     match list {
         Ok(set) if set.contains(&addr) => TorLookup::Listed,

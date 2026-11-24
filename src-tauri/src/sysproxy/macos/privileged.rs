@@ -98,9 +98,11 @@ pub(super) fn build_privileged_networksetup_script(
                 }
                 match pac.url.as_deref() {
                     Some("") => {
-                        cmds.push(format!(
-                            "/usr/sbin/networksetup -setautoproxyurl {q_name} ''"
-                        ));
+                        if pac.enabled != Some(false) {
+                            cmds.push(format!(
+                                "/usr/sbin/networksetup -setautoproxystate {q_name} off"
+                            ));
+                        }
                     }
                     Some(url) => {
                         if !is_safe_pac_url(url) {

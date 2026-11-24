@@ -28,10 +28,14 @@ pub const WHOAMI_TTL: Duration = Duration::from_secs(60);
 pub const GEO_TTL: Duration = Duration::from_secs(600);
 /// STUN (UDP) probe: rare requests, per HTTP exit address.
 pub const UDP_TTL: Duration = Duration::from_secs(60);
+/// Reverse DNS PTR result per exit IP/metadata.
+pub const RDNS_TTL: Duration = Duration::from_secs(600);
 /// How long a failed (`Unknown`) outcome is reused.
 pub const UNKNOWN_TTL: Duration = Duration::from_secs(5);
 /// Cooldown for failed/unmeasured whoami DNS resolver probes so transient VPN flaps don't thrash every 10s.
 pub const RESOLVER_UNKNOWN_TTL: Duration = Duration::from_secs(25);
+/// Cooldown for failed external list/reputation lookups (DNSBL, Tor, rDNS) over double-tunnel VPNs.
+pub const EXTERNAL_LIST_UNKNOWN_TTL: Duration = Duration::from_secs(30);
 
 const MAX_ENTRIES: usize = 64;
 
@@ -157,6 +161,8 @@ pub struct CheckCache {
     pub geo: TtlCache<Result<GeoInfo, UnknownReason>>,
     /// STUN verdict per HTTP exit address.
     pub udp: TtlCache<CheckResult>,
+    /// Reverse DNS PTR verdict per exit IP/metadata.
+    pub rdns: TtlCache<CheckResult>,
     /// The Tor exit list (one entry, 6 h). Not cleared when the network changes: it does not
     /// depend on the network, and a refetch on every switch would only add requests.
     pub tor: TorListCache,
@@ -171,6 +177,7 @@ impl CheckCache {
         self.resolver.clear().await;
         self.geo.clear().await;
         self.udp.clear().await;
+        self.rdns.clear().await;
     }
 }
 

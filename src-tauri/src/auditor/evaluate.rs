@@ -3,11 +3,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::cache::{DNSBL_TTL, IPV6_TTL, OS_TTL, cached_check};
+use super::cache::{DNSBL_TTL, EXTERNAL_LIST_UNKNOWN_TTL, IPV6_TTL, OS_TTL, cached_check};
 use super::evaluate_checks::{
-    CHECK_LIMIT_IO, CHECK_LIMIT_IO_ROUTED, CHECK_LIMIT_LOCAL, reconcile_key_exit_external_lists,
-    resolver_view, run_dns_resolver_check, run_locale_check, run_timezone_check,
-    run_udp_stun_check, tracked,
+    CHECK_LIMIT_IO, CHECK_LIMIT_IO_ROUTED, CHECK_LIMIT_LOCAL, evaluate_gemini_exit_from_telemetry,
+    reconcile_key_exit_external_lists, resolver_view, run_dns_resolver_check, run_locale_check,
+    run_reverse_dns_check, run_timezone_check, run_udp_stun_check, tracked,
 };
 use super::probes::whoami;
 use super::run_check::{blocking_check, run_check};
@@ -15,8 +15,7 @@ use super::{
     AuditProgress, AuditProtectionContext, AuditProtectionFlags, Auditor, ProgressSink, ProviderId,
     RiskReport, check_all_dnsbl_with_doh, check_ipv6_leak_with_route,
     check_os_location_services_with, dnsbl, evaluate_dnsbl_report, evaluate_ip_pinning_for_route,
-    evaluate_ip_reputation, evaluate_provider_geo, evaluate_reverse_dns_ptr_with_dns, leaks,
-    lookup_tor, network, score_checks, seams,
+    evaluate_ip_reputation, evaluate_provider_geo, leaks, lookup_tor, network, score_checks, seams,
 };
 use crate::auditor::ip_type::ExitIdentity;
 use crate::routing::RouteSelection;
@@ -182,11 +181,17 @@ impl Auditor {
                     async move {
                         let (result, summary) = cache
                             .dnsbl
-                            .get_or_compute(&ip, DNSBL_TTL, |(r, _)| !r.is_unknown(), async {
-                                let report =
-                                    check_all_dnsbl_with_doh(dns, doh_dns, &ip, &asns).await;
-                                (evaluate_dnsbl_report(&report), report.summary_label)
-                            })
+                            .get_or_compute_with_unknown_ttl(
+                                &ip,
+                                DNSBL_TTL,
+                                EXTERNAL_LIST_UNKNOWN_TTL,
+                                |(r, _)| !r.is_unknown(),
+                                async {
+                                    let report =
+                                        check_all_dnsbl_with_doh(dns, doh_dns, &ip, &asns).await;
+                                    (evaluate_dnsbl_report(&report), report.summary_label)
+                                },
+                            )
                             .await;
                         *label.lock().unwrap_or_else(|e| e.into_inner()) = summary;
                         result
@@ -297,11 +302,7 @@ impl Auditor {
         let reverse_dns = tracked(
             &sink,
             9,
-            run_check("Reverse DNS", CHECK_LIMIT_IO, {
-                let tel = telemetry.clone();
-                let dns = env.dns.clone();
-                async move { evaluate_reverse_dns_ptr_with_dns(&tel, &*dns).await }
-            }),
+            run_reverse_dns_check(cache.clone(), telemetry.clone(), env.dns.clone()),
         );
         // Country of the resolver that sees the requests (whoami) against the exit country.
         let dns_country = tracked(
@@ -347,6 +348,11 @@ impl Auditor {
 
         // Real AI provider exit verification (index 13, 14th check).
         let exit_latency_ms = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+        let use_cached_gemini_route_exit = provider == ProviderId::Gemini
+            && via_zastava_key
+            && !self.use_env_probe_for_direct
+            && !force_refresh_telemetry
+            && telemetry.is_fresh(network::CACHE_TTL_SECONDS);
         let claude_exit = tracked(
             &sink,
             13,
@@ -362,6 +368,10 @@ impl Auditor {
                 let cached_route_client = route_client.clone();
                 let latency_slot = exit_latency_ms.clone();
                 async move {
+                    if use_cached_gemini_route_exit {
+                        latency_slot.store(tel_elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+                        return evaluate_gemini_exit_from_telemetry(&tel, &matrix);
+                    }
                     let started = std::time::Instant::now();
                     let res = resolver
                         .probe_provider_exit_with_client(

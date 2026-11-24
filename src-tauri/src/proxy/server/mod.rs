@@ -4,6 +4,7 @@ mod connect;
 mod connect_hold;
 mod http_handler;
 mod responses;
+mod route_audit;
 mod route_guard;
 mod ssrf;
 mod tunnel;
@@ -96,6 +97,7 @@ pub struct ProxyServer {
     pub upstream_redirect: Option<SocketAddr>,
     conn_limiter: Arc<Semaphore>,
     route_alerts: std::sync::Mutex<HashMap<String, Instant>>,
+    route_reports: Arc<route_audit::RouteReportCache>,
     direct_connects: AtomicU64,
     /// Outbound side for transit (non-AI) traffic: DNS cache, Happy Eyeballs, chained proxy.
     transit: Arc<Transit>,
@@ -147,6 +149,7 @@ impl ProxyServer {
             upstream_redirect: None,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             route_alerts: std::sync::Mutex::new(HashMap::new()),
+            route_reports: Arc::new(route_audit::RouteReportCache::default()),
             direct_connects: AtomicU64::new(0),
             transit: Arc::new(Transit::system()),
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
@@ -182,6 +185,7 @@ impl ProxyServer {
             upstream_redirect,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             route_alerts: std::sync::Mutex::new(HashMap::new()),
+            route_reports: Arc::new(route_audit::RouteReportCache::default()),
             direct_connects: AtomicU64::new(0),
             transit: Arc::new(Transit::system()),
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
@@ -234,6 +238,7 @@ impl ProxyServer {
             upstream_redirect: self.upstream_redirect,
             conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
             route_alerts: std::sync::Mutex::new(HashMap::new()),
+            route_reports: Arc::clone(&self.route_reports),
             direct_connects: AtomicU64::new(0),
             transit: Arc::clone(&self.transit),
             hold_ttl: self.hold_ttl,

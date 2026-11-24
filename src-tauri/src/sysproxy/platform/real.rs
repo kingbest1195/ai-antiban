@@ -169,7 +169,11 @@ impl Platform for RealPlatform {
             set_state(false)?;
         }
         match pac.url.as_deref() {
-            Some("") => clear_pac_url(&name)?,
+            Some("") => {
+                if pac.enabled != Some(false) {
+                    clear_pac_url(&name)?;
+                }
+            }
             Some(url) => run_ok("networksetup", &["-setautoproxyurl", &name, url], "set_pac")?,
             None => {}
         }

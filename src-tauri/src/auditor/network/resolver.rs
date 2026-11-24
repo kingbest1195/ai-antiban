@@ -28,6 +28,15 @@ struct CachedTelemetry {
 }
 
 #[derive(Clone)]
+pub(super) struct CachedRouteClient {
+    pub(super) route_id: String,
+    pub(super) route_fp: u64,
+    pub(super) chained_fp: u64,
+    pub(super) created_at: tokio::time::Instant,
+    pub(super) client: reqwest::Client,
+}
+
+#[derive(Clone)]
 pub struct NetworkResolver {
     pub(super) client: reqwest::Client,
     cache: Arc<RwLock<HashMap<CacheKey, CachedTelemetry>>>,
@@ -40,6 +49,9 @@ pub struct NetworkResolver {
     /// Provider-independent check results (DNSBL, IPv6, OS); dropped together with the telemetry
     /// whenever the network changes.
     check_cache: Arc<crate::auditor::cache::CheckCache>,
+    /// Short-lived keep-alive `reqwest::Client` reused between `cascade_via_route` and the same
+    /// audit pass's `client_for_route` (avoids spawning duplicate `entry_relay`s per audit).
+    last_route_client: Arc<RwLock<Option<CachedRouteClient>>>,
 }
 
 impl Default for NetworkResolver {
@@ -66,6 +78,7 @@ impl NetworkResolver {
             cache_generation: Arc::new(AtomicU64::new(0)),
             gateway_port: Arc::new(AtomicU16::new(0)),
             check_cache: Arc::default(),
+            last_route_client: Arc::default(),
         }
     }
 
@@ -87,6 +100,7 @@ impl NetworkResolver {
     pub async fn invalidate_cache(&self) {
         self.cache_generation.fetch_add(1, Ordering::SeqCst);
         self.cache.write().await.clear();
+        *self.last_route_client.write().await = None;
         self.check_cache.clear().await;
     }
 
@@ -158,6 +172,44 @@ impl NetworkResolver {
     pub async fn invalidate_route(&self, route_id: &str) {
         self.cache_generation.fetch_add(1, Ordering::SeqCst);
         self.cache.write().await.remove(&Some(route_id.to_string()));
+        let mut slot = self.last_route_client.write().await;
+        if slot.as_ref().is_some_and(|c| c.route_id == route_id) {
+            *slot = None;
+        }
+    }
+
+    pub(super) async fn get_cached_route_client(
+        &self,
+        route: &Route,
+        chained_fp: u64,
+    ) -> Option<reqwest::Client> {
+        let fp = route_fingerprint(route);
+        let guard = self.last_route_client.read().await;
+        let cached = guard.as_ref()?;
+        if cached.route_id == route.id
+            && cached.route_fp == fp
+            && cached.chained_fp == chained_fp
+            && cached.created_at.elapsed() < Duration::from_secs(10)
+        {
+            Some(cached.client.clone())
+        } else {
+            None
+        }
+    }
+
+    pub(super) async fn set_cached_route_client(
+        &self,
+        route: &Route,
+        chained_fp: u64,
+        client: reqwest::Client,
+    ) {
+        *self.last_route_client.write().await = Some(CachedRouteClient {
+            route_id: route.id.clone(),
+            route_fp: route_fingerprint(route),
+            chained_fp,
+            created_at: tokio::time::Instant::now(),
+            client,
+        });
     }
 
     /// Returns last known telemetry for `route` (matching its fingerprint if recorded) regardless
@@ -349,7 +401,7 @@ impl NetworkResolver {
     }
 }
 
-fn direct_chained_fingerprint(chained: Option<&str>) -> u64 {
+pub(super) fn direct_chained_fingerprint(chained: Option<&str>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     chained.hash(&mut h);
     h.finish()

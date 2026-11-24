@@ -1,6 +1,7 @@
 //! Application bootstrap: Tauri builder, setup sequence and background tasks.
 
 mod deep_links;
+mod rlimit;
 mod watchers;
 
 #[cfg(test)]
@@ -8,6 +9,7 @@ mod tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use deep_links::reconcile_active_profile_binding_async;
+pub use rlimit::raise_nofile_limit;
 
 use crate::startup::{self, StartupSink, StartupSnapshot, StartupState, StartupSteps};
 use crate::{auditor, bin_checker, commands, os_tz, proxy, state, sysproxy, tray};
@@ -53,7 +55,6 @@ pub fn run() {
                 }
                 Err(_) => None,
             };
-
             init_alert_popup(app);
             crate::proxy::popup_port::register_ui_hooks(
                 crate::popup::show_and_position_alert_popup_timed,
@@ -61,10 +62,8 @@ pub fn run() {
                 crate::update_tray_from_report,
                 crate::update_tray_status,
             );
-
             let (app_state, risk_auditor) = init_services(app)?;
             reconcile_active_profile_on_startup(&app_state);
-
             let (guard_for_watcher, pac_url) = start_proxy(app, &risk_auditor, &app_state);
             app.manage(guard_for_watcher.clone());
 

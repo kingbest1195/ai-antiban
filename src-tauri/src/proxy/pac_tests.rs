@@ -139,18 +139,8 @@ fn gemini_domains_match_across_matrix_and_pac_defaults() {
         "deepmind.google",
         "jules.google.com",
         "accounts.google.com",
-        "ogs.google.com",
-        "apis.google.com",
-        "www.google.com",
-        "play.google.com",
-        "footprints-pa.googleapis.com",
-        "people-pa.googleapis.com",
-        "signaler-pa.googleapis.com",
-        "jnn-pa.googleapis.com",
         "oauth2.googleapis.com",
         "iamcredentials.googleapis.com",
-        "myactivity.google.com",
-        "myaccount.google.com",
     ];
 
     for domain in expected {
@@ -169,6 +159,31 @@ fn gemini_domains_match_across_matrix_and_pac_defaults() {
         assert!(
             pac.contains(&format!("\"{domain}\"")),
             "PAC missing {domain}"
+        );
+    }
+    for noisy in [
+        "www.google.com",
+        "play.google.com",
+        "ogs.google.com",
+        "apis.google.com",
+        "footprints-pa.googleapis.com",
+        "people-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "jnn-pa.googleapis.com",
+        "myactivity.google.com",
+        "myaccount.google.com",
+    ] {
+        assert!(
+            !matrix_gemini.iter().any(|d| d == noisy),
+            "noisy non-AI domain must not be in provider_matrix.json: {noisy}"
+        );
+        assert!(
+            !DEFAULT_AI_DOMAINS.contains(&noisy),
+            "noisy non-AI domain must not be in DEFAULT_AI_DOMAINS: {noisy}"
+        );
+        assert!(
+            !pac.contains(&format!("\"{noisy}\"")),
+            "noisy non-AI domain must not be in PAC: {noisy}"
         );
     }
     // Subdomains like waa-pa.clients6.google.com are matched via wildcard shExpMatch("*." + d).
@@ -198,16 +213,8 @@ fn browser_extension_ai_api_hosts_and_matrix_stay_in_sync() {
         "generativelanguage.googleapis.com",
         "clients6.google.com",
         "aistudio.google.com",
-        "www.google.com",
-        "play.google.com",
-        "footprints-pa.googleapis.com",
-        "people-pa.googleapis.com",
-        "signaler-pa.googleapis.com",
-        "jnn-pa.googleapis.com",
         "oauth2.googleapis.com",
         "iamcredentials.googleapis.com",
-        "myactivity.google.com",
-        "myaccount.google.com",
     ] {
         assert!(pac_matches(host), "PAC missing extension/AI host {host}");
         assert!(

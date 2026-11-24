@@ -234,13 +234,13 @@ pub fn is_admin_auth_error(stdout: &str, stderr: &str) -> bool {
     check(stderr) || check(stdout)
 }
 
-/// The one place that knows how a PAC URL is cleared. `networksetup` has no "unset"; clearing it
-/// with an empty argument (`-setautoproxyurl <service> ""`) is the assumed way and is still to be
-/// confirmed on a real macOS (manual gate S2c). If it turns out wrong, only this function changes.
+/// Clears/disables PAC on macOS. `networksetup -setautoproxyurl <service> ""` fails with
+/// exit code 4 ("The parameters were not valid") on macOS 15.6.1+, so PAC is turned off via
+/// `-setautoproxystate <service> off`.
 pub(super) fn clear_pac_url(service_name: &str) -> PResult<()> {
     run_ok(
         "networksetup",
-        &["-setautoproxyurl", service_name, ""],
+        &["-setautoproxystate", service_name, "off"],
         "set_pac",
     )
 }

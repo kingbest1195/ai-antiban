@@ -303,52 +303,26 @@ impl ProxyServer {
         }
 
         // Step 3: Run comprehensive risk audit (on this provider's own egress).
-        // If `guard.restore_epoch()` advances mid-audit (network recovered cleanly while probing
-        // the old network), re-run once against the restored state/cache before deciding.
-        let mut attempt = 0u8;
-        let (report, st_after_audit) = loop {
-            let pre_audit_epoch = self.guard.restore_epoch();
-            let eval_res = self
-                .auditor
-                .evaluate_all_with(provider, &self.state, &selection, false)
-                .await;
-            match eval_res {
-                Ok(r) => {
-                    let st_now = self.state.get_data().await;
-                    if route.is_none()
-                        && attempt == 0
-                        && self.guard.restore_epoch() != pre_audit_epoch
-                        && !crate::proxy::guard::report_allowed_for_state(&r, &st_now, false)
+        // Routed connections reuse a per-(provider, route) cached `RiskReport` with single-flight
+        // coalescing and background refresh so concurrent Gemini/AI sockets do not block on 14-point
+        // audits per CONNECT. Unrouted connections keep the exact uncached Step 3 path.
+        let (report, st_after_audit, report_from_cache) = if let Some(r) = route.as_ref() {
+            match self
+                .route_reports
+                .get_or_evaluate(&self.auditor, &self.state, provider, r, &selection)
+                .await
+            {
+                Ok(out) => (out.report, out.state, out.from_cache),
+                Err(e) => {
+                    if super::route_audit::can_soft_bypass_audit(
+                        &self.auditor,
+                        &self.state,
+                        r,
+                        is_canary,
+                        &e,
+                    )
+                    .await
                     {
-                        attempt += 1;
-                        continue;
-                    }
-                    break (r, st_now);
-                }
-                Err(e) if route.is_some() => {
-                    let r = route.as_ref().expect("checked");
-                    let health_ok = self
-                        .state
-                        .route_health()
-                        .get(&r.id)
-                        .is_some_and(|h| h.reachable == Some(true));
-                    let cached_tel = self
-                        .auditor
-                        .resolver
-                        .last_known_telemetry_for_route(r)
-                        .await;
-                    let geo_ok = !r
-                        .country
-                        .as_deref()
-                        .is_some_and(crate::core::sanctions::is_blocked_geo_code)
-                        && !cached_tel.as_ref().is_some_and(|t| {
-                            crate::core::sanctions::is_blocked_geo_code(&t.country_code)
-                        });
-                    if !is_canary && (health_ok || cached_tel.is_some()) && geo_ok {
-                        crate::diagnostics::record(
-                            "proxy:route",
-                            &format!("route={} phase=audit_soft_bypass err={e}", r.id),
-                        );
                         return self
                             .tunnel_to_target(client, &host, port, Some(provider), &selection)
                             .await;
@@ -365,23 +339,47 @@ impl ProxyServer {
                         )
                         .await;
                 }
-                Err(e) => {
-                    if route.is_none()
-                        && attempt == 0
-                        && self.guard.restore_epoch() != pre_audit_epoch
-                    {
-                        attempt += 1;
-                        continue;
+            }
+        } else {
+            // If `guard.restore_epoch()` advances mid-audit (network recovered cleanly while probing
+            // the old network), re-run once against the restored state/cache before deciding.
+            let mut attempt = 0u8;
+            loop {
+                let pre_audit_epoch = self.guard.restore_epoch();
+                let eval_res = self
+                    .auditor
+                    .evaluate_all_with(provider, &self.state, &selection, false)
+                    .await;
+                match eval_res {
+                    Ok(r) => {
+                        let st_now = self.state.get_data().await;
+                        if attempt == 0
+                            && self.guard.restore_epoch() != pre_audit_epoch
+                            && !crate::proxy::guard::report_allowed_for_state(&r, &st_now, false)
+                        {
+                            attempt += 1;
+                            continue;
+                        }
+                        break (r, st_now, false);
                     }
-                    eprintln!("Auditor evaluation failed: {e}");
-                    self.state
-                        .stats()
-                        .record_intercepted(&host, provider.as_str(), "ERROR", "??");
-                    if is_canary {
-                        return send_canary_intercepted(client).await;
+                    Err(e) => {
+                        if attempt == 0 && self.guard.restore_epoch() != pre_audit_epoch {
+                            attempt += 1;
+                            continue;
+                        }
+                        eprintln!("Auditor evaluation failed: {e}");
+                        self.state.stats().record_intercepted(
+                            &host,
+                            provider.as_str(),
+                            "ERROR",
+                            "??",
+                        );
+                        if is_canary {
+                            return send_canary_intercepted(client).await;
+                        }
+                        // In case of auditor error, fall back to hold for safety
+                        return send_forbidden(client, &format!("Audit error: {e}")).await;
                     }
-                    // In case of auditor error, fall back to hold for safety
-                    return send_forbidden(client, &format!("Audit error: {e}")).await;
                 }
             }
         };
@@ -408,8 +406,9 @@ impl ProxyServer {
                     )
                     .await;
             }
-            if crate::proxy::guard::report_no_critical_and_geo_ok(&report)
-                || crate::proxy::guard::is_report_pinned_travel_only(&report, &st_after_audit)
+            if !report_from_cache
+                && (crate::proxy::guard::report_no_critical_and_geo_ok(&report)
+                    || crate::proxy::guard::is_report_pinned_travel_only(&report, &st_after_audit))
             {
                 let entry = IpHistoryEntry::new(
                     report.telemetry.ip.clone(),
