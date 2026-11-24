@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 use crate::auditor::geo_matrix::ProviderId;
 use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, shutdown_aborted};
 use crate::proxy::route_watch::RouteWatch;
+use crate::proxy::upstream::handshakes::configure_tcp_stream;
 use crate::proxy::upstream::{
     ChainedError, UpstreamStream, connect_via_chained_proxy, connect_via_route_with_chained,
 };
@@ -86,6 +87,7 @@ impl ProxyServer {
         host: &str,
         port: u16,
     ) -> Result<(), std::io::Error> {
+        configure_tcp_stream(client);
         // The manual kill-switch ("СТОП СЕТИ") stops transit traffic too; subscribe first so a
         // switch-on during the connect is noticed.
         let mut kill_rx = self.guard.subscribe_killswitch();
@@ -107,7 +109,10 @@ impl ProxyServer {
                 )
             })
             .and_then(|r| r)
-            .map(UpstreamStream::Plain)
+            .map(|s| {
+                configure_tcp_stream(&s);
+                UpstreamStream::Plain(s)
+            })
         } else {
             self.connect_transit(host, port).await
         };
@@ -151,6 +156,7 @@ impl ProxyServer {
         if provider.is_none() && !matches!(selection, RouteSelection::Route(_)) {
             return self.transit_tunnel(client, host, port).await;
         }
+        configure_tcp_stream(client);
         let route: Option<&Route> = match selection {
             RouteSelection::Route(r) => Some(r),
             _ => None,
@@ -215,7 +221,7 @@ impl ProxyServer {
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 .await?;
             client.flush().await?;
-            return pump(
+            let res = pump(
                 client,
                 &mut target,
                 &self.guard,
@@ -224,6 +230,10 @@ impl ProxyServer {
                 watch,
             )
             .await;
+            return match res {
+                Err(e) if is_peer_gone(&e) => Ok(()),
+                other => other,
+            };
         }
 
         let abort_rx = self.guard.subscribe_tunnel_abort();
@@ -241,7 +251,10 @@ impl ProxyServer {
                 )
             })
             .and_then(|r| r)
-            .map(UpstreamStream::Plain)
+            .map(|s| {
+                configure_tcp_stream(&s);
+                UpstreamStream::Plain(s)
+            })
         } else {
             self.connect_transit(host, port).await
         };
@@ -388,7 +401,7 @@ where
     };
     let mut abort_rx = guard.subscribe_tunnel_abort();
     let mut kill_rx = guard.subscribe_killswitch();
-    let mut buf = vec![0u8; 16 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
 
     loop {
         // The manual kill-switch or any gate exit from Open immediately tears down direct tunnels.
@@ -416,6 +429,7 @@ where
         };
 
         if n == 0 {
+            let _ = writer.flush().await;
             let _ = writer.shutdown().await;
             return Ok(());
         }
@@ -447,7 +461,7 @@ where
 {
     let mut kill_rx = guard.subscribe_killswitch();
     let mut shutdown_rx = guard.subscribe_shutdown_abort();
-    let mut buf = vec![0u8; 16 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
 
     loop {
         if *kill_rx.borrow_and_update() || *shutdown_rx.borrow_and_update() {
@@ -466,6 +480,7 @@ where
             }
         };
         if n == 0 {
+            let _ = writer.flush().await;
             let _ = writer.shutdown().await;
             return Ok(());
         }

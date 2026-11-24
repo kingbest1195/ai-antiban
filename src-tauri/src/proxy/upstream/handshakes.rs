@@ -49,11 +49,11 @@ fn should_prefer_v4(prefer_v4_hint: bool) -> bool {
     !has_working_ipv6()
 }
 
-fn configure_tcp_stream(stream: &TcpStream) {
+pub(crate) fn configure_tcp_stream(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
     let ka = socket2::TcpKeepalive::new()
-        .with_time(Duration::from_secs(30))
-        .with_interval(Duration::from_secs(10));
+        .with_time(Duration::from_secs(15))
+        .with_interval(Duration::from_secs(15));
     let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&ka);
 }
 

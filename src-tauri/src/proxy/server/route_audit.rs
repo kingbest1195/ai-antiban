@@ -17,8 +17,9 @@ use crate::auditor::{Auditor, RiskReport};
 use crate::routing::{Route, RouteSelection, route_fingerprint};
 use crate::state::{AppState, AppStateData};
 
-pub(super) const ROUTE_REPORT_FRESH_TTL: Duration = Duration::from_secs(60);
 pub(super) const ROUTE_REPORT_BG_REFRESH_AFTER: Duration = Duration::from_secs(30);
+pub(super) const ROUTE_REPORT_GRACE_TTL: Duration = Duration::from_secs(600);
+pub(super) const ROUTE_REPORT_BG_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
 
 type CacheKey = (ProviderId, String);
 
@@ -26,6 +27,7 @@ struct CachedEntry {
     route_fp: u64,
     state_sig: u64,
     stored_at: Instant,
+    last_bg_attempt: Option<Instant>,
     report: RiskReport,
     refreshing: bool,
 }
@@ -82,10 +84,14 @@ impl RouteReportCache {
             return None;
         }
         let age = entry.stored_at.elapsed();
-        if age >= ROUTE_REPORT_FRESH_TTL {
+        if age >= ROUTE_REPORT_GRACE_TTL {
             return None;
         }
-        let needs_bg_refresh = age >= ROUTE_REPORT_BG_REFRESH_AFTER && !entry.refreshing;
+        let bg_cooldown_ok = entry
+            .last_bg_attempt
+            .is_none_or(|t| t.elapsed() >= ROUTE_REPORT_BG_RETRY_COOLDOWN);
+        let needs_bg_refresh =
+            age >= ROUTE_REPORT_BG_REFRESH_AFTER && !entry.refreshing && bg_cooldown_ok;
         Some((entry.report.clone(), needs_bg_refresh))
     }
 
@@ -108,6 +114,7 @@ impl RouteReportCache {
                     route_fp,
                     state_sig,
                     stored_at: Instant::now(),
+                    last_bg_attempt: None,
                     report: report.clone(),
                     refreshing: false,
                 },
@@ -139,6 +146,7 @@ impl RouteReportCache {
                     return;
                 }
                 entry.refreshing = true;
+                entry.last_bg_attempt = Some(Instant::now());
             }
             let selection = RouteSelection::Route(route.clone());
             let res = auditor
@@ -152,10 +160,20 @@ impl RouteReportCache {
                         .store_if_allowed(key, route_fp, sig, &report, &st_now)
                         .await;
                 }
-                Err(_) => {
+                Err(err) => {
+                    crate::diagnostics::record(
+                        "proxy:route",
+                        &format!(
+                            "route={} provider={} phase=bg_audit_failed_grace_kept err={}",
+                            route.id,
+                            key.0.as_str(),
+                            crate::diagnostics::sanitize_diagnostic_text(&err)
+                        ),
+                    );
                     let mut guard = cache.entries.write().await;
                     if let Some(entry) = guard.get_mut(&key) {
                         entry.refreshing = false;
+                        entry.last_bg_attempt = Some(Instant::now());
                     }
                 }
             }
@@ -268,3 +286,7 @@ pub(super) async fn can_soft_bypass_audit(
         false
     }
 }
+
+#[cfg(test)]
+#[path = "route_audit_tests.rs"]
+mod tests;
