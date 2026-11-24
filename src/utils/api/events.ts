@@ -102,10 +102,13 @@ export async function onSysproxyAdminAuthRequired(
 }
 
 export async function onInterceptorResolved(
-  handler: () => void,
+  handler: (payload?: import("../../types").InterceptorResolvedPayload) => void,
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
-  return await tauriListen<unknown>("interceptor://resolved", () => handler());
+  return await tauriListen<import("../../types").InterceptorResolvedPayload | undefined>(
+    "interceptor://resolved",
+    (payload) => handler(payload),
+  );
 }
 
 /** Событие PayShield из alert-popup: открыть экран проверки оплаты в главном окне. */

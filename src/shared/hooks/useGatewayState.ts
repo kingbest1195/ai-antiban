@@ -51,13 +51,38 @@ export {
 interface Options {
   showToast: ShowToast;
   refreshGatewayStats: () => Promise<void>;
+  onManualKillswitchChange?: (frozen: boolean) => void;
+}
+
+/** При paused === true или gate === "blocked" отчёты не сбрасываем, чтобы экран не мигал «Проверяем сеть и защиту...». */
+export function shouldInvalidateOnPauseStatus(snap: GuardPauseStatus): {
+  invalidate: boolean;
+  onlyProviders?: string[];
+  includeAll: boolean;
+} {
+  if (snap.paused || snap.gate === "blocked") {
+    return { invalidate: false, includeAll: false };
+  }
+  const pending = snap.pending_providers ?? [];
+  if (snap.manual_killswitch) {
+    return { invalidate: true, onlyProviders: pending.length > 0 ? pending : undefined, includeAll: true };
+  }
+  if (snap.gate === "pending" || pending.length > 0) {
+    return { invalidate: true, onlyProviders: pending.length > 0 ? pending : undefined, includeAll: false };
+  }
+  return { invalidate: false, includeAll: false };
+}
+
+/** Подавляет фоновый 1.5с self-heal аудит, пока шлюз в pending или на паузе. */
+export function shouldSuppressSelfHeal(guardPauseStatus: GuardPauseStatus | null | undefined): boolean {
+  return guardPauseStatus?.gate === "pending" || guardPauseStatus?.paused === true;
 }
 
 /**
  * Состояние шлюза: AppStateData, отчёты аудита по трём сервисам, статус системного прокси, задержка проверки.
  * Здесь же стартовый аудит и «самолечение» — повторный опрос, пока не определились IP и провайдер.
  */
-export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
+export function useGatewayState({ showToast, refreshGatewayStats, onManualKillswitchChange }: Options) {
   const [state, setState] = useState<AppStateData | null>(null);
   const [reports, setReports] = useState<Partial<Record<ProviderId, RiskReport>>>({});
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -273,25 +298,33 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     };
   }, []);
 
-  // Подписка на смену gate/паузы шлюза: при pending/paused немедленно сбрасываем устаревшие отчёты.
+  const onManualKillswitchChangeRef = useRef(onManualKillswitchChange);
+  onManualKillswitchChangeRef.current = onManualKillswitchChange;
+
+  // Подписка на смену gate/паузы шлюза: при pending (без паузы/блокировки) сбрасываем устаревшие отчёты.
   useEffect(() => {
     let off: (() => void) | undefined;
     let cancelled = false;
     let pauseSeq = 0;
     getGuardPauseStatus()
-      .then((snap) => !cancelled && setGuardPauseStatus(snap))
+      .then((snap) => {
+        if (cancelled) return;
+        setGuardPauseStatus(snap);
+        onManualKillswitchChangeRef.current?.(Boolean(snap.manual_killswitch));
+      })
       .catch(() => {});
     onGuardPauseStatusChanged((snap) => {
       const seq = ++pauseSeq;
       setGuardPauseStatus(snap);
+      onManualKillswitchChangeRef.current?.(Boolean(snap.manual_killswitch));
       setState((prev) =>
         prev
           ? { ...prev, manual_killswitch: snap.manual_killswitch, blocked_providers: snap.blocked_providers ?? prev.blocked_providers }
           : prev,
       );
-      const affected = [...(snap.pending_providers ?? []), ...(snap.blocked_providers ?? [])];
-      if (snap.gate !== "open" || snap.paused || snap.manual_killswitch || affected.length > 0) {
-        invalidateReports(affected.length > 0 ? affected : undefined, snap.manual_killswitch);
+      const decision = shouldInvalidateOnPauseStatus(snap);
+      if (decision.invalidate) {
+        invalidateReports(decision.onlyProviders, decision.includeAll);
       }
       fetchAppState()
         .then((st) => {
@@ -357,9 +390,16 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     [reports, state?.disabled_providers],
   );
 
+  const guardSuppressedRef = useRef(false);
+  guardSuppressedRef.current = shouldSuppressSelfHeal(guardPauseStatus);
+
   // Самолечение на старте: если первый аудит упёрся в холодный старт сети/PAC и вернулся без IP или провайдера,
-  // перепроверяем сами, до шести раз с шагом 1,5 с.
+  // перепроверяем сами, до шести раз с шагом 1,5 с. При pending/paused шлюзе не запускаем.
   useEffect(() => {
+    if (shouldSuppressSelfHeal(guardPauseStatus)) {
+      return;
+    }
+
     const missingIp = !activeReport || !activeReport.telemetry?.ip || activeReport.telemetry.ip === "--";
     const missingProvider =
       activeReport &&
@@ -374,8 +414,8 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     let attempts = 0;
     const maxAttempts = 6;
     const timer = setInterval(() => {
-      // Пока идёт аудит, новый не запускаем: параллельные принудительные запуски только замедляют старт.
-      if (inFlight.current > 0) return;
+      // Пока идёт аудит или шлюз в pending/paused, новый не запускаем.
+      if (inFlight.current > 0 || guardSuppressedRef.current) return;
       attempts += 1;
       if (attempts > maxAttempts) {
         clearInterval(timer);
@@ -389,6 +429,7 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   }, [
     activeReport?.telemetry?.ip, activeReport?.telemetry?.asn,
     activeReport?.telemetry?.isp, activeReport?.telemetry?.org,
+    guardPauseStatus?.gate, guardPauseStatus?.paused,
   ]);
 
   // Раз в 30 секунд пересчитываем возраст отчёта.

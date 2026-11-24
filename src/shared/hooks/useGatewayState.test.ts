@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { CheckResult, OverallStatus, ProviderId, RiskReport, RoutesSnapshot } from "../../types";
-import { invalidateStaleReports, mergeProviderReport } from "./useGatewayState";
+import {
+  invalidateStaleReports,
+  mergeProviderReport,
+  shouldInvalidateOnPauseStatus,
+  shouldSuppressSelfHeal,
+} from "./useGatewayState";
 
 const okCheck: CheckResult = {
   status: "ok",
@@ -83,5 +88,61 @@ describe("invalidateStaleReports", () => {
 
     const allDropped = invalidateStaleReports(prev, routesSnapshot, undefined, true);
     expect(allDropped).toEqual({});
+  });
+});
+
+describe("shouldInvalidateOnPauseStatus", () => {
+  it("не сбрасывает отчёты при paused === true или gate === 'blocked'", () => {
+    expect(
+      shouldInvalidateOnPauseStatus({
+        paused: true,
+        mode: "until_network_change",
+        gate: "blocked",
+        manual_killswitch: false,
+        blocked_providers: ["anthropic"],
+      }).invalidate,
+    ).toBe(false);
+
+    expect(
+      shouldInvalidateOnPauseStatus({
+        paused: false,
+        mode: "none",
+        gate: "blocked",
+        manual_killswitch: false,
+        blocked_providers: ["anthropic"],
+      }).invalidate,
+    ).toBe(false);
+  });
+
+  it("сбрасывает отчёты только при переходе в pending (свежая проверка)", () => {
+    expect(
+      shouldInvalidateOnPauseStatus({
+        paused: false,
+        mode: "none",
+        gate: "pending",
+        manual_killswitch: false,
+        pending_providers: ["anthropic"],
+      }),
+    ).toEqual({ invalidate: true, onlyProviders: ["anthropic"], includeAll: false });
+
+    expect(
+      shouldInvalidateOnPauseStatus({
+        paused: false,
+        mode: "none",
+        gate: "open",
+        manual_killswitch: false,
+        pending_providers: [],
+        blocked_providers: [],
+      }).invalidate,
+    ).toBe(false);
+  });
+});
+
+describe("shouldSuppressSelfHeal", () => {
+  it("подавляет 1.5с self-heal при gate === 'pending' или paused === true", () => {
+    expect(shouldSuppressSelfHeal({ paused: true, mode: "until_network_change", gate: "open", manual_killswitch: false })).toBe(true);
+    expect(shouldSuppressSelfHeal({ paused: false, mode: "none", gate: "pending", manual_killswitch: false })).toBe(true);
+    expect(shouldSuppressSelfHeal({ paused: false, mode: "none", gate: "open", manual_killswitch: false })).toBe(false);
+    expect(shouldSuppressSelfHeal(null)).toBe(false);
   });
 });

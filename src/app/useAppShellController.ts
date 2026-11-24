@@ -69,6 +69,11 @@ export function useAppShellController() {
     showToast,
     startupPending: gw.startupPending,
   });
+  useEffect(() => {
+    if (gw.guardPauseStatus != null) {
+      toggles.setKillswitchFrozen(Boolean(gw.guardPauseStatus.manual_killswitch));
+    }
+  }, [gw.guardPauseStatus?.manual_killswitch, toggles.setKillswitchFrozen]);
   const hideIpMode = gw.state?.hide_ip_mode ?? hideIpPref;
   const pinning = usePinning({
     state: gw.state,

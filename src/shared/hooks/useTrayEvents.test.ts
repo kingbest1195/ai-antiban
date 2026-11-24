@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { toast as t } from "../copy/ru";
 import type { RiskInterceptPayload } from "../../types";
 import {
+  createNetworkChangedCoalescer,
   handleInterceptorResolvedEvent,
   handleNetworkChangedEvent,
   handleRiskDetectedEvent,
@@ -168,5 +169,78 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
     expect(invalidateReports).not.toHaveBeenCalled();
     expect(refreshState).not.toHaveBeenCalled();
     expect(setInterceptPayload).toHaveBeenCalledWith(null);
+  });
+
+  it("handleInterceptorResolvedEvent при block_until_network_change / should_reaudit=false НЕ сбрасывает отчёты и НЕ запускает аудит", () => {
+    for (const payload of [
+      { id: "a1", provider: "anthropic", decision: "block_until_network_change", should_reaudit: false },
+      { id: "a2", provider: "openai", decision: "block" },
+      { id: "a3", provider: "gemini", decision: "block_always" },
+      { id: "a4", should_reaudit: false },
+    ]) {
+      const invalidateReports = vi.fn();
+      const refreshState = vi.fn(async () => ({}));
+      const setInterceptPayload = vi.fn();
+      const runFullAudit = vi.fn(async () => {});
+
+      handleInterceptorResolvedEvent(
+        { invalidateReports, refreshState, setInterceptPayload, runFullAudit },
+        payload,
+      );
+
+      expect(setInterceptPayload).toHaveBeenCalledWith(null);
+      expect(refreshState).toHaveBeenCalledTimes(1);
+      expect(invalidateReports).not.toHaveBeenCalled();
+      expect(runFullAudit).not.toHaveBeenCalled();
+    }
+  });
+
+  it("handleInterceptorResolvedEvent при allow_session или legacy-форме { id } сбрасывает отчёты и запускает аудит", () => {
+    for (const payload of [
+      { id: "a1", provider: "anthropic", decision: "allow_session", should_reaudit: true },
+      { id: "a2" },
+    ]) {
+      const invalidateReports = vi.fn();
+      const refreshState = vi.fn(async () => ({}));
+      const setInterceptPayload = vi.fn();
+      const runFullAudit = vi.fn(async () => {});
+
+      handleInterceptorResolvedEvent(
+        { invalidateReports, refreshState, setInterceptPayload, runFullAudit },
+        payload,
+      );
+
+      expect(setInterceptPayload).toHaveBeenCalledWith(null);
+      expect(refreshState).toHaveBeenCalledTimes(1);
+      expect(invalidateReports).toHaveBeenCalledTimes(1);
+      expect(runFullAudit).toHaveBeenCalledWith(false);
+    }
+  });
+
+  it("createNetworkChangedCoalescer склеивает всплеск network://changed в один runFullAudit(true)", () => {
+    vi.useFakeTimers();
+    try {
+      const invalidateReports = vi.fn();
+      const runFullAudit = vi.fn(async () => {});
+      const coalescer = createNetworkChangedCoalescer(() => ({ invalidateReports, runFullAudit }), 250);
+
+      coalescer.trigger();
+      vi.advanceTimersByTime(50);
+      coalescer.trigger();
+      vi.advanceTimersByTime(50);
+      coalescer.trigger();
+
+      expect(invalidateReports).toHaveBeenCalledTimes(1);
+      expect(runFullAudit).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(249);
+      expect(runFullAudit).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(runFullAudit).toHaveBeenCalledTimes(1);
+      expect(runFullAudit).toHaveBeenCalledWith(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

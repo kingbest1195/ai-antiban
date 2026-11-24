@@ -23,7 +23,7 @@ import {
   isFailed,
   isHighRiskAlert,
 } from "./alertState";
-import type { AlertState } from "./alertState";
+import type { AlertEvent, AlertState } from "./alertState";
 import { alertDialog as copy, providers as providerCopy } from "../../shared/copy/ru";
 import { formatCountryWithCode } from "../../shared/lib/country";
 import { CheckoutAlertView } from "./CheckoutAlertView";
@@ -59,6 +59,16 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
 
   const { payload } = state;
   const generation = state.generation;
+  const currentAlertIdRef = useRef<string | null>(payload?.id ?? null);
+  currentAlertIdRef.current = payload?.id ?? null;
+  const dispatchAlert = useCallback((event: AlertEvent) => {
+    if (event.type === "detected") {
+      currentAlertIdRef.current = event.payload.id;
+    } else if (event.type === "cleared") {
+      currentAlertIdRef.current = null;
+    }
+    dispatch(event);
+  }, []);
   // Пока fetchAppState() не вернул настройку, маскируем IP по умолчанию, чтобы не было вспышки сырого IP.
   const effectiveHideIpMode = propHideIpMode ?? stateHideIpMode ?? true;
 
@@ -88,19 +98,13 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
       takePendingAlert()
         .then((snapshot) => {
           if (cancelled || !snapshot) return;
-          if (!guardPausedRef.current || snapshot.is_simulation) {
-            if (snapshot.phase === "detecting") guardPausedRef.current = false;
-            dispatch({ type: "detected", payload: snapshot });
+          if (snapshot.phase === "detecting" && !snapshot.is_simulation) {
+            guardPausedRef.current = false;
+          }
+          if (guardPausedRef.current && !snapshot.is_simulation) {
             return;
           }
-          getGuardPauseStatus()
-            .then((status) => {
-              if (!cancelled && !status?.paused) {
-                guardPausedRef.current = false;
-                dispatch({ type: "detected", payload: snapshot });
-              }
-            })
-            .catch(() => {});
+          dispatchAlert({ type: "detected", payload: snapshot });
         })
         .catch((err) => console.error("Failed to take pending alert:", err));
     };
@@ -110,14 +114,14 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
         listen<GuardPauseStatus>("guard://pause-status-changed", (event) => {
           const paused = Boolean(event.payload?.paused);
           guardPausedRef.current = paused;
-          if (paused) dispatch({ type: "cleared" });
+          if (paused) dispatchAlert({ type: "cleared" });
         }),
       );
       getGuardPauseStatus()
         .then((status) => {
           if (cancelled) return;
           guardPausedRef.current = Boolean(status?.paused);
-          if (guardPausedRef.current) dispatch({ type: "cleared" });
+          if (guardPausedRef.current) dispatchAlert({ type: "cleared" });
         })
         .catch(() => {});
       track(
@@ -126,23 +130,20 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
             guardPausedRef.current = false;
           }
           if (guardPausedRef.current && !event.payload.is_simulation) {
-            getGuardPauseStatus()
-              .then((status) => {
-                if (!cancelled && !status?.paused) {
-                  guardPausedRef.current = false;
-                  dispatch({ type: "detected", payload: event.payload });
-                }
-              })
-              .catch(() => {});
             return;
           }
-          dispatch({ type: "detected", payload: event.payload });
+          dispatchAlert({ type: "detected", payload: event.payload });
         }),
       );
       track(
         listen<EnrichedPayload>("interceptor://enriched", (event) => {
-          if (guardPausedRef.current) return;
-          dispatch({ type: "enriched", payload: event.payload });
+          const matchesCurrentAlert =
+            currentAlertIdRef.current !== null && currentAlertIdRef.current === event.payload.id;
+          if (guardPausedRef.current && !matchesCurrentAlert) return;
+          if (matchesCurrentAlert) {
+            guardPausedRef.current = false;
+          }
+          dispatchAlert({ type: "enriched", payload: event.payload });
         }),
       );
     }
@@ -158,10 +159,10 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
 
     // Мок в браузере (без Tauri): те же события, что шлёт бэкенд.
     const onMockDetected = (e: Event) => {
-      dispatch({ type: "detected", payload: (e as CustomEvent<RiskInterceptPayload>).detail });
+      dispatchAlert({ type: "detected", payload: (e as CustomEvent<RiskInterceptPayload>).detail });
     };
     const onMockEnriched = (e: Event) => {
-      dispatch({ type: "enriched", payload: (e as CustomEvent<EnrichedPayload>).detail });
+      dispatchAlert({ type: "enriched", payload: (e as CustomEvent<EnrichedPayload>).detail });
     };
     window.addEventListener(MOCK_ALERT_DETECTED_EVENT, onMockDetected);
     window.addEventListener(MOCK_ALERT_ENRICHED_EVENT, onMockEnriched);
@@ -175,7 +176,7 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
       window.removeEventListener(MOCK_ALERT_DETECTED_EVENT, onMockDetected);
       window.removeEventListener(MOCK_ALERT_ENRICHED_EVENT, onMockEnriched);
     };
-  }, []);
+  }, [dispatchAlert]);
 
   // Новый алерт: сбрасываем ошибку, подтверждение и демо-подпись предыдущего.
   useEffect(() => {
@@ -233,7 +234,7 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
           if (payload.scope === "network") {
             guardPausedRef.current = true;
           }
-          dispatch({ type: "cleared" });
+          dispatchAlert({ type: "cleared" });
         }
         if (onResolved) onResolved(action);
       } catch (err) {

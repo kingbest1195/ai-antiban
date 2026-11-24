@@ -185,6 +185,14 @@ export interface EnrichedPayload {
   gate_reason?: string | null;
 }
 
+/** interceptor://resolved: результат разрешения перехвата. */
+export interface InterceptorResolvedPayload {
+  id?: string;
+  provider?: string;
+  decision?: string;
+  should_reaudit?: boolean;
+}
+
 export type GuardPauseMode = "none" | "until_network_change" | "manual";
 
 export interface GuardPauseStatus {

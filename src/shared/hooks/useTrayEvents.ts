@@ -5,6 +5,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import type {
   EnrichedPayload,
   GuardPauseStatus,
+  InterceptorResolvedPayload,
   ProfileSwitchResult,
   RiskInterceptPayload,
   UpdateCheckResult,
@@ -77,6 +78,33 @@ export function handleNetworkChangedEvent(
   void handlers.runFullAudit(true);
 }
 
+/** Склеивает всплески `network://changed`: инвалидация сразу на первом событии, аудит — один раз после паузы. */
+export function createNetworkChangedCoalescer(
+  getHandlers: () => Pick<TrayEventHandlers, "invalidateReports" | "runFullAudit">,
+  delayMs = 250,
+): { trigger: () => void; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return {
+    trigger: () => {
+      if (timer === null) {
+        getHandlers().invalidateReports?.();
+      } else {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        void getHandlers().runFullAudit(true);
+      }, delayMs);
+    },
+    cancel: () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
 /** При `detecting` / `failed` / сетевом риске сбрасывает устаревшие отчёты, чтобы сервис не выглядел «Доступен». */
 export function handleRiskDetectedEvent(
   handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload" | "guardPauseStatus">,
@@ -96,13 +124,20 @@ export function handleRiskDetectedEvent(
   );
 }
 
-/** После закрытия/разрешения алерта очищает устаревшие отчёты, обновляет state и запускает аудит. */
+/** После закрытия/разрешения алерта обновляет state; при паузе/блокировке не сбрасывает отчёты и не запускает аудит. */
 export function handleInterceptorResolvedEvent(
   handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload" | "runFullAudit">,
+  payload?: InterceptorResolvedPayload | null,
 ): void {
   handlers.setInterceptPayload(null);
-  handlers.invalidateReports?.();
   void handlers.refreshState();
+  const skipReaudit =
+    payload?.should_reaudit === false ||
+    payload?.decision === "block_until_network_change" ||
+    payload?.decision === "block" ||
+    payload?.decision === "block_always";
+  if (skipReaudit) return;
+  handlers.invalidateReports?.();
   void handlers.runFullAudit(false);
 }
 
@@ -219,8 +254,9 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
       }
     });
 
+    const networkChangedCoalescer = createNetworkChangedCoalescer(() => ref.current);
     on("network://changed", () => {
-      handleNetworkChangedEvent(ref.current);
+      networkChangedCoalescer.trigger();
     });
 
     on<string>("sysproxy://admin-auth-required", (payload) => {
@@ -260,12 +296,13 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
       });
     });
 
-    on("interceptor://resolved", () => {
-      handleInterceptorResolvedEvent(ref.current);
+    on<InterceptorResolvedPayload | undefined>("interceptor://resolved", (payload) => {
+      handleInterceptorResolvedEvent(ref.current, payload);
     });
 
     return () => {
       cancelled = true;
+      networkChangedCoalescer.cancel();
       unlisteners.forEach((u) => u());
     };
   }, []);
