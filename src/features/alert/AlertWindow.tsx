@@ -88,10 +88,20 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
     const syncPendingAlert = () => {
       takePendingAlert()
         .then((snapshot) => {
-          if (!cancelled && snapshot && (!guardPausedRef.current || snapshot.is_simulation)) {
+          if (cancelled || !snapshot) return;
+          if (!guardPausedRef.current || snapshot.is_simulation) {
             if (snapshot.phase === "detecting") guardPausedRef.current = false;
             dispatch({ type: "detected", payload: snapshot });
+            return;
           }
+          getGuardPauseStatus()
+            .then((status) => {
+              if (!cancelled && !status?.paused) {
+                guardPausedRef.current = false;
+                dispatch({ type: "detected", payload: snapshot });
+              }
+            })
+            .catch(() => {});
         })
         .catch((err) => console.error("Failed to take pending alert:", err));
     };
@@ -116,7 +126,17 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
           if (event.payload.phase === "detecting" && !event.payload.is_simulation) {
             guardPausedRef.current = false;
           }
-          if (guardPausedRef.current && !event.payload.is_simulation) return;
+          if (guardPausedRef.current && !event.payload.is_simulation) {
+            getGuardPauseStatus()
+              .then((status) => {
+                if (!cancelled && !status?.paused) {
+                  guardPausedRef.current = false;
+                  dispatch({ type: "detected", payload: event.payload });
+                }
+              })
+              .catch(() => {});
+            return;
+          }
           dispatch({ type: "detected", payload: event.payload });
         }),
       );

@@ -465,3 +465,121 @@ async fn e2e_per_provider_pinned_ips_and_transient_unknown_geo_never_sticky_lock
     );
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn e2e_routed_cold_startup_recovery_never_poisons_direct_baseline() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let Some((upstream_addr, upstream_hits)) = spawn_echo_upstream().await else {
+        return;
+    };
+    let entry_listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(e) => panic!("bind mock entry: {e}"),
+    };
+    let entry_addr = entry_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = entry_listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                if let Ok(n) = client.read(&mut buf).await
+                    && n > 0
+                    && let Ok(mut target) = TcpStream::connect(upstream_addr).await
+                {
+                    let _ = client
+                        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                        .await;
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut target).await;
+                }
+            });
+        }
+    });
+
+    let exit = Arc::new(std::sync::Mutex::new(Some((
+        "1.1.1.1".to_string(),
+        "DE".to_string(),
+        24940u32,
+    ))));
+    let auditor = Auditor::with_env(AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+        probe: Arc::new(DynamicExitProbe(Arc::clone(&exit))),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    })
+    .unwrap();
+    let state = AppState::new_in_memory();
+    let route = zastava_lib::routing::Route {
+        id: "r_test".to_string(),
+        label: "Test Key".to_string(),
+        raw_key: format!("http://{entry_addr}"),
+        entries: vec![zastava_lib::routing::Entry {
+            proto: zastava_lib::routing::EntryProto::Http,
+            host: entry_addr.ip().to_string(),
+            port: entry_addr.port(),
+            username: None,
+            password: None,
+            sni: None,
+        }],
+        country: Some("NL".to_string()),
+        exit_ip: Some("99.99.99.99".to_string()),
+        expires_at: None,
+        sub_url: None,
+        grace_extended: false,
+        enabled: true,
+        added_at: 0,
+    };
+    state.upsert_route(route).await.unwrap();
+    state
+        .bind_provider_route("anthropic", Some("r_test"))
+        .await
+        .unwrap();
+    state.block_provider("anthropic").await.unwrap();
+    auditor
+        .resolver
+        .set_cached_for_route(
+            Some("r_test".to_string()),
+            NetworkTelemetry {
+                ip: "99.99.99.99".to_string(),
+                country_code: "NL".to_string(),
+                hostname: None,
+                asn: Some(24940),
+                org: Some("TestKeyVPS".to_string()),
+                isp: Some("TestKeyVPS".to_string()),
+                timezone: Some("Europe/Amsterdam".to_string()),
+                resolved_at: current_timestamp(),
+            },
+        )
+        .await;
+
+    let hold_queue = Arc::new(HoldQueue::new());
+    let server = Arc::new(
+        ProxyServer::bind_ephemeral(
+            auditor.clone(),
+            state.clone(),
+            hold_queue.clone(),
+            Some(upstream_addr),
+        )
+        .await
+        .unwrap(),
+    );
+    server.guard.start_with_test_env(
+        auditor.clone(),
+        state.clone(),
+        hold_queue.clone(),
+        None,
+        None,
+    );
+    let srv = Arc::clone(&server);
+    tokio::spawn(async move { srv.run().await });
+
+    // Cold startup recovery on routed `anthropic`: unblocks `anthropic` and leaves direct
+    // guard baseline / observed_ip untouched (`None`).
+    assert_connect_ok_echo(server.bound_addr, "claude.ai").await;
+    assert!(upstream_hits.load(Ordering::SeqCst) >= 1);
+    assert!(!state.is_provider_blocked("anthropic").await);
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+    assert!(
+        server.guard.current_observed_ip().await.is_none(),
+        "routed provider recovery must not poison direct guard observed_ip/baseline"
+    );
+}

@@ -97,7 +97,11 @@ impl ProxyServer {
             };
             if allowed {
                 let _ = self.state.unblock_provider(provider.as_str()).await;
-                self.guard.ensure_open_for_verified(&report.telemetry).await;
+                if routed {
+                    self.guard.sync_gates_with_state(&self.state).await;
+                } else {
+                    self.guard.ensure_open_for_verified(&report.telemetry).await;
+                }
                 return true;
             }
             false
