@@ -238,7 +238,7 @@ impl NetworkGuard {
             .filter(|p| !was_blocked_set.contains(*p))
             .collect();
 
-        self.freeze_providers_pending(&st, &non_blocked, &was_blocked_set);
+        self.freeze_providers_pending_quiet(&st, &non_blocked, &was_blocked_set);
         self.abort_active_tunnels();
         if let Some(p) = inner.invalidate_alert() {
             env.hold_queue.remove(&p.id).await;

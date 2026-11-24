@@ -105,7 +105,7 @@ impl NetworkGuard {
                 let _ = env.state.block_provider(p).await;
             }
         }
-        self.freeze_providers_pending(&st, newly_affected, &blocked_set);
+        self.freeze_providers_pending_quiet(&st, newly_affected, &blocked_set);
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 
@@ -169,7 +169,7 @@ impl NetworkGuard {
                 !newly_affected.contains(&p.as_str()) && !healthy_providers.contains(&p.as_str())
             })
             .collect();
-        self.freeze_providers_pending(&st, newly_affected, &blocked_set);
+        self.freeze_providers_pending_quiet(&st, newly_affected, &blocked_set);
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 
@@ -293,7 +293,7 @@ impl NetworkGuard {
                 let _ = env.state.block_provider(p).await;
             }
         }
-        self.freeze_providers_pending(&st, newly_affected, &blocked_set);
+        self.freeze_providers_pending_quiet(&st, newly_affected, &blocked_set);
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 
@@ -322,7 +322,7 @@ impl NetworkGuard {
                 phase: PHASE_READY,
                 gate_reason: reason,
                 timing_label: "risk_detected_emitted",
-                emit_pause_status: false,
+                emit_pause_status: true,
                 emit_network_changed: true,
                 t0,
             },
@@ -359,7 +359,7 @@ impl NetworkGuard {
                 !newly_affected.contains(&p.as_str()) && !healthy_providers.contains(&p.as_str())
             })
             .collect();
-        self.freeze_providers_pending(&st, newly_affected, &blocked_set);
+        self.freeze_providers_pending_quiet(&st, newly_affected, &blocked_set);
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 

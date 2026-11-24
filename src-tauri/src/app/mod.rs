@@ -10,6 +10,9 @@ mod tests;
 #[cfg(any(test, feature = "test-support"))]
 pub use deep_links::reconcile_active_profile_binding_async;
 pub use rlimit::raise_nofile_limit;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(unused_imports)]
+pub use watchers::try_silent_paused_recovery;
 
 use crate::startup::{self, StartupSink, StartupSnapshot, StartupState, StartupSteps};
 use crate::{auditor, bin_checker, commands, os_tz, proxy, state, sysproxy, tray};

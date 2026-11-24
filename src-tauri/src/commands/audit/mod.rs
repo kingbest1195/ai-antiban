@@ -79,7 +79,10 @@ pub async fn audit_connection(
         Err(e) => {
             // A failed primary audit must not overwrite paused/pending/blocked states or
             // leave the previous (possibly green) tray state (`tray/mod.rs` enforces priority).
-            if provider_id == auditor::ProviderId::Anthropic {
+            if provider_id == auditor::ProviderId::Anthropic
+                && !guard.is_network_transition_active()
+                && !guard.is_paused()
+            {
                 crate::tray::update_tray_no_data(&app, None);
             }
             return Err(e);

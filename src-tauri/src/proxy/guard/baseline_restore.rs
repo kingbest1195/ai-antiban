@@ -51,7 +51,6 @@ impl NetworkGuard {
                 self.set_gate(Gate::Blocked);
                 return;
             }
-            self.clear_until_network_change_locked(&mut inner);
             inner.needs_reaudit = false;
             self.force_reaudit.store(false, Ordering::SeqCst);
             self.drain_pending_route_sync_locked(Some(env), &mut inner)

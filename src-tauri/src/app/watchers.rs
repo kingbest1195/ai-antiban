@@ -9,14 +9,6 @@ use tauri::{Emitter, Manager};
 /// Failed audits in a row at start before the tray says "Нет данных" (about 3.6 s plus the audit time).
 const STARTUP_FAILURES_BEFORE_NO_DATA: u32 = 3;
 
-fn status_rank(s: auditor::OverallStatus) -> u8 {
-    match s {
-        auditor::OverallStatus::Red => 2,
-        auditor::OverallStatus::Yellow => 1,
-        auditor::OverallStatus::Green => 0,
-    }
-}
-
 struct SiblingRefreshCtx<'a> {
     handle: &'a tauri::AppHandle,
     auditor: &'a auditor::Auditor,
@@ -56,8 +48,16 @@ async fn refresh_sibling_unrouted_providers(
             let _ = ctx.handle.emit("audit://refreshed", &other_report);
             if update_tray_on_worse
                 && !proxy::guard::report_allowed_for_state(&other_report, ctx.st, false)
-                && status_rank(other_report.overall_status)
-                    > status_rank(tray_report.overall_status)
+                && matches!(
+                    (other_report.overall_status, tray_report.overall_status),
+                    (
+                        auditor::OverallStatus::Red,
+                        auditor::OverallStatus::Yellow | auditor::OverallStatus::Green
+                    ) | (
+                        auditor::OverallStatus::Yellow,
+                        auditor::OverallStatus::Green
+                    )
+                )
             {
                 *tray_report =
                     proxy::guard::effective_tray_report(&other_report, ctx.has_blocked, ctx.st)
@@ -106,17 +106,26 @@ pub(super) fn spawn_tray_status_watcher(
     let watcher_state = app_state.clone();
     let watcher_guard = guard;
     tauri::async_runtime::spawn(async move {
-        let mut gate_rx = watcher_guard.subscribe();
-        let mut kill_rx = watcher_guard.subscribe_killswitch();
-        let mut initial_synced = false;
-        let mut failures: u32 = 0;
-        // Local time (HH:MM) of the last audit that produced a report.
-        let mut last_checked: Option<String> = None;
-        let mut last_synced_ip: Option<String> = None;
-        let mut last_synced_status: Option<(auditor::OverallStatus, bool)> = None;
-        let mut last_observed_ip: Option<String> = None;
+        let (mut gate_rx, mut kill_rx) = (
+            watcher_guard.subscribe(),
+            watcher_guard.subscribe_killswitch(),
+        );
+        let (mut initial_synced, mut failures) = (false, 0u32);
+        let (mut last_checked, mut last_synced_ip, mut last_synced_status, mut last_observed_ip) =
+            (None, None, None, None);
         loop {
             if sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
+                if let Some(r) = paused::try_silent_paused_recovery(
+                    &watcher_auditor,
+                    &watcher_state,
+                    &watcher_guard,
+                    commands::audit::read_runtime_protection_flags().await,
+                )
+                .await
+                {
+                    let _ = watcher_handle.emit("audit://refreshed", &r);
+                    continue;
+                }
                 let delay = if watcher_guard.any_provider_gate_pending() {
                     Duration::from_millis(1000)
                 } else {
@@ -483,6 +492,11 @@ pub(super) fn spawn_route_subscription_refresher(
         }
     });
 }
+
+#[path = "watchers_paused.rs"]
+mod paused;
+#[cfg(any(test, feature = "test-support"))]
+pub use paused::try_silent_paused_recovery;
 
 #[cfg(test)]
 #[path = "watchers_tests.rs"]

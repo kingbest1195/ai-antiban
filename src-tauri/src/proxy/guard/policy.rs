@@ -44,7 +44,7 @@ fn is_travel_anomaly_code(code: &str) -> bool {
     )
 }
 
-fn has_non_travel_critical_checks(report: &RiskReport) -> bool {
+pub(super) fn has_non_travel_critical_checks(report: &RiskReport) -> bool {
     report
         .checks
         .iter()

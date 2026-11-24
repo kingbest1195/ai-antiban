@@ -13,16 +13,15 @@ use super::types::{Gate, GuardPauseStatus, Inner, NetworkGuard, PauseMode, Pendi
 
 impl NetworkGuard {
     pub fn new() -> Self {
-        let (gate_tx, _rx) = watch::channel(Gate::Open);
-        let mut provider_gates = HashMap::with_capacity(3);
-        for p in [
+        let (gate_tx, _) = watch::channel(Gate::Open);
+        let provider_gates = [
             ProviderId::Anthropic,
             ProviderId::Openai,
             ProviderId::Gemini,
-        ] {
-            let (tx, _rx) = watch::channel(Gate::Open);
-            provider_gates.insert(p, tx);
-        }
+        ]
+        .into_iter()
+        .map(|p| (p, watch::channel(Gate::Open).0))
+        .collect();
         let (tunnel_abort_tx, _abort_rx) = watch::channel(0u64);
         let (kill_tx, _kill_rx) = watch::channel(false);
         let (shutdown_abort_tx, _shutdown_rx) = watch::channel(false);
@@ -30,11 +29,10 @@ impl NetworkGuard {
             .connect_timeout(Duration::from_millis(400))
             .timeout(Duration::from_millis(800))
             .tcp_nodelay(true)
-            // Never reuse keep-alive sockets: they may still point to the previous route.
             .pool_max_idle_per_host(0)
             .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_default();
         Self {
             gate_tx,
             provider_gates,
@@ -250,9 +248,8 @@ impl NetworkGuard {
     /// waiting for `PROBE_MIN_GAP_MS`.
     pub fn check_route_fingerprint_sync(&self, upstream_key: Option<&str>) -> bool {
         let fp = self.compute_route_fp(upstream_key);
-        let mut g = match self.inner.try_lock() {
-            Ok(guard) => guard,
-            Err(_) => return false,
+        let Ok(mut g) = self.inner.try_lock() else {
+            return false;
         };
         if g.baseline.is_none() {
             g.last_route_fp = Some(fp);
@@ -393,12 +390,10 @@ impl NetworkGuard {
                     Gate::Blocked => {}
                 }
             }
-            let global = if any_open {
-                Gate::Open
-            } else if any_pending {
-                Gate::Pending
-            } else {
-                Gate::Blocked
+            let global = match (any_open, any_pending) {
+                (true, _) => Gate::Open,
+                (false, true) => Gate::Pending,
+                (false, false) => Gate::Blocked,
             };
             self.gate_tx.send_replace(global);
         }
@@ -425,8 +420,8 @@ impl NetworkGuard {
         emit: bool,
     ) {
         self.apply_provider_gates(emit, |name| {
-            let is_routed = crate::routing::select_route_id(st, name).is_some();
-            if st.is_provider_disabled(name) || is_routed {
+            if st.is_provider_disabled(name) || crate::routing::select_route_id(st, name).is_some()
+            {
                 Gate::Open
             } else if st.blocked_providers.contains(name) {
                 Gate::Blocked
@@ -441,11 +436,9 @@ impl NetworkGuard {
     pub async fn sync_gates_with_state(&self, state: &AppState) {
         self.sync_gates_with_state_inner(state, true).await;
     }
-
     pub(crate) async fn sync_gates_with_state_quiet(&self, state: &AppState) {
         self.sync_gates_with_state_inner(state, false).await;
     }
-
     async fn sync_gates_with_state_inner(&self, state: &AppState, emit: bool) {
         let mut inner = self.inner.lock().await;
         self.drain_pending_route_sync_locked(self.env.get(), &mut inner)
@@ -456,32 +449,48 @@ impl NetworkGuard {
 
     /// Returns enabled unrouted provider IDs currently blocked in either `state` or `provider_gates`.
     pub(super) fn currently_blocked_set(&self, st: &crate::state::AppStateData) -> HashSet<String> {
-        let mut blocked = HashSet::new();
-        for p in st.enabled_unrouted_providers() {
-            if st.blocked_providers.contains(p)
-                || ProviderId::from_id(p).is_some_and(|pid| self.gate_for(pid) == Gate::Blocked)
-            {
-                blocked.insert(p.to_string());
-            }
-        }
-        blocked
+        st.enabled_unrouted_providers()
+            .into_iter()
+            .filter(|p| {
+                st.blocked_providers.contains(*p)
+                    || ProviderId::from_id(p).is_some_and(|pid| self.gate_for(pid) == Gate::Blocked)
+            })
+            .map(str::to_string)
+            .collect()
     }
 
-    /// Freezes ONLY `freeze_providers` to `Gate::Pending` while preserving `already_blocked`
-    /// at `Gate::Blocked` and keeping disabled/routed/healthy providers `Gate::Open`.
     pub(super) fn freeze_providers_pending(
         &self,
         st: &crate::state::AppStateData,
-        freeze_providers: &[&'static str],
-        already_blocked: &HashSet<String>,
+        freeze: &[&'static str],
+        blocked: &HashSet<String>,
     ) {
-        self.apply_provider_gates(true, |name| {
-            let is_routed = crate::routing::select_route_id(st, name).is_some();
-            if st.is_provider_disabled(name) || is_routed {
+        self.freeze_pending_inner(st, freeze, blocked, true);
+    }
+
+    pub(super) fn freeze_providers_pending_quiet(
+        &self,
+        st: &crate::state::AppStateData,
+        freeze: &[&'static str],
+        blocked: &HashSet<String>,
+    ) {
+        self.freeze_pending_inner(st, freeze, blocked, false);
+    }
+
+    fn freeze_pending_inner(
+        &self,
+        st: &crate::state::AppStateData,
+        freeze: &[&'static str],
+        blocked: &HashSet<String>,
+        emit: bool,
+    ) {
+        self.apply_provider_gates(emit, |name| {
+            if st.is_provider_disabled(name) || crate::routing::select_route_id(st, name).is_some()
+            {
                 Gate::Open
-            } else if already_blocked.contains(name) || st.blocked_providers.contains(name) {
+            } else if blocked.contains(name) || st.blocked_providers.contains(name) {
                 Gate::Blocked
-            } else if freeze_providers.contains(&name) {
+            } else if freeze.contains(&name) {
                 Gate::Pending
             } else {
                 Gate::Open

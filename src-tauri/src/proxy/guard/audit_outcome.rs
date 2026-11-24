@@ -6,11 +6,25 @@ use tokio::task::JoinHandle;
 
 use crate::proxy::hold_queue::HoldResolution;
 
-use super::audit_summary::summarize_for_state;
+use super::audit_summary::{AuditSummary, summarize_for_state};
 use super::policy::{
-    all_pinned_or_excepted_for, any_pinned_or_excepted_for, canonical_probe_ip, network_change,
+    all_pinned_or_excepted_for, any_blocked_pinned_or_excepted_for, any_pinned_or_excepted_for,
+    canonical_probe_ip, has_non_travel_critical_checks, is_blocked_geo_code, network_change,
     report_allowed_for_state, resolve_gate_reason_with_cooldown,
 };
+
+fn has_real_critical_for(summary: &AuditSummary, providers: &[&'static str]) -> bool {
+    providers.iter().any(|p| {
+        summary.reports.get(p).is_some_and(|r| {
+            has_non_travel_critical_checks(r)
+                || is_blocked_geo_code(&r.telemetry.country_code)
+                || matches!(
+                    r.asn_result.detail.as_ref().and_then(|d| d.ip_type),
+                    Some(crate::auditor::IpType::Tor | crate::auditor::IpType::Vpn)
+                )
+        })
+    })
+}
 use super::types::{AuditResults, Baseline, Env, Inner, NetworkGuard, PauseMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +256,14 @@ impl NetworkGuard {
                 });
             }
             let st_after = env.state.get_data().await;
-            if (all_pinned && !summary.failed_providers.is_empty()) || has_transient_blocked {
+            let any_blocked_pinned =
+                any_blocked_pinned_or_excepted_for(&st_after, &enabled_unrouted, &new_ip);
+            let transient_pinned_only = (all_pinned || any_blocked_pinned)
+                && !has_real_critical_for(&summary, &already_blocked);
+            if (all_pinned && !summary.failed_providers.is_empty())
+                || has_transient_blocked
+                || transient_pinned_only
+            {
                 inner.handled_ip = None;
                 inner.needs_reaudit = true;
             } else {
@@ -336,7 +357,15 @@ impl NetworkGuard {
             let all_blocked = enabled_unrouted
                 .iter()
                 .all(|p| st_after.blocked_providers.contains(*p));
-            if (all_pinned && !summary.failed_providers.is_empty()) || has_transient_pinned {
+            let any_blocked_pinned =
+                any_blocked_pinned_or_excepted_for(&st_after, &enabled_unrouted, &new_ip);
+            let transient_pinned_only = (all_pinned || any_blocked_pinned)
+                && !has_real_critical_for(&summary, &newly_affected)
+                && !has_real_critical_for(&summary, &already_blocked);
+            if (all_pinned && !summary.failed_providers.is_empty())
+                || has_transient_pinned
+                || transient_pinned_only
+            {
                 inner.handled_ip = None;
                 inner.needs_reaudit = true;
             } else {
