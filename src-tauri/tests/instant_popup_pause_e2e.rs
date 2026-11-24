@@ -165,13 +165,11 @@ async fn e2e_pause_during_detecting_stays_paused_after_probe_resolves() {
     assert!(resp2.contains("403"), "expected 403 while paused: {resp2}");
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 
-    // 6. Subsequent real IP change to "8.8.8.8" clears pause and opens detecting alert.
+    // 6. Subsequent IP change to unverified/offline "8.8.8.8" keeps pause active silently without popup.
     *current_ip.lock().unwrap() = Some("8.8.8.8".to_string());
     server.guard.tick_test().await;
-    assert!(!server.guard.pause_status().paused);
-    let _ = hold_queue
-        .resolve_all_for_provider("all", HoldResolution::Block)
-        .await;
+    assert!(server.guard.pause_status().paused);
+    assert!(hold_queue.current_alert().is_none());
 }
 
 #[tokio::test]

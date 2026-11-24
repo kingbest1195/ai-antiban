@@ -15,6 +15,22 @@ pub(crate) use helpers::toggle_or_clear_stop_core;
 pub(crate) use helpers::{resolve_interception_core, resolve_interception_core_with};
 pub(crate) use sim::build_simulation_network_change;
 
+#[derive(serde::Serialize, Clone)]
+struct InterceptorResolvedPayload<'a> {
+    id: &'a str,
+    provider: &'a str,
+    decision: &'static str,
+    should_reaudit: bool,
+}
+
+fn interception_decision_meta(action: &proxy::InterceptionAction) -> (&'static str, bool) {
+    match action {
+        proxy::InterceptionAction::AllowSession => ("allow_session", true),
+        proxy::InterceptionAction::BlockUntilNetworkChange => ("block_until_network_change", false),
+        proxy::InterceptionAction::OpenGuideAndBlock => ("block", false),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn resolve_interception(
@@ -28,6 +44,7 @@ pub async fn resolve_interception(
     auditor: tauri::State<'_, auditor::Auditor>,
     app: tauri::AppHandle,
 ) -> Result<bool, proxy::AllowError> {
+    let (decision, should_reaudit) = interception_decision_meta(&action);
     let is_simulation = scope.as_deref() == Some("simulation") || id.starts_with("sim-");
     if is_simulation {
         let resolution = match action {
@@ -44,7 +61,15 @@ pub async fn resolve_interception(
             let _ = app.emit("interceptor://open-guide", "01-personal-vpn-15min");
         }
         crate::popup::hide_alert_popup(&app);
-        let _ = app.emit("interceptor://resolved", "");
+        let _ = app.emit(
+            "interceptor://resolved",
+            InterceptorResolvedPayload {
+                id: &id,
+                provider: &provider,
+                decision,
+                should_reaudit,
+            },
+        );
         return Ok(true);
     }
 
@@ -60,9 +85,7 @@ pub async fn resolve_interception(
     })
     .await?;
 
-    if let Some(ref status) = outcome.pause_status {
-        emit_guard_pause_status(&app, status);
-    }
+    let _ = &outcome.pause_status;
     if outcome.open_guide
         && let Some(main_win) = app.get_webview_window("main")
     {
@@ -72,7 +95,15 @@ pub async fn resolve_interception(
     }
 
     crate::popup::hide_alert_popup(&app);
-    let _ = app.emit("interceptor://resolved", "");
+    let _ = app.emit(
+        "interceptor://resolved",
+        InterceptorResolvedPayload {
+            id: &id,
+            provider: &provider,
+            decision,
+            should_reaudit,
+        },
+    );
 
     Ok(outcome.applied)
 }
@@ -219,11 +250,8 @@ pub async fn pause_until_network_change_cmd(
     reason: Option<String>,
     guard: tauri::State<'_, std::sync::Arc<proxy::NetworkGuard>>,
     state: tauri::State<'_, AppContext>,
-    app: tauri::AppHandle,
 ) -> Result<proxy::guard::GuardPauseStatus, String> {
-    let status = guard.pause_until_network_change(&state, reason).await;
-    emit_guard_pause_status(&app, &status);
-    Ok(status)
+    Ok(guard.pause_until_network_change(&state, reason).await)
 }
 
 #[tauri::command]
@@ -241,8 +269,9 @@ pub async fn set_guard_pause_mode_cmd(
                 guard.set_manual_killswitch(false, &state).await;
             }
             guard
-                .clear_pause_on_network_change(Some(&state), true)
+                .clear_pause_on_network_change(Some(&state), false)
                 .await;
+            guard.sync_gates_with_state(&state).await;
             guard.pause_status()
         }
         proxy::guard::PauseMode::UntilNetworkChange => {
@@ -250,14 +279,15 @@ pub async fn set_guard_pause_mode_cmd(
         }
         proxy::guard::PauseMode::Manual => {
             guard.set_manual_killswitch(true, &state).await;
-            guard.pause_status()
+            let st = guard.pause_status();
+            emit_guard_pause_status(&app, &st);
+            st
         }
     };
     if status.manual_killswitch != was_manual {
         crate::tray::update_tray_killswitch(&app, status.manual_killswitch);
         let _ = app.emit("tray://killswitch-toggled", status.manual_killswitch);
     }
-    emit_guard_pause_status(&app, &status);
     Ok(status)
 }
 

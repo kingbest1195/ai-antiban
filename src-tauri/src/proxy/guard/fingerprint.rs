@@ -7,6 +7,37 @@ use std::net::IpAddr;
 #[cfg(unix)]
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+#[cfg(any(unix, target_os = "windows", test, feature = "test-support"))]
+fn is_tunnel_interface_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("utun")
+        || lower.starts_with("tun")
+        || lower.starts_with("tap")
+        || lower.starts_with("wg")
+        || lower.starts_with("ppp")
+        || lower.starts_with("ipsec")
+        || lower.contains("wintun")
+        || lower.contains("wireguard")
+}
+
+/// Stabilizes IPv6 addresses on non-tunnel interfaces to their `/64` prefix so transient
+/// SLAAC/privacy-extension temporary address churn on idle Wi-Fi never causes phantom `fp` flaps,
+/// while real network/prefix changes and VPN `utun`/Wintun transitions still fire immediately.
+#[cfg(any(unix, target_os = "windows", test, feature = "test-support"))]
+fn format_stable_ip_for_fp(ip: IpAddr, is_tunnel: bool) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => {
+            if is_tunnel {
+                v6.to_string()
+            } else {
+                let seg = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3])
+            }
+        }
+    }
+}
+
 fn udp_route_ip(bind: &str, target: &str) -> String {
     std::net::UdpSocket::bind(bind)
         .ok()
@@ -88,7 +119,8 @@ fn active_interfaces_signature() -> String {
         };
 
         let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_string_lossy();
-        entries.push(format!("{name}={ip}"));
+        let stable_ip = format_stable_ip_for_fp(ip, is_tunnel_interface_name(&name));
+        entries.push(format!("{name}={stable_ip}"));
     }
 
     entries.sort();
@@ -133,7 +165,12 @@ pub fn format_windows_interfaces_signature(
             {
                 continue;
             }
-            entries.push(format!("{name}={ip}"));
+            let is_tunnel = is_tunnel_interface_name(name)
+                || is_tunnel_interface_name(&adapter.friendly_name)
+                || adapter.if_type == 53
+                || adapter.if_type == 131;
+            let stable_ip = format_stable_ip_for_fp(ip, is_tunnel);
+            entries.push(format!("{name}={stable_ip}"));
         }
     }
     entries.sort();
@@ -163,7 +200,14 @@ fn active_interfaces_signature() -> String {
 pub fn compute_local_route_fingerprint(upstream_key: Option<&str>) -> String {
     let ip_cf = udp_route_ip("0.0.0.0:0", "1.1.1.1:80");
     let ip_dns = udp_route_ip("0.0.0.0:0", "8.8.8.8:53");
-    let ip_v6 = udp_route_ip("[::]:0", "[2606:4700:4700::1111]:80");
+    let ip_v6_raw = udp_route_ip("[::]:0", "[2606:4700:4700::1111]:80");
+    let ip_v6 = if ip_cf == "none" {
+        ip_v6_raw
+    } else if let Ok(IpAddr::V6(v6)) = ip_v6_raw.parse::<IpAddr>() {
+        format_stable_ip_for_fp(IpAddr::V6(v6), false)
+    } else {
+        ip_v6_raw
+    };
     let dns_sig = system_dns_signature();
     let if_sig = active_interfaces_signature();
     format!(
@@ -177,7 +221,6 @@ pub fn compute_local_route_fingerprint(upstream_key: Option<&str>) -> String {
 /// When `os_pac_deferred` is set (macOS temporary VPN DNS), retries at most once every 5s;
 /// otherwise performs a low-frequency self-heal & newly-installed-browser check every 120s.
 #[derive(Default)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct PeriodicSysproxySync {
     last_route_fp: Option<String>,
     last_active: bool,
@@ -185,13 +228,10 @@ pub(super) struct PeriodicSysproxySync {
 }
 
 impl PeriodicSysproxySync {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) const DEFERRED_RETRY_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(5);
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) const SELF_HEAL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn should_refresh(
         &mut self,
         route_fp: &str,
@@ -206,7 +246,6 @@ impl PeriodicSysproxySync {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn should_refresh_at(
         &mut self,
         route_fp: &str,

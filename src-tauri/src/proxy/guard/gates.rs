@@ -50,6 +50,7 @@ impl NetworkGuard {
             self_weak: OnceLock::new(),
             wake_notify: Arc::new(tokio::sync::Notify::new()),
             loop_running: AtomicBool::new(false),
+            regular_probe_in_flight: AtomicBool::new(false),
             sysproxy_sync_in_flight: AtomicBool::new(false),
             force_reaudit: AtomicBool::new(false),
             pending_route_sync: std::sync::Mutex::new(HashMap::new()),
@@ -281,30 +282,32 @@ impl NetworkGuard {
                 let in_flight = g.probe_in_flight
                     || (self.any_provider_gate_pending() && g.audit_abort.is_some());
                 if in_flight {
-                    g.deferred_recheck_fp = Some(fp);
+                    g.deferred_recheck_fp = Some(fp.clone());
                 } else {
                     if !g.route_dirty {
                         g.dirty_since = Some(Instant::now());
                     }
                     g.route_dirty = true;
                 }
-                g.paused_ip = None;
-                g.pending_pause_ip_bind = false;
-                g.paused_route_fp = None;
-                let mut cleared_pause = false;
+                let mut pause_active = false;
                 if !self.is_manual_killswitch() {
-                    let mut pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
-                    if *pm == PauseMode::UntilNetworkChange {
-                        *pm = PauseMode::None;
-                        cleared_pause = true;
-                        drop(pm);
-                        self.set_gate_reason(None);
-                    }
+                    let pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
+                    pause_active = *pm == PauseMode::UntilNetworkChange;
+                }
+                if pause_active {
+                    // Keep PauseMode::UntilNetworkChange active while verifying the new network
+                    // silently in the background; update paused_route_fp and keep blocked
+                    // providers Gate::Blocked.
+                    g.paused_route_fp = Some(fp);
+                } else {
+                    g.paused_ip = None;
+                    g.pending_pause_ip_bind = false;
+                    g.paused_route_fp = None;
                 }
                 drop(g);
                 self.freeze_open_gates_pending();
                 self.abort_active_tunnels();
-                return !in_flight || cleared_pause;
+                return !in_flight;
             }
         } else {
             g.last_route_fp = Some(fp);
@@ -362,14 +365,10 @@ impl NetworkGuard {
         self.emit_pause_status();
     }
 
-    /// Applies isolated per-provider gates after an audit:
-    /// Synchronises per-provider and global gates against full `AppStateData` (respecting
-    /// `disabled_providers`, routed providers, `blocked_providers`, and any `Pending` alert).
-    pub(super) fn sync_gates_with_state_and_pending(
-        &self,
-        st: &crate::state::AppStateData,
-        pending: Option<&Pending>,
-    ) {
+    fn apply_provider_gates<F>(&self, emit: bool, mut resolve_gate: F)
+    where
+        F: FnMut(&str) -> Gate,
+    {
         {
             let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
             if *self.kill_tx.borrow() {
@@ -378,25 +377,20 @@ impl NetworkGuard {
                     tx.send_replace(Gate::Blocked);
                 }
                 drop(_g);
-                self.emit_pause_status();
+                if emit {
+                    self.emit_pause_status();
+                }
                 return;
             }
             let mut any_open = false;
             let mut any_pending = false;
             for (pid, tx) in &self.provider_gates {
-                let name = pid.as_str();
-                let is_routed = crate::routing::select_route_id(st, name).is_some();
-                if st.is_provider_disabled(name) || is_routed {
-                    tx.send_replace(Gate::Open);
-                    any_open = true;
-                } else if st.blocked_providers.contains(name) {
-                    tx.send_replace(Gate::Blocked);
-                } else if pending.is_some_and(|p| p.affected_providers.contains(&name)) {
-                    tx.send_replace(Gate::Pending);
-                    any_pending = true;
-                } else {
-                    tx.send_replace(Gate::Open);
-                    any_open = true;
+                let g = resolve_gate(pid.as_str());
+                tx.send_replace(g);
+                match g {
+                    Gate::Open => any_open = true,
+                    Gate::Pending => any_pending = true,
+                    Gate::Blocked => {}
                 }
             }
             let global = if any_open {
@@ -408,15 +402,56 @@ impl NetworkGuard {
             };
             self.gate_tx.send_replace(global);
         }
-        self.emit_pause_status();
+        if emit {
+            self.emit_pause_status();
+        }
+    }
+
+    /// Applies isolated per-provider gates after an audit:
+    /// Synchronises per-provider and global gates against full `AppStateData` (respecting
+    /// `disabled_providers`, routed providers, `blocked_providers`, and any `Pending` alert).
+    pub(super) fn sync_gates_with_state_and_pending(
+        &self,
+        st: &crate::state::AppStateData,
+        pending: Option<&Pending>,
+    ) {
+        self.sync_gates_with_state_and_pending_inner(st, pending, true);
+    }
+
+    pub(super) fn sync_gates_with_state_and_pending_inner(
+        &self,
+        st: &crate::state::AppStateData,
+        pending: Option<&Pending>,
+        emit: bool,
+    ) {
+        self.apply_provider_gates(emit, |name| {
+            let is_routed = crate::routing::select_route_id(st, name).is_some();
+            if st.is_provider_disabled(name) || is_routed {
+                Gate::Open
+            } else if st.blocked_providers.contains(name) {
+                Gate::Blocked
+            } else if pending.is_some_and(|p| p.affected_providers.contains(&name)) {
+                Gate::Pending
+            } else {
+                Gate::Open
+            }
+        });
     }
 
     pub async fn sync_gates_with_state(&self, state: &AppState) {
+        self.sync_gates_with_state_inner(state, true).await;
+    }
+
+    pub(crate) async fn sync_gates_with_state_quiet(&self, state: &AppState) {
+        self.sync_gates_with_state_inner(state, false).await;
+    }
+
+    async fn sync_gates_with_state_inner(&self, state: &AppState, emit: bool) {
         let mut inner = self.inner.lock().await;
         self.drain_pending_route_sync_locked(self.env.get(), &mut inner)
             .await;
         let st = state.get_data().await;
-        self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
+        self.sync_gates_with_state_and_pending_inner(&st, inner.pending.as_ref(), emit);
     }
 
     /// Returns enabled unrouted provider IDs currently blocked in either `state` or `provider_gates`.
@@ -440,45 +475,18 @@ impl NetworkGuard {
         freeze_providers: &[&'static str],
         already_blocked: &HashSet<String>,
     ) {
-        {
-            let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
-            if *self.kill_tx.borrow() {
-                self.gate_tx.send_replace(Gate::Blocked);
-                for tx in self.provider_gates.values() {
-                    tx.send_replace(Gate::Blocked);
-                }
-                drop(_g);
-                self.emit_pause_status();
-                return;
-            }
-            let mut any_open = false;
-            let mut any_pending = false;
-            for (pid, tx) in &self.provider_gates {
-                let name = pid.as_str();
-                let is_routed = crate::routing::select_route_id(st, name).is_some();
-                if st.is_provider_disabled(name) || is_routed {
-                    tx.send_replace(Gate::Open);
-                    any_open = true;
-                } else if already_blocked.contains(name) || st.blocked_providers.contains(name) {
-                    tx.send_replace(Gate::Blocked);
-                } else if freeze_providers.contains(&name) {
-                    tx.send_replace(Gate::Pending);
-                    any_pending = true;
-                } else {
-                    tx.send_replace(Gate::Open);
-                    any_open = true;
-                }
-            }
-            let global = if any_open {
+        self.apply_provider_gates(true, |name| {
+            let is_routed = crate::routing::select_route_id(st, name).is_some();
+            if st.is_provider_disabled(name) || is_routed {
                 Gate::Open
-            } else if any_pending {
+            } else if already_blocked.contains(name) || st.blocked_providers.contains(name) {
+                Gate::Blocked
+            } else if freeze_providers.contains(&name) {
                 Gate::Pending
             } else {
-                Gate::Blocked
-            };
-            self.gate_tx.send_replace(global);
-        }
-        self.emit_pause_status();
+                Gate::Open
+            }
+        });
     }
 
     /// Returns the newly affected providers for an active network alert `id`, if present.

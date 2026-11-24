@@ -10,10 +10,10 @@ use super::policy::{
 };
 use super::types::{Baseline, Env, Inner, NetworkGuard, PauseMode};
 
-const OFFLINE_PROBE_RETRY_DELAYS_MS: &[u64] = &[350, 500, 750, 1000, 1000];
-const OFFLINE_PROBE_MAX_BUDGET_SECS: u64 = 6;
+const OFFLINE_PROBE_RETRY_DELAYS_MS: &[u64] = &[250, 400, 600, 800];
+const OFFLINE_PROBE_MAX_BUDGET_SECS: u64 = 3;
 const FP_SETTLE_WINDOW_MS: u64 = 350;
-const FP_SETTLE_MAX_ROUNDS: usize = 5;
+const FP_SETTLE_MAX_ROUNDS: usize = 3;
 
 impl NetworkGuard {
     pub(super) async fn probe_with_offline_retries(
@@ -251,33 +251,48 @@ impl NetworkGuard {
         }
 
         let prev_paused_ip = inner.paused_ip.clone();
+        let mut paused_recheck = false;
         let mut pinned_untrapped = false;
         // If user explicitly paused until the next network change on this exact IP, stay paused
         // until the external IP changes or route fingerprint invalidates — UNLESS this IP matches
         // saved `pinned_ip` / `pinned_ips` / `trusted_exceptions` (and `!is_manual_killswitch()`),
-        // in which case we never trap the pinned IP permanently and silently recover cleanly.
-        if self.pause_mode() == PauseMode::UntilNetworkChange
-            && prev_paused_ip.as_deref() == Some(ip.as_str())
-            && !inner.needs_reaudit
-            && !self.force_reaudit.load(Ordering::SeqCst)
-        {
+        // in which case we verify and recover cleanly if safe.
+        if self.pause_mode() == PauseMode::UntilNetworkChange {
             let st_pause = env.state.get_data().await;
             let unrouted_pause = st_pause.enabled_unrouted_providers();
             let ip_matches_pin = !self.is_manual_killswitch()
                 && (all_pinned_or_excepted_for(&st_pause, &unrouted_pause, &ip)
                     || any_blocked_pinned_or_excepted_for(&st_pause, &unrouted_pause, &ip));
-            if !ip_matches_pin {
-                inner.observed_ip = Some(ip);
-                return;
+            if prev_paused_ip.as_deref() == Some(ip.as_str())
+                && !inner.needs_reaudit
+                && !self.force_reaudit.load(Ordering::SeqCst)
+            {
+                if !ip_matches_pin {
+                    inner.observed_ip = Some(ip);
+                    return;
+                }
+                pinned_untrapped = true;
+                inner.needs_reaudit = true;
+            } else if ip_matches_pin {
+                pinned_untrapped = true;
+                inner.needs_reaudit = true;
+            } else {
+                // IP or route changed to an unpinned IP while paused: keep PauseMode::UntilNetworkChange
+                // active and run silent verification before deciding whether to unlock or stay paused.
+                paused_recheck = true;
+                inner.needs_reaudit = true;
             }
-            pinned_untrapped = true;
-            inner.needs_reaudit = true;
         }
         let prev_observed_ip = inner.observed_ip.replace(ip.clone());
-        let pause_cleared = self.clear_until_network_change_locked(&mut inner) || pinned_untrapped;
-        if pause_cleared {
-            inner.handled_ip = None;
-        }
+        let pause_cleared = if paused_recheck {
+            false
+        } else {
+            let cleared = self.clear_until_network_change_locked(&mut inner) || pinned_untrapped;
+            if cleared {
+                inner.handled_ip = None;
+            }
+            cleared
+        };
 
         if env.state.is_split_tunnel_mode().await {
             let prev_baseline_ip = inner.baseline.as_ref().map(|b| b.ip.clone());

@@ -204,9 +204,6 @@ impl ProxyServer {
                 && self.guard.check_route_fingerprint_sync(chained.as_deref())
             {
                 self.auditor.resolver.invalidate_direct_cache().await;
-                self.guard
-                    .clear_pause_on_network_change(Some(&self.state), false)
-                    .await;
             }
 
             Box::pin(self.guard.ensure_fresh()).await;

@@ -2,19 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use uuid::Uuid;
-
 use crate::auditor::geo_matrix::ProviderId;
 use crate::core::timing::log_timing;
-use crate::proxy::hold_queue::{
-    DEFAULT_HOLD_TTL_SECS, PHASE_DETECTING, RiskInterceptPayload, build_gate_reason,
-};
+use crate::proxy::hold_queue::{PHASE_DETECTING, build_gate_reason};
 
 use super::policy::{
     all_excepted, all_pinned_or_excepted_for, all_unrouted_session_or_excepted,
-    any_blocked_pinned_or_excepted_for, is_blocked_geo_code, network_change, now_unix_ms,
+    any_blocked_pinned_or_excepted_for, is_blocked_geo_code, network_change,
 };
-use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, NetworkGuard, PauseMode, Pending};
+use super::types::{Baseline, Env, Gate, NetworkGuard, PauseMode};
 
 impl NetworkGuard {
     /// Handles `TickPlan::ProbeChanged(t0, planned_fp)` immediately with ZERO network waits:
@@ -59,7 +55,8 @@ impl NetworkGuard {
             return;
         }
 
-        if self.pause_mode() == PauseMode::UntilNetworkChange && inner.pending_pause_ip_bind {
+        let paused_until_change = self.pause_mode() == PauseMode::UntilNetworkChange;
+        if paused_until_change && inner.pending_pause_ip_bind {
             inner.paused_route_fp = Some(planned_fp.clone());
             self.abort_active_tunnels();
             self.hide_popup(env);
@@ -87,8 +84,9 @@ impl NetworkGuard {
             inner.probe_abort = Some(handle.abort_handle());
             return;
         }
-        if self.clear_until_network_change_locked(&mut inner) {
-            inner.handled_ip = None;
+        if paused_until_change {
+            // Keep PauseMode::UntilNetworkChange active while verifying the new route silently.
+            inner.paused_route_fp = Some(planned_fp.clone());
         }
         let needs_reaudit = std::mem::take(&mut inner.needs_reaudit);
         let was_blocked_set = self.collect_was_blocked_set(&inner, &st);
@@ -123,52 +121,40 @@ impl NetworkGuard {
         let epoch = inner.epoch;
         let alert_id = if st.interception_behavior == crate::state::InterceptionBehavior::AskPopup
             && !non_blocked.is_empty()
+            && !paused_until_change
         {
-            let id = Uuid::new_v4().to_string();
-            let rx = env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
             inner.needs_reaudit = false;
-            inner.pending = Some(Pending {
-                id: id.clone(),
-                epoch,
-                target_ip: String::new(),
-                tel: None,
-                clear_old_state: None,
-                affected_providers: non_blocked.clone(),
-                already_blocked_providers: already_blocked_vec.clone(),
-                healthy_providers: Vec::new(),
-                alert_emitted: true,
-            });
-
             let provider = non_blocked
                 .iter()
                 .find_map(|p| ProviderId::from_id(p))
                 .unwrap_or(ProviderId::Anthropic);
             let net_change = network_change(inner.baseline.as_ref(), None, None);
             let reason = build_gate_reason(None, Some(&net_change), false);
-            self.set_gate_reason(Some(reason.clone()));
-            let payload = RiskInterceptPayload {
-                id: id.clone(),
-                provider,
-                host: "Смена сети · все ИИ-сервисы".to_string(),
-                report: None,
-                ttl_seconds: DEFAULT_HOLD_TTL_SECS,
-                scope: "network".to_string(),
-                network_change: Some(net_change),
-                is_simulation: false,
-                detected_at_ms: now_unix_ms(),
-                phase: PHASE_DETECTING.to_string(),
-                gate_reason: Some(reason),
-                checkout_risk: None,
-            };
-
-            log_timing(&id, "detected", t0);
-            env.hold_queue.set_alert(payload.clone());
-            env.emit("interceptor://risk-detected", &payload);
-            log_timing(&id, "risk_detected_emitted", t0);
-            env.io.show_alert_popup(Some((id.clone(), t0)));
-            log_timing(&id, "popup_show_queued", t0);
-            self.emit_pause_status();
-            self.spawn_decision_waiter(env, id.clone(), epoch, rx);
+            log_timing("detecting", "detected", t0);
+            let (id, _) = self
+                .register_and_emit_network_alert_locked(
+                    env,
+                    &mut inner,
+                    super::alerts::NetworkAlertSpec {
+                        existing_id: None,
+                        target_ip: String::new(),
+                        tel: None,
+                        clear_old_state: None,
+                        affected_providers: &non_blocked,
+                        already_blocked_providers: &already_blocked_vec,
+                        healthy_providers: &[],
+                        provider,
+                        report: None,
+                        network_change: net_change,
+                        phase: PHASE_DETECTING,
+                        gate_reason: reason,
+                        timing_label: "risk_detected_emitted",
+                        emit_pause_status: true,
+                        emit_network_changed: false,
+                        t0,
+                    },
+                )
+                .await;
             Some(id)
         } else {
             if !non_blocked.is_empty() {
@@ -271,8 +257,15 @@ impl NetworkGuard {
                     self.hide_popup(&env);
                     return;
                 }
-                self.clear_until_network_change_locked(&mut inner);
             } else {
+                self.hide_popup(&env);
+                return;
+            }
+        } else if self.pause_mode() == PauseMode::UntilNetworkChange {
+            if probed.is_none() {
+                inner.last_probe = Some(Instant::now());
+                inner.paused_route_fp = inner.last_route_fp.clone().or(Some(planned_fp));
+                self.sync_gates_with_state_and_pending(&st, None);
                 self.hide_popup(&env);
                 return;
             }
@@ -392,12 +385,20 @@ impl NetworkGuard {
 
         let all_pinned = all_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
         if all_pinned {
-            self.clear_until_network_change_locked(&mut inner);
-            let cached_cc = env.auditor.resolver.cached_direct_country(&new_ip).await;
+            let cached_cc = match env.auditor.resolver.cached_direct_country(&new_ip).await {
+                Some(cc) => Some(cc),
+                None => {
+                    env.auditor
+                        .resolver
+                        .cached_verified_pinned_country(&new_ip)
+                        .await
+                }
+            };
             if cached_cc
                 .as_deref()
                 .is_some_and(|c| !is_blocked_geo_code(c))
             {
+                self.clear_until_network_change_locked(&mut inner);
                 if baseline_changed {
                     let _ = env.state.clear_session_allowed_providers().await;
                 }

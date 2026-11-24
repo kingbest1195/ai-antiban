@@ -12,6 +12,28 @@ pub(super) fn ips_equal(a: &str, b: &str) -> bool {
     !na.is_empty() && na == nb
 }
 
+pub(super) fn same_ip_family(a: &str, b: &str) -> bool {
+    match (
+        crate::state::normalize_ip_str(a).parse::<std::net::IpAddr>(),
+        crate::state::normalize_ip_str(b).parse::<std::net::IpAddr>(),
+    ) {
+        (Ok(ip_a), Ok(ip_b)) => ip_a.is_ipv4() == ip_b.is_ipv4(),
+        _ => true,
+    }
+}
+
+/// Keeps `guard` IP state anchored to `probe_ip`'s IP family when `tel_ip` has a different family
+/// (e.g. dual-stack IPv6 `summary.tel.ip` vs IPv4 `probe_ip`).
+pub(super) fn canonical_probe_ip(probe_ip: &str, tel_ip: &str) -> String {
+    let tel = tel_ip.trim();
+    let probe = probe_ip.trim();
+    if !tel.is_empty() && (probe.is_empty() || same_ip_family(probe, tel)) {
+        tel.to_string()
+    } else {
+        probe.to_string()
+    }
+}
+
 fn is_travel_anomaly_code(code: &str) -> bool {
     matches!(
         code,

@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::audit_summary::{audit_enabled, summarize_for_state};
+use super::audit_outcome::AuditOutcomeMode;
+use super::audit_summary::audit_enabled;
 use super::policy::all_pinned_or_excepted_for;
-use super::types::{Baseline, Env, Gate, NetworkGuard, PauseMode};
+use super::types::{Env, Gate, NetworkGuard};
 
 pub(super) struct VerifyInFlightGuard(Arc<NetworkGuard>);
 
@@ -127,26 +128,7 @@ impl NetworkGuard {
         }
         let inner = &mut *inner_guard;
 
-        let st_before = if let Ok(ref results) = audited {
-            let ok_reports: Vec<crate::auditor::RiskReport> = results
-                .iter()
-                .filter_map(|(_, r)| r.as_ref().ok().cloned())
-                .collect();
-            if self
-                .try_auto_unblock_pinned_providers_locked(&env.state, inner, &ok_reports)
-                .await
-            {
-                env.state.get_data().await
-            } else {
-                st_before
-            }
-        } else {
-            st_before
-        };
-
-        let Some(summary) = audited.ok().and_then(|r| {
-            summarize_for_state(&r, &enabled_unrouted, &st_before, Some(baseline_ip))
-        }) else {
+        let Ok(results) = audited else {
             self.drain_pending_route_sync_locked(Some(env), inner).await;
             let st_cur = env.state.get_data().await;
             if all_pinned_or_excepted_for(&st_cur, &enabled_unrouted, baseline_ip)
@@ -163,242 +145,26 @@ impl NetworkGuard {
             return;
         };
 
-        for p in &summary.healthy_providers {
-            if st_before.blocked_providers.contains(*p) {
-                let _ = env.state.unblock_provider(p).await;
-            }
-            env.hold_queue
-                .resolve_all_for_provider(p, crate::proxy::hold_queue::HoldResolution::Superseded)
-                .await;
-        }
-
-        if summary.affected_providers.is_empty() {
-            if inner.baseline.is_none() {
-                inner.baseline = Some(Baseline {
-                    ip: baseline_ip.to_string(),
-                    country: Some(summary.tel.country_code.clone()),
-                    trusted: true,
-                });
-            } else if let Some(b) = inner.baseline.as_mut() {
-                b.trusted = true;
-                if b.country.is_none() {
-                    b.country = Some(summary.tel.country_code.clone());
-                }
-            }
-            summary.record_healthy_history(&env.state, &st_before).await;
-            self.restore_locked(env, inner).await;
-            self.update_tray(env, &summary.tray).await;
-            return;
-        }
-
-        let already_blocked: Vec<&'static str> = summary
-            .affected_providers
-            .iter()
-            .copied()
-            .filter(|p| was_blocked_set.contains(*p))
-            .collect();
-        let newly_affected: Vec<&'static str> = summary
-            .affected_providers
-            .iter()
-            .copied()
-            .filter(|p| !already_blocked.contains(p))
-            .collect();
-
-        if newly_affected.is_empty() {
-            if let Some(p) = inner.invalidate_alert() {
-                env.hold_queue.remove(&p.id).await;
-            }
-            let has_transient_blocked = already_blocked
-                .iter()
-                .any(|p| summary.is_transient_pinned_error(&st_before, p, baseline_ip));
-            if !summary.failed_providers.is_empty() || has_transient_blocked {
-                inner.handled_ip = None;
-                inner.needs_reaudit = true;
-            } else {
-                inner.handled_ip = Some(baseline_ip.to_string());
-                inner.needs_reaudit = false;
-            }
-            if !summary.healthy_providers.is_empty() && !self.is_manual_killswitch() {
-                self.clear_until_network_change_locked(inner);
-                inner.baseline = Some(Baseline {
-                    ip: baseline_ip.to_string(),
-                    country: Some(summary.tel.country_code.clone()),
-                    trusted: true,
-                });
-                summary.record_healthy_history(&env.state, &st_before).await;
-            }
-            for p in &already_blocked {
-                if !st_before.blocked_providers.contains(*p) {
-                    let _ = env.state.block_provider(p).await;
-                }
-            }
-            let st_after = env.state.get_data().await;
-            self.sync_gates_with_state_and_pending(&st_after, None);
-            self.hide_popup(env);
-            env.emit("network://changed", &summary.worst);
-            self.update_tray(env, &summary.tray).await;
-            return;
-        }
-
-        // Transient failures (`Err` / unknown geo during `utun` stabilization) on a saved pinned
-        // IP must retry silently without blocking, alerting, or locking `PauseMode` onto `baseline_ip`.
-        let has_transient_pinned = newly_affected
-            .iter()
-            .any(|p| summary.is_transient_pinned_error(&st_before, p, baseline_ip));
-        let newly_affected: Vec<&'static str> = newly_affected
-            .into_iter()
-            .filter(|p| !summary.is_transient_pinned_error(&st_before, p, baseline_ip))
-            .collect();
-        if newly_affected.is_empty() {
-            if let Some(p) = inner.invalidate_alert() {
-                env.hold_queue.remove(&p.id).await;
-            }
-            if !summary.healthy_providers.is_empty() && !self.is_manual_killswitch() {
-                self.clear_until_network_change_locked(inner);
-                inner.baseline = Some(Baseline {
-                    ip: baseline_ip.to_string(),
-                    country: Some(summary.tel.country_code.clone()),
-                    trusted: true,
-                });
-                summary.record_healthy_history(&env.state, &st_before).await;
-            }
-            inner.handled_ip = None;
-            inner.needs_reaudit = true;
-            for p in &already_blocked {
-                if !st_before.blocked_providers.contains(*p) {
-                    let _ = env.state.block_provider(p).await;
-                }
-            }
-            let st_after = env.state.get_data().await;
-            self.sync_gates_with_state_and_pending(&st_after, None);
-            self.hide_popup(env);
-            self.update_tray(env, &summary.tray).await;
-            return;
-        }
-
-        // At least one currently allowed enabled non-excepted provider has a Critical violation or failed.
-        let has_newly_report = newly_affected
-            .iter()
-            .any(|p| summary.reports.contains_key(p));
-        let worst_newly = summary.worst_for(&newly_affected);
-        match st_before.interception_behavior {
-            crate::state::InterceptionBehavior::AutoLockSilent
-            | crate::state::InterceptionBehavior::AutoAllowTrusted => {
-                if let Some(p) = inner.invalidate_alert() {
-                    env.hold_queue.remove(&p.id).await;
-                }
-                for p in &newly_affected {
-                    let _ = env.state.block_provider(p).await;
-                }
-                for p in &already_blocked {
-                    if !st_before.blocked_providers.contains(*p) {
-                        let _ = env.state.block_provider(p).await;
-                    }
-                }
-                let st_after = env.state.get_data().await;
-                let all_blocked = enabled_unrouted
-                    .iter()
-                    .all(|p| st_after.blocked_providers.contains(*p));
-                if all_blocked
-                    && !self.is_manual_killswitch()
-                    && summary.failed_providers.is_empty()
-                    && !has_transient_pinned
-                {
-                    self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
-                    inner.paused_ip = Some(baseline_ip.to_string());
-                }
-                if !summary.failed_providers.is_empty() || has_transient_pinned {
-                    inner.handled_ip = None;
-                    inner.needs_reaudit = true;
-                } else {
-                    inner.handled_ip = Some(baseline_ip.to_string());
-                }
-                self.sync_gates_with_state_and_pending(&st_after, None);
-                self.hide_popup(env);
-                if has_newly_report {
-                    env.emit("network://changed", &worst_newly);
-                }
-                self.update_tray(env, &summary.tray).await;
-            }
-            crate::state::InterceptionBehavior::AskPopup => {
-                let detecting_alert_id = inner
-                    .pending
-                    .as_ref()
-                    .filter(|p| p.alert_emitted && p.target_ip.is_empty())
-                    .map(|p| p.id.clone());
-                if inner.handled_ip.as_deref() == Some(baseline_ip)
-                    || (inner.pending.is_some() && detecting_alert_id.is_none())
-                {
-                    let st_after = env.state.get_data().await;
-                    self.sync_gates_with_state_and_pending(&st_after, inner.pending.as_ref());
-                    self.update_tray(env, &summary.tray).await;
-                    return;
-                }
-                let old_baseline = inner.baseline.clone();
-                let ip_owned = baseline_ip.to_string();
-                if let Some(alert_id) = detecting_alert_id {
-                    if has_newly_report {
-                        self.enrich_ready_alert_locked(
-                            env,
-                            inner,
-                            old_baseline.as_ref(),
-                            ip_owned,
-                            &alert_id,
-                            &summary,
-                            &already_blocked,
-                            &newly_affected,
-                            None,
-                            Instant::now(),
-                        )
-                        .await;
-                    } else {
-                        self.enrich_failed_alert_locked(
-                            env,
-                            inner,
-                            old_baseline.as_ref(),
-                            ip_owned,
-                            &alert_id,
-                            &already_blocked,
-                            &newly_affected,
-                            &summary.healthy_providers,
-                            Instant::now(),
-                        )
-                        .await;
-                    }
-                } else if has_newly_report {
-                    self.emit_ready_network_alert_locked(
-                        env,
-                        inner,
-                        old_baseline.as_ref(),
-                        ip_owned,
-                        &summary,
-                        &already_blocked,
-                        &newly_affected,
-                        None,
-                        None,
-                        None,
-                        Instant::now(),
-                    )
-                    .await;
-                } else {
-                    self.emit_failed_network_alert_locked(
-                        env,
-                        inner,
-                        old_baseline.as_ref(),
-                        ip_owned,
-                        &already_blocked,
-                        &newly_affected,
-                        &summary.healthy_providers,
-                        None,
-                        Instant::now(),
-                    )
-                    .await;
-                }
-                if has_transient_pinned {
-                    inner.needs_reaudit = true;
-                }
-                self.update_tray(env, &summary.tray).await;
-            }
-        }
+        let old_baseline = inner.baseline.clone();
+        let detecting_alert_id = inner
+            .pending
+            .as_ref()
+            .filter(|p| p.alert_emitted && p.target_ip.is_empty())
+            .map(|p| p.id.clone());
+        let existing_alert_emitted = detecting_alert_id.is_some();
+        self.apply_audit_outcome_with_mode_locked(
+            env,
+            inner,
+            baseline_ip.to_string(),
+            old_baseline.as_ref(),
+            &results,
+            &was_blocked_set,
+            detecting_alert_id,
+            existing_alert_emitted,
+            None,
+            AuditOutcomeMode::BaselineRestore { was_blocked },
+            Instant::now(),
+        )
+        .await;
     }
 }

@@ -5,17 +5,94 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::auditor::NetworkTelemetry;
 use crate::auditor::geo_matrix::ProviderId;
 use crate::core::timing::log_timing;
 use crate::proxy::hold_queue::{
-    DEFAULT_HOLD_TTL_SECS, EnrichedPayload, PHASE_FAILED, PHASE_READY, RiskInterceptPayload,
+    DEFAULT_HOLD_TTL_SECS, EnrichedPayload, NetworkChange, PHASE_FAILED, PHASE_READY,
+    RiskInterceptPayload,
 };
 
 use super::audit_summary::AuditSummary;
-use super::policy::{network_change, now_unix_ms, resolve_gate_reason_with_cooldown};
+use super::policy::{
+    canonical_probe_ip, network_change, now_unix_ms, resolve_gate_reason_with_cooldown,
+};
 use super::types::{ALL_PROVIDERS, AuditResults, Baseline, Env, Inner, NetworkGuard, Pending};
 
+pub(super) struct NetworkAlertSpec<'a> {
+    pub(super) existing_id: Option<String>,
+    pub(super) target_ip: String,
+    pub(super) tel: Option<NetworkTelemetry>,
+    pub(super) clear_old_state: Option<JoinHandle<()>>,
+    pub(super) affected_providers: &'a [&'static str],
+    pub(super) already_blocked_providers: &'a [&'static str],
+    pub(super) healthy_providers: &'a [&'static str],
+    pub(super) provider: ProviderId,
+    pub(super) report: Option<crate::auditor::RiskReport>,
+    pub(super) network_change: NetworkChange,
+    pub(super) phase: &'a str,
+    pub(super) gate_reason: String,
+    pub(super) timing_label: &'static str,
+    pub(super) emit_pause_status: bool,
+    pub(super) emit_network_changed: bool,
+    pub(super) t0: Instant,
+}
+
 impl NetworkGuard {
+    pub(super) async fn register_and_emit_network_alert_locked(
+        self: &Arc<Self>,
+        env: &Env,
+        inner: &mut Inner,
+        spec: NetworkAlertSpec<'_>,
+    ) -> (String, u64) {
+        let id = spec
+            .existing_id
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let rx = env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
+        let epoch = inner.epoch;
+        inner.pending = Some(Pending {
+            id: id.clone(),
+            epoch,
+            target_ip: spec.target_ip,
+            tel: spec.tel,
+            clear_old_state: spec.clear_old_state,
+            affected_providers: spec.affected_providers.to_vec(),
+            already_blocked_providers: spec.already_blocked_providers.to_vec(),
+            healthy_providers: spec.healthy_providers.to_vec(),
+            alert_emitted: true,
+        });
+
+        self.set_gate_reason(Some(spec.gate_reason.clone()));
+        let payload = RiskInterceptPayload {
+            id: id.clone(),
+            provider: spec.provider,
+            host: "Смена сети · все ИИ-сервисы".to_string(),
+            report: spec.report.clone(),
+            ttl_seconds: DEFAULT_HOLD_TTL_SECS,
+            scope: "network".to_string(),
+            network_change: Some(spec.network_change),
+            is_simulation: false,
+            detected_at_ms: now_unix_ms(),
+            phase: spec.phase.to_string(),
+            gate_reason: Some(spec.gate_reason),
+            checkout_risk: None,
+        };
+
+        env.hold_queue.set_alert(payload.clone());
+        env.emit("interceptor://risk-detected", &payload);
+        log_timing(&id, spec.timing_label, spec.t0);
+        env.io.show_alert_popup(Some((id.clone(), spec.t0)));
+        if spec.emit_pause_status {
+            self.emit_pause_status();
+        }
+        if spec.emit_network_changed
+            && let Some(ref r) = spec.report
+        {
+            env.emit("network://changed", r);
+        }
+        self.spawn_decision_waiter(env, id.clone(), epoch, rx);
+        (id, epoch)
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn enrich_ready_alert_locked(
         self: &Arc<Self>,
@@ -30,7 +107,7 @@ impl NetworkGuard {
         cooldown_reason: Option<&str>,
         t0: Instant,
     ) {
-        if self.is_paused() {
+        if self.is_manual_killswitch() {
             self.hide_popup(env);
             return;
         }
@@ -52,6 +129,7 @@ impl NetworkGuard {
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 
+        let canonical_ip = canonical_probe_ip(&new_ip, &summary.tel.ip);
         let epoch = inner.epoch;
         if let Some(p) = inner.pending.as_mut() {
             p.target_ip = new_ip;
@@ -64,7 +142,7 @@ impl NetworkGuard {
         let worst_newly = summary.worst_for(newly_affected);
         let net_change = network_change(
             old_baseline,
-            Some(summary.tel.ip.clone()),
+            Some(canonical_ip),
             Some(summary.tel.country_code.clone()),
         );
         let reason = resolve_gate_reason_with_cooldown(&worst_newly, &net_change, cooldown_reason);
@@ -98,7 +176,7 @@ impl NetworkGuard {
         healthy_providers: &[&'static str],
         t0: Instant,
     ) {
-        if self.is_paused() {
+        if self.is_manual_killswitch() {
             self.hide_popup(env);
             return;
         }
@@ -154,7 +232,7 @@ impl NetworkGuard {
         newly_affected: &[&'static str],
         t0: Instant,
     ) {
-        if self.is_paused() {
+        if self.is_manual_killswitch() {
             self.hide_popup(env);
             return;
         }
@@ -211,7 +289,7 @@ impl NetworkGuard {
         cooldown_reason: Option<&str>,
         t0: Instant,
     ) {
-        if self.is_paused() {
+        if self.is_manual_killswitch() {
             self.hide_popup(env);
             return;
         }
@@ -239,52 +317,37 @@ impl NetworkGuard {
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 
-        let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let rx = env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
-        let epoch = inner.epoch;
-        inner.pending = Some(Pending {
-            id: id.clone(),
-            epoch,
-            target_ip: new_ip,
-            tel: Some(summary.tel.clone()),
-            clear_old_state: None,
-            affected_providers: newly_affected.to_vec(),
-            already_blocked_providers: already_blocked.to_vec(),
-            healthy_providers: summary.healthy_providers.clone(),
-            alert_emitted: true,
-        });
-
+        let canonical_ip = canonical_probe_ip(&new_ip, &summary.tel.ip);
         let worst_newly = summary.worst_for(newly_affected);
         let net_change = network_change(
             old_baseline,
-            Some(summary.tel.ip.clone()),
+            Some(canonical_ip),
             Some(summary.tel.country_code.clone()),
         );
         let reason = resolve_gate_reason_with_cooldown(&worst_newly, &net_change, cooldown_reason);
-        self.set_gate_reason(Some(reason.clone()));
-
-        let payload = RiskInterceptPayload {
-            id: id.clone(),
-            provider: worst_newly.provider,
-            host: "Смена сети · все ИИ-сервисы".to_string(),
-            report: Some(worst_newly.clone()),
-            ttl_seconds: DEFAULT_HOLD_TTL_SECS,
-            scope: "network".to_string(),
-            network_change: Some(net_change),
-            is_simulation: false,
-            detected_at_ms: now_unix_ms(),
-            phase: PHASE_READY.to_string(),
-            gate_reason: Some(reason),
-            checkout_risk: None,
-        };
-
-        env.hold_queue.set_alert(payload.clone());
-        log_timing(&id, "risk_detected_emitted", t0);
-        env.emit("interceptor://risk-detected", &payload);
-        env.io.show_alert_popup(Some((id.clone(), t0)));
-        env.emit("network://changed", &worst_newly);
-
-        self.spawn_decision_waiter(env, id, epoch, rx);
+        self.register_and_emit_network_alert_locked(
+            env,
+            inner,
+            NetworkAlertSpec {
+                existing_id,
+                target_ip: new_ip,
+                tel: Some(summary.tel.clone()),
+                clear_old_state: None,
+                affected_providers: newly_affected,
+                already_blocked_providers: already_blocked,
+                healthy_providers: &summary.healthy_providers,
+                provider: worst_newly.provider,
+                report: Some(worst_newly),
+                network_change: net_change,
+                phase: PHASE_READY,
+                gate_reason: reason,
+                timing_label: "risk_detected_emitted",
+                emit_pause_status: false,
+                emit_network_changed: true,
+                t0,
+            },
+        )
+        .await;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -300,7 +363,7 @@ impl NetworkGuard {
         existing_id: Option<String>,
         t0: Instant,
     ) {
-        if self.is_paused() {
+        if self.is_manual_killswitch() {
             self.hide_popup(env);
             return;
         }
@@ -320,53 +383,37 @@ impl NetworkGuard {
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 
-        let id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let rx = env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
-        let epoch = inner.epoch;
-        inner.pending = Some(Pending {
-            id: id.clone(),
-            epoch,
-            target_ip: new_ip.clone(),
-            tel: None,
-            clear_old_state: None,
-            affected_providers: newly_affected.to_vec(),
-            already_blocked_providers: already_blocked.to_vec(),
-            healthy_providers: healthy_providers.to_vec(),
-            alert_emitted: true,
-        });
-
         let provider = newly_affected
             .iter()
             .find_map(|p| ProviderId::from_id(p))
             .unwrap_or(ProviderId::Anthropic);
-        let net_change = network_change(old_baseline, Some(new_ip), None);
+        let net_change = network_change(old_baseline, Some(new_ip.clone()), None);
         let reason =
             "Не удалось проверить новую сеть после смены IP — запросы временно остановлены"
                 .to_string();
-        self.set_gate_reason(Some(reason.clone()));
-
-        let payload = RiskInterceptPayload {
-            id: id.clone(),
-            provider,
-            host: "Смена сети · все ИИ-сервисы".to_string(),
-            report: None,
-            ttl_seconds: DEFAULT_HOLD_TTL_SECS,
-            scope: "network".to_string(),
-            network_change: Some(net_change),
-            is_simulation: false,
-            detected_at_ms: now_unix_ms(),
-            phase: PHASE_FAILED.to_string(),
-            gate_reason: Some(reason),
-            checkout_risk: None,
-        };
-
-        env.hold_queue.set_alert(payload.clone());
-        log_timing(&id, "risk_detected_failed_emitted", t0);
-        env.emit("interceptor://risk-detected", &payload);
-        env.io.show_alert_popup(Some((id.clone(), t0)));
-        self.emit_pause_status();
-
-        self.spawn_decision_waiter(env, id, epoch, rx);
+        self.register_and_emit_network_alert_locked(
+            env,
+            inner,
+            NetworkAlertSpec {
+                existing_id,
+                target_ip: new_ip,
+                tel: None,
+                clear_old_state: None,
+                affected_providers: newly_affected,
+                already_blocked_providers: already_blocked,
+                healthy_providers,
+                provider,
+                report: None,
+                network_change: net_change,
+                phase: PHASE_FAILED,
+                gate_reason: reason,
+                timing_label: "risk_detected_failed_emitted",
+                emit_pause_status: true,
+                emit_network_changed: false,
+                t0,
+            },
+        )
+        .await;
     }
 
     /// Delivers the result of the background audit started by `handle_change_locked`.

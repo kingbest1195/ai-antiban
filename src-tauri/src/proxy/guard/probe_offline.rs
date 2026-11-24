@@ -2,16 +2,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::MutexGuard;
-use uuid::Uuid;
 
 use crate::auditor::geo_matrix::ProviderId;
-use crate::core::timing::log_timing;
-use crate::proxy::hold_queue::{
-    DEFAULT_HOLD_TTL_SECS, PHASE_DETECTING, RiskInterceptPayload, build_gate_reason,
-};
+use crate::proxy::hold_queue::{PHASE_DETECTING, build_gate_reason};
 
-use super::policy::{network_change, now_unix_ms};
-use super::types::{ALL_PROVIDERS, Env, Gate, Inner, NetworkGuard, PauseMode, Pending};
+use super::policy::network_change;
+use super::types::{Env, Gate, Inner, NetworkGuard, PauseMode};
 
 /// RAII drop guard ensuring `Inner::probe_in_flight` and `Inner::probe_abort` are cleared
 /// even if the background probe task exits early, is cancelled, or panics.
@@ -145,46 +141,36 @@ impl NetworkGuard {
 
         let epoch = inner.epoch;
         let alert_id = if st.interception_behavior == crate::state::InterceptionBehavior::AskPopup {
-            let id = Uuid::new_v4().to_string();
-            let rx = env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
-            inner.pending = Some(Pending {
-                id: id.clone(),
-                epoch,
-                target_ip: String::new(),
-                tel: None,
-                clear_old_state: None,
-                affected_providers: non_blocked.clone(),
-                already_blocked_providers: already_blocked_vec.clone(),
-                healthy_providers: Vec::new(),
-                alert_emitted: true,
-            });
             let provider = non_blocked
                 .iter()
                 .find_map(|p| ProviderId::from_id(p))
                 .unwrap_or(ProviderId::Anthropic);
             let net_change = network_change(inner.baseline.as_ref(), None, None);
             let reason = build_gate_reason(None, Some(&net_change), false);
-            self.set_gate_reason(Some(reason.clone()));
-            let payload = RiskInterceptPayload {
-                id: id.clone(),
-                provider,
-                host: "Смена сети · все ИИ-сервисы".to_string(),
-                report: None,
-                ttl_seconds: DEFAULT_HOLD_TTL_SECS,
-                scope: "network".to_string(),
-                network_change: Some(net_change),
-                is_simulation: false,
-                detected_at_ms: now_unix_ms(),
-                phase: PHASE_DETECTING.to_string(),
-                gate_reason: Some(reason),
-                checkout_risk: None,
-            };
-            env.hold_queue.set_alert(payload.clone());
-            env.emit("interceptor://risk-detected", &payload);
-            env.io.show_alert_popup(Some((id.clone(), t0)));
-            self.emit_pause_status();
-            log_timing(&id, "offline_regular_freeze", t0);
-            self.spawn_decision_waiter(env, id.clone(), epoch, rx);
+            let (id, _) = self
+                .register_and_emit_network_alert_locked(
+                    env,
+                    inner,
+                    super::alerts::NetworkAlertSpec {
+                        existing_id: None,
+                        target_ip: String::new(),
+                        tel: None,
+                        clear_old_state: None,
+                        affected_providers: &non_blocked,
+                        already_blocked_providers: &already_blocked_vec,
+                        healthy_providers: &[],
+                        provider,
+                        report: None,
+                        network_change: net_change,
+                        phase: PHASE_DETECTING,
+                        gate_reason: reason,
+                        timing_label: "offline_regular_freeze",
+                        emit_pause_status: true,
+                        emit_network_changed: false,
+                        t0,
+                    },
+                )
+                .await;
             Some(id)
         } else {
             let msg = match st.interception_behavior {
@@ -246,35 +232,6 @@ impl NetworkGuard {
             .observed_ip
             .as_deref()
             .is_none_or(|ip| ip == baseline.ip)
-    }
-
-    /// True when direct unrouted egress telemetry must bypass the 15s cache because a route check
-    /// or probe mismatch leaves the current egress unverified.
-    pub async fn needs_direct_audit_refresh(
-        &self,
-        resolver: &crate::auditor::network::NetworkResolver,
-    ) -> bool {
-        if !self.is_env_installed() {
-            return false;
-        }
-        let cur_ip = {
-            let inner = self.inner.lock().await;
-            if inner.route_dirty
-                || inner.needs_reaudit
-                || inner.probe_in_flight
-                || inner.pending.is_some()
-            {
-                return true;
-            }
-            inner
-                .observed_ip
-                .clone()
-                .or_else(|| inner.baseline.as_ref().map(|b| b.ip.clone()))
-        };
-        match cur_ip {
-            Some(ip) => resolver.cached_direct_country(&ip).await.is_none(),
-            None => false,
-        }
     }
 
     /// Checks whether direct egress telemetry must be refreshed and invalidates any short-TTL

@@ -50,6 +50,17 @@ impl NetworkGuard {
         if !self.is_manual_killswitch() {
             let _ = env.state.clear_blocked_providers().await;
             let st_after = env.state.get_data().await;
+            if super::policy::all_pinned_or_excepted_for(
+                &st_after,
+                &st_after.enabled_unrouted_providers(),
+                ip,
+            ) && !super::policy::is_blocked_geo_code(&tel.country_code)
+            {
+                env.auditor
+                    .resolver
+                    .record_verified_pinned_country(ip, &tel.country_code)
+                    .await;
+            }
             self.sync_gates_with_state_and_pending(&st_after, None);
         } else {
             self.set_gate(Gate::Blocked);
@@ -111,6 +122,15 @@ impl NetworkGuard {
             }
             if state.unblock_provider(pname).await.is_ok() {
                 unblocked.push(pname);
+                if let Some(env) = self.env.get() {
+                    env.auditor
+                        .resolver
+                        .record_verified_pinned_country(
+                            &report.telemetry.ip,
+                            &report.telemetry.country_code,
+                        )
+                        .await;
+                }
             }
         }
         if unblocked.is_empty() {

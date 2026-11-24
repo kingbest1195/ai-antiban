@@ -77,12 +77,48 @@ async fn resolve_provider_telemetry_for_allow(
     (None, None)
 }
 
+async fn expand_risky_block_targets(
+    base_targets: &[String],
+    state: &state::AppState,
+    auditor: &auditor::Auditor,
+    proxy_manager: &proxy::ProxyManager,
+) -> Vec<String> {
+    let st = state.get_data().await;
+    let mut out: Vec<String> = base_targets.to_vec();
+    let cur_ip = proxy_manager.guard.current_observed_ip().await;
+    for p in st.enabled_unrouted_providers() {
+        if out.iter().any(|t| t == p) || st.blocked_providers.contains(p) {
+            continue;
+        }
+        if cur_ip
+            .as_deref()
+            .is_some_and(|ip| st.is_ip_trusted_for_provider(p, ip))
+            || st.session_allowed_providers.contains(p)
+        {
+            continue;
+        }
+        let is_risky = match auditor::ProviderId::from_id(p) {
+            Some(pid) => match auditor.evaluate_all(pid, state, false).await {
+                Ok(r) => !proxy::guard::report_allowed_for_state(&r, &st, false),
+                Err(_) => true,
+            },
+            None => true,
+        };
+        if is_risky {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn claim_and_block_targets_if_active(
     id: &str,
     targets: &[String],
     is_network_scope: bool,
     network_alert_active: bool,
     epoch_before: u64,
+    quiet_sync: bool,
     proxy_manager: &proxy::ProxyManager,
     state: &state::AppState,
 ) -> Result<bool, proxy::AllowError> {
@@ -110,7 +146,11 @@ async fn claim_and_block_targets_if_active(
         proxy_manager.guard.sync_gates_with_state(state).await;
         return Ok(false);
     }
-    proxy_manager.guard.sync_gates_with_state(state).await;
+    if quiet_sync {
+        proxy_manager.guard.sync_gates_with_state_quiet(state).await;
+    } else {
+        proxy_manager.guard.sync_gates_with_state(state).await;
+    }
     Ok(true)
 }
 
@@ -210,22 +250,24 @@ pub(super) async fn resolve_interception_with_params(
             }
         }
         proxy::InterceptionAction::BlockUntilNetworkChange => {
-            let pause_reason = if is_network_scope {
-                proxy_manager.guard.gate_reason().or_else(|| {
-                    proxy_manager
-                        .hold_queue
-                        .current_alert()
-                        .and_then(|alert| alert.gate_reason)
-                })
+            let pause_reason = proxy_manager.guard.gate_reason().or_else(|| {
+                proxy_manager
+                    .hold_queue
+                    .current_alert()
+                    .and_then(|alert| alert.gate_reason)
+            });
+            let block_targets = if is_network_scope {
+                targets.clone()
             } else {
-                None
+                expand_risky_block_targets(&targets, state, auditor, proxy_manager).await
             };
             if !claim_and_block_targets_if_active(
                 id,
-                &targets,
+                &block_targets,
                 is_network_scope,
                 network_alert_active,
                 epoch_before,
+                true,
                 proxy_manager,
                 state,
             )
@@ -233,22 +275,19 @@ pub(super) async fn resolve_interception_with_params(
             {
                 return Ok(ResolveInterceptionOutcome::noop());
             }
-            if is_network_scope {
-                let st_after = state.get_data().await;
-                let all_enabled_unrouted_blocked = st_after
-                    .enabled_unrouted_providers()
-                    .iter()
-                    .all(|p| st_after.blocked_providers.contains(*p));
-                if all_enabled_unrouted_blocked && !targets.is_empty() {
-                    proxy_manager
-                        .guard
-                        .mark_paused_until_network_change(pause_reason)
-                        .await;
-                    proxy_manager.guard.sync_gates_with_state(state).await;
-                    pause_status = Some(proxy_manager.guard.pause_status());
+            if !block_targets.is_empty() && !proxy_manager.guard.is_manual_killswitch() {
+                proxy_manager
+                    .guard
+                    .mark_paused_until_network_change(pause_reason)
+                    .await;
+                if !proxy_manager.guard.is_env_installed() {
+                    proxy_manager.guard.sync_gates_with_state_quiet(state).await;
                 }
+                pause_status = Some(proxy_manager.guard.pause_status());
+            } else {
+                proxy_manager.guard.sync_gates_with_state(state).await;
             }
-            for p in targets
+            for p in block_targets
                 .iter()
                 .map(String::as_str)
                 .chain([proxy::ALL_PROVIDERS])
@@ -266,6 +305,7 @@ pub(super) async fn resolve_interception_with_params(
                 is_network_scope,
                 network_alert_active,
                 epoch_before,
+                false,
                 proxy_manager,
                 state,
             )

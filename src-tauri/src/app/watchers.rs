@@ -227,26 +227,12 @@ pub(super) fn spawn_tray_status_watcher(
                         .await;
                         continue;
                     }
-                    let startup_ready = watcher_handle
-                        .try_state::<Arc<crate::startup::StartupState>>()
-                        .is_none_or(|s| s.is_ready());
-                    if has_blocked {
-                        update_tray_from_report(
-                            &watcher_handle,
-                            &tray_report,
-                            tray_is_pinned,
-                            true,
-                        );
-                    } else if startup_ready && !sysproxy::is_sysproxy_active() {
-                        crate::tray::update_tray_protection_off(&watcher_handle);
-                    } else {
-                        update_tray_from_report(
-                            &watcher_handle,
-                            &tray_report,
-                            tray_is_pinned,
-                            false,
-                        );
-                    }
+                    update_tray_from_report(
+                        &watcher_handle,
+                        &tray_report,
+                        tray_is_pinned,
+                        has_blocked,
+                    );
 
                     let cur_status = (tray_report.overall_status, has_blocked);
                     let status_changed = last_synced_status.is_some_and(|prev| prev != cur_status)
@@ -293,7 +279,7 @@ pub(super) fn spawn_tray_status_watcher(
                             && watcher_guard.current_observed_ip().await.as_deref()
                                 != Some(report.telemetry.ip.as_str())
                         {
-                            watcher_guard.wake();
+                            watcher_guard.wake_immediate_probe().await;
                         }
                         let _ = watcher_handle.emit("network://changed", &report);
                     }

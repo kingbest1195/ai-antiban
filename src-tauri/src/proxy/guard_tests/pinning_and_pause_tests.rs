@@ -463,6 +463,15 @@ async fn pause_until_network_change_stays_on_same_ip_and_clears_on_change_or_inv
         inner.last_probe = None;
     }
     h.guard.check_route_and_tick(&h.env).await;
+    for _ in 0..20 {
+        if h.guard.inner.lock().await.pending.is_none() {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+    }
+    h.guard.wait_probe_settled_for_test().await;
+    // New network verified Green: UntilNetworkChange clears to None.
     assert_eq!(h.guard.pause_mode(), PauseMode::None);
 
     // 4. Manual kill-switch must NEVER clear on invalidate_cache_and_clear_pause.
@@ -523,6 +532,13 @@ async fn pause_until_network_change_during_detecting_adopts_settled_ip_without_r
         inner.route_dirty = true;
     }
     h.guard.check_route_and_tick(&h.env).await;
+    for _ in 0..20 {
+        if h.guard.inner.lock().await.pending.is_none() {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+    }
     h.guard.wait_probe_settled_for_test().await;
 
     assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
@@ -542,11 +558,25 @@ async fn pause_until_network_change_during_detecting_adopts_settled_ip_without_r
     assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
     assert_eq!(h.io.count("interceptor://risk-detected"), 1);
 
-    // 5. Real subsequent change to "8.8.8.8" clears UntilNetworkChange pause.
+    // 5. Subsequent change to another risky IP ("8.8.8.8" Red) keeps UntilNetworkChange
+    //    silently without reopening a popup.
     *probe_ip.lock().unwrap() = Some("8.8.8.8".to_string());
     h.guard.inner.lock().await.last_probe = None;
     h.guard.check_route_and_tick(&h.env).await;
-    assert_eq!(h.guard.pause_mode(), PauseMode::None);
+    for _ in 0..20 {
+        if h.guard.inner.lock().await.pending.is_none() {
+            break;
+        }
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+    }
+    h.guard.wait_probe_settled_for_test().await;
+    assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
+    assert_eq!(
+        h.guard.inner.lock().await.paused_ip.as_deref(),
+        Some("8.8.8.8")
+    );
+    assert_eq!(h.io.count("interceptor://risk-detected"), 1);
 }
 
 #[tokio::test(start_paused = true)]

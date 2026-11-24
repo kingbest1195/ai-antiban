@@ -412,3 +412,375 @@ async fn e2e_video_4_try_auto_unblock_rejects_tor_and_vpn_even_on_green_report()
             .contains("anthropic")
     );
 }
+
+#[tokio::test]
+async fn e2e_video1942_dual_stack_ipv4_ipv6_pause_never_spams_popup() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let fp = Arc::new(std::sync::Mutex::new("fp-home".to_string()));
+    let probe_ip = Arc::new(std::sync::Mutex::new("5.228.44.64".to_string()));
+    // Simulate dual-stack ISP where geo telemetry returns IPv6 while probe_ip is IPv4.
+    let exit = Arc::new(std::sync::Mutex::new(Some((
+        "2a02:4540:1234::1".to_string(),
+        "RU".to_string(),
+        12345u32,
+    ))));
+    let auditor = Auditor::with_env(AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+        probe: Arc::new(DynamicExitProbe(Arc::clone(&exit))),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    })
+    .unwrap();
+
+    let state = AppState::new_in_memory();
+    state.block_provider("anthropic").await.unwrap();
+    state.block_provider("openai").await.unwrap();
+    state.block_provider("gemini").await.unwrap();
+    let hold_queue = Arc::new(HoldQueue::new());
+    let guard = Arc::new(zastava_lib::proxy::NetworkGuard::new());
+    guard.set_route_fingerprint_fn_for_test(Some(Arc::new({
+        let fp = Arc::clone(&fp);
+        move |_| fp.lock().unwrap().clone()
+    })));
+    guard.start_with_test_env(
+        auditor,
+        state.clone(),
+        hold_queue.clone(),
+        Some(Arc::new({
+            let ip = Arc::clone(&probe_ip);
+            move || {
+                let cur = ip.lock().unwrap().clone();
+                Box::pin(async move { Some(cur) })
+            }
+        })),
+        None,
+    );
+    guard
+        .seed_baseline_for_test("5.228.44.64", "RU", None)
+        .await;
+    guard
+        .mark_paused_until_network_change(Some("Санкционный регион".to_string()))
+        .await;
+
+    for _ in 0..3 {
+        guard.tick_test().await;
+        assert_eq!(guard.pause_status().mode, PauseMode::UntilNetworkChange);
+        assert!(
+            hold_queue.current_alert().is_none(),
+            "dual-stack IPv4/IPv6 mismatch must never spam a popup while paused"
+        );
+        assert_eq!(guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
+    }
+}
+
+#[tokio::test]
+async fn e2e_video1942_dynamic_ip_rotation_while_paused_silent_then_auto_unlocks_pinned() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let fp = Arc::new(std::sync::Mutex::new("fp-home-1".to_string()));
+    let probe_ip = Arc::new(std::sync::Mutex::new("5.228.44.64".to_string()));
+    let exit = Arc::new(std::sync::Mutex::new(Some((
+        "5.228.44.64".to_string(),
+        "RU".to_string(),
+        12345u32,
+    ))));
+    let auditor = Auditor::with_env(AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+        probe: Arc::new(DynamicExitProbe(Arc::clone(&exit))),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    })
+    .unwrap();
+
+    let state = AppState::new_in_memory();
+    state
+        .set_pinned_ip_for("anthropic", Some("145.241.193.245".to_string()))
+        .await
+        .unwrap();
+    state
+        .set_pinned_ip_for("openai", Some("145.241.193.245".to_string()))
+        .await
+        .unwrap();
+    state
+        .set_pinned_ip_for("gemini", Some("145.241.193.245".to_string()))
+        .await
+        .unwrap();
+    state.block_provider("anthropic").await.unwrap();
+    state.block_provider("openai").await.unwrap();
+    state.block_provider("gemini").await.unwrap();
+
+    let hold_queue = Arc::new(HoldQueue::new());
+    let guard = Arc::new(zastava_lib::proxy::NetworkGuard::new());
+    guard.set_route_fingerprint_fn_for_test(Some(Arc::new({
+        let fp = Arc::clone(&fp);
+        move |_| fp.lock().unwrap().clone()
+    })));
+    guard.start_with_test_env(
+        auditor,
+        state.clone(),
+        hold_queue.clone(),
+        Some(Arc::new({
+            let ip = Arc::clone(&probe_ip);
+            move || {
+                let cur = ip.lock().unwrap().clone();
+                Box::pin(async move { Some(cur) })
+            }
+        })),
+        None,
+    );
+    guard
+        .seed_baseline_for_test("5.228.44.64", "RU", None)
+        .await;
+    guard
+        .mark_paused_until_network_change(Some("Пауза на домашнем IP".to_string()))
+        .await;
+
+    // Dynamic home IP rotates 5.228.44.64 -> 5.228.44.99 (still RU) + fp jitter.
+    *probe_ip.lock().unwrap() = "5.228.44.99".to_string();
+    *exit.lock().unwrap() = Some(("5.228.44.99".to_string(), "RU".to_string(), 12345));
+    *fp.lock().unwrap() = "fp-home-2".to_string();
+    guard.tick_test().await;
+
+    assert_eq!(
+        guard.pause_status().mode,
+        PauseMode::UntilNetworkChange,
+        "rotating to another risky IP must keep UntilNetworkChange active"
+    );
+    assert!(
+        hold_queue.current_alert().is_none(),
+        "rotating to another risky IP while paused must emit ZERO popups"
+    );
+    assert_eq!(guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
+
+    // Now switch back to pinned GB 145.241.193.245: must clear pause and auto-unlock.
+    *probe_ip.lock().unwrap() = "145.241.193.245".to_string();
+    *exit.lock().unwrap() = Some(("145.241.193.245".to_string(), "GB".to_string(), 24940));
+    *fp.lock().unwrap() = "fp-gb-vpn".to_string();
+    guard.tick_test().await;
+
+    assert_eq!(guard.pause_status().mode, PauseMode::None);
+    assert_eq!(guard.gate_for(ProviderId::Anthropic), Gate::Open);
+    assert!(state.get_data().await.blocked_providers.is_empty());
+}
+
+#[tokio::test]
+async fn e2e_video1942_single_provider_pause_sets_tray_pause_and_preserves_trusted_siblings() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let state = AppState::new_in_memory();
+    state
+        .add_trusted_exception("openai", "5.228.44.64")
+        .await
+        .unwrap();
+    state.block_provider("anthropic").await.unwrap();
+    state.block_provider("gemini").await.unwrap();
+
+    let guard = Arc::new(zastava_lib::proxy::NetworkGuard::new());
+    guard
+        .mark_paused_until_network_change(Some("Пауза до смены сети".to_string()))
+        .await;
+    guard.sync_gates_with_state(&state).await;
+
+    let status = guard.pause_status();
+    assert_eq!(status.mode, PauseMode::UntilNetworkChange);
+    assert_eq!(guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
+    assert_eq!(guard.gate_for(ProviderId::Gemini), Gate::Blocked);
+    assert_eq!(
+        guard.gate_for(ProviderId::Openai),
+        Gate::Open,
+        "trusted-exception sibling must remain Gate::Open"
+    );
+
+    let (icon, title) = resolve_tray_transition_for_test(&status, true, true, None, true);
+    assert_eq!(icon, "gray");
+    assert_eq!(title.trim(), "Пауза");
+}
+
+#[tokio::test]
+async fn e2e_video1942_global_sanctioned_pause_blocks_all_risky_prevents_chatgpt_second_popup() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let Some((upstream_addr, _)) = spawn_echo_upstream().await else {
+        return;
+    };
+    let exit = Arc::new(std::sync::Mutex::new(Some((
+        "5.228.44.64".to_string(),
+        "RU".to_string(),
+        12345u32,
+    ))));
+    let auditor = Auditor::with_env(AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+        probe: Arc::new(DynamicExitProbe(Arc::clone(&exit))),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    })
+    .unwrap();
+
+    let state = AppState::new_in_memory();
+    state.block_provider("anthropic").await.unwrap();
+    state.block_provider("openai").await.unwrap();
+    state.block_provider("gemini").await.unwrap();
+
+    let hold_queue = Arc::new(HoldQueue::new());
+    let server = match ProxyServer::bind_ephemeral(
+        auditor.clone(),
+        state.clone(),
+        hold_queue.clone(),
+        Some(upstream_addr),
+    )
+    .await
+    {
+        Ok(s) => Arc::new(s),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(e) => panic!("bind_ephemeral: {e}"),
+    };
+    let proxy_addr = server.bound_addr;
+    server.guard.start_with_test_env(
+        auditor.clone(),
+        state.clone(),
+        hold_queue.clone(),
+        Some(Arc::new(|| {
+            Box::pin(async { Some("5.228.44.64".to_string()) })
+        })),
+        None,
+    );
+    server
+        .guard
+        .seed_baseline_for_test("5.228.44.64", "RU", None)
+        .await;
+    server
+        .guard
+        .mark_paused_until_network_change(Some("Санкционный регион".to_string()))
+        .await;
+    server.guard.sync_gates_with_state(&state).await;
+
+    let srv = Arc::clone(&server);
+    tokio::spawn(async move { srv.run().await });
+
+    let (_s, resp) = send_connect(proxy_addr, "api.openai.com").await;
+    assert!(
+        resp.contains("403"),
+        "paused ChatGPT CONNECT must fail closed with 403, got: {resp}"
+    );
+    assert!(
+        hold_queue.current_alert().is_none(),
+        "blocked sibling ChatGPT CONNECT while paused must not create a second popup"
+    );
+}
+
+#[tokio::test]
+async fn e2e_video1942_pinned_fast_path_cache_survives_vpn_switch_and_unlocks_fast() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let fp = Arc::new(std::sync::Mutex::new("fp-se".to_string()));
+    let probe_ip = Arc::new(std::sync::Mutex::new("56.228.36.74".to_string()));
+    let exit = Arc::new(std::sync::Mutex::new(Some((
+        "56.228.36.74".to_string(),
+        "SE".to_string(),
+        24940u32,
+    ))));
+    let auditor = Auditor::with_env(AuditEnv {
+        dns: Arc::new(FakeDns::new(LookupOutcome::NotFound)),
+        probe: Arc::new(DynamicExitProbe(Arc::clone(&exit))),
+        udp: Arc::new(FakeUdp::new()),
+        system: Arc::new(FakeSystem::healthy()),
+    })
+    .unwrap();
+
+    // Seed verified-pinned-IP cache for GB, then invalidate direct cache (simulating SE switch).
+    auditor
+        .resolver
+        .record_verified_pinned_country("145.241.193.245", "GB")
+        .await;
+    auditor.resolver.invalidate_direct_cache().await;
+    assert_eq!(
+        auditor
+            .resolver
+            .cached_verified_pinned_country("145.241.193.245")
+            .await
+            .as_deref(),
+        Some("GB")
+    );
+
+    let state = AppState::new_in_memory();
+    state
+        .set_pinned_ip_for("anthropic", Some("145.241.193.245".to_string()))
+        .await
+        .unwrap();
+    state
+        .set_pinned_ip_for("openai", Some("145.241.193.245".to_string()))
+        .await
+        .unwrap();
+    state
+        .set_pinned_ip_for("gemini", Some("145.241.193.245".to_string()))
+        .await
+        .unwrap();
+    state.block_provider("anthropic").await.unwrap();
+
+    let hold_queue = Arc::new(HoldQueue::new());
+    let guard = Arc::new(zastava_lib::proxy::NetworkGuard::new());
+    guard.set_route_fingerprint_fn_for_test(Some(Arc::new({
+        let fp = Arc::clone(&fp);
+        move |_| fp.lock().unwrap().clone()
+    })));
+    guard.start_with_test_env(
+        auditor,
+        state.clone(),
+        hold_queue.clone(),
+        Some(Arc::new({
+            let ip = Arc::clone(&probe_ip);
+            move || {
+                let cur = ip.lock().unwrap().clone();
+                Box::pin(async move { Some(cur) })
+            }
+        })),
+        None,
+    );
+    guard
+        .seed_baseline_for_test("56.228.36.74", "SE", None)
+        .await;
+    guard.sync_gates_with_state(&state).await;
+
+    // Switch back to pinned GB: Fast-path 2 must unlock immediately via verified-pinned cache.
+    *probe_ip.lock().unwrap() = "145.241.193.245".to_string();
+    *exit.lock().unwrap() = Some(("145.241.193.245".to_string(), "GB".to_string(), 24940));
+    *fp.lock().unwrap() = "fp-gb".to_string();
+    guard.tick_test().await;
+
+    assert_eq!(guard.gate_for(ProviderId::Anthropic), Gate::Open);
+    assert!(state.get_data().await.blocked_providers.is_empty());
+    assert!(hold_queue.current_alert().is_none());
+}
+
+#[tokio::test]
+async fn e2e_video1942_connect_fp_change_preserves_was_blocked_set() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let fp = Arc::new(std::sync::Mutex::new("fp-1".to_string()));
+    let state = AppState::new_in_memory();
+    state.block_provider("anthropic").await.unwrap();
+
+    let guard = Arc::new(zastava_lib::proxy::NetworkGuard::new());
+    guard.set_route_fingerprint_fn_for_test(Some(Arc::new({
+        let fp = Arc::clone(&fp);
+        move |_| fp.lock().unwrap().clone()
+    })));
+    guard
+        .seed_baseline_for_test("5.228.44.64", "RU", None)
+        .await;
+    guard
+        .mark_paused_until_network_change(Some("Пауза".to_string()))
+        .await;
+    guard.sync_gates_with_state(&state).await;
+    assert_eq!(guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
+
+    // Simulate CONNECT detecting an fp change: must NOT clear blocked_providers or drop Anthropic
+    // from Gate::Blocked.
+    *fp.lock().unwrap() = "fp-2".to_string();
+    let changed = guard.check_route_fingerprint_sync(None);
+    assert!(changed);
+    assert_eq!(guard.gate_for(ProviderId::Anthropic), Gate::Blocked);
+    assert!(
+        state
+            .get_data()
+            .await
+            .blocked_providers
+            .contains("anthropic"),
+        "blocked_providers must be preserved across check_route_fingerprint_sync"
+    );
+}

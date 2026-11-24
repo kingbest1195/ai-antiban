@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::Duration;
@@ -36,10 +37,17 @@ pub(super) struct CachedRouteClient {
     pub(super) client: reqwest::Client,
 }
 
+/// TTL (seconds) for the verified-pinned-IP cache that survives `invalidate_direct_cache()`.
+const VERIFIED_PINNED_TTL_SECONDS: u64 = 15 * 60;
+
 #[derive(Clone)]
 pub struct NetworkResolver {
     pub(super) client: reqwest::Client,
+    /// IPv4-bound direct client so dual-stack ISPs resolve IPv4 consistently with `probe_ip`.
+    pub(super) ipv4_client: reqwest::Client,
     cache: Arc<RwLock<HashMap<CacheKey, CachedTelemetry>>>,
+    /// Small verified-pinned-IP cache (ip -> (country_code, verified_at)) surviving direct cache clears.
+    verified_pinned_cache: Arc<RwLock<HashMap<String, (String, u64)>>>,
     resolve_lock: Arc<tokio::sync::Mutex<()>>,
     /// Monotonic generation bumped on every `invalidate_cache()` / `invalidate_route()` call so
     /// an in-flight `cascade_query` that started before invalidation never poisons `cache`.
@@ -71,9 +79,19 @@ impl NetworkResolver {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
+        let ipv4_client = reqwest::Client::builder()
+            .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+            .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
+            .pool_max_idle_per_host(0)
+            .user_agent(NEUTRAL_USER_AGENT)
+            .build()
+            .unwrap_or_else(|_| client.clone());
+
         Self {
             client,
+            ipv4_client,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            verified_pinned_cache: Arc::new(RwLock::new(HashMap::new())),
             resolve_lock: Arc::new(tokio::sync::Mutex::new(())),
             cache_generation: Arc::new(AtomicU64::new(0)),
             gateway_port: Arc::new(AtomicU16::new(0)),
@@ -243,6 +261,36 @@ impl NetworkResolver {
         None
     }
 
+    /// Records a verified Green pinned IP -> country mapping (TTL 15 min) that survives
+    /// `invalidate_direct_cache()` when switching away to another VPN and back.
+    pub async fn record_verified_pinned_country(&self, ip: &str, country_code: &str) {
+        let target = crate::state::normalize_ip_str(ip);
+        let cc = country_code.trim().to_uppercase();
+        if target.is_empty() || cc.is_empty() {
+            return;
+        }
+        let now = current_timestamp();
+        let mut w = self.verified_pinned_cache.write().await;
+        w.retain(|_, (_, ts)| now.saturating_sub(*ts) < VERIFIED_PINNED_TTL_SECONDS);
+        w.insert(target, (cc, now));
+    }
+
+    /// Returns a recently verified pinned IP's country code if still within the 15 min TTL.
+    pub async fn cached_verified_pinned_country(&self, ip: &str) -> Option<String> {
+        let target = crate::state::normalize_ip_str(ip);
+        if target.is_empty() {
+            return None;
+        }
+        let now = current_timestamp();
+        let r = self.verified_pinned_cache.read().await;
+        let (cc, ts) = r.get(&target)?;
+        if now.saturating_sub(*ts) < VERIFIED_PINNED_TTL_SECONDS {
+            Some(cc.clone())
+        } else {
+            None
+        }
+    }
+
     /// Pre-populate or override cached direct telemetry (deterministic tests and simulation)
     pub async fn set_cached(&self, telemetry: NetworkTelemetry) {
         self.cache.write().await.insert(
@@ -392,7 +440,12 @@ impl NetworkResolver {
                     {
                         return self.cascade_query(&c).await;
                     }
-                    self.cascade_query(&self.client).await
+                    // Prefer IPv4 on dual-stack networks so telemetry IP matches IPv4 probe_ip;
+                    // fall back to dual-stack only if IPv4 fails (e.g. IPv6-only networks).
+                    match self.cascade_query(&self.ipv4_client).await {
+                        Ok(t) => Ok(t),
+                        Err(_) => self.cascade_query(&self.client).await,
+                    }
                 }
                 Some(r) => self.cascade_via_route(r).await,
             }

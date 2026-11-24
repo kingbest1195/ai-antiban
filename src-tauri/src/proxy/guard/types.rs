@@ -339,6 +339,8 @@ pub struct NetworkGuard {
     pub(super) self_weak: OnceLock<Weak<NetworkGuard>>,
     pub(super) wake_notify: Arc<tokio::sync::Notify>,
     pub(super) loop_running: AtomicBool,
+    /// Prevents concurrent `ProbeRegular` runs from `ensure_fresh()` and `probe_loop`.
+    pub(super) regular_probe_in_flight: AtomicBool,
     /// Prevents overlapping background `refresh_if_services_changed` / `reconcile_browser_pac_prefs` runs.
     #[cfg_attr(test, allow(dead_code))]
     pub(super) sysproxy_sync_in_flight: AtomicBool,

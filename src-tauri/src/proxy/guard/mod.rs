@@ -40,8 +40,8 @@ pub use fingerprint::compute_local_route_fingerprint;
 pub use fingerprint::format_windows_interfaces_signature;
 pub use killswitch::{gate_closed, shutdown_aborted, wait_open};
 pub(crate) use policy::{
-    effective_tray_report, is_report_pinned_travel_only, report_allowed_for_state,
-    report_no_critical_and_geo_ok, should_hold_ai_studio_session,
+    effective_tray_report, is_ip_pinned_for_state, is_report_pinned_travel_only,
+    report_allowed_for_state, report_no_critical_and_geo_ok, should_hold_ai_studio_session,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use routes_sync::GuardTestObserver;
@@ -65,7 +65,7 @@ use crate::proxy::hold_queue::{
 #[cfg(test)]
 use crate::state::{AppState, IpHistoryEntry, KNOWN_PROVIDERS};
 #[cfg(test)]
-use audit_summary::{audit_all, summarize};
+use audit_summary::audit_all;
 #[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]

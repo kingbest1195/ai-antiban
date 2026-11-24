@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -250,8 +249,10 @@ impl NetworkGuard {
         if cleared {
             if let Some(st) = state {
                 let _ = st.clear_blocked_providers().await;
-            }
-            if open_gate_if_blocked && self.any_provider_gate_blocked() {
+                if open_gate_if_blocked && self.any_provider_gate_blocked() {
+                    self.sync_gates_with_state(st).await;
+                }
+            } else if open_gate_if_blocked && self.any_provider_gate_blocked() {
                 self.set_gate(Gate::Open);
             }
         }
@@ -259,6 +260,7 @@ impl NetworkGuard {
     }
 
     /// Invalidates cached network telemetry and automatically clears any `UntilNetworkChange` pause.
+    #[cfg(test)]
     pub async fn invalidate_cache_and_clear_pause(
         &self,
         resolver: &crate::auditor::network::NetworkResolver,
@@ -311,6 +313,7 @@ impl NetworkGuard {
         }
     }
 
+    #[cfg(test)]
     pub fn is_gate_blocked(&self) -> bool {
         self.gate() == Gate::Blocked
     }
@@ -370,11 +373,6 @@ impl NetworkGuard {
         }
     }
 
-    pub async fn verify_before_connect(self: &Arc<Self>) -> bool {
-        self.ensure_fresh().await;
-        self.gate() == Gate::Open
-    }
-
     async fn await_gate_rx(mut rx: watch::Receiver<Gate>) -> Gate {
         let fut = async {
             loop {
@@ -393,6 +391,7 @@ impl NetworkGuard {
     }
 
     /// Used by new CONNECT requests: waits for the user's decision while the gate is pending.
+    #[cfg(test)]
     pub async fn await_decision(&self) -> Gate {
         Self::await_gate_rx(self.gate_tx.subscribe()).await
     }

@@ -12,6 +12,8 @@ pub(crate) struct AuditProgressEvent<'a> {
     pub(crate) progress: auditor::AuditProgress,
 }
 
+pub(crate) use proxy::guard::is_ip_pinned_for_state;
+
 pub(crate) fn finalize_audit_report_for_state(
     st: &state::AppStateData,
     provider_id: auditor::ProviderId,
@@ -20,27 +22,6 @@ pub(crate) fn finalize_audit_report_for_state(
     let is_pinned = is_ip_pinned_for_state(st, provider_id, &report.telemetry.ip);
     auditor::history::apply_pinned_travel_grace(report, is_pinned);
     is_pinned
-}
-
-pub(crate) fn is_ip_pinned_for_state(
-    st: &state::AppStateData,
-    provider_id: auditor::ProviderId,
-    exit_ip: &str,
-) -> bool {
-    let is_routed = matches!(
-        crate::routing::select_route(st, provider_id.as_str()),
-        crate::routing::RouteSelection::Route(_)
-    );
-    if is_routed {
-        if let Some(pin) = st.pinned_ip_for_provider(provider_id.as_str(), true) {
-            return pin == exit_ip.trim();
-        }
-        // A bound Zastava key already locks this provider to the key endpoint IP.
-        return true;
-    }
-    st.pinned_ip_for_provider(provider_id.as_str(), false)
-        .map(|p| p == exit_ip.trim())
-        .unwrap_or(false)
 }
 
 async fn resolve_pin_scope(
@@ -268,10 +249,6 @@ pub(crate) fn sync_tray_with_guard_priority(
     report: &auditor::RiskReport,
     is_pinned: bool,
 ) {
-    if guard.is_manual_killswitch() || guard.is_paused() || guard.any_provider_gate_pending() {
-        crate::tray::update_tray_from_guard_status(app, &guard.pause_status());
-        return;
-    }
     let has_blocked = !st.blocked_providers.is_empty() || guard.any_provider_gate_blocked();
     let tray_report = proxy::guard::effective_tray_report(report, has_blocked, st);
     crate::tray::update_tray_from_report(app, &tray_report, is_pinned, has_blocked);

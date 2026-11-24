@@ -1,3 +1,4 @@
+use super::audit_summary::summarize;
 use super::*;
 use crate::auditor::CheckResult;
 use std::sync::atomic::{AtomicUsize, Ordering};

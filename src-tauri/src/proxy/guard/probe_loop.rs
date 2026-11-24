@@ -9,13 +9,26 @@ use crate::auditor::{Auditor, RiskReport};
 use crate::proxy::hold_queue::HoldQueue;
 #[cfg(any(test, feature = "test-support"))]
 use crate::state::AppState;
-use crate::state::KNOWN_PROVIDERS;
 
 #[cfg(any(test, feature = "test-support"))]
 use super::types::{AUDIT_TIMEOUT_SECS, AuditFn, GuardIo, ProbeFn, ResolveFn};
 use super::types::{
     Env, Gate, GuardCtx, NetworkGuard, PROBE_MIN_GAP_MS, ROUTE_CHECK_INTERVAL_MS, TickPlan,
 };
+
+struct RegularProbeInFlightGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> RegularProbeInFlightGuard<'a> {
+    fn try_enter(flag: &'a std::sync::atomic::AtomicBool) -> Option<Self> {
+        (!flag.swap(true, Ordering::SeqCst)).then_some(Self(flag))
+    }
+}
+
+impl Drop for RegularProbeInFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 impl NetworkGuard {
     /// Starts the background monitor (call once from the Tauri setup hook).
@@ -140,27 +153,16 @@ impl NetworkGuard {
                                         }
                                     })
                                     .await;
-                                    env_sync.auditor.set_protection_flags(
-                                        crate::auditor::AuditProtectionFlags {
-                                            sysproxy_active: crate::sysproxy::is_sysproxy_active(),
-                                            cli_or_sandbox_protection_active:
-                                                crate::sysproxy::is_cli_protection_enabled()
-                                                    || crate::sysproxy::is_browser_pac_policy_active(),
-                                            os_pac_deferred: crate::sysproxy::is_os_pac_deferred(),
-                                        },
-                                    );
+                                    let flags =
+                                        crate::commands::audit::read_runtime_protection_flags()
+                                            .await;
+                                    env_sync.auditor.set_protection_flags(flags);
                                 });
                             }
                         } else if n.is_multiple_of(20) {
-                            env.auditor.set_protection_flags(
-                                crate::auditor::AuditProtectionFlags {
-                                    sysproxy_active: crate::sysproxy::is_sysproxy_active(),
-                                    cli_or_sandbox_protection_active:
-                                        crate::sysproxy::is_cli_protection_enabled()
-                                            || crate::sysproxy::is_browser_pac_policy_active(),
-                                    os_pac_deferred: crate::sysproxy::is_os_pac_deferred(),
-                                },
-                            );
+                            let flags =
+                                crate::commands::audit::read_runtime_protection_flags().await;
+                            env.auditor.set_protection_flags(flags);
                         }
                     }
                 }
@@ -420,7 +422,7 @@ impl NetworkGuard {
 
         inner.last_route_fp = Some(current_fp.clone());
 
-        if inner.probe_in_flight {
+        if inner.probe_in_flight || self.regular_probe_in_flight.load(Ordering::SeqCst) {
             return TickPlan::Done;
         }
         if let Some(t) = inner.last_probe
@@ -440,13 +442,7 @@ impl NetworkGuard {
         let current_fp = self.current_local_route_fingerprint();
         let st_data = env.state.get_data().await;
         let enabled_unrouted = st_data.enabled_unrouted_providers();
-        if !self.is_manual_killswitch() {
-            for p in KNOWN_PROVIDERS {
-                if st_data.blocked_providers.contains(p) && !enabled_unrouted.contains(&p) {
-                    let _ = env.state.unblock_provider(p).await;
-                }
-            }
-        }
+        self.unblock_disabled_and_routed(env, &st_data).await;
         // Capture before `plan_tick` transitions any gates.
         let was_blocked = self.any_provider_gate_blocked() || !st_data.blocked_providers.is_empty();
 
@@ -462,6 +458,11 @@ impl NetworkGuard {
                     .await;
             }
             TickPlan::ProbeRegular(planned_fp) => {
+                let Some(_regular_guard) =
+                    RegularProbeInFlightGuard::try_enter(&self.regular_probe_in_flight)
+                else {
+                    return;
+                };
                 let fast_fail = self.gate() == Gate::Open && !self.is_paused();
                 drop(tick_guard);
                 let mut fp_interval =
