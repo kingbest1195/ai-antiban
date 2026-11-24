@@ -2,9 +2,8 @@
 
 mod helpers;
 
-use crate::tray::update_tray_from_report;
 use crate::{auditor, proxy, state};
-use helpers::resolve_exit_ip_for_provider;
+use helpers::{resolve_exit_ip_for_provider, sync_tray_with_guard_priority};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
@@ -103,14 +102,22 @@ pub async fn audit_connection(
     {
         Ok(report) => report,
         Err(e) => {
-            // A failed primary audit must not leave the previous (possibly green) tray state;
-            // a stop/block state stays as it is.
-            if provider_id == auditor::ProviderId::Anthropic && !guard.any_provider_gate_pending() {
-                let st = state.get_data().await;
-                let has_blocked =
-                    !st.blocked_providers.is_empty() || guard.any_provider_gate_closed();
-                if !has_blocked {
-                    crate::tray::update_tray_no_data(&app, None);
+            // A failed primary audit must not overwrite paused/pending/blocked states or
+            // leave the previous (possibly green) tray state.
+            if provider_id == auditor::ProviderId::Anthropic {
+                if guard.is_manual_killswitch()
+                    || guard.is_paused()
+                    || guard.any_provider_gate_pending()
+                    || guard.any_provider_gate_blocked()
+                {
+                    crate::tray::update_tray_from_guard_status(&app, &guard.pause_status());
+                } else {
+                    let st = state.get_data().await;
+                    if st.blocked_providers.is_empty() {
+                        crate::tray::update_tray_no_data(&app, None);
+                    } else {
+                        crate::tray::update_tray_from_guard_status(&app, &guard.pause_status());
+                    }
                 }
             }
             return Err(e);
@@ -120,13 +127,9 @@ pub async fn audit_connection(
     let st = state.get_data().await;
     let is_pinned = finalize_audit_report_for_state(&st, provider_id, &mut report);
 
-    // Sync system tray status whenever Anthropic or primary audit runs (unless guard is pending)
-    if (provider_id == auditor::ProviderId::Anthropic || force_refresh.unwrap_or(false))
-        && !guard.any_provider_gate_pending()
-    {
-        let has_blocked = !st.blocked_providers.is_empty() || guard.any_provider_gate_closed();
-        let tray_report = proxy::guard::effective_tray_report(&report, has_blocked, &st);
-        update_tray_from_report(&app, &tray_report, is_pinned, has_blocked);
+    // Sync system tray status via strict guard priority whenever Anthropic or primary audit runs
+    if provider_id == auditor::ProviderId::Anthropic || force_refresh.unwrap_or(false) {
+        sync_tray_with_guard_priority(&app, &guard, &st, &report, is_pinned);
     }
 
     Ok(report)
@@ -288,9 +291,7 @@ pub async fn verify_and_unblock_provider(
     let is_routed = matches!(selection, crate::routing::RouteSelection::Route(_));
 
     if !should_verify_unblock(manual_ks, &report, &st_before, is_routed) {
-        let has_blocked =
-            !st_before.blocked_providers.is_empty() || guard.any_provider_gate_closed();
-        update_tray_from_report(&app, &report, is_pinned, has_blocked);
+        sync_tray_with_guard_priority(&app, &guard, &st_before, &report, is_pinned);
         return Ok(false);
     }
     state
@@ -308,11 +309,12 @@ pub async fn verify_and_unblock_provider(
         .await;
     if matches!(selection, crate::routing::RouteSelection::Direct) {
         guard.ensure_open_for_verified(&report.telemetry).await;
+    } else {
+        guard.sync_gates_with_state(&state).await;
     }
 
     let st_after = state.get_data().await;
-    let has_blocked = !st_after.blocked_providers.is_empty() || guard.any_provider_gate_closed();
-    update_tray_from_report(&app, &report, is_pinned, has_blocked);
+    sync_tray_with_guard_priority(&app, &guard, &st_after, &report, is_pinned);
     let _ = app.emit("network://changed", &report);
     Ok(true)
 }

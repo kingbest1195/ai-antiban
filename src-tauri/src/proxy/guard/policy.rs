@@ -332,11 +332,16 @@ pub(crate) fn report_allowed_on_network_switch(
     st: &crate::state::AppStateData,
     trusted_baseline_ip: Option<&str>,
 ) -> bool {
+    let pid = report.provider.as_str();
+    let ip = report.telemetry.ip.trim();
+    if trusted_baseline_ip.is_some_and(|b| ips_equal(b, ip))
+        && st.session_allowed_providers.contains(pid)
+    {
+        return true;
+    }
     if !report_allowed_for_state(report, st, false) {
         return false;
     }
-    let pid = report.provider.as_str();
-    let ip = report.telemetry.ip.trim();
     if st.is_ip_trusted_for_provider(pid, ip) {
         return true;
     }

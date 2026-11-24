@@ -263,4 +263,91 @@ impl NetworkGuard {
     pub(crate) fn bump_restore_epoch_for_test(&self) {
         self.restore_epoch.fetch_add(1, Ordering::SeqCst);
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_route_fingerprint_fn_for_test(&self, fp_fn: Option<super::types::RouteFpFn>) {
+        *self.test_fp_fn.lock().unwrap_or_else(|p| p.into_inner()) = fp_fn;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn start_with_test_env_observed(
+        self: &Arc<Self>,
+        auditor: crate::auditor::Auditor,
+        state: AppState,
+        hold_queue: Arc<crate::proxy::hold_queue::HoldQueue>,
+        probe: Option<super::types::ProbeFn>,
+        resolve: Option<super::types::ResolveFn>,
+        observer: Arc<GuardTestObserver>,
+    ) {
+        struct ObservedIo(Arc<GuardTestObserver>);
+        impl super::types::GuardIo for ObservedIo {
+            fn emit(&self, event: &str, payload: serde_json::Value) {
+                self.0
+                    .events
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((event.to_string(), payload));
+            }
+            fn show_alert_popup(&self, _timing: Option<(String, std::time::Instant)>) {
+                self.0.shows.fetch_add(1, Ordering::SeqCst);
+            }
+            fn hide_alert_popup(&self) {
+                self.0.hides.fetch_add(1, Ordering::SeqCst);
+            }
+            fn tray_report(
+                &self,
+                report: &crate::auditor::RiskReport,
+                is_pinned: bool,
+                has_blocked: bool,
+            ) {
+                self.0
+                    .tray_reports
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((report.clone(), is_pinned, has_blocked));
+            }
+            fn tray_status(&self, color: &str, title: Option<&str>) {
+                self.0
+                    .tray_statuses
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((color.to_string(), title.map(str::to_string)));
+            }
+            fn tray_guard_status(&self, status: &super::types::GuardPauseStatus) {
+                self.0
+                    .tray_guard_statuses
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(status.clone());
+            }
+        }
+        let audit_auditor = auditor.clone();
+        let audit_state = state.clone();
+        let audit: super::types::AuditFn = Arc::new(move |provider, force| {
+            let (auditor, state) = (audit_auditor.clone(), audit_state.clone());
+            Box::pin(async move { auditor.evaluate_all(provider, &state, force).await })
+        });
+        self.register_self_weak();
+        let _ = self.install_env(Env {
+            auditor,
+            state,
+            hold_queue,
+            io: Arc::new(ObservedIo(observer)),
+            audit,
+            probe,
+            resolve,
+            audit_timeout: std::time::Duration::from_secs(super::types::AUDIT_TIMEOUT_SECS),
+        });
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+pub struct GuardTestObserver {
+    pub events: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    pub shows: std::sync::atomic::AtomicUsize,
+    pub hides: std::sync::atomic::AtomicUsize,
+    pub tray_reports: std::sync::Mutex<Vec<(crate::auditor::RiskReport, bool, bool)>>,
+    pub tray_statuses: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    pub tray_guard_statuses: std::sync::Mutex<Vec<super::types::GuardPauseStatus>>,
 }

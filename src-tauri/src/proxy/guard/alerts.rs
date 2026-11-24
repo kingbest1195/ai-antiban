@@ -139,7 +139,7 @@ impl NetworkGuard {
         };
         env.hold_queue.update_alert(&enriched);
         env.emit("interceptor://enriched", &enriched);
-        env.io.tray_status("red", None);
+        self.emit_pause_status();
         log_timing(id, "enriched_failed", t0);
     }
 
@@ -192,7 +192,7 @@ impl NetworkGuard {
         };
         env.hold_queue.update_alert(&enriched);
         env.emit("interceptor://enriched", &enriched);
-        env.io.tray_status("red", None);
+        self.emit_pause_status();
         log_timing(id, "enriched_offline_failed", t0);
     }
 
@@ -364,7 +364,7 @@ impl NetworkGuard {
         log_timing(&id, "risk_detected_failed_emitted", t0);
         env.emit("interceptor://risk-detected", &payload);
         env.io.show_alert_popup(Some((id.clone(), t0)));
-        env.io.tray_status("red", None);
+        self.emit_pause_status();
 
         self.spawn_decision_waiter(env, id, epoch, rx);
     }
@@ -385,6 +385,33 @@ impl NetworkGuard {
         if !inner.is_current(id, epoch) {
             log_timing(id, "audit_dropped_stale", t0);
             return;
+        }
+        if inner.deferred_recheck_fp.take().is_some() {
+            let settle_wait = inner
+                .last_fp_change_at
+                .map(|t| std::time::Duration::from_millis(350).saturating_sub(t.elapsed()))
+                .unwrap_or_default();
+            drop(inner);
+            if !settle_wait.is_zero() {
+                tokio::time::sleep(settle_wait).await;
+            }
+            let latest_ip = self.probe(env).await;
+            inner = self.inner.lock().await;
+            if !inner.is_current(id, epoch) {
+                log_timing(id, "audit_dropped_stale", t0);
+                return;
+            }
+            if latest_ip.as_deref() != Some(new_ip.as_str()) {
+                inner.probe_abort = None;
+                inner.audit_abort = None;
+                if let Some(changed_ip) = latest_ip {
+                    self.handle_change_locked(env, &mut inner, changed_ip, t0)
+                        .await;
+                    return;
+                }
+                inner.handled_ip = None;
+                inner.needs_reaudit = true;
+            }
         }
         inner.probe_abort = None;
         inner.audit_abort = None;

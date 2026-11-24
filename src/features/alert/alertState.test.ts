@@ -415,4 +415,13 @@ describe("Dialog & AlertWindow (Было → Стало, 2 кнопки)", () =>
     expect(alertDialog.persistExceptionLabel).toContain("постоянное исключение");
     expect(alertDialog.confirmForceText).not.toContain("Сохранить исключение для этого адреса автоматически");
   });
+
+  it("single-provider BlockUntilNetworkChange не вызывает глобальный pauseUntilNetworkChange", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const alertSrc = fs.readFileSync(path.join(process.cwd(), "src/features/alert/AlertWindow.tsx"), "utf8");
+    const hookSrc = fs.readFileSync(path.join(process.cwd(), "src/shared/hooks/useInterception.ts"), "utf8");
+    expect(alertSrc).not.toContain("pauseUntilNetworkChange");
+    expect(hookSrc).not.toContain("pauseUntilNetworkChange");
+  });
 });

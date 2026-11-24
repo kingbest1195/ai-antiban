@@ -31,7 +31,7 @@ impl NetworkGuard {
         let chained: Option<String> = None;
         #[cfg(not(test))]
         let chained = crate::sysproxy::get_chained_proxy();
-        compute_local_route_fingerprint(chained.as_deref())
+        self.compute_route_fp(chained.as_deref())
     }
 
     /// True when the route moved (or a CONNECT flagged it) while a probe was in flight. Such a
@@ -97,6 +97,17 @@ impl NetworkGuard {
     /// background. Neither `trusted_exceptions` nor `blocked_providers` is cleared here:
     /// persistent exceptions always survive network switches, and `apply_audit_outcome_locked`
     /// keeps or silently unblocks `blocked_providers` based on the new network's audit.
+    pub(super) fn clear_old_if_ip_changed(
+        self: &Arc<Self>,
+        env: &Env,
+        old_baseline: Option<&Baseline>,
+        new_ip: &str,
+    ) -> Option<JoinHandle<()>> {
+        old_baseline
+            .is_some_and(|b| b.ip.trim() != new_ip.trim())
+            .then(|| self.spawn_clear_old_network_state(env))
+    }
+
     pub(super) fn spawn_clear_old_network_state(self: &Arc<Self>, env: &Env) -> JoinHandle<()> {
         let state = env.state.clone();
         tokio::spawn(async move {
@@ -301,12 +312,13 @@ impl NetworkGuard {
         let id = Uuid::new_v4().to_string();
         let rx = env.hold_queue.register(id.clone(), ALL_PROVIDERS).await;
         let epoch = inner.epoch;
+        let clear_old_state = self.clear_old_if_ip_changed(env, old_baseline.as_ref(), &new_ip);
         inner.pending = Some(Pending {
             id: id.clone(),
             epoch,
             target_ip: new_ip.clone(),
             tel: None,
-            clear_old_state: Some(self.spawn_clear_old_network_state(env)),
+            clear_old_state,
             affected_providers: non_blocked.to_vec(),
             already_blocked_providers: already_blocked.to_vec(),
             healthy_providers: Vec::new(),
@@ -341,7 +353,7 @@ impl NetworkGuard {
         log_timing(&id, "risk_detected_emitted", t0);
         env.io.show_alert_popup(Some((id.clone(), t0)));
         log_timing(&id, "popup_show_queued", t0);
-        env.io.tray_status("yellow", None);
+        self.emit_pause_status();
 
         let st = env.state.get_data().await;
         self.spawn_background_audit_task(
@@ -373,12 +385,13 @@ impl NetworkGuard {
         inner.needs_reaudit = false;
         let id = Uuid::new_v4().to_string();
         let epoch = inner.epoch;
+        let clear_old_state = self.clear_old_if_ip_changed(env, inner.baseline.as_ref(), &new_ip);
         inner.pending = Some(Pending {
             id: id.clone(),
             epoch,
             target_ip: new_ip.clone(),
             tel: None,
-            clear_old_state: Some(self.spawn_clear_old_network_state(env)),
+            clear_old_state,
             affected_providers: non_blocked.to_vec(),
             already_blocked_providers: already_blocked.to_vec(),
             healthy_providers: Vec::new(),
@@ -386,25 +399,19 @@ impl NetworkGuard {
         });
 
         if !non_blocked.is_empty() {
-            if all_pinned {
-                env.io.tray_status("yellow", None);
-            } else {
-                match st.interception_behavior {
+            if !all_pinned {
+                let msg = match st.interception_behavior {
                     crate::state::InterceptionBehavior::AutoLockSilent => {
-                        self.set_gate_reason(Some(
-                            "Смена сети — трафик приостановлен на время проверки".to_string(),
-                        ));
-                        env.io.tray_status("red", None);
+                        "Смена сети — трафик приостановлен на время проверки"
                     }
                     crate::state::InterceptionBehavior::AutoAllowTrusted
                     | crate::state::InterceptionBehavior::AskPopup => {
-                        self.set_gate_reason(Some(
-                            "Смена сети — проверяем безопасность подключения".to_string(),
-                        ));
-                        env.io.tray_status("yellow", None);
+                        "Смена сети — проверяем безопасность подключения"
                     }
-                }
+                };
+                self.set_gate_reason(Some(msg.to_string()));
             }
+            self.emit_pause_status();
         }
 
         self.spawn_background_audit_task(
@@ -429,12 +436,13 @@ impl NetworkGuard {
     ) -> (String, u64) {
         let (silent_id, silent_epoch) = (Uuid::new_v4().to_string(), inner.epoch);
         inner.needs_reaudit = false;
+        let clear_old_state = self.clear_old_if_ip_changed(env, inner.baseline.as_ref(), new_ip);
         inner.pending = Some(Pending {
             id: silent_id.clone(),
             epoch: silent_epoch,
             target_ip: new_ip.to_string(),
             tel: None,
-            clear_old_state: Some(self.spawn_clear_old_network_state(env)),
+            clear_old_state,
             affected_providers: non_blocked.to_vec(),
             already_blocked_providers: already_blocked.to_vec(),
             healthy_providers: Vec::new(),

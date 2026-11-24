@@ -30,7 +30,6 @@ impl NetworkGuard {
     ) {
         crate::routing::net::clear_entry_dns_cache();
         crate::proxy::transit::invalidate_all_dns_caches();
-        env.auditor.resolver.invalidate_direct_cache().await;
 
         let mut inner = self.inner.lock().await;
         self.drain_pending_route_sync_locked(Some(env), &mut inner)
@@ -168,22 +167,22 @@ impl NetworkGuard {
             log_timing(&id, "risk_detected_emitted", t0);
             env.io.show_alert_popup(Some((id.clone(), t0)));
             log_timing(&id, "popup_show_queued", t0);
-            env.io.tray_status("yellow", None);
+            self.emit_pause_status();
             self.spawn_decision_waiter(env, id.clone(), epoch, rx);
             Some(id)
         } else {
             if !non_blocked.is_empty() {
-                let (msg, color) = match st.interception_behavior {
+                let msg = match st.interception_behavior {
                     crate::state::InterceptionBehavior::AutoLockSilent => {
-                        ("Смена сети — трафик приостановлен на время проверки", "red")
+                        "Смена сети — трафик приостановлен на время проверки"
                     }
                     crate::state::InterceptionBehavior::AutoAllowTrusted
                     | crate::state::InterceptionBehavior::AskPopup => {
-                        ("Смена сети — проверяем безопасность подключения", "yellow")
+                        "Смена сети — проверяем безопасность подключения"
                     }
                 };
                 self.set_gate_reason(Some(msg.to_string()));
-                env.io.tray_status(color, None);
+                self.emit_pause_status();
             }
             None
         };
@@ -222,8 +221,8 @@ impl NetworkGuard {
         t0: Instant,
     ) {
         let mut in_flight_guard = super::probe_offline::ProbeInFlightGuard::new(Arc::clone(self));
-        let probed = self
-            .probe_with_offline_retries(&env, &alert_id, epoch, &planned_fp)
+        let (probed, planned_fp) = self
+            .probe_changed_with_settling(&env, &alert_id, epoch, planned_fp)
             .await;
 
         let mut inner = self.inner.lock().await;
@@ -342,7 +341,11 @@ impl NetworkGuard {
                 let cc_ok = baseline_country
                     .as_deref()
                     .is_some_and(|c| !is_blocked_geo_code(c));
-                if !was_blocked && !needs_reaudit && (cc_ok || returning_from_other) {
+                let all_pinned_match = all_pinned_or_excepted_for(&st, &enabled_unrouted, &new_ip);
+                let explicit_reaudit = self.force_reaudit.load(Ordering::SeqCst);
+                if ((!was_blocked && !needs_reaudit) || (all_pinned_match && !explicit_reaudit))
+                    && (cc_ok || returning_from_other)
+                {
                     self.restore_locked(&env, &mut inner).await;
                     let cur_epoch = inner.epoch;
                     self.spawn_verify_restored_baseline(&env, new_ip, cur_epoch);
@@ -410,6 +413,11 @@ impl NetworkGuard {
             }
         }
 
+        let ip_changed_from_baseline = inner
+            .baseline
+            .as_ref()
+            .is_some_and(|b| b.ip.trim() != new_ip.trim());
+        env.auditor.resolver.invalidate_direct_cache().await;
         let active_alert = alert_id.filter(|id| inner.is_current(id, epoch));
         let (audit_id, audit_epoch) = match active_alert {
             Some(id) if !all_pinned => {
@@ -417,7 +425,11 @@ impl NetworkGuard {
                 inner.needs_reaudit = false;
                 if let Some(p) = inner.pending.as_mut() {
                     p.target_ip = new_ip.clone();
-                    p.clear_old_state = Some(self.spawn_clear_old_network_state(&env));
+                    p.clear_old_state = if ip_changed_from_baseline {
+                        Some(self.spawn_clear_old_network_state(&env))
+                    } else {
+                        None
+                    };
                 }
                 (id, epoch)
             }

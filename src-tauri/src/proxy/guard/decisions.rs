@@ -89,9 +89,6 @@ impl NetworkGuard {
         if !self.any_provider_gate_closed() && st.blocked_providers.is_empty() {
             self.restore_epoch.fetch_add(1, Ordering::SeqCst);
             env.hold_queue.cancel_all_superseded().await;
-        } else if !st.blocked_providers.is_empty() {
-            self.force_reaudit.store(true, Ordering::SeqCst);
-            self.wake();
         }
         self.hide_popup(env);
         env.emit("network://changed", &());

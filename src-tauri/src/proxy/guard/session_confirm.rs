@@ -36,7 +36,8 @@ impl NetworkGuard {
                     None => env.resolve_telemetry().await.ok(),
                 };
                 if let Some(t) = resolved {
-                    let ip = inner.observed_ip.clone().unwrap_or_else(|| t.ip.clone());
+                    let ip = t.ip.clone();
+                    inner.observed_ip = Some(ip.clone());
                     inner.baseline = Some(Baseline {
                         ip,
                         country: Some(t.country_code.clone()),
@@ -45,6 +46,8 @@ impl NetworkGuard {
                 } else if let Some(b) = inner.baseline.as_mut() {
                     b.trusted = true;
                 }
+                inner.needs_reaudit = false;
+                self.clear_until_network_change_locked(&mut inner);
             }
             if let Some(p) = inner.pending.as_mut() {
                 p.affected_providers.retain(|x| *x != canonical);
@@ -64,6 +67,8 @@ impl NetworkGuard {
                 self.clear_until_network_change_locked(&mut inner);
                 self.set_gate_reason(None);
                 self.hide_popup(env);
+            } else if st.blocked_providers.is_empty() {
+                self.set_gate_reason(None);
             }
             self.spawn_refresh_tray(env);
             return;

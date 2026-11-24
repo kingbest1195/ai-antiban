@@ -97,7 +97,6 @@ impl NetworkGuard {
                 let st_after = env.state.get_data().await;
                 self.sync_gates_with_state_and_pending(&st_after, None);
                 self.hide_popup(env);
-                env.io.tray_status("red", None);
             } else if st.interception_behavior == crate::state::InterceptionBehavior::AskPopup {
                 if existing_alert_emitted && let Some(ref alert_id) = existing_id {
                     self.enrich_failed_alert_locked(
@@ -154,7 +153,6 @@ impl NetworkGuard {
                 }
                 self.sync_gates_with_state_and_pending(&st_after, None);
                 self.hide_popup(env);
-                env.io.tray_status("red", None);
                 env.emit("network://changed", &());
             }
             return;

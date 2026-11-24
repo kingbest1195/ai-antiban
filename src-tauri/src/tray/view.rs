@@ -169,23 +169,29 @@ impl TrayView {
         }
     }
 
-    /// Instant tray view derived directly from a `NetworkGuard` state transition (`GuardPauseStatus`),
-    /// updating icon, title, tooltip, header, and killswitch item without waiting for an audit.
-    pub(crate) fn from_guard_status(
+    /// Strict top-to-bottom priority resolver shared by guard transitions, report updates, and watchers:
+    /// 1) `manual_killswitch` -> Red " СТОП СЕТИ"
+    /// 2) `pause_mode == UntilNetworkChange` -> Gray " Пауза"
+    /// 3) `any_provider_gate_pending()` -> Yellow " Проверяем…"
+    /// 4) `any_provider_gate_blocked()` or `blocked_in_state` -> Red " СТОП СЕТИ"
+    /// 5) `startup_ready && !sysproxy_active` -> Gray " Защита выключена"
+    /// 6) `None` -> caller proceeds to `TrayView::from_report` (Green/Yellow with country & pin).
+    pub(crate) fn resolve_guard_priority(
         status: &GuardPauseStatus,
+        blocked_in_state: bool,
         sysproxy_active: bool,
-        current_icon_is_green: bool,
-    ) -> Self {
+        startup_ready: bool,
+    ) -> Option<Self> {
         let ver = env!("CARGO_PKG_VERSION");
         if status.manual_killswitch {
-            return TrayView {
+            return Some(TrayView {
                 icon: Some(TrayColor::Red),
                 title: Some(STOP_TITLE.to_string()),
                 tooltip: Some("Застава · СТОП СЕТИ (Ручная блокировка ИИ)".to_string()),
                 header: Some((format!("Застава v{ver} — СТОП СЕТИ"), TrayColor::Red)),
                 killswitch: Some((KS_UNFREEZE_TEXT, TrayColor::Green)),
                 ..Default::default()
-            };
+            });
         }
         if status.mode == PauseMode::UntilNetworkChange {
             let reason = status
@@ -194,7 +200,7 @@ impl TrayView {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("Пауза до следующей смены сети");
-            return TrayView {
+            return Some(TrayView {
                 icon: Some(TrayColor::Gray),
                 title: Some(PAUSED_TITLE.to_string()),
                 tooltip: Some(format!("Застава · {reason}")),
@@ -204,10 +210,10 @@ impl TrayView {
                 )),
                 killswitch: Some((KS_UNFREEZE_TEXT, TrayColor::Green)),
                 ..Default::default()
-            };
+            });
         }
         if status.gate == "pending" || !status.pending_providers.is_empty() {
-            let ks = if status.blocked_providers.is_empty() {
+            let ks = if status.blocked_providers.is_empty() && !blocked_in_state {
                 (KS_FREEZE_TEXT, TrayColor::Red)
             } else {
                 (KS_UNFREEZE_TEXT, TrayColor::Green)
@@ -219,7 +225,7 @@ impl TrayView {
                 .filter(|s| !s.is_empty())
                 .map(|r| format!("Застава · {r}"))
                 .unwrap_or_else(|| format!("Застава · {CHECKING_TOOLTIP}"));
-            return TrayView {
+            return Some(TrayView {
                 icon: Some(TrayColor::Yellow),
                 title: Some(CHECKING_TITLE.to_string()),
                 tooltip: Some(tip),
@@ -229,9 +235,9 @@ impl TrayView {
                 )),
                 killswitch: Some(ks),
                 ..Default::default()
-            };
+            });
         }
-        if status.gate == "blocked" || !status.blocked_providers.is_empty() {
+        if status.gate == "blocked" || !status.blocked_providers.is_empty() || blocked_in_state {
             let tip = status
                 .gate_reason
                 .as_deref()
@@ -239,22 +245,36 @@ impl TrayView {
                 .filter(|s| !s.is_empty())
                 .map(|r| format!("Застава · {r}"))
                 .unwrap_or_else(|| format!("Застава ·{STOP_TITLE}"));
-            return TrayView {
+            return Some(TrayView {
                 icon: Some(TrayColor::Red),
                 title: Some(STOP_TITLE.to_string()),
                 tooltip: Some(tip),
                 header: Some((format!("Застава v{ver} — СТОП СЕТИ"), TrayColor::Red)),
                 killswitch: Some((KS_UNFREEZE_TEXT, TrayColor::Green)),
                 ..Default::default()
-            };
+            });
         }
-        if !sysproxy_active {
-            return TrayView::protection_off().merged_with(TrayView::from_killswitch(false));
+        if startup_ready && !sysproxy_active {
+            return Some(TrayView::protection_off().merged_with(TrayView::from_killswitch(false)));
+        }
+        None
+    }
+
+    /// Instant tray view derived directly from a `NetworkGuard` state transition (`GuardPauseStatus`),
+    /// updating icon, title, tooltip, header, and killswitch item without waiting for an audit.
+    pub(crate) fn from_guard_status(
+        status: &GuardPauseStatus,
+        sysproxy_active: bool,
+        current_icon_is_green: bool,
+    ) -> Self {
+        if let Some(view) = Self::resolve_guard_priority(status, false, sysproxy_active, true) {
+            return view;
         }
         if current_icon_is_green {
             // Preserve the existing country/pin/IP report while ensuring killswitch state is open.
             return TrayView::from_killswitch(false);
         }
+        let ver = env!("CARGO_PKG_VERSION");
         TrayView {
             icon: Some(TrayColor::Green),
             title: Some(" Защита".to_string()),

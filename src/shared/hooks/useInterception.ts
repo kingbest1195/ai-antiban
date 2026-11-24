@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { RiskInterceptPayload } from "../../types";
-import { pauseUntilNetworkChange, resolveInterception, simulateInterception } from "../../utils/api";
+import { resolveInterception, simulateInterception } from "../../utils/api";
 import { toast as t } from "../copy/ru";
 import { allowErrorText, classifyAllowError } from "../../features/alert/alertState";
 import type { ShowToast } from "./useToasts";
@@ -56,7 +56,6 @@ export function useInterception({ runFullAudit, showToast, onSimulateInBrowser }
         interceptPayload.scope,
       );
       if (applied) {
-        await pauseUntilNetworkChange(interceptPayload.gate_reason ?? undefined);
         showToast(t.intercept.pausedTitle, t.intercept.pausedText, "info");
       }
       setInterceptPayload(null);

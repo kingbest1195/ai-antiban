@@ -7,6 +7,21 @@ use super::audit_summary::{audit_enabled, summarize_for_state};
 use super::policy::all_pinned_or_excepted_for;
 use super::types::{Baseline, Env, Gate, NetworkGuard, PauseMode};
 
+struct VerifyInFlightGuard(Arc<NetworkGuard>);
+
+impl VerifyInFlightGuard {
+    fn enter(guard: Arc<NetworkGuard>) -> Self {
+        guard.verify_in_flight.store(true, Ordering::SeqCst);
+        Self(guard)
+    }
+}
+
+impl Drop for VerifyInFlightGuard {
+    fn drop(&mut self) {
+        self.0.verify_in_flight.store(false, Ordering::SeqCst);
+    }
+}
+
 impl NetworkGuard {
     /// Re-audits the baseline IP after a prior block, recovery, route unbind, or monitoring toggle.
     /// Silently clears `blocked_providers` and opens gates for any provider meeting
@@ -22,6 +37,7 @@ impl NetworkGuard {
         baseline_ip: &str,
         was_blocked: bool,
     ) {
+        let _verify_guard = VerifyInFlightGuard::enter(Arc::clone(self));
         let (
             st_before,
             enabled_unrouted,
@@ -83,10 +99,7 @@ impl NetworkGuard {
         if inner_guard.epoch != epoch_before
             || self.is_manual_killswitch()
             || inner_guard.route_dirty
-            || inner_guard.needs_reaudit
-            || self.force_reaudit.load(Ordering::SeqCst)
             || has_pending_route_sync
-            || route_fp_changed
             || inner_guard
                 .observed_ip
                 .as_deref()
@@ -94,6 +107,24 @@ impl NetworkGuard {
         {
             inner_guard.needs_reaudit = true;
             return;
+        }
+        if route_fp_changed {
+            drop(inner_guard);
+            let still_baseline = self.probe(env).await.as_deref() == Some(baseline_ip);
+            inner_guard = self.inner.lock().await;
+            if !still_baseline
+                || inner_guard.epoch != epoch_before
+                || self.is_manual_killswitch()
+                || inner_guard.route_dirty
+                || inner_guard
+                    .observed_ip
+                    .as_deref()
+                    .is_some_and(|obs| obs != baseline_ip)
+            {
+                inner_guard.needs_reaudit = true;
+                return;
+            }
+            inner_guard.last_route_fp = Some(self.current_local_route_fingerprint());
         }
         let inner = &mut *inner_guard;
 
@@ -367,6 +398,7 @@ impl NetworkGuard {
         let guard = Arc::clone(self);
         let env = env.clone();
         tokio::spawn(async move {
+            let _verify_guard = VerifyInFlightGuard::enter(Arc::clone(&guard));
             let st_before = env.state.get_data().await;
             let enabled_unrouted = st_before.enabled_unrouted_providers();
             if enabled_unrouted.is_empty() {

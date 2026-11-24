@@ -260,3 +260,19 @@ pub(crate) fn should_verify_unblock(
     }
     proxy::guard::report_allowed_for_state(report, st, routed)
 }
+
+pub(crate) fn sync_tray_with_guard_priority(
+    app: &tauri::AppHandle,
+    guard: &proxy::NetworkGuard,
+    st: &state::AppStateData,
+    report: &auditor::RiskReport,
+    is_pinned: bool,
+) {
+    if guard.is_manual_killswitch() || guard.is_paused() || guard.any_provider_gate_pending() {
+        crate::tray::update_tray_from_guard_status(app, &guard.pause_status());
+        return;
+    }
+    let has_blocked = !st.blocked_providers.is_empty() || guard.any_provider_gate_blocked();
+    let tray_report = proxy::guard::effective_tray_report(report, has_blocked, st);
+    crate::tray::update_tray_from_report(app, &tray_report, is_pinned, has_blocked);
+}

@@ -41,6 +41,8 @@ pub(crate) use policy::{
     effective_tray_report, is_report_pinned_travel_only, report_allowed_for_state,
     report_no_critical_and_geo_ok, should_hold_ai_studio_session,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use routes_sync::GuardTestObserver;
 pub use types::{
     ALL_PROVIDERS, AUDIT_TIMEOUT_SECS, AuditFn, AuditResults, Gate, GuardCtx, GuardPauseStatus,
     MAX_STALL_SECS, NetworkGuard, PROBE_INTERVAL_MS, PROBE_MIN_GAP_MS, PauseMode, ProbeFn,
