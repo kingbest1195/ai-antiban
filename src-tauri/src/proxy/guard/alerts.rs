@@ -30,6 +30,10 @@ impl NetworkGuard {
         cooldown_reason: Option<&str>,
         t0: Instant,
     ) {
+        if self.is_paused() {
+            self.hide_popup(env);
+            return;
+        }
         let st = env.state.get_data().await;
         let enabled_unrouted = st.enabled_unrouted_providers();
         let mut blocked_set: HashSet<String> =
@@ -94,6 +98,10 @@ impl NetworkGuard {
         healthy_providers: &[&'static str],
         t0: Instant,
     ) {
+        if self.is_paused() {
+            self.hide_popup(env);
+            return;
+        }
         let st = env.state.get_data().await;
         let blocked_set: HashSet<String> = already_blocked
             .iter()
@@ -146,6 +154,10 @@ impl NetworkGuard {
         newly_affected: &[&'static str],
         t0: Instant,
     ) {
+        if self.is_paused() {
+            self.hide_popup(env);
+            return;
+        }
         let st = env.state.get_data().await;
         let blocked_set: HashSet<String> = already_blocked
             .iter()
@@ -199,6 +211,10 @@ impl NetworkGuard {
         cooldown_reason: Option<&str>,
         t0: Instant,
     ) {
+        if self.is_paused() {
+            self.hide_popup(env);
+            return;
+        }
         if let Some(clear) = clear_old_state {
             let _ = clear.await;
         }
@@ -284,6 +300,10 @@ impl NetworkGuard {
         existing_id: Option<String>,
         t0: Instant,
     ) {
+        if self.is_paused() {
+            self.hide_popup(env);
+            return;
+        }
         if let Some(p) = inner.invalidate_alert() {
             env.hold_queue.remove(&p.id).await;
         }

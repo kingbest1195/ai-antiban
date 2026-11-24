@@ -112,6 +112,7 @@ impl NetworkGuard {
         let st = state.get_data().await;
         {
             let mut inner = self.inner.lock().await;
+            inner.pause_epoch = inner.pause_epoch.wrapping_add(1);
             let target_ip = inner.pending.as_ref().map(|p| p.target_ip.clone());
             let detecting_unresolved = inner.probe_in_flight
                 || inner.route_dirty
@@ -153,6 +154,7 @@ impl NetworkGuard {
         }
         self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
         let mut inner = self.inner.lock().await;
+        inner.pause_epoch = inner.pause_epoch.wrapping_add(1);
         let target_ip = inner.pending.as_ref().map(|p| p.target_ip.clone());
         let detecting_unresolved = inner.probe_in_flight
             || inner.route_dirty
@@ -164,6 +166,7 @@ impl NetworkGuard {
         if let Some(env) = self.env.get() {
             let st = env.state.get_data().await;
             self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
+            self.hide_popup(env);
         } else {
             self.set_gate(Gate::Blocked);
         }
@@ -322,6 +325,7 @@ impl NetworkGuard {
                 eprintln!("Warning: could not persist the kill-switch: {e}");
             }
             let mut inner = self.inner.lock().await;
+            inner.pause_epoch = inner.pause_epoch.wrapping_add(1);
             if let (Some(p), Some(env)) = (inner.invalidate_alert(), self.env.get()) {
                 env.hold_queue.remove(&p.id).await;
             }

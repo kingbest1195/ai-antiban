@@ -19,6 +19,7 @@ mod audit_outcome;
 mod audit_summary;
 mod baseline_restore;
 mod decisions;
+mod fingerprint;
 mod gates;
 mod killswitch;
 mod orchestrator;
@@ -32,6 +33,7 @@ mod session_confirm;
 mod types;
 mod waiter;
 
+pub use fingerprint::compute_local_route_fingerprint;
 pub use killswitch::{gate_closed, shutdown_aborted, wait_open};
 pub(crate) use policy::{
     effective_tray_report, is_report_pinned_travel_only, report_allowed_for_state,
@@ -40,7 +42,7 @@ pub(crate) use policy::{
 pub use types::{
     ALL_PROVIDERS, AUDIT_TIMEOUT_SECS, AuditFn, AuditResults, Gate, GuardCtx, GuardPauseStatus,
     MAX_STALL_SECS, NetworkGuard, PROBE_INTERVAL_MS, PROBE_MIN_GAP_MS, PauseMode, ProbeFn,
-    ROUTE_CHECK_INTERVAL_MS, ResolveFn, compute_local_route_fingerprint,
+    ROUTE_CHECK_INTERVAL_MS, ResolveFn,
 };
 
 #[cfg(test)]

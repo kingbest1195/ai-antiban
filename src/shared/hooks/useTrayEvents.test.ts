@@ -132,4 +132,41 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
     expect(refreshState).toHaveBeenCalledTimes(1);
     expect(runFullAudit).toHaveBeenCalledWith(false);
   });
+
+  it("handleRiskDetectedEvent игнорирует событие и очищает payload, когда guardPauseStatus.paused === true", () => {
+    const invalidateReports = vi.fn();
+    const refreshState = vi.fn(async () => ({}));
+    const setInterceptPayload = vi.fn();
+    const payload: RiskInterceptPayload = {
+      id: "alert-paused",
+      provider: "anthropic",
+      host: "claude.ai",
+      report: null,
+      ttl_seconds: 90,
+      scope: "network",
+      detected_at_ms: 1,
+      phase: "ready",
+    };
+
+    handleRiskDetectedEvent(
+      {
+        invalidateReports,
+        refreshState,
+        setInterceptPayload,
+        guardPauseStatus: {
+          paused: true,
+          mode: "until_network_change",
+          gate: "blocked",
+          gate_reason: "Пауза",
+          manual_killswitch: false,
+          pending_providers: [],
+          blocked_providers: ["anthropic", "openai", "gemini"],
+        },
+      },
+      payload,
+    );
+    expect(invalidateReports).not.toHaveBeenCalled();
+    expect(refreshState).not.toHaveBeenCalled();
+    expect(setInterceptPayload).toHaveBeenCalledWith(null);
+  });
 });

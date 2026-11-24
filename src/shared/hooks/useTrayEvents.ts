@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
 import type {
   EnrichedPayload,
+  GuardPauseStatus,
   ProfileSwitchResult,
   RiskInterceptPayload,
   UpdateCheckResult,
@@ -38,6 +39,7 @@ export interface TrayEventHandlers {
   openCrashTest: () => void;
   setKillswitchFrozen: (frozen: boolean) => void;
   setInterceptPayload: Dispatch<SetStateAction<RiskInterceptPayload | null>>;
+  guardPauseStatus?: GuardPauseStatus | null;
   invalidateReports?: (onlyProviders?: string[], includeAll?: boolean) => void;
   applyUpdateProgress: (payload: UpdateProgressPayload) => void;
   applyUpdateAvailable: (payload: UpdateCheckResult) => void;
@@ -77,9 +79,13 @@ export function handleNetworkChangedEvent(
 
 /** При `detecting` / `failed` / сетевом риске сбрасывает устаревшие отчёты, чтобы сервис не выглядел «Доступен». */
 export function handleRiskDetectedEvent(
-  handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload">,
+  handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload" | "guardPauseStatus">,
   payload: RiskInterceptPayload,
 ): void {
+  if (handlers.guardPauseStatus?.paused && !payload.is_simulation) {
+    handlers.setInterceptPayload(null);
+    return;
+  }
   if (payload.phase === "detecting" || payload.phase === "failed" || payload.scope === "network") {
     const only = payload.scope === "provider" ? [payload.provider] : undefined;
     handlers.invalidateReports?.(only, false);
@@ -223,12 +229,27 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
 
     // Эпоха последнего enriched по текущему алерту: чужие и устаревшие события игнорируются.
     let enrichedEpoch: number | null = null;
+    let pausedFromEvent = false;
+    on<GuardPauseStatus>("guard://pause-status-changed", (status) => {
+      pausedFromEvent = Boolean(status?.paused);
+      if (pausedFromEvent) {
+        ref.current.setInterceptPayload(null);
+      }
+    });
+
     on<RiskInterceptPayload>("interceptor://risk-detected", (payload) => {
+      if ((pausedFromEvent || ref.current.guardPauseStatus?.paused) && !payload.is_simulation) {
+        ref.current.setInterceptPayload(null);
+        return;
+      }
       enrichedEpoch = null;
       handleRiskDetectedEvent(ref.current, payload);
     });
 
     on<EnrichedPayload>("interceptor://enriched", (enriched) => {
+      if (pausedFromEvent || ref.current.guardPauseStatus?.paused) {
+        return;
+      }
       ref.current.setInterceptPayload((prev) => {
         const applied = applyEnriched(prev, enrichedEpoch, enriched);
         if (!applied) return prev;

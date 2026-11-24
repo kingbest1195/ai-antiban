@@ -17,8 +17,8 @@ use crate::auditor::{Auditor, NetworkTelemetry, RiskReport};
 use crate::proxy::hold_queue::HoldQueue;
 use crate::state::AppState;
 
-/// Fast kernel routing table check interval (sub-250ms reaction time on VPN disconnect).
-pub const ROUTE_CHECK_INTERVAL_MS: u64 = 250;
+/// Fast kernel routing / interface / DNS table check interval (< 200ms reaction on VPN disconnect).
+pub const ROUTE_CHECK_INTERVAL_MS: u64 = 150;
 /// Remote IP probe interval when route fingerprint has not changed.
 pub const PROBE_INTERVAL_MS: u64 = 1000;
 /// Minimum gap between two remote HTTP probes.
@@ -242,6 +242,8 @@ pub(super) struct Inner {
     pub(super) pending_pause_ip_bind: bool,
     /// Route fingerprint active when `pending_pause_ip_bind` was armed.
     pub(super) paused_route_fp: Option<String>,
+    /// Monotonic pause epoch bumped whenever pause/manual killswitch is engaged.
+    pub(super) pause_epoch: u64,
 }
 
 impl Inner {
@@ -326,45 +328,6 @@ pub struct NetworkGuard {
     pub(super) client: reqwest::Client,
     /// Cached client configured with the current `chained_proxy` so ticks do not rebuild it.
     pub(super) chained_client: std::sync::Mutex<Option<(String, reqwest::Client)>>,
-}
-
-fn udp_route_ip(bind: &str, target: &str) -> String {
-    std::net::UdpSocket::bind(bind)
-        .ok()
-        .and_then(|s| s.connect(target).ok().and_then(|_| s.local_addr().ok()))
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "none".to_string())
-}
-
-fn system_dns_signature() -> String {
-    let Ok((cfg, _)) = hickory_resolver::system_conf::read_system_conf() else {
-        return "none".to_string();
-    };
-    let mut ips: Vec<String> = cfg
-        .name_servers()
-        .iter()
-        .map(|ns| ns.ip.to_string())
-        .collect();
-    ips.sort();
-    ips.dedup();
-    if ips.is_empty() {
-        "none".to_string()
-    } else {
-        ips.join(",")
-    }
-}
-
-/// Computes the local default-route network & DNS fingerprint in < 0.1ms
-/// using local UDP routing lookups and OS resolver config without transmitting any packet.
-pub fn compute_local_route_fingerprint(upstream_key: Option<&str>) -> String {
-    let ip_cf = udp_route_ip("0.0.0.0:0", "1.1.1.1:80");
-    let ip_dns = udp_route_ip("0.0.0.0:0", "8.8.8.8:53");
-    let ip_v6 = udp_route_ip("[::]:0", "[2606:4700:4700::1111]:80");
-    let dns_sig = system_dns_signature();
-    format!(
-        "{ip_cf}|{ip_dns}|{ip_v6}|dns:{dns_sig}|upstream:{}",
-        upstream_key.unwrap_or("")
-    )
 }
 
 impl Default for NetworkGuard {

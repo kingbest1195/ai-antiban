@@ -13,6 +13,44 @@ use crate::proxy::hold_queue::{
 use super::policy::{network_change, now_unix_ms};
 use super::types::{ALL_PROVIDERS, Env, Gate, Inner, NetworkGuard, PauseMode, Pending};
 
+/// RAII drop guard ensuring `Inner::probe_in_flight` and `Inner::probe_abort` are cleared
+/// even if the background probe task exits early, is cancelled, or panics.
+pub(super) struct ProbeInFlightGuard {
+    guard: Arc<NetworkGuard>,
+    armed: bool,
+}
+
+impl ProbeInFlightGuard {
+    pub(super) fn new(guard: Arc<NetworkGuard>) -> Self {
+        Self { guard, armed: true }
+    }
+
+    pub(super) fn disarm(&mut self, inner: &mut Inner) {
+        self.armed = false;
+        inner.probe_in_flight = false;
+        inner.probe_abort = None;
+    }
+}
+
+impl Drop for ProbeInFlightGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut inner) = self.guard.inner.try_lock() {
+            inner.probe_in_flight = false;
+            inner.probe_abort = None;
+        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let guard = Arc::clone(&self.guard);
+            handle.spawn(async move {
+                let mut inner = guard.inner.lock().await;
+                inner.probe_in_flight = false;
+                inner.probe_abort = None;
+            });
+        }
+    }
+}
+
 impl NetworkGuard {
     /// Revokes session-level ephemeral approvals for currently enabled unrouted providers.
     pub(super) async fn revoke_unrouted_session_allows(env: &Env, unrouted: &[&'static str]) {

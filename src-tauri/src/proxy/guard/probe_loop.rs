@@ -93,7 +93,7 @@ impl NetworkGuard {
             #[cfg(not(test))]
             let mut n: u64 = 0;
             #[cfg(not(test))]
-            let mut sync_tracker = PeriodicSysproxySync::default();
+            let mut sync_tracker = super::fingerprint::PeriodicSysproxySync::default();
             loop {
                 if let Some(env) = guard.env.get() {
                     guard.check_route_and_tick(env).await;
@@ -188,7 +188,9 @@ impl NetworkGuard {
 
     /// Fetches the current egress IP (Cloudflare trace, falls back to ipify),
     /// honoring an active external `chained_proxy` when configured (caching its `reqwest::Client`).
-    async fn probe_ip(&self) -> Option<String> {
+    /// When `fast_fail` is true and the primary 500ms-connect probe fails with a connect/timeout
+    /// error, returns `None` immediately so the guard can freeze gates and show the popup first.
+    async fn probe_ip_with_fast_fail(&self, fast_fail: bool) -> Option<String> {
         let proxied = match crate::sysproxy::get_chained_proxy() {
             Some(cp) => {
                 let cached = {
@@ -207,7 +209,8 @@ impl NetworkGuard {
                     reqwest::Proxy::all(&cp).ok().and_then(|proxy| {
                         let client = reqwest::Client::builder()
                             .proxy(proxy)
-                            .timeout(Duration::from_millis(2000))
+                            .connect_timeout(Duration::from_millis(500))
+                            .timeout(Duration::from_millis(1200))
                             .pool_max_idle_per_host(0)
                             .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
                             .build()
@@ -231,17 +234,23 @@ impl NetworkGuard {
             }
         };
         let client = proxied.as_ref().unwrap_or(&self.client);
-        if let Ok(resp) = client.get("https://1.1.1.1/cdn-cgi/trace").send().await
-            && let Ok(text) = resp.text().await
-        {
-            for line in text.lines() {
-                if let Some(val) = line.strip_prefix("ip=") {
-                    let val = val.trim();
-                    if val.parse::<IpAddr>().is_ok() {
-                        return Some(val.to_string());
+        match client.get("https://1.1.1.1/cdn-cgi/trace").send().await {
+            Ok(resp) => {
+                if let Ok(text) = resp.text().await {
+                    for line in text.lines() {
+                        if let Some(val) = line.strip_prefix("ip=") {
+                            let val = val.trim();
+                            if val.parse::<IpAddr>().is_ok() {
+                                return Some(val.to_string());
+                            }
+                        }
                     }
                 }
             }
+            Err(err) if fast_fail && (err.is_connect() || err.is_timeout()) => {
+                return None;
+            }
+            Err(_) => {}
         }
         if let Ok(resp) = client.get("https://api.ipify.org").send().await
             && let Ok(text) = resp.text().await
@@ -257,7 +266,18 @@ impl NetworkGuard {
     pub(super) async fn probe(&self, env: &Env) -> Option<String> {
         match &env.probe {
             Some(probe) => probe().await,
-            None => self.probe_ip().await,
+            None => self.probe_ip_with_fast_fail(false).await,
+        }
+    }
+
+    pub(super) async fn probe_for_regular_tick(
+        &self,
+        env: &Env,
+        fast_fail: bool,
+    ) -> Option<String> {
+        match &env.probe {
+            Some(probe) => probe().await,
+            None => self.probe_ip_with_fast_fail(fast_fail).await,
         }
     }
 
@@ -411,73 +431,12 @@ impl NetworkGuard {
                     .await;
             }
             TickPlan::ProbeRegular(planned_fp) => {
+                let fast_fail = self.gate() == Gate::Open && !self.is_paused();
                 drop(tick_guard);
-                let probed = self.probe(env).await;
+                let probed = self.probe_for_regular_tick(env, fast_fail).await;
                 self.apply_regular_probe_unlocked(env, probed, &planned_fp, was_blocked)
                     .await;
             }
         }
-    }
-}
-
-/// Tracks the last route/proxy state synced via `refresh_if_services_changed()` so steady-state
-/// ticks never re-open the ownership journal or rewrite WinINet/browser policies every 5 seconds.
-/// When `os_pac_deferred` is set (macOS temporary VPN DNS), retries at most once every 5s;
-/// otherwise performs a low-frequency self-heal & newly-installed-browser check every 120s.
-#[derive(Default)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) struct PeriodicSysproxySync {
-    last_route_fp: Option<String>,
-    last_active: bool,
-    last_refresh_at: Option<Instant>,
-}
-
-impl PeriodicSysproxySync {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) const DEFERRED_RETRY_INTERVAL: Duration = Duration::from_secs(5);
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) const SELF_HEAL_INTERVAL: Duration = Duration::from_secs(120);
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn should_refresh(
-        &mut self,
-        route_fp: &str,
-        sysproxy_active: bool,
-        os_pac_deferred: bool,
-    ) -> bool {
-        self.should_refresh_at(route_fp, sysproxy_active, os_pac_deferred, Instant::now())
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn should_refresh_at(
-        &mut self,
-        route_fp: &str,
-        sysproxy_active: bool,
-        os_pac_deferred: bool,
-        now: Instant,
-    ) -> bool {
-        if !sysproxy_active {
-            self.last_active = false;
-            self.last_route_fp = None;
-            self.last_refresh_at = None;
-            return false;
-        }
-        let route_or_active_changed =
-            !self.last_active || self.last_route_fp.as_deref() != Some(route_fp);
-        let interval = if os_pac_deferred {
-            Self::DEFERRED_RETRY_INTERVAL
-        } else {
-            Self::SELF_HEAL_INTERVAL
-        };
-        let timer_due = self
-            .last_refresh_at
-            .is_none_or(|t| now.saturating_duration_since(t) >= interval);
-        let refresh = route_or_active_changed || timer_due;
-        if refresh {
-            self.last_active = true;
-            self.last_route_fp = Some(route_fp.to_string());
-            self.last_refresh_at = Some(now);
-        }
-        refresh
     }
 }

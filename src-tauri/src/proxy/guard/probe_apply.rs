@@ -150,14 +150,24 @@ impl NetworkGuard {
         }
 
         if self.pause_mode() == PauseMode::UntilNetworkChange && inner.pending_pause_ip_bind {
-            let route_still_same = !inner.route_dirty
-                && (inner.paused_route_fp.is_none()
-                    || inner.paused_route_fp == inner.last_route_fp)
-                && !self.probe_is_stale(&inner, planned_fp);
-            if route_still_same {
+            let st_pause = env.state.get_data().await;
+            let unrouted_pause = st_pause.enabled_unrouted_providers();
+            let ip_matches_pin = !self.is_manual_killswitch()
+                && !unrouted_pause.is_empty()
+                && unrouted_pause.iter().all(|p| {
+                    st_pause
+                        .pinned_ip_for_provider(p, false)
+                        .is_some_and(|pin| pin.trim() == ip.trim())
+                });
+            if !ip_matches_pin {
+                inner.observed_ip = Some(ip.clone());
                 inner.paused_ip = Some(ip.clone());
+                inner.paused_route_fp = inner.last_route_fp.clone();
                 inner.handled_ip = Some(ip.clone());
                 inner.pending_pause_ip_bind = false;
+                inner.route_dirty = false;
+                self.hide_popup(env);
+                return;
             }
         }
 
