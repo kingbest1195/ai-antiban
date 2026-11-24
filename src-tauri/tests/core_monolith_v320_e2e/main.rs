@@ -672,4 +672,5 @@ async fn e2e_multi_provider_isolation_manual_allow_anthropic_then_gemini_without
     assert!(state.get_data().await.blocked_providers.is_empty());
 }
 
+mod video_pause_regressions;
 mod video_regressions;

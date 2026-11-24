@@ -488,16 +488,4 @@ impl NetworkGuard {
             }
         });
     }
-
-    /// Returns the newly affected providers for an active network alert `id`, if present.
-    pub async fn affected_providers_for_alert(&self, id: &str) -> Option<Vec<String>> {
-        let mut inner = self.inner.lock().await;
-        self.drain_pending_route_sync_locked(self.env.get(), &mut inner)
-            .await;
-        inner
-            .pending
-            .as_ref()
-            .filter(|p| p.id == id)
-            .map(|p| p.affected_providers.iter().map(|s| s.to_string()).collect())
-    }
 }

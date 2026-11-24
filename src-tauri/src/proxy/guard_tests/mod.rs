@@ -320,6 +320,7 @@ mod asn_cooldown_tests;
 mod audit_lifecycle_tests;
 mod gates_tests;
 mod offline_fail_closed_tests;
+mod pause_reaudit_tests;
 mod pinning_and_pause_tests;
 mod provider_isolation_tests;
 mod real_ticker_changed_tests;

@@ -377,3 +377,22 @@ pub(super) enum TickPlan {
     /// Regular periodic probe. Both carry the route fingerprint the plan was made for.
     ProbeRegular(String),
 }
+
+pub(super) struct NetworkAlertSpec<'a> {
+    pub(super) existing_id: Option<String>,
+    pub(super) target_ip: String,
+    pub(super) tel: Option<crate::auditor::NetworkTelemetry>,
+    pub(super) clear_old_state: Option<JoinHandle<()>>,
+    pub(super) affected_providers: &'a [&'static str],
+    pub(super) already_blocked_providers: &'a [&'static str],
+    pub(super) healthy_providers: &'a [&'static str],
+    pub(super) provider: ProviderId,
+    pub(super) report: Option<RiskReport>,
+    pub(super) network_change: crate::proxy::hold_queue::NetworkChange,
+    pub(super) phase: &'a str,
+    pub(super) gate_reason: String,
+    pub(super) timing_label: &'static str,
+    pub(super) emit_pause_status: bool,
+    pub(super) emit_network_changed: bool,
+    pub(super) t0: Instant,
+}

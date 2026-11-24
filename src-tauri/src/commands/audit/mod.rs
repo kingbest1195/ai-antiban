@@ -7,37 +7,12 @@ use helpers::{resolve_exit_ip_for_provider, sync_tray_with_guard_priority};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
+pub(crate) use crate::sysproxy::read_runtime_protection_flags;
 pub(crate) use helpers::{
     AuditProgressEvent, clear_trusted_exceptions_inner, finalize_audit_report_for_state,
     is_ip_pinned_for_state, remove_trusted_exception_inner, set_provider_monitoring_inner,
     should_verify_unblock,
 };
-
-fn read_os_pac_deferred() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        if !crate::sysproxy::os_effects_enabled() || !crate::sysproxy::is_sysproxy_active() {
-            return false;
-        }
-        use crate::sysproxy::platform::{Platform, RealPlatform};
-        !matches!(RealPlatform.temp_dns_overrides(), Ok(false))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
-}
-
-pub(crate) async fn read_runtime_protection_flags() -> auditor::AuditProtectionFlags {
-    tokio::task::spawn_blocking(|| auditor::AuditProtectionFlags {
-        sysproxy_active: crate::sysproxy::is_sysproxy_active(),
-        cli_or_sandbox_protection_active: crate::sysproxy::is_cli_protection_enabled()
-            || crate::sysproxy::is_browser_pac_policy_active(),
-        os_pac_deferred: read_os_pac_deferred(),
-    })
-    .await
-    .unwrap_or_default()
-}
 
 #[cfg(test)]
 pub(crate) use helpers::{allow_provider_session_inner, pin_ip_inner, unpin_ip_inner};

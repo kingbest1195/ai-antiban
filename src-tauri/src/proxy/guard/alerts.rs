@@ -5,38 +5,18 @@ use std::time::Instant;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::auditor::NetworkTelemetry;
 use crate::auditor::geo_matrix::ProviderId;
 use crate::core::timing::log_timing;
 use crate::proxy::hold_queue::{
-    DEFAULT_HOLD_TTL_SECS, EnrichedPayload, NetworkChange, PHASE_FAILED, PHASE_READY,
-    RiskInterceptPayload,
+    DEFAULT_HOLD_TTL_SECS, EnrichedPayload, PHASE_FAILED, PHASE_READY, RiskInterceptPayload,
 };
 
 use super::audit_summary::AuditSummary;
 use super::policy::{
     canonical_probe_ip, network_change, now_unix_ms, resolve_gate_reason_with_cooldown,
 };
+pub(super) use super::types::NetworkAlertSpec;
 use super::types::{ALL_PROVIDERS, AuditResults, Baseline, Env, Inner, NetworkGuard, Pending};
-
-pub(super) struct NetworkAlertSpec<'a> {
-    pub(super) existing_id: Option<String>,
-    pub(super) target_ip: String,
-    pub(super) tel: Option<NetworkTelemetry>,
-    pub(super) clear_old_state: Option<JoinHandle<()>>,
-    pub(super) affected_providers: &'a [&'static str],
-    pub(super) already_blocked_providers: &'a [&'static str],
-    pub(super) healthy_providers: &'a [&'static str],
-    pub(super) provider: ProviderId,
-    pub(super) report: Option<crate::auditor::RiskReport>,
-    pub(super) network_change: NetworkChange,
-    pub(super) phase: &'a str,
-    pub(super) gate_reason: String,
-    pub(super) timing_label: &'static str,
-    pub(super) emit_pause_status: bool,
-    pub(super) emit_network_changed: bool,
-    pub(super) t0: Instant,
-}
 
 impl NetworkGuard {
     pub(super) async fn register_and_emit_network_alert_locked(

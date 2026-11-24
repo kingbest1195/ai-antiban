@@ -16,6 +16,7 @@
 
 mod alerts;
 mod audit_outcome;
+mod audit_outcome_fallback;
 mod audit_summary;
 mod baseline_restore;
 mod baseline_verify;

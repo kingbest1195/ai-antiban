@@ -154,14 +154,12 @@ impl NetworkGuard {
                                     })
                                     .await;
                                     let flags =
-                                        crate::commands::audit::read_runtime_protection_flags()
-                                            .await;
+                                        crate::sysproxy::read_runtime_protection_flags().await;
                                     env_sync.auditor.set_protection_flags(flags);
                                 });
                             }
                         } else if n.is_multiple_of(20) {
-                            let flags =
-                                crate::commands::audit::read_runtime_protection_flags().await;
+                            let flags = crate::sysproxy::read_runtime_protection_flags().await;
                             env.auditor.set_protection_flags(flags);
                         }
                     }

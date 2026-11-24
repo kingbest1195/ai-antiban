@@ -33,6 +33,8 @@ import {
   invalidateStaleReports,
   isValidGatewayLatency,
   mergeProviderReport,
+  shouldInvalidateOnPauseStatus,
+  shouldSuppressSelfHeal,
 } from "./gatewayReports";
 import type { ShowToast } from "./useToasts";
 import { pickWorstReport } from "../../features/checks/checksModel";
@@ -46,36 +48,14 @@ export {
   emptyPartial,
   invalidateStaleReports,
   mergeProviderReport,
+  shouldInvalidateOnPauseStatus,
+  shouldSuppressSelfHeal,
 };
 
 interface Options {
   showToast: ShowToast;
   refreshGatewayStats: () => Promise<void>;
   onManualKillswitchChange?: (frozen: boolean) => void;
-}
-
-/** При paused === true или gate === "blocked" отчёты не сбрасываем, чтобы экран не мигал «Проверяем сеть и защиту...». */
-export function shouldInvalidateOnPauseStatus(snap: GuardPauseStatus): {
-  invalidate: boolean;
-  onlyProviders?: string[];
-  includeAll: boolean;
-} {
-  if (snap.paused || snap.gate === "blocked") {
-    return { invalidate: false, includeAll: false };
-  }
-  const pending = snap.pending_providers ?? [];
-  if (snap.manual_killswitch) {
-    return { invalidate: true, onlyProviders: pending.length > 0 ? pending : undefined, includeAll: true };
-  }
-  if (snap.gate === "pending" || pending.length > 0) {
-    return { invalidate: true, onlyProviders: pending.length > 0 ? pending : undefined, includeAll: false };
-  }
-  return { invalidate: false, includeAll: false };
-}
-
-/** Подавляет фоновый 1.5с self-heal аудит, пока шлюз в pending или на паузе. */
-export function shouldSuppressSelfHeal(guardPauseStatus: GuardPauseStatus | null | undefined): boolean {
-  return guardPauseStatus?.gate === "pending" || guardPauseStatus?.paused === true;
 }
 
 /**

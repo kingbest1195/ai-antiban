@@ -405,6 +405,32 @@ fn open_windows_settings_uri(uri: &str, label: &str) -> Result<(), String> {
 #[path = "mod_tests.rs"]
 mod tests;
 
+fn read_os_pac_deferred() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if !os_effects_enabled() || !is_sysproxy_active() {
+            return false;
+        }
+        use platform::{Platform, RealPlatform};
+        !matches!(RealPlatform.temp_dns_overrides(), Ok(false))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+pub(crate) async fn read_runtime_protection_flags() -> crate::auditor::AuditProtectionFlags {
+    tokio::task::spawn_blocking(|| crate::auditor::AuditProtectionFlags {
+        sysproxy_active: is_sysproxy_active(),
+        cli_or_sandbox_protection_active: is_cli_protection_enabled()
+            || is_browser_pac_policy_active(),
+        os_pac_deferred: read_os_pac_deferred(),
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 #[allow(unused_imports)]
 use orchestrator::take_app_lock;
