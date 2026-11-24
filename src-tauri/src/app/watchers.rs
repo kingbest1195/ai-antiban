@@ -70,6 +70,26 @@ async fn refresh_sibling_unrouted_providers(
     sibling_status_changed
 }
 
+async fn wait_next_tray_tick(
+    delay: Duration,
+    gate_rx: &mut tokio::sync::watch::Receiver<proxy::Gate>,
+    kill_rx: &mut tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => {}
+        res = gate_rx.changed() => {
+            if res.is_err() {
+                tokio::time::sleep(delay).await;
+            }
+        }
+        res = kill_rx.changed() => {
+            if res.is_err() {
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 /// Background tray status updater (network changes are handled by the NetworkGuard).
 pub(super) fn spawn_tray_status_watcher(
     app: &tauri::App,
@@ -82,6 +102,8 @@ pub(super) fn spawn_tray_status_watcher(
     let watcher_state = app_state.clone();
     let watcher_guard = guard;
     tauri::async_runtime::spawn(async move {
+        let mut gate_rx = watcher_guard.subscribe();
+        let mut kill_rx = watcher_guard.subscribe_killswitch();
         let mut initial_synced = false;
         let mut failures: u32 = 0;
         // Local time (HH:MM) of the last audit that produced a report.
@@ -91,7 +113,11 @@ pub(super) fn spawn_tray_status_watcher(
         let mut last_observed_ip: Option<String> = None;
         loop {
             if watcher_guard.any_provider_gate_pending() {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
+                crate::tray::update_tray_from_guard_status(
+                    &watcher_handle,
+                    &watcher_guard.pause_status(),
+                );
+                wait_next_tray_tick(Duration::from_millis(1000), &mut gate_rx, &mut kill_rx).await;
                 continue;
             }
             let st_pre = watcher_state.get_data().await;
@@ -106,7 +132,7 @@ pub(super) fn spawn_tray_status_watcher(
                     "green",
                     Some("Мониторинг провайдеров отключён"),
                 );
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                wait_next_tray_tick(Duration::from_secs(10), &mut gate_rx, &mut kill_rx).await;
                 continue;
             };
             let protection = commands::audit::read_runtime_protection_flags().await;
@@ -118,7 +144,16 @@ pub(super) fn spawn_tray_status_watcher(
                     failures = 0;
                     last_checked = Some(chrono::Local::now().format("%H:%M").to_string());
                     if watcher_guard.any_provider_gate_pending() {
-                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        crate::tray::update_tray_from_guard_status(
+                            &watcher_handle,
+                            &watcher_guard.pause_status(),
+                        );
+                        wait_next_tray_tick(
+                            Duration::from_millis(1000),
+                            &mut gate_rx,
+                            &mut kill_rx,
+                        )
+                        .await;
                         continue;
                     }
                     let st = watcher_state.get_data().await;
@@ -166,7 +201,12 @@ pub(super) fn spawn_tray_status_watcher(
                     let startup_ready = watcher_handle
                         .try_state::<Arc<crate::startup::StartupState>>()
                         .is_none_or(|s| s.is_ready());
-                    if !has_blocked && startup_ready && !sysproxy::is_sysproxy_active() {
+                    if watcher_guard.is_paused() {
+                        crate::tray::update_tray_from_guard_status(
+                            &watcher_handle,
+                            &watcher_guard.pause_status(),
+                        );
+                    } else if !has_blocked && startup_ready && !sysproxy::is_sysproxy_active() {
                         crate::tray::update_tray_protection_off(&watcher_handle);
                     } else {
                         update_tray_from_report(
@@ -211,11 +251,20 @@ pub(super) fn spawn_tray_status_watcher(
                         }
                         let _ = watcher_handle.emit("network://changed", &report);
                     }
-                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    wait_next_tray_tick(Duration::from_secs(10), &mut gate_rx, &mut kill_rx).await;
                 }
                 Err(_) => {
-                    if watcher_guard.any_provider_gate_pending() {
-                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                    if watcher_guard.any_provider_gate_pending() || watcher_guard.is_paused() {
+                        crate::tray::update_tray_from_guard_status(
+                            &watcher_handle,
+                            &watcher_guard.pause_status(),
+                        );
+                        wait_next_tray_tick(
+                            Duration::from_millis(1000),
+                            &mut gate_rx,
+                            &mut kill_rx,
+                        )
+                        .await;
                         continue;
                     }
                     // Never leave the previous (possibly green) state on screen after a failed
@@ -240,11 +289,12 @@ pub(super) fn spawn_tray_status_watcher(
                             );
                         }
                     }
-                    if !initial_synced {
-                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                    let delay = if !initial_synced {
+                        Duration::from_millis(1200)
                     } else {
-                        tokio::time::sleep(Duration::from_secs(10)).await;
-                    }
+                        Duration::from_secs(10)
+                    };
+                    wait_next_tray_tick(delay, &mut gate_rx, &mut kill_rx).await;
                 }
             }
         }

@@ -51,6 +51,7 @@ pub(crate) async fn toggle_sysproxy_shared(
         let enabled = enable_sysproxy_with(false, state, auditor, proxy_manager).await?;
         if enabled {
             crate::tray::update_tray_checking(app);
+            proxy_manager.guard.wake();
         }
         auditor.set_protection_flags(crate::commands::audit::read_runtime_protection_flags().await);
         Ok(enabled)

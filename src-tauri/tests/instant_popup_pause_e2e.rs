@@ -173,3 +173,66 @@ async fn e2e_pause_during_detecting_stays_paused_after_probe_resolves() {
         .resolve_all_for_provider("all", HoldResolution::Block)
         .await;
 }
+
+#[tokio::test]
+async fn e2e_fast_fail_offline_transition_freezes_gate_and_emits_detecting_without_delay() {
+    zastava_lib::sysproxy::force_os_dry_run();
+    let auditor = offline_auditor_with_probe(HttpProbeOutcome::Timeout);
+    let state = AppState::new_in_memory();
+    let hold_queue = Arc::new(HoldQueue::new());
+    let server = Arc::new(
+        ProxyServer::bind_ephemeral(auditor.clone(), state.clone(), hold_queue.clone(), None)
+            .await
+            .expect("bind proxy"),
+    );
+
+    let current_ip = Arc::new(std::sync::Mutex::new(Some("1.1.1.1".to_string())));
+    let probe_ip = Arc::clone(&current_ip);
+    server.guard.start_with_test_env(
+        auditor,
+        state.clone(),
+        hold_queue.clone(),
+        Some(Arc::new(move || {
+            let ip = probe_ip.lock().unwrap().clone();
+            Box::pin(async move { ip })
+        })),
+        None,
+    );
+    server
+        .guard
+        .seed_baseline_for_test("1.1.1.1", "NL", None)
+        .await;
+
+    // Simulate dead keep-alive / VPN server switch inside TUN (probe returns None).
+    *current_ip.lock().unwrap() = None;
+    let t0 = std::time::Instant::now();
+    server.guard.wake_immediate_probe().await;
+    server.guard.ensure_fresh().await;
+    let elapsed = t0.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "detecting transition must be instant (<200ms), took {elapsed:?}"
+    );
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Pending);
+    let status = server.guard.pause_status();
+    assert_eq!(status.gate, "pending");
+    assert_eq!(
+        status.pending_providers,
+        vec!["anthropic", "gemini", "openai"]
+    );
+
+    let alert = hold_queue.current_alert().expect("detecting alert open");
+    assert_eq!(alert.phase, "detecting");
+    assert!(
+        alert
+            .network_change
+            .as_ref()
+            .and_then(|n| n.new_ip.as_ref())
+            .is_none()
+    );
+
+    let _ = hold_queue
+        .resolve_all_for_provider("all", HoldResolution::Superseded)
+        .await;
+}

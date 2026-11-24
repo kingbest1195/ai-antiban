@@ -1,4 +1,5 @@
 use super::*;
+use crate::proxy::guard::PauseMode;
 use auditor::OverallStatus as S;
 
 fn report_view(s: S, pinned: bool, blocked: bool) -> TrayView {
@@ -190,4 +191,117 @@ fn gray_state_represents_protection_off_and_embeds_valid_png() {
     // Merging protection_off replaces previous green icon with gray.
     let merged = report_view(S::Green, false, false).merged_with(off);
     assert_eq!(merged.icon, Some(TrayColor::Gray));
+}
+
+#[test]
+fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
+    let ver = env!("CARGO_PKG_VERSION");
+
+    // 1. Detecting / Pending -> Yellow "Проверяем…" + header + killswitch.
+    let pending = GuardPauseStatus {
+        paused: false,
+        mode: PauseMode::None,
+        gate: "pending".to_string(),
+        gate_reason: Some("Смена сети — проверяем безопасность подключения".to_string()),
+        manual_killswitch: false,
+        pending_providers: vec!["anthropic".to_string()],
+        blocked_providers: vec![],
+    };
+    let v_pending = TrayView::from_guard_status(&pending, true, true);
+    assert_eq!(v_pending.icon, Some(TrayColor::Yellow));
+    assert_eq!(v_pending.title.as_deref(), Some(CHECKING_TITLE));
+    assert_eq!(
+        v_pending.header,
+        Some((
+            format!("Застава v{ver} — {CHECKING_HEADER}"),
+            TrayColor::Yellow
+        ))
+    );
+    assert_eq!(v_pending.killswitch, Some((KS_FREEZE_TEXT, TrayColor::Red)));
+
+    // 2. Paused until network change -> Gray "Пауза" + unfreeze action + gate_reason tooltip.
+    let paused = GuardPauseStatus {
+        paused: true,
+        mode: PauseMode::UntilNetworkChange,
+        gate: "blocked".to_string(),
+        gate_reason: Some("Пауза до следующей смены сети".to_string()),
+        manual_killswitch: false,
+        pending_providers: vec![],
+        blocked_providers: vec!["anthropic".to_string()],
+    };
+    let v_paused = TrayView::from_guard_status(&paused, true, false);
+    assert_eq!(v_paused.icon, Some(TrayColor::Gray));
+    assert_eq!(v_paused.title.as_deref(), Some(PAUSED_TITLE));
+    assert_eq!(
+        v_paused.header,
+        Some((
+            format!("Застава v{ver} — Пауза до смены сети"),
+            TrayColor::Gray
+        ))
+    );
+    assert_eq!(
+        v_paused.killswitch,
+        Some((KS_UNFREEZE_TEXT, TrayColor::Green))
+    );
+    assert!(
+        v_paused
+            .tooltip
+            .as_deref()
+            .unwrap()
+            .contains("Пауза до следующей смены сети")
+    );
+
+    // 3. Manual kill-switch -> Red "СТОП СЕТИ" + unfreeze action.
+    let manual = GuardPauseStatus {
+        paused: true,
+        mode: PauseMode::Manual,
+        gate: "blocked".to_string(),
+        gate_reason: None,
+        manual_killswitch: true,
+        pending_providers: vec![],
+        blocked_providers: vec!["anthropic".to_string(), "openai".to_string()],
+    };
+    let v_manual = TrayView::from_guard_status(&manual, true, false);
+    assert_eq!(v_manual.icon, Some(TrayColor::Red));
+    assert_eq!(v_manual.title.as_deref(), Some(STOP_TITLE));
+    assert_eq!(
+        v_manual.header,
+        Some((format!("Застава v{ver} — СТОП СЕТИ"), TrayColor::Red))
+    );
+    assert_eq!(
+        v_manual.killswitch,
+        Some((KS_UNFREEZE_TEXT, TrayColor::Green))
+    );
+
+    // 4. Open recovery from non-green -> Green "Защита" + freeze action.
+    let open = GuardPauseStatus {
+        paused: false,
+        mode: PauseMode::None,
+        gate: "open".to_string(),
+        gate_reason: None,
+        manual_killswitch: false,
+        pending_providers: vec![],
+        blocked_providers: vec![],
+    };
+    let v_open_from_red = TrayView::from_guard_status(&open, true, false);
+    assert_eq!(v_open_from_red.icon, Some(TrayColor::Green));
+    assert_eq!(v_open_from_red.title.as_deref(), Some(" Защита"));
+    assert_eq!(
+        v_open_from_red.killswitch,
+        Some((KS_FREEZE_TEXT, TrayColor::Red))
+    );
+
+    // 5. Open steady-state when already green -> preserves country/pin title and only syncs killswitch.
+    let v_open_steady = TrayView::from_guard_status(&open, true, true);
+    assert!(v_open_steady.icon.is_none());
+    assert!(v_open_steady.title.is_none());
+    assert_eq!(
+        v_open_steady.killswitch,
+        Some((KS_FREEZE_TEXT, TrayColor::Red))
+    );
+
+    // 6. Open when sysproxy is OFF -> Gray protection_off.
+    let v_off = TrayView::from_guard_status(&open, false, true);
+    assert_eq!(v_off.icon, Some(TrayColor::Gray));
+    assert_eq!(v_off.title.as_deref(), Some(" Защита выключена"));
 }

@@ -527,4 +527,68 @@ fn cowork_guard_handles_v2_2_0_and_v2_2_1_upgrade_repair_and_windows_encodings()
     ));
 }
 
+#[test]
+fn windows_native_adapter_signature_detects_vpn_interface_changes_without_lolbins() {
+    use zastava_lib::proxy::guard::format_windows_interfaces_signature;
+    use zastava_lib::win_native::network::AdapterInfo;
+
+    let wifi = AdapterInfo {
+        friendly_name: "Wi-Fi".to_string(),
+        description: "Intel Wi-Fi 6".to_string(),
+        adapter_name: "{1111-WIFI}".to_string(),
+        is_up: true,
+        if_type: 71,
+        ipv4_addrs: vec!["192.168.1.42".to_string()],
+        ipv6_addrs: vec!["fe80::1".to_string()], // link-local must be ignored
+        dns_servers: vec!["192.168.1.1".to_string()],
+    };
+    let loopback = AdapterInfo {
+        friendly_name: "Loopback Pseudo-Interface 1".to_string(),
+        description: "Software Loopback".to_string(),
+        adapter_name: "{0000-LOOP}".to_string(),
+        is_up: true,
+        if_type: 24, // IF_TYPE_SOFTWARE_LOOPBACK
+        ipv4_addrs: vec!["127.0.0.1".to_string()],
+        ipv6_addrs: vec!["::1".to_string()],
+        dns_servers: vec![],
+    };
+    let tun_down = AdapterInfo {
+        friendly_name: "V2BOX TUN".to_string(),
+        description: "Wintun Userspace Tunnel".to_string(),
+        adapter_name: "{2222-TUN}".to_string(),
+        is_up: false,
+        if_type: 53,
+        ipv4_addrs: vec!["10.0.0.2".to_string()],
+        ipv6_addrs: vec![],
+        dns_servers: vec![],
+    };
+    let mut tun_up = tun_down.clone();
+    tun_up.is_up = true;
+    tun_up.ipv6_addrs = vec!["fd00::2".to_string()];
+
+    // All down/loopback -> "none".
+    assert_eq!(
+        format_windows_interfaces_signature(&[loopback.clone(), tun_down.clone()]),
+        "none"
+    );
+
+    let sig_no_vpn =
+        format_windows_interfaces_signature(&[wifi.clone(), loopback.clone(), tun_down]);
+    assert_eq!(sig_no_vpn, "{1111-WIFI}=192.168.1.42");
+
+    let sig_with_vpn =
+        format_windows_interfaces_signature(&[wifi.clone(), loopback.clone(), tun_up.clone()]);
+    assert_eq!(
+        sig_with_vpn,
+        "{1111-WIFI}=192.168.1.42,{2222-TUN}=10.0.0.2,{2222-TUN}=fd00::2"
+    );
+    assert_ne!(sig_no_vpn, sig_with_vpn);
+
+    // Changing TUN IP inside an already-UP tunnel adapter also changes the signature.
+    let mut tun_switched = tun_up;
+    tun_switched.ipv4_addrs = vec!["10.0.1.2".to_string()];
+    let sig_switched = format_windows_interfaces_signature(&[wifi, loopback, tun_switched]);
+    assert_ne!(sig_with_vpn, sig_switched);
+}
+
 mod lolbin_scan;

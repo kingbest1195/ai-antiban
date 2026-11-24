@@ -6,8 +6,8 @@ import type { EnrichedPayload, GuardPauseStatus, InterceptionAction, RiskInterce
 import {
   MOCK_ALERT_DETECTED_EVENT,
   MOCK_ALERT_ENRICHED_EVENT,
-  fetchAppState,
   getGuardPauseStatus,
+  getHideIpMode,
   pauseUntilNetworkChange,
   resolveInterception,
   takePendingAlert,
@@ -66,15 +66,15 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
   useEffect(() => {
     if (propHideIpMode !== undefined) return;
     let cancelled = false;
-    fetchAppState()
-      .then((appState) => {
-        if (!cancelled) setStateHideIpMode(Boolean(appState.hide_ip_mode));
+    getHideIpMode()
+      .then((hide) => {
+        if (!cancelled) setStateHideIpMode(Boolean(hide));
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [propHideIpMode, generation]);
+  }, [propHideIpMode]);
 
   useEffect(() => {
     let unlistenFns: Array<() => void> = [];
@@ -84,6 +84,17 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
         if (cancelled) unlisten();
         else unlistenFns.push(unlisten);
       });
+
+    const syncPendingAlert = () => {
+      takePendingAlert()
+        .then((snapshot) => {
+          if (!cancelled && snapshot && (!guardPausedRef.current || snapshot.is_simulation)) {
+            if (snapshot.phase === "detecting") guardPausedRef.current = false;
+            dispatch({ type: "detected", payload: snapshot });
+          }
+        })
+        .catch((err) => console.error("Failed to take pending alert:", err));
+    };
 
     if (isTauri()) {
       track(
@@ -102,6 +113,9 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
         .catch(() => {});
       track(
         listen<RiskInterceptPayload>("interceptor://risk-detected", (event) => {
+          if (event.payload.phase === "detecting" && !event.payload.is_simulation) {
+            guardPausedRef.current = false;
+          }
           if (guardPausedRef.current && !event.payload.is_simulation) return;
           dispatch({ type: "detected", payload: event.payload });
         }),
@@ -114,14 +128,14 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
       );
     }
 
-    // Холодный старт окна: первое событие могло прийти до подписки, берём снимок у бэкенда.
-    takePendingAlert()
-      .then((snapshot) => {
-        if (!cancelled && snapshot && (!guardPausedRef.current || snapshot.is_simulation)) {
-          dispatch({ type: "detected", payload: snapshot });
-        }
-      })
-      .catch((err) => console.error("Failed to take pending alert:", err));
+    // Холодный старт окна и пробуждение скрытого WebView при показе: берём актуальный снимок у бэкенда.
+    syncPendingAlert();
+    const hasDoc = typeof document !== "undefined";
+    const onWakeSync = () => {
+      if (hasDoc && document.visibilityState === "visible") syncPendingAlert();
+    };
+    window.addEventListener("focus", syncPendingAlert);
+    if (hasDoc) document.addEventListener("visibilitychange", onWakeSync);
 
     // Мок в браузере (без Tauri): те же события, что шлёт бэкенд.
     const onMockDetected = (e: Event) => {
@@ -137,6 +151,8 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
       cancelled = true;
       unlistenFns.forEach((u) => u());
       unlistenFns = [];
+      window.removeEventListener("focus", syncPendingAlert);
+      if (hasDoc) document.removeEventListener("visibilitychange", onWakeSync);
       window.removeEventListener(MOCK_ALERT_DETECTED_EVENT, onMockDetected);
       window.removeEventListener(MOCK_ALERT_ENRICHED_EVENT, onMockEnriched);
     };
@@ -214,7 +230,7 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
         setResolving(false);
       }
     },
-    [resolving, isDemo, payload, allowEnabled, onResolved],
+    [resolving, isDemo, payload, allowEnabled, persistException, onResolved],
   );
 
   // Таймер дошёл до нуля: блокируем до смены сети.

@@ -159,3 +159,42 @@ async fn test_manual_killswitch_flag_is_distinct_from_automatic_freeze() {
 }
 
 // ---- window-first alert flow (event seam + AuditFn / ProbeFn seams) ----
+
+#[tokio::test]
+async fn test_guard_status_transitions_update_tray_immediately_without_audit() {
+    let h = super::harness(
+        super::slow_audit(Duration::from_millis(500), "1.2.3.4", OverallStatus::Green),
+        "1.2.3.4",
+    )
+    .await;
+
+    h.guard.set_gate(Gate::Pending);
+    h.guard
+        .pause_until_network_change(&h.state, Some("Пауза".to_string()))
+        .await;
+    h.guard.set_manual_killswitch(true, &h.state).await;
+    h.guard.set_manual_killswitch(false, &h.state).await;
+
+    let trays = h.io.guard_trays.lock().unwrap().clone();
+    assert!(
+        trays.iter().any(|s| s.gate == "pending" && !s.paused),
+        "expected immediate Pending tray update: {trays:?}"
+    );
+    assert!(
+        trays.iter().any(|s| s.paused
+            && s.mode == PauseMode::UntilNetworkChange
+            && s.gate == "blocked"
+            && !s.manual_killswitch),
+        "expected immediate UntilNetworkChange tray update: {trays:?}"
+    );
+    assert!(
+        trays
+            .iter()
+            .any(|s| s.manual_killswitch && s.mode == PauseMode::Manual && s.gate == "blocked"),
+        "expected immediate manual kill-switch tray update: {trays:?}"
+    );
+    let last = trays.last().expect("final tray status");
+    assert_eq!(last.gate, "open");
+    assert!(!last.paused);
+    assert!(!last.manual_killswitch);
+}

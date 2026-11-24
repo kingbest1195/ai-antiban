@@ -229,7 +229,7 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
 
     // Эпоха последнего enriched по текущему алерту: чужие и устаревшие события игнорируются.
     let enrichedEpoch: number | null = null;
-    let pausedFromEvent = false;
+    let pausedFromEvent: boolean | null = null;
     on<GuardPauseStatus>("guard://pause-status-changed", (status) => {
       pausedFromEvent = Boolean(status?.paused);
       if (pausedFromEvent) {
@@ -238,7 +238,8 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
     });
 
     on<RiskInterceptPayload>("interceptor://risk-detected", (payload) => {
-      if ((pausedFromEvent || ref.current.guardPauseStatus?.paused) && !payload.is_simulation) {
+      const isPaused = pausedFromEvent ?? Boolean(ref.current.guardPauseStatus?.paused);
+      if (isPaused && !payload.is_simulation) {
         ref.current.setInterceptPayload(null);
         return;
       }
@@ -247,7 +248,8 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
     });
 
     on<EnrichedPayload>("interceptor://enriched", (enriched) => {
-      if (pausedFromEvent || ref.current.guardPauseStatus?.paused) {
+      const isPaused = pausedFromEvent ?? Boolean(ref.current.guardPauseStatus?.paused);
+      if (isPaused) {
         return;
       }
       ref.current.setInterceptPayload((prev) => {

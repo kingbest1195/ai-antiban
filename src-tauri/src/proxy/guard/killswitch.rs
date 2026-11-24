@@ -133,7 +133,6 @@ impl NetworkGuard {
         }
         if let Some(env) = self.env.get() {
             self.hide_popup(env);
-            env.io.tray_status("red", Some(&cleaned_reason));
         }
         self.pause_status()
     }
@@ -297,7 +296,6 @@ impl NetworkGuard {
         self.sync_gates_with_state_and_pending(&st, None);
         if let Some(env) = self.env.get() {
             self.hide_popup(env);
-            env.io.tray_status("green", None);
         }
         self.kick_reaudit();
     }
@@ -335,8 +333,6 @@ impl NetworkGuard {
             }
             if let Some(env) = self.env.get() {
                 self.hide_popup(env);
-                env.io
-                    .tray_status("red", Some("⛔ СТОП СЕТИ (Ручная блокировка ИИ)"));
             }
             true
         } else {
@@ -361,7 +357,6 @@ impl NetworkGuard {
             let _ = state.clear_blocked_providers().await;
             if let Some(env) = self.env.get() {
                 self.hide_popup(env);
-                env.io.tray_status("green", None);
             }
             false
         }

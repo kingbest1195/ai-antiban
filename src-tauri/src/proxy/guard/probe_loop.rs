@@ -209,8 +209,9 @@ impl NetworkGuard {
                     reqwest::Proxy::all(&cp).ok().and_then(|proxy| {
                         let client = reqwest::Client::builder()
                             .proxy(proxy)
-                            .connect_timeout(Duration::from_millis(500))
-                            .timeout(Duration::from_millis(1200))
+                            .connect_timeout(Duration::from_millis(400))
+                            .timeout(Duration::from_millis(900))
+                            .tcp_nodelay(true)
                             .pool_max_idle_per_host(0)
                             .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
                             .build()
@@ -235,8 +236,8 @@ impl NetworkGuard {
         };
         let client = proxied.as_ref().unwrap_or(&self.client);
         match client.get("https://1.1.1.1/cdn-cgi/trace").send().await {
-            Ok(resp) => {
-                if let Ok(text) = resp.text().await {
+            Ok(resp) => match resp.text().await {
+                Ok(text) => {
                     for line in text.lines() {
                         if let Some(val) = line.strip_prefix("ip=") {
                             let val = val.trim();
@@ -246,8 +247,10 @@ impl NetworkGuard {
                         }
                     }
                 }
-            }
-            Err(err) if fast_fail && (err.is_connect() || err.is_timeout()) => {
+                Err(_) if fast_fail => return None,
+                Err(_) => {}
+            },
+            Err(err) if fast_fail && (err.is_connect() || err.is_timeout() || err.is_request()) => {
                 return None;
             }
             Err(_) => {}

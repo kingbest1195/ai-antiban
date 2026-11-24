@@ -27,8 +27,9 @@ impl NetworkGuard {
         let (kill_tx, _kill_rx) = watch::channel(false);
         let (shutdown_abort_tx, _shutdown_rx) = watch::channel(false);
         let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(500))
-            .timeout(Duration::from_millis(1000))
+            .connect_timeout(Duration::from_millis(400))
+            .timeout(Duration::from_millis(800))
+            .tcp_nodelay(true)
             // Never reuse keep-alive sockets: they may still point to the previous route.
             .pool_max_idle_per_host(0)
             .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
@@ -175,7 +176,9 @@ impl NetworkGuard {
 
     pub(super) fn emit_pause_status(&self) {
         if let Some(env) = self.env.get() {
-            env.emit("guard://pause-status-changed", &self.pause_status());
+            let status = self.pause_status();
+            env.io.tray_guard_status(&status);
+            env.emit("guard://pause-status-changed", &status);
         }
     }
 

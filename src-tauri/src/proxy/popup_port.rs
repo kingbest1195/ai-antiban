@@ -4,11 +4,13 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::auditor::RiskReport;
+use crate::proxy::guard::GuardPauseStatus;
 
 type ShowAlertFn = Arc<dyn Fn(&tauri::AppHandle, Option<(String, Instant)>) + Send + Sync>;
 type HideAlertFn = Arc<dyn Fn(&tauri::AppHandle) + Send + Sync>;
 type TrayReportFn = Arc<dyn Fn(&tauri::AppHandle, &RiskReport, bool, bool) + Send + Sync>;
 type TrayStatusFn = Arc<dyn Fn(&tauri::AppHandle, &str, Option<&str>) + Send + Sync>;
+type TrayGuardStatusFn = Arc<dyn Fn(&tauri::AppHandle, &GuardPauseStatus) + Send + Sync>;
 
 struct UiHooks {
     show_popup: ShowAlertFn,
@@ -18,6 +20,7 @@ struct UiHooks {
 }
 
 static UI_HOOKS: RwLock<Option<UiHooks>> = RwLock::new(None);
+static TRAY_GUARD_HOOK: RwLock<Option<TrayGuardStatusFn>> = RwLock::new(None);
 
 /// Registers the Layer 3 alert-popup and tray handlers.
 pub fn register_ui_hooks<S, H, R, T>(show_popup: S, hide_popup: H, tray_report: R, tray_status: T)
@@ -34,6 +37,16 @@ where
             tray_report: Arc::new(tray_report),
             tray_status: Arc::new(tray_status),
         });
+    }
+}
+
+/// Registers the Layer 3 tray updater triggered on `NetworkGuard` state transitions.
+pub fn register_tray_guard_hook<G>(tray_guard_status: G)
+where
+    G: Fn(&tauri::AppHandle, &GuardPauseStatus) + Send + Sync + 'static,
+{
+    if let Ok(mut guard) = TRAY_GUARD_HOOK.write() {
+        *guard = Some(Arc::new(tray_guard_status));
     }
 }
 
@@ -79,5 +92,15 @@ pub(crate) fn update_tray_status(app: &tauri::AppHandle, color: &str, title: Opt
         .and_then(|g| g.as_ref().map(|h| Arc::clone(&h.tray_status)));
     if let Some(cb) = hook {
         cb(app, color, title);
+    }
+}
+
+pub(crate) fn update_tray_from_guard_status(app: &tauri::AppHandle, status: &GuardPauseStatus) {
+    let hook = TRAY_GUARD_HOOK
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(Arc::clone));
+    if let Some(cb) = hook {
+        cb(app, status);
     }
 }

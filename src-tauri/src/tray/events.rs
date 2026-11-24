@@ -52,6 +52,7 @@ pub fn handle_menu_event(
         }
         "show" => {
             if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
             }
@@ -191,26 +192,38 @@ pub fn handle_menu_event(
             });
         }
         "toggle_cli_tray" => {
-            let active = sysproxy::is_cli_protection_enabled();
-            // Whether the switch really changed: a refused journal leaves everything as it was.
-            let mut now_active = active;
-            if active {
-                let report = sysproxy::disable_cli_protection();
-                now_active = report.has_failures();
-            } else if let Some(proxy_mgr) = app.try_state::<proxy::ProxyManager>() {
-                let addr = proxy_mgr.server.bound_addr.to_string();
-                let (mode, tz) = match app.try_state::<state::AppState>() {
-                    Some(s) => {
-                        let data = tauri::async_runtime::block_on(s.get_data());
-                        (data.cli_mode, data.effective_sync_tz())
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let active = tokio::task::spawn_blocking(sysproxy::is_cli_protection_enabled)
+                    .await
+                    .unwrap_or(false);
+                // Whether the switch really changed: a refused journal leaves everything as it was.
+                let mut now_active = active;
+                if active {
+                    let report = tokio::task::spawn_blocking(sysproxy::disable_cli_protection)
+                        .await
+                        .ok();
+                    if let Some(rep) = report {
+                        now_active = rep.has_failures();
                     }
-                    None => (state::CliMode::default(), None),
-                };
-                now_active =
-                    sysproxy::enable_cli_and_ide_protection_with(&addr, mode, tz.as_deref())
-                        .enabled;
-            }
-            let _ = app.emit("tray://cli-toggled", now_active);
+                } else if let Some(proxy_mgr) = app_handle.try_state::<proxy::ProxyManager>() {
+                    let addr = proxy_mgr.server.bound_addr.to_string();
+                    let (mode, tz) = match app_handle.try_state::<state::AppState>() {
+                        Some(s) => {
+                            let data = s.get_data().await;
+                            (data.cli_mode, data.effective_sync_tz())
+                        }
+                        None => (state::CliMode::default(), None),
+                    };
+                    now_active = tokio::task::spawn_blocking(move || {
+                        sysproxy::enable_cli_and_ide_protection_with(&addr, mode, tz.as_deref())
+                            .enabled
+                    })
+                    .await
+                    .unwrap_or(false);
+                }
+                let _ = app_handle.emit("tray://cli-toggled", now_active);
+            });
         }
         "sync_tz_tray" => {
             if let Some(win) = app.get_webview_window("main") {
@@ -333,9 +346,12 @@ pub fn handle_tray_icon_event(tray: &tauri::tray::TrayIcon, event: TrayIconEvent
     {
         let app = tray.app_handle();
         if let Some(win) = app.get_webview_window("main") {
-            if win.is_visible().unwrap_or(false) {
+            let visible = win.is_visible().unwrap_or(false);
+            let minimized = win.is_minimized().unwrap_or(false);
+            if visible && !minimized {
                 let _ = win.hide();
             } else {
+                let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
             }

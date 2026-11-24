@@ -2,8 +2,10 @@
 
 #[cfg(unix)]
 use std::ffi::CStr;
+#[cfg(any(unix, target_os = "windows", test, feature = "test-support"))]
+use std::net::IpAddr;
 #[cfg(unix)]
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 fn udp_route_ip(bind: &str, target: &str) -> String {
     std::net::UdpSocket::bind(bind)
@@ -98,7 +100,60 @@ fn active_interfaces_signature() -> String {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+pub fn format_windows_interfaces_signature(
+    adapters: &[crate::win_native::network::AdapterInfo],
+) -> String {
+    const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
+    let mut entries: Vec<String> = Vec::new();
+    for adapter in adapters {
+        if !adapter.is_up || adapter.if_type == IF_TYPE_SOFTWARE_LOOPBACK {
+            continue;
+        }
+        let name = {
+            let trimmed = adapter.adapter_name.trim();
+            if trimmed.is_empty() {
+                adapter.friendly_name.trim()
+            } else {
+                trimmed
+            }
+        };
+        if name.is_empty() {
+            continue;
+        }
+        for raw in adapter.ipv4_addrs.iter().chain(adapter.ipv6_addrs.iter()) {
+            let Ok(ip) = raw.trim().parse::<IpAddr>() else {
+                continue;
+            };
+            if ip.is_loopback() || ip.is_unspecified() {
+                continue;
+            }
+            if let IpAddr::V6(v6) = ip
+                && v6.is_unicast_link_local()
+            {
+                continue;
+            }
+            entries.push(format!("{name}={ip}"));
+        }
+    }
+    entries.sort();
+    entries.dedup();
+    if entries.is_empty() {
+        "none".to_string()
+    } else {
+        entries.join(",")
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn active_interfaces_signature() -> String {
+    match crate::win_native::network::get_adapters_addresses() {
+        Ok(adapters) => format_windows_interfaces_signature(&adapters),
+        Err(_) => "none".to_string(),
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn active_interfaces_signature() -> String {
     "none".to_string()
 }
