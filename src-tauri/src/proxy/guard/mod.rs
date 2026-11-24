@@ -26,6 +26,7 @@ mod policy;
 mod probe_apply;
 mod probe_changed;
 mod probe_loop;
+mod probe_offline;
 mod routes_sync;
 mod session_confirm;
 mod types;

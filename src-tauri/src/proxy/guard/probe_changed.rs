@@ -219,7 +219,7 @@ impl NetworkGuard {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn run_changed_probe_background(
+    pub(super) async fn run_changed_probe_background(
         self: &Arc<Self>,
         env: Env,
         alert_id: Option<String>,
@@ -306,6 +306,8 @@ impl NetworkGuard {
             inner.last_probe = Some(Instant::now());
             self.abort_active_tunnels();
             env.auditor.resolver.invalidate_direct_cache().await;
+            let enabled_unrouted = st.enabled_unrouted_providers();
+            Self::revoke_unrouted_session_allows(&env, &enabled_unrouted).await;
             inner.handled_ip = None;
             inner.needs_reaudit = true;
             if let Some(id) = alert_id {
@@ -320,6 +322,8 @@ impl NetworkGuard {
                     t0,
                 )
                 .await;
+            } else {
+                self.emit_pause_status();
             }
             return;
         };

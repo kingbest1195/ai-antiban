@@ -29,7 +29,7 @@ impl NetworkGuard {
         let (kill_tx, _kill_rx) = watch::channel(false);
         let (shutdown_abort_tx, _shutdown_rx) = watch::channel(false);
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(2000))
+            .timeout(Duration::from_millis(1200))
             // Never reuse keep-alive sockets: they may still point to the previous route.
             .pool_max_idle_per_host(0)
             .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
@@ -136,18 +136,43 @@ impl NetworkGuard {
 
     pub fn pause_status(&self) -> GuardPauseStatus {
         let mode = self.pause_mode();
+        let manual_killswitch = self.is_manual_killswitch();
         let gate = match self.gate() {
             Gate::Open => "open",
             Gate::Pending => "pending",
             Gate::Blocked => "blocked",
         }
         .to_string();
+        let mut pending_providers = Vec::new();
+        let mut blocked_providers = Vec::new();
+        for (pid, tx) in &self.provider_gates {
+            let g = if manual_killswitch {
+                Gate::Blocked
+            } else {
+                *tx.borrow()
+            };
+            match g {
+                Gate::Pending => pending_providers.push(pid.as_str().to_string()),
+                Gate::Blocked => blocked_providers.push(pid.as_str().to_string()),
+                Gate::Open => {}
+            }
+        }
+        pending_providers.sort();
+        blocked_providers.sort();
         GuardPauseStatus {
             paused: mode != PauseMode::None,
             mode,
             gate,
             gate_reason: self.gate_reason(),
-            manual_killswitch: self.is_manual_killswitch(),
+            manual_killswitch,
+            pending_providers,
+            blocked_providers,
+        }
+    }
+
+    pub(super) fn emit_pause_status(&self) {
+        if let Some(env) = self.env.get() {
+            env.emit("guard://pause-status-changed", &self.pause_status());
         }
     }
 
@@ -223,6 +248,7 @@ impl NetworkGuard {
                         self.set_gate_reason(None);
                     }
                 }
+                drop(g);
                 self.set_gate(Gate::Pending);
                 self.abort_active_tunnels();
                 return true;
@@ -237,16 +263,19 @@ impl NetworkGuard {
     /// engaged every request is coerced to `Blocked`: `Open` (or `Pending`) cannot be set behind
     /// the kill-switch's back.
     pub(super) fn set_gate(&self, gate: Gate) {
-        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
-        let effective = if *self.kill_tx.borrow() {
-            Gate::Blocked
-        } else {
-            gate
-        };
-        self.gate_tx.send_replace(effective);
-        for tx in self.provider_gates.values() {
-            tx.send_replace(effective);
+        {
+            let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+            let effective = if *self.kill_tx.borrow() {
+                Gate::Blocked
+            } else {
+                gate
+            };
+            self.gate_tx.send_replace(effective);
+            for tx in self.provider_gates.values() {
+                tx.send_replace(effective);
+            }
         }
+        self.emit_pause_status();
     }
 
     /// Applies isolated per-provider gates after an audit:
@@ -257,40 +286,45 @@ impl NetworkGuard {
         st: &crate::state::AppStateData,
         pending: Option<&Pending>,
     ) {
-        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
-        if *self.kill_tx.borrow() {
-            self.gate_tx.send_replace(Gate::Blocked);
-            for tx in self.provider_gates.values() {
-                tx.send_replace(Gate::Blocked);
+        {
+            let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+            if *self.kill_tx.borrow() {
+                self.gate_tx.send_replace(Gate::Blocked);
+                for tx in self.provider_gates.values() {
+                    tx.send_replace(Gate::Blocked);
+                }
+                drop(_g);
+                self.emit_pause_status();
+                return;
             }
-            return;
-        }
-        let mut any_open = false;
-        let mut any_pending = false;
-        for (pid, tx) in &self.provider_gates {
-            let name = pid.as_str();
-            let is_routed = crate::routing::select_route_id(st, name).is_some();
-            if st.is_provider_disabled(name) || is_routed {
-                tx.send_replace(Gate::Open);
-                any_open = true;
-            } else if st.blocked_providers.contains(name) {
-                tx.send_replace(Gate::Blocked);
-            } else if pending.is_some_and(|p| p.affected_providers.contains(&name)) {
-                tx.send_replace(Gate::Pending);
-                any_pending = true;
+            let mut any_open = false;
+            let mut any_pending = false;
+            for (pid, tx) in &self.provider_gates {
+                let name = pid.as_str();
+                let is_routed = crate::routing::select_route_id(st, name).is_some();
+                if st.is_provider_disabled(name) || is_routed {
+                    tx.send_replace(Gate::Open);
+                    any_open = true;
+                } else if st.blocked_providers.contains(name) {
+                    tx.send_replace(Gate::Blocked);
+                } else if pending.is_some_and(|p| p.affected_providers.contains(&name)) {
+                    tx.send_replace(Gate::Pending);
+                    any_pending = true;
+                } else {
+                    tx.send_replace(Gate::Open);
+                    any_open = true;
+                }
+            }
+            let global = if any_open {
+                Gate::Open
+            } else if any_pending {
+                Gate::Pending
             } else {
-                tx.send_replace(Gate::Open);
-                any_open = true;
-            }
+                Gate::Blocked
+            };
+            self.gate_tx.send_replace(global);
         }
-        let global = if any_open {
-            Gate::Open
-        } else if any_pending {
-            Gate::Pending
-        } else {
-            Gate::Blocked
-        };
-        self.gate_tx.send_replace(global);
+        self.emit_pause_status();
     }
 
     pub async fn sync_gates_with_state(&self, state: &AppState) {
@@ -322,40 +356,45 @@ impl NetworkGuard {
         freeze_providers: &[&'static str],
         already_blocked: &HashSet<String>,
     ) {
-        let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
-        if *self.kill_tx.borrow() {
-            self.gate_tx.send_replace(Gate::Blocked);
-            for tx in self.provider_gates.values() {
-                tx.send_replace(Gate::Blocked);
+        {
+            let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+            if *self.kill_tx.borrow() {
+                self.gate_tx.send_replace(Gate::Blocked);
+                for tx in self.provider_gates.values() {
+                    tx.send_replace(Gate::Blocked);
+                }
+                drop(_g);
+                self.emit_pause_status();
+                return;
             }
-            return;
-        }
-        let mut any_open = false;
-        let mut any_pending = false;
-        for (pid, tx) in &self.provider_gates {
-            let name = pid.as_str();
-            let is_routed = crate::routing::select_route_id(st, name).is_some();
-            if st.is_provider_disabled(name) || is_routed {
-                tx.send_replace(Gate::Open);
-                any_open = true;
-            } else if already_blocked.contains(name) || st.blocked_providers.contains(name) {
-                tx.send_replace(Gate::Blocked);
-            } else if freeze_providers.contains(&name) {
-                tx.send_replace(Gate::Pending);
-                any_pending = true;
+            let mut any_open = false;
+            let mut any_pending = false;
+            for (pid, tx) in &self.provider_gates {
+                let name = pid.as_str();
+                let is_routed = crate::routing::select_route_id(st, name).is_some();
+                if st.is_provider_disabled(name) || is_routed {
+                    tx.send_replace(Gate::Open);
+                    any_open = true;
+                } else if already_blocked.contains(name) || st.blocked_providers.contains(name) {
+                    tx.send_replace(Gate::Blocked);
+                } else if freeze_providers.contains(&name) {
+                    tx.send_replace(Gate::Pending);
+                    any_pending = true;
+                } else {
+                    tx.send_replace(Gate::Open);
+                    any_open = true;
+                }
+            }
+            let global = if any_open {
+                Gate::Open
+            } else if any_pending {
+                Gate::Pending
             } else {
-                tx.send_replace(Gate::Open);
-                any_open = true;
-            }
+                Gate::Blocked
+            };
+            self.gate_tx.send_replace(global);
         }
-        let global = if any_open {
-            Gate::Open
-        } else if any_pending {
-            Gate::Pending
-        } else {
-            Gate::Blocked
-        };
-        self.gate_tx.send_replace(global);
+        self.emit_pause_status();
     }
 
     /// Returns the newly affected providers for an active network alert `id`, if present.

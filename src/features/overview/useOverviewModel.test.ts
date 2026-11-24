@@ -366,3 +366,84 @@ describe("Wave 2: disabled_providers, trusted_exceptions и API-моки", () =>
     expect(afterClear.trusted_exceptions).toEqual({});
   });
 });
+
+describe("§7.7 Fail-closed UI: проверка, инвалидация и route://unavailable", () => {
+  it("при отсутствии отчёта устаревший session_allowed_providers НЕ даёт статус allowed («Доступен»)", () => {
+    const baseState = {
+      pinned_ip: null,
+      strict_pinning_enabled: false,
+      ip_history: {},
+      session_allowed_providers: ["anthropic"],
+      blocked_providers: [],
+    };
+    const checking = model({
+      reports: {},
+      activeReport: null,
+      state: baseState,
+      sysproxyActive: true,
+      refreshing: true,
+    });
+    expect(checking.services.find((s) => s.id === "anthropic")?.status).toBe("checking");
+    expect(checking.verdict).toBe(copy.verdict.checking);
+    expect(checking.tone).toBe("warn");
+
+    const missing = model({
+      reports: {},
+      activeReport: null,
+      state: baseState,
+      sysproxyActive: true,
+      refreshing: false,
+    });
+    expect(missing.services.find((s) => s.id === "anthropic")?.status).toBe("missing");
+  });
+
+  it("пока guardPauseStatus.gate === 'pending', unrouted Claude показывает 'checking', а routed ChatGPT — 'ok'", () => {
+    const rClaude = report({ provider: "anthropic", overall_status: "green" });
+    const rGpt = report({ provider: "openai", overall_status: "green", telemetry: { ip: "9.9.9.9", country_code: "NL", resolved_at: 1 } });
+    const m = model({
+      reports: { anthropic: rClaude, openai: rGpt },
+      activeReport: rClaude,
+      sysproxyActive: true,
+      state: {
+        pinned_ip: null,
+        strict_pinning_enabled: false,
+        ip_history: {},
+        session_allowed_providers: ["anthropic"],
+        blocked_providers: [],
+        provider_routes: { openai: "key-1" },
+      },
+      guardPauseStatus: {
+        paused: false,
+        mode: "none",
+        gate: "pending",
+        gate_reason: "Проверяем смену сети",
+        manual_killswitch: false,
+        pending_providers: ["anthropic", "gemini"],
+        blocked_providers: [],
+      },
+    });
+    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("checking");
+    expect(m.services.find((s) => s.id === "openai")?.status).toBe("ok");
+    expect(m.verdict).toBe(copy.verdict.checking);
+    expect(m.tone).toBe("warn");
+  });
+
+  it("активный route://unavailable переводит щит из зелёного в danger «Маршрут недоступен» и блокирует сервис", () => {
+    const rClaude = report({ provider: "anthropic", overall_status: "green", trust_score: 100 });
+    const m = model({
+      reports: { anthropic: rClaude },
+      activeReport: rClaude,
+      sysproxyActive: true,
+      routeUnavailable: {
+        route_id: "key-1",
+        provider: "anthropic",
+        reason: "unreachable",
+        message: "Ключ недоступен",
+      },
+    });
+    expect(m.tone).toBe("danger");
+    expect(m.verdict).toBe(copy.verdict.routeUnavailable);
+    expect(m.banner).toBe("stopped");
+    expect(m.services.find((s) => s.id === "anthropic")?.status).toBe("critical");
+  });
+});

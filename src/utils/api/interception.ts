@@ -153,3 +153,18 @@ export async function getNetworkKillswitchStatus(): Promise<boolean> {
   }
   return mockFlags.killswitchStatus;
 }
+
+export async function getGuardPauseStatus(): Promise<GuardPauseStatus> {
+  if (isTauri()) {
+    return await tauriInvoke<GuardPauseStatus>("get_guard_pause_status_cmd");
+  }
+  return {
+    paused: false,
+    mode: "none",
+    gate: "open",
+    gate_reason: null,
+    manual_killswitch: mockFlags.killswitchStatus,
+    pending_providers: [],
+    blocked_providers: [],
+  };
+}

@@ -18,9 +18,18 @@ export function resolveMascotState(params: {
   sysproxyActive: boolean;
   killswitchFrozen: boolean;
   overallStatus?: string | null;
+  routeUnavailable?: boolean;
+  guardGate?: string | null;
 }): MascotState {
-  if (params.killswitchFrozen || params.overallStatus === "red") return "alert";
-  if (params.startupPending || params.refreshing) return "scanning";
+  if (
+    params.killswitchFrozen ||
+    params.routeUnavailable ||
+    params.guardGate === "blocked" ||
+    params.overallStatus === "red"
+  ) {
+    return "alert";
+  }
+  if (params.startupPending || params.refreshing || params.guardGate === "pending") return "scanning";
   if (!params.sysproxyActive) return "sleep";
   return "protected";
 }
@@ -66,13 +75,17 @@ export function HomeHub({
   const osTz = osTzProp ?? sharedOsTz;
   const { loading, failed, model, progress } = view;
   const off = !overview.startupPending && !overview.sysproxyActive && !overview.killswitchFrozen;
+  const routeBroken = Boolean(routeUnavailableBanner);
   const mascotState = resolveMascotState({
     startupPending: overview.startupPending,
     refreshing: overview.refreshing,
     sysproxyActive: overview.sysproxyActive,
     killswitchFrozen: overview.killswitchFrozen,
     overallStatus: overview.activeReport?.overall_status,
+    routeUnavailable: routeBroken,
+    guardGate: overview.guardPauseStatus?.gate,
   });
+  const displayTrustScore = routeBroken ? 0 : overview.trustScore;
 
   const ip = overview.currentIp !== "--" ? formatIp(overview.currentIp, overview.hideIpMode) : null;
   const country =
@@ -92,7 +105,7 @@ export function HomeHub({
           </div>
 
           <div className="zs-v3-hero__info">
-            {loading ? (
+            {loading && !routeBroken ? (
               <div role="status" aria-busy="true">
                 <p className="zs-v3-verdict">
                   {overview.startupPending ? copy.checking.startingTitle : copy.checking.title}
@@ -102,7 +115,7 @@ export function HomeHub({
                   <span>{progress.done > 0 ? copy.checking.progress(progress.done, progress.total) : "Несколько секунд"}</span>
                 </div>
               </div>
-            ) : failed ? (
+            ) : failed && !routeBroken ? (
               <EmptyState
                 icon="alert"
                 title={copy.error.title}
@@ -114,7 +127,7 @@ export function HomeHub({
               >
                 {copy.error.text}
               </EmptyState>
-            ) : off ? (
+            ) : off && !routeBroken ? (
               <>
                 <p className="zs-v3-verdict zs-v3-verdict--danger">Нейросети без защиты</p>
                 <div className="zs-v3-meta">
@@ -133,8 +146,8 @@ export function HomeHub({
                 )}
                 <div className="zs-v3-trust-row">
                   <span>Доверие к адресу</span>
-                  <b className={`zs-v3-trust__num zs-v3-trust__num--${toneForScore(overview.trustScore)}`}>
-                    {Math.round(overview.trustScore)} из 100
+                  <b className={`zs-v3-trust__num zs-v3-trust__num--${toneForScore(displayTrustScore)}`}>
+                    {Math.round(displayTrustScore)} из 100
                   </b>
                   <InfoTip
                     title="Доверие к адресу"

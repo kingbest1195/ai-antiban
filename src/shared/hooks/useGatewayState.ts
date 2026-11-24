@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppStateData,
-  AuditProgressEvent,
   CoverageSnapshot,
+  GuardPauseStatus,
   PartialAudit,
   ProviderId,
   RiskReport,
@@ -13,58 +13,40 @@ import {
   auditConnection,
   fetchAppState,
   getCoverageSnapshot,
+  getGuardPauseStatus,
   getRoutesSnapshot,
   getStartupState,
   getSysproxyStatus,
   onAuditProgress,
   onAuditRefreshed,
+  onGuardPauseStatusChanged,
   onStartupChanged,
 } from "../../utils/api";
 import { toast as t } from "../copy/ru";
+import {
+  CHECK_SLOTS,
+  FOCUS_REFRESH_MS,
+  STALE_REPORT_MS,
+  applyProgress,
+  dataAge,
+  emptyPartial,
+  invalidateStaleReports,
+  isValidGatewayLatency,
+  mergeProviderReport,
+} from "./gatewayReports";
 import type { ShowToast } from "./useToasts";
 import { pickWorstReport } from "../../features/checks/checksModel";
 
-/** Порог устаревания отчёта без ошибок: 15 минут. */
-export const STALE_REPORT_MS = 15 * 60_000;
-/** Перепроверка при возврате фокуса окна: если отчёту больше 3 минут. */
-export const FOCUS_REFRESH_MS = 3 * 60_000;
-
-/** Возраст отчёта в минутах для подписи или null, если данные свежие и аудит не падал. Вынесено для тестов. */
-export function dataAge(ageMs: number, auditFailed: boolean): number | null {
-  if (!auditFailed && ageMs < STALE_REPORT_MS) return null;
-  return Math.max(1, Math.floor(ageMs / 60_000));
-}
-
-function isValidGatewayLatency(gwMs: unknown): gwMs is number {
-  return typeof gwMs === "number" && Number.isFinite(gwMs) && gwMs >= 0;
-}
-
-/** Число проверок в отчёте шлюза (места 0..13 в `RiskReport.checks`). */
-export const CHECK_SLOTS = 14;
-
-/** Новый идущий аудит: ничего ещё не готово. */
-export function emptyPartial(provider: ProviderId, runId: string): PartialAudit {
-  return { runId, provider, telemetry: null, checks: Array.from({ length: CHECK_SLOTS }, () => null) };
-}
-
-/** Вносит кусок аудита в накопленное; события чужого запуска (устаревшего) игнорируются. */
-export function applyProgress(prev: PartialAudit | undefined, event: AuditProgressEvent): PartialAudit | undefined {
-  if (!prev || prev.runId !== event.run_id) return prev;
-  if (event.kind === "telemetry") return { ...prev, telemetry: event.telemetry };
-  if (event.index < 0 || event.index >= prev.checks.length) return prev;
-  const checks = prev.checks.slice();
-  checks[event.index] = event.result;
-  return { ...prev, checks };
-}
-
-/** Точечно обновляет отчёт одного сервиса, не затрагивая отчёты остальных. */
-export function mergeProviderReport(
-  prev: Partial<Record<ProviderId, RiskReport>>,
-  providerId: ProviderId,
-  report: RiskReport,
-): Partial<Record<ProviderId, RiskReport>> {
-  return { ...prev, [providerId]: report };
-}
+export {
+  CHECK_SLOTS,
+  FOCUS_REFRESH_MS,
+  STALE_REPORT_MS,
+  applyProgress,
+  dataAge,
+  emptyPartial,
+  invalidateStaleReports,
+  mergeProviderReport,
+};
 
 interface Options {
   showToast: ShowToast;
@@ -86,6 +68,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
   const [auditError, setAuditError] = useState<string | null>(null);
   const [routesSnapshot, setRoutesSnapshot] = useState<RoutesSnapshot | null>(null);
   const [coverageSnapshot, setCoverageSnapshot] = useState<CoverageSnapshot | null>(null);
+  const [guardPauseStatus, setGuardPauseStatus] = useState<GuardPauseStatus | null>(null);
+  const routesSnapshotRef = useRef<RoutesSnapshot | null>(null);
+  routesSnapshotRef.current = routesSnapshot;
   /** Когда пришёл последний успешный отчёт (мс) и «сейчас» для пересчёта возраста. */
   const [reportAt, setReportAt] = useState<number | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
@@ -126,10 +111,23 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     }
   }, []);
 
-  /** Перечитать AppStateData, маршруты и покрытие без аудита (тихо: ошибки только в консоль). */
+  /** Инвалидирует устаревшие отчёты (по умолчанию — только unrouted-сервисы при смене сети). */
+  const invalidateReports = useCallback((onlyProviders?: string[], includeAll = false) => {
+    setReports((prev) =>
+      invalidateStaleReports(prev, routesSnapshotRef.current, onlyProviders, includeAll),
+    );
+  }, []);
+
+  /** Перечитать AppStateData, маршруты, статус шлюза и покрытие без аудита. */
   const refreshState = useCallback(async () => {
-    const [st] = await Promise.all([fetchAppState(), refreshRoutes(), refreshCoverage()]);
+    const [st, , , pauseSnap] = await Promise.all([
+      fetchAppState(),
+      refreshRoutes(),
+      refreshCoverage(),
+      getGuardPauseStatus().catch(() => null),
+    ]);
     setState(st);
+    if (pauseSnap) setGuardPauseStatus(pauseSnap);
     return st;
   }, [refreshRoutes, refreshCoverage]);
 
@@ -274,6 +272,28 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
       off?.();
     };
   }, []);
+
+  // Подписка на смену gate/паузы шлюза: при pending/paused немедленно сбрасываем устаревшие отчёты.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let cancelled = false;
+    getGuardPauseStatus()
+      .then((snap) => !cancelled && setGuardPauseStatus(snap))
+      .catch(() => {});
+    onGuardPauseStatusChanged((snap) => {
+      setGuardPauseStatus(snap);
+      if (snap.gate === "pending" || snap.paused || snap.manual_killswitch) {
+        invalidateReports(snap.pending_providers?.length ? snap.pending_providers : undefined, snap.manual_killswitch);
+      }
+      fetchAppState().then(setState).catch(() => {});
+    })
+      .then((un) => (cancelled ? un() : (off = un)))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off?.();
+    };
+  }, [invalidateReports]);
 
   // Фоновый запуск шлюза: узнаём стартовое состояние и ловим его окончание.
   useEffect(() => {
@@ -459,6 +479,9 @@ export function useGatewayState({ showToast, refreshGatewayStats }: Options) {
     coverageSnapshot,
     setCoverageSnapshot,
     refreshCoverage,
+    guardPauseStatus,
+    setGuardPauseStatus,
+    invalidateReports,
   };
 }
 

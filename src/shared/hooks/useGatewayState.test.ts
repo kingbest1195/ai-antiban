@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { CheckResult, OverallStatus, ProviderId, RiskReport } from "../../types";
-import { mergeProviderReport } from "./useGatewayState";
+import type { CheckResult, OverallStatus, ProviderId, RiskReport, RoutesSnapshot } from "../../types";
+import { invalidateStaleReports, mergeProviderReport } from "./useGatewayState";
 
 const okCheck: CheckResult = {
   status: "ok",
@@ -49,5 +49,39 @@ describe("mergeProviderReport", () => {
     expect(next.openai).toBe(openaiOk);
     expect(next.gemini).toBe(geminiNew);
     expect(prev.gemini).toBe(geminiOld);
+  });
+});
+
+describe("invalidateStaleReports", () => {
+  const routesSnapshot: RoutesSnapshot = {
+    routes: [],
+    provider_routes: { openai: "route-1" },
+    effective: { anthropic: null, openai: "route-1", gemini: null },
+    dangling: [],
+  };
+
+  it("сбрасывает только unrouted-сервисы при смене сети и сохраняет привязанный к ключу", () => {
+    const prev = {
+      anthropic: makeReport("anthropic", "green", "1.1.1.1"),
+      openai: makeReport("openai", "green", "9.9.9.9"),
+      gemini: makeReport("gemini", "green", "1.1.1.1"),
+    };
+    const next = invalidateStaleReports(prev, routesSnapshot);
+    expect(next.anthropic).toBeUndefined();
+    expect(next.gemini).toBeUndefined();
+    expect(next.openai).toEqual(prev.openai);
+  });
+
+  it("при includeAll сбрасывает все отчёты, а при onlyProviders — только перечисленные", () => {
+    const prev = {
+      anthropic: makeReport("anthropic", "green", "1.1.1.1"),
+      openai: makeReport("openai", "green", "9.9.9.9"),
+    };
+    const targeted = invalidateStaleReports(prev, routesSnapshot, ["openai"]);
+    expect(targeted.openai).toBeUndefined();
+    expect(targeted.anthropic).toEqual(prev.anthropic);
+
+    const allDropped = invalidateStaleReports(prev, routesSnapshot, undefined, true);
+    expect(allDropped).toEqual({});
   });
 });

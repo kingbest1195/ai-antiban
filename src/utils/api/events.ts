@@ -1,6 +1,7 @@
 import type {
   AuditProgressEvent,
   CoworkGuardStatus,
+  GuardPauseStatus,
   RiskReport,
   RouteUnavailablePayload,
   ShutdownProgressPayload,
@@ -70,6 +71,13 @@ export async function onRouteUnavailable(
 ): Promise<() => void> {
   if (!isTauri()) return () => {};
   return await tauriListen<RouteUnavailablePayload>("route://unavailable", handler);
+}
+
+export async function onGuardPauseStatusChanged(
+  handler: (status: GuardPauseStatus) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  return await tauriListen<GuardPauseStatus>("guard://pause-status-changed", handler);
 }
 
 export async function onShutdownProgress(

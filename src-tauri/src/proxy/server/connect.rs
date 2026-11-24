@@ -284,11 +284,12 @@ impl ProxyServer {
         }
 
         // Step 2: Check if provider has active session allowance
-        if self
+        let session_allowed = self
             .state
             .is_provider_session_allowed(provider.as_str())
             .await
-        {
+            && (route.is_some() || self.guard.can_use_session_allowance(provider).await);
+        if session_allowed {
             if is_canary {
                 return self
                     .canary_protected(client, &host, provider, route.as_ref(), "ALLOWED")
@@ -305,7 +306,7 @@ impl ProxyServer {
         // Step 3: Run comprehensive risk audit (on this provider's own egress).
         // Routed connections reuse a per-(provider, route) cached `RiskReport` with single-flight
         // coalescing and background refresh so concurrent Gemini/AI sockets do not block on 14-point
-        // audits per CONNECT. Unrouted connections keep the exact uncached Step 3 path.
+        // audits per CONNECT. Unrouted connections keep strict fail-closed direct refresh checks.
         let (report, st_after_audit, report_from_cache) = if let Some(r) = route.as_ref() {
             match self
                 .route_reports
@@ -344,11 +345,15 @@ impl ProxyServer {
             // If `guard.restore_epoch()` advances mid-audit (network recovered cleanly while probing
             // the old network), re-run once against the restored state/cache before deciding.
             let mut attempt = 0u8;
+            let force_direct_refresh = self
+                .guard
+                .prepare_direct_audit_refresh(&self.auditor.resolver)
+                .await;
             loop {
                 let pre_audit_epoch = self.guard.restore_epoch();
                 let eval_res = self
                     .auditor
-                    .evaluate_all_with(provider, &self.state, &selection, false)
+                    .evaluate_all_with(provider, &self.state, &selection, force_direct_refresh)
                     .await;
                 match eval_res {
                     Ok(r) => {
@@ -368,6 +373,7 @@ impl ProxyServer {
                             continue;
                         }
                         eprintln!("Auditor evaluation failed: {e}");
+                        self.guard.wake_immediate_probe().await;
                         self.state.stats().record_intercepted(
                             &host,
                             provider.as_str(),

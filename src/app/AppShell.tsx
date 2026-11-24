@@ -131,6 +131,8 @@ export function AppShell() {
     coverageSnapshot: gw.coverageSnapshot,
     onCoverageSnapshot: gw.setCoverageSnapshot,
     routesSnapshot: gw.routesSnapshot,
+    guardPauseStatus: gw.guardPauseStatus,
+    routeUnavailableBanner,
     hideIpMode,
     dataAgeMinutes: gw.dataAgeMinutes,
     sysproxyActive: gw.sysproxyActive,
@@ -167,6 +169,8 @@ export function AppShell() {
     updateInfo: updater.updateInfo,
     refreshing: gw.refreshing,
     startupPending: gw.startupPending,
+    guardPauseStatus: gw.guardPauseStatus,
+    routeUnavailable: routeUnavailableBanner,
   });
 
   const overviewView: OverviewView = {

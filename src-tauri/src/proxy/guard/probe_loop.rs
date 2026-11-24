@@ -207,7 +207,7 @@ impl NetworkGuard {
                     reqwest::Proxy::all(&cp).ok().and_then(|proxy| {
                         let client = reqwest::Client::builder()
                             .proxy(proxy)
-                            .timeout(Duration::from_millis(3000))
+                            .timeout(Duration::from_millis(2000))
                             .pool_max_idle_per_host(0)
                             .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
                             .build()

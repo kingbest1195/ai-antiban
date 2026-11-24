@@ -1,5 +1,13 @@
 import { useMemo } from "react";
-import type { AppStateData, CheckResult, ProviderId, RiskReport, UpdateCheckResult } from "../../types";
+import type {
+  AppStateData,
+  CheckResult,
+  GuardPauseStatus,
+  ProviderId,
+  RiskReport,
+  RouteUnavailablePayload,
+  UpdateCheckResult,
+} from "../../types";
 import { checksWord, resolvePinnedIp } from "../../shared/lib/format";
 import { classify, countChecks, failedChecks, isYellowOnlyUnknown, pickWorstReport } from "../checks/checksModel";
 import { overview as copy } from "../../shared/copy/ru";
@@ -73,6 +81,10 @@ interface Input {
   refreshing: boolean;
   /** Шлюз ещё запускается в фоне: защита не включена, не объявляем ни «защищены», ни «выключена». */
   startupPending?: boolean;
+  /** Текущий снимок паузы/затворов NetworkGuard. */
+  guardPauseStatus?: GuardPauseStatus | null;
+  /** Активное уведомление о недоступности выбранного маршрута. */
+  routeUnavailable?: RouteUnavailablePayload | null;
 }
 
 /** Вывод показателей «Обзора» из сырых данных: вердикт, бейджи, баннер и статусы сервисов. Тут нет побочных эффектов. */
@@ -86,6 +98,8 @@ export function useOverviewModel({
   updateInfo,
   refreshing,
   startupPending = false,
+  guardPauseStatus = null,
+  routeUnavailable = null,
 }: Input): OverviewModel {
   return useMemo(() => {
     const disabledSet = new Set((state?.disabled_providers ?? []).map((p) => p.toLowerCase()));
@@ -94,9 +108,24 @@ export function useOverviewModel({
       (activeReport && !disabledSet.has(activeReport.provider) ? activeReport : null) ??
       enabledProviderIds.map((id) => reports[id]).find(Boolean) ??
       null;
+    const pendingSet = new Set((guardPauseStatus?.pending_providers ?? []).map((p) => p.toLowerCase()));
+    const guardBlockedSet = new Set((guardPauseStatus?.blocked_providers ?? []).map((p) => p.toLowerCase()));
+    const hasGlobalPending = guardPauseStatus?.gate === "pending" && pendingSet.size === 0;
+    const isProviderPending = (id: ProviderId): boolean =>
+      pendingSet.has(id) ||
+      (hasGlobalPending &&
+        !guardBlockedSet.has(id) &&
+        !state?.blocked_providers?.includes(id) &&
+        !state?.provider_routes?.[id] &&
+        !state?.default_route_id &&
+        !state?.profile_route_id);
+    const isProviderRouteBroken = (id: ProviderId): boolean =>
+      Boolean(routeUnavailable && (routeUnavailable.provider === id || routeUnavailable.provider === "all"));
 
     const allowReasonFor = (id: ProviderId): ServiceAllowReason | null => {
-      if (disabledSet.has(id)) return null;
+      if (disabledSet.has(id) || isProviderPending(id) || guardBlockedSet.has(id) || isProviderRouteBroken(id)) {
+        return null;
+      }
       const exitIp = reports[id]?.telemetry?.ip || (currentIp !== "--" ? currentIp : "");
       const trimmedExit = exitIp.trim();
       if (trimmedExit && state?.trusted_exceptions?.[id]?.some((ip) => ip.trim() === trimmedExit)) {
@@ -119,8 +148,16 @@ export function useOverviewModel({
     };
     const isAllowedFor = (id: ProviderId): boolean => allowReasonFor(id) !== null;
 
+    const anyPending =
+      guardPauseStatus?.gate === "pending" ||
+      enabledProviderIds.some((id) => isProviderPending(id));
     const anyRed = enabledProviderIds.some(
-      (id) => (reports[id]?.overall_status === "red" && !isAllowedFor(id)) || Boolean(state?.blocked_providers?.includes(id)),
+      (id) =>
+        (reports[id]?.overall_status === "red" && !isAllowedFor(id)) ||
+        Boolean(state?.blocked_providers?.includes(id)) ||
+        guardBlockedSet.has(id) ||
+        Boolean(guardPauseStatus?.manual_killswitch) ||
+        isProviderRouteBroken(id),
     );
     const anyYellow = enabledProviderIds.some(
       (id) =>
@@ -145,21 +182,30 @@ export function useOverviewModel({
 
     let verdict: string = copy.verdict.ok;
     let tone: HeroTone = "ok";
-    if (killswitchFrozen) {
+    if (killswitchFrozen || guardPauseStatus?.manual_killswitch) {
       verdict = copy.verdict.frozen;
       tone = "danger";
     } else if (startupPending) {
       // До конца запуска вывода нет: ни «Вы защищены», ни «Защита выключена».
       verdict = copy.verdict.starting;
       tone = "warn";
+    } else if (routeUnavailable) {
+      verdict = copy.verdict.routeUnavailable;
+      tone = "danger";
     } else if (anyRed) {
       verdict = copy.verdict.stopped;
       tone = "danger";
+    } else if (anyPending) {
+      verdict = copy.verdict.checking;
+      tone = "warn";
     } else if (!sysproxyActive) {
       verdict = copy.verdict.off;
       tone = "warn";
     } else if (anyYellow || ipv6Leak || tzMismatch) {
       verdict = copy.verdict.attention;
+      tone = "warn";
+    } else if (!effectiveActiveReport) {
+      verdict = refreshing ? copy.verdict.checking : copy.verdict.partial;
       tone = "warn";
     } else if (incomplete) {
       verdict = copy.verdict.partial;
@@ -167,8 +213,9 @@ export function useOverviewModel({
     }
 
     let banner: BannerKind | null = null;
-    if (killswitchFrozen) banner = "frozen";
+    if (killswitchFrozen || guardPauseStatus?.manual_killswitch) banner = "frozen";
     else if (startupPending) banner = null;
+    else if (routeUnavailable) banner = "stopped";
     else if (anyRed) banner = "stopped";
     else if (ipv6Leak) banner = "leak";
     else if (tzMismatch) banner = "timezone";
@@ -201,10 +248,13 @@ export function useOverviewModel({
         Boolean(report?.incomplete);
 
       let status: ServiceStatus = "ok";
-      if (isBlocked) status = "critical";
-      else if (isAllowed) status = "allowed";
-      else if (startupPending) status = "checking";
+      const guardBlocked = guardBlockedSet.has(id) || Boolean(guardPauseStatus?.manual_killswitch);
+      const guardPending = isProviderPending(id);
+      const routeBroken = isProviderRouteBroken(id);
+      if (killswitchFrozen || isBlocked || guardBlocked || routeBroken) status = "critical";
+      else if (startupPending || guardPending) status = "checking";
       else if (!report) status = refreshing ? "checking" : "missing";
+      else if (isAllowed) status = "allowed";
       else if (report.overall_status === "red" || hasCritical) status = "critical";
       else if ((report.overall_status === "yellow" && !isYellowOnlyUnknown(report, list)) || hasWarning) status = "warn";
       return status === "allowed" && allowReason ? { id, status, allowReason } : { id, status };
@@ -225,7 +275,19 @@ export function useOverviewModel({
       banner,
       services,
     };
-  }, [reports, activeReport, state, currentIp, sysproxyActive, killswitchFrozen, updateInfo, refreshing, startupPending]);
+  }, [
+    reports,
+    activeReport,
+    state,
+    currentIp,
+    sysproxyActive,
+    killswitchFrozen,
+    updateInfo,
+    refreshing,
+    startupPending,
+    guardPauseStatus,
+    routeUnavailable,
+  ]);
 }
 
 /**
