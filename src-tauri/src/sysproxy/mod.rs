@@ -80,12 +80,6 @@ pub(crate) use orchestrator::{
     EnableReport, Run, journal_base_dir, journal_failure_text, restore_pass, with_files,
     with_journal,
 };
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use orchestrator::{cleanup_cli_gate, hold_app_lock, local_journal_base};
-#[cfg(test)]
-#[allow(unused_imports)]
-use orchestrator::{enable_with, recover_in, refresh_with};
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)]
 pub(crate) use state::user_appdata_dir;
@@ -401,10 +395,6 @@ fn open_windows_settings_uri(uri: &str, label: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(test)]
-#[path = "mod_tests.rs"]
-mod tests;
-
 fn read_os_pac_deferred() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -432,8 +422,18 @@ pub(crate) async fn read_runtime_protection_flags() -> crate::auditor::AuditProt
 }
 
 #[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;
+
+#[cfg(test)]
 #[allow(unused_imports)]
 use orchestrator::take_app_lock;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use orchestrator::{cleanup_cli_gate, hold_app_lock, local_journal_base};
+#[cfg(test)]
+#[allow(unused_imports)]
+use orchestrator::{enable_with, recover_in, refresh_with};
 #[cfg(test)]
 #[allow(unused_imports)]
 use std::path::PathBuf;
