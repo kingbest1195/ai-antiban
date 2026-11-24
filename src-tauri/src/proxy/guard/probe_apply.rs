@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::MutexGuard;
 
-use super::policy::{all_excepted, all_unrouted_session_or_excepted, is_blocked_geo_code};
+use super::policy::{
+    all_pinned_or_excepted_for, all_unrouted_session_or_excepted,
+    any_blocked_pinned_or_excepted_for, is_blocked_geo_code,
+};
 use super::types::{Baseline, Env, Inner, NetworkGuard, PauseMode};
 
 const OFFLINE_PROBE_RETRY_DELAYS_MS: &[u64] = &[350, 500, 750, 1000, 1000];
@@ -76,9 +79,18 @@ impl NetworkGuard {
                     return true;
                 }
                 let country_ok = baseline_country.is_some_and(|c| !is_blocked_geo_code(c));
+                let st_check = env.state.get_data().await;
+                let has_explicit_pin_mismatch = was_blocked
+                    && st_check.strict_pinning_enabled
+                    && !all_pinned_or_excepted_for(
+                        &st_check,
+                        &st_check.enabled_unrouted_providers(),
+                        ip,
+                    );
                 if returning_from_other_ip
                     && !needs_reaudit
                     && country_ok
+                    && !has_explicit_pin_mismatch
                     && !self.is_manual_killswitch()
                 {
                     self.restore_locked(env, &mut inner).await;
@@ -86,7 +98,7 @@ impl NetworkGuard {
                     self.spawn_verify_restored_baseline(env, ip.to_string(), epoch);
                 } else {
                     drop(inner);
-                    self.verify_and_restore_baseline(env, ip, was_blocked).await;
+                    Box::pin(self.verify_and_restore_baseline(env, ip, was_blocked)).await;
                 }
             } else {
                 inner.handled_ip = None;
@@ -153,12 +165,8 @@ impl NetworkGuard {
             let st_pause = env.state.get_data().await;
             let unrouted_pause = st_pause.enabled_unrouted_providers();
             let ip_matches_pin = !self.is_manual_killswitch()
-                && !unrouted_pause.is_empty()
-                && unrouted_pause.iter().all(|p| {
-                    st_pause
-                        .pinned_ip_for_provider(p, false)
-                        .is_some_and(|pin| pin.trim() == ip.trim())
-                });
+                && (all_pinned_or_excepted_for(&st_pause, &unrouted_pause, &ip)
+                    || any_blocked_pinned_or_excepted_for(&st_pause, &unrouted_pause, &ip));
             if !ip_matches_pin {
                 inner.observed_ip = Some(ip.clone());
                 inner.paused_ip = Some(ip.clone());
@@ -175,8 +183,8 @@ impl NetworkGuard {
         let mut pinned_untrapped = false;
         // If user explicitly paused until the next network change on this exact IP, stay paused
         // until the external IP changes or route fingerprint invalidates — UNLESS this IP matches
-        // saved `pinned_ip` / `pinned_ips` (and `!is_manual_killswitch()`), in which case we never
-        // trap the pinned IP permanently and silently recover cleanly.
+        // saved `pinned_ip` / `pinned_ips` / `trusted_exceptions` (and `!is_manual_killswitch()`),
+        // in which case we never trap the pinned IP permanently and silently recover cleanly.
         if self.pause_mode() == PauseMode::UntilNetworkChange
             && prev_paused_ip.as_deref() == Some(ip.as_str())
             && !inner.needs_reaudit
@@ -185,12 +193,8 @@ impl NetworkGuard {
             let st_pause = env.state.get_data().await;
             let unrouted_pause = st_pause.enabled_unrouted_providers();
             let ip_matches_pin = !self.is_manual_killswitch()
-                && !unrouted_pause.is_empty()
-                && unrouted_pause.iter().all(|p| {
-                    st_pause
-                        .pinned_ip_for_provider(p, false)
-                        .is_some_and(|pin| pin.trim() == ip.trim())
-                });
+                && (all_pinned_or_excepted_for(&st_pause, &unrouted_pause, &ip)
+                    || any_blocked_pinned_or_excepted_for(&st_pause, &unrouted_pause, &ip));
             if !ip_matches_pin {
                 inner.observed_ip = Some(ip);
                 return;
@@ -248,12 +252,8 @@ impl NetworkGuard {
             let st = env.state.get_data().await;
             self.unblock_disabled_and_routed(env, &st).await;
             let enabled_unrouted = st.enabled_unrouted_providers();
-            let matches_pinned = !enabled_unrouted.is_empty()
-                && enabled_unrouted.iter().all(|p| {
-                    st.pinned_ip_for_provider(p, false)
-                        .is_some_and(|pin| pin.trim() == ip.trim())
-                });
-            let matches_exception = all_excepted(&st, &enabled_unrouted, &ip);
+            let matches_pinned_or_excepted =
+                all_pinned_or_excepted_for(&st, &enabled_unrouted, &ip);
             let country = env
                 .auditor
                 .resolve_direct(false)
@@ -261,7 +261,7 @@ impl NetworkGuard {
                 .ok()
                 .map(|t| t.country_code);
             let country_ok = country.as_deref().is_some_and(|c| !is_blocked_geo_code(c));
-            let trusted = matches_pinned || matches_exception || country_ok;
+            let trusted = matches_pinned_or_excepted || country_ok;
             inner.baseline = Some(Baseline {
                 ip: ip.clone(),
                 country,
@@ -270,10 +270,10 @@ impl NetworkGuard {
             inner.needs_reaudit = false;
             let st_after = env.state.get_data().await;
             let still_blocked =
-                !st_after.blocked_providers.is_empty() || self.any_provider_gate_blocked();
+                !st_after.blocked_providers.is_empty() || self.any_provider_gate_closed();
             if still_blocked && !self.is_manual_killswitch() {
                 drop(inner);
-                self.verify_and_restore_baseline(env, &ip, true).await;
+                Box::pin(self.verify_and_restore_baseline(env, &ip, true)).await;
             }
             return;
         };
@@ -321,7 +321,25 @@ impl NetworkGuard {
             return;
         }
 
-        if inner.handled_ip.as_deref() == Some(ip.as_str()) && !needs_reaudit {
+        let has_blocked_pin_match = if inner.handled_ip.as_deref() == Some(ip.as_str())
+            && !needs_reaudit
+            && !self.is_manual_killswitch()
+        {
+            let st_check = env.state.get_data().await;
+            let unrouted_check = st_check.enabled_unrouted_providers();
+            if any_blocked_pinned_or_excepted_for(&st_check, &unrouted_check, &ip) {
+                inner.handled_ip = None;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if inner.handled_ip.as_deref() == Some(ip.as_str())
+            && !needs_reaudit
+            && !has_blocked_pin_match
+        {
             return; // user already decided about this network
         }
 

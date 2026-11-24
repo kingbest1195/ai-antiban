@@ -641,3 +641,50 @@ async fn test_kick_reaudit_and_route_sync_never_drop_when_inner_is_locked() {
         "pending alert containing routed openai must have been pruned"
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn test_partial_blocked_switch_to_trusted_exception_clears_lock_without_trap() {
+    let audit: AuditFn = Arc::new(|provider, _force| {
+        Box::pin(async move {
+            let mut r = test_report(provider, OverallStatus::Red, "7.7.7.7", "DE");
+            r.checks = vec![CheckResult::critical(
+                "IMPOSSIBLE_TRAVEL_CRITICAL",
+                "RU -> DE",
+                None,
+            )];
+            Ok(r)
+        })
+    });
+    let h = harness(audit, "7.7.7.7").await;
+    h.state
+        .set_interception_behavior(InterceptionBehavior::AutoLockSilent)
+        .await
+        .unwrap();
+    h.state
+        .set_provider_monitoring("gemini", false)
+        .await
+        .unwrap();
+    h.state.block_provider("anthropic").await.unwrap();
+    h.state.block_provider("openai").await.unwrap();
+    h.state
+        .add_trusted_exception("anthropic", "7.7.7.7")
+        .await
+        .unwrap();
+    h.guard.set_pause_mode_raw(PauseMode::UntilNetworkChange);
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.paused_ip = Some("9.9.9.9".to_string());
+    }
+    h.guard.sync_gates_with_state(&h.state).await;
+
+    h.change("7.7.7.7").await;
+    h.io.wait_for("network://changed", 2000)
+        .await
+        .expect("trusted exception recovery");
+    assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+    assert!(!h.state.is_provider_blocked("anthropic").await);
+    assert_eq!(h.guard.gate_for(ProviderId::Openai), Gate::Blocked);
+    assert!(h.state.is_provider_blocked("openai").await);
+    assert_eq!(h.guard.pause_mode(), PauseMode::None);
+    assert!(h.io.count("interceptor://resolved") >= 1);
+}

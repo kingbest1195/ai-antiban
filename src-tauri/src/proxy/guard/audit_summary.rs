@@ -6,9 +6,10 @@ use crate::auditor::OverallStatus;
 use crate::auditor::geo_matrix::ProviderId;
 use crate::auditor::{NetworkTelemetry, RiskReport};
 
-#[cfg(test)]
-use super::policy::report_no_critical_and_geo_ok;
-use super::policy::{report_allowed_on_network_switch, severity};
+use super::policy::{
+    ips_equal, is_pinned_transient_unknown_geo, is_report_pinned_travel_only,
+    report_allowed_on_network_switch, report_no_critical_and_geo_ok, severity,
+};
 use super::types::{AuditFn, AuditResults};
 
 async fn audit_one_with_retry(
@@ -176,6 +177,50 @@ impl AuditSummary {
             Some(super::policy::format_cooldown_gate_reason(remaining))
         } else {
             None
+        }
+    }
+
+    pub(super) fn is_transient_pinned_error(
+        &self,
+        st: &crate::state::AppStateData,
+        provider: &str,
+        ip: &str,
+    ) -> bool {
+        let is_pinned = st
+            .pinned_ip_for_provider(provider, false)
+            .is_some_and(|pin| ips_equal(pin, ip));
+        is_pinned
+            && (self.failed_providers.contains(&provider)
+                || self
+                    .reports
+                    .get(provider)
+                    .is_some_and(|r| is_pinned_transient_unknown_geo(r, st, false)))
+    }
+
+    pub(super) async fn record_healthy_history(
+        &self,
+        state: &crate::state::AppState,
+        st: &crate::state::AppStateData,
+    ) {
+        let now = crate::auditor::network::current_timestamp();
+        for p in &self.healthy_providers {
+            if let Some(r) = self.reports.get(p)
+                && (report_no_critical_and_geo_ok(r) || is_report_pinned_travel_only(r, st))
+            {
+                let entry = crate::state::IpHistoryEntry::new(
+                    r.telemetry.ip.clone(),
+                    r.telemetry.country_code.clone(),
+                    r.telemetry.asn,
+                    now,
+                );
+                let _ = state
+                    .record_ip_history_for_selection(
+                        p,
+                        &crate::routing::RouteSelection::Direct,
+                        entry,
+                    )
+                    .await;
+            }
         }
     }
 }

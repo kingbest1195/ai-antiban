@@ -27,6 +27,21 @@ impl AppStateData {
             .filter(|(k, _)| canonical_provider_key(k) == key)
             .any(|(_, ips)| ips.iter().any(|stored| normalize_ip_str(stored) == norm_ip))
     }
+
+    /// Returns `true` if `provider` has at least one persistent trusted exception IP.
+    pub fn has_trusted_exceptions_for(&self, provider: &str) -> bool {
+        let key = canonical_provider_key(provider);
+        if key.is_empty() {
+            return false;
+        }
+        self.trusted_exceptions
+            .iter()
+            .filter(|(k, _)| canonical_provider_key(k) == key)
+            .any(|(_, ips)| {
+                ips.iter()
+                    .any(|stored| !normalize_ip_str(stored).is_empty())
+            })
+    }
 }
 
 impl AppState {
@@ -316,7 +331,7 @@ pub(super) fn canonical_provider_key(provider: &str) -> String {
     }
 }
 
-pub(super) fn normalize_ip_str(ip: &str) -> String {
+pub(crate) fn normalize_ip_str(ip: &str) -> String {
     let trimmed = ip.trim();
     if trimmed.is_empty() {
         return String::new();

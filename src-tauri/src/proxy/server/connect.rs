@@ -73,16 +73,6 @@ impl ProxyServer {
             }
             None => {
                 if crate::auditor::geo_matrix::is_payment_or_kyc_host(&host) {
-                    if self.guard.is_manual_killswitch() {
-                        self.state
-                            .stats()
-                            .record_intercepted(&host, "anthropic", "BLOCKED", "??");
-                        return send_forbidden(
-                            client,
-                            "Network kill-switch is engaged in Zastava: payment traffic is stopped.",
-                        )
-                        .await;
-                    }
                     let pay_selection = super::http_handler::active_payment_route_selection(
                         &self.state,
                         &st_snapshot,
@@ -219,7 +209,7 @@ impl ProxyServer {
                     .await;
             }
 
-            self.guard.ensure_fresh().await;
+            Box::pin(self.guard.ensure_fresh()).await;
             match self.guard.gate_for(provider) {
                 Gate::Open => {}
                 Gate::Pending => {
@@ -465,6 +455,16 @@ impl ProxyServer {
                 "Requests to this provider are blocked until network change.",
             )
             .await;
+        }
+
+        // Transient unknown geo during `utun` stabilization on a pinned IP must fail-closed for
+        // this CONNECT without persistently adding the provider to `blocked_providers`.
+        if self
+            .guard
+            .is_transient_pinned_report(&report, &st_after_audit, route.is_some())
+        {
+            self.guard.wake_immediate_probe().await;
+            return send_forbidden(client, "Pinned IP geo pending.").await;
         }
 
         // Step 5: Non-excepted Critical / Blocked Geo / Strict Pinning mismatch -> apply preset InterceptionBehavior
