@@ -476,3 +476,75 @@ async fn pause_until_network_change_stays_on_same_ip_and_clears_on_change_or_inv
     assert_eq!(h.guard.pause_mode(), PauseMode::Manual);
     assert_eq!(h.guard.gate(), Gate::Blocked);
 }
+
+#[tokio::test(start_paused = true)]
+async fn pause_until_network_change_during_detecting_adopts_settled_ip_without_reopening_popup() {
+    let probe_ip = Arc::new(std::sync::Mutex::new(None::<String>));
+    let probe_ip_env = Arc::clone(&probe_ip);
+    let h = harness_env(
+        slow_audit(Duration::from_millis(20), "9.9.9.9", OverallStatus::Red),
+        "1.1.1.1",
+        move |env| {
+            env.probe = Some(Arc::new(move || {
+                let ip = probe_ip_env.lock().unwrap().clone();
+                Box::pin(async move { ip })
+            }));
+        },
+    )
+    .await;
+
+    // 1. Trigger route change -> instant detecting popup while probe is still offline (`None`).
+    let fp = compute_local_route_fingerprint(None);
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.last_route_fp = Some(format!("{fp}-old"));
+        inner.route_dirty = true;
+    }
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.gate(), Gate::Pending);
+    assert_eq!(h.io.count("interceptor://risk-detected"), 1);
+
+    // 2. User clicks "Пауза до смены сети" while still in `detecting` (IP unresolved).
+    let status = h
+        .guard
+        .pause_until_network_change(&h.state, Some("Пауза при проверке".to_string()))
+        .await;
+    assert!(status.paused);
+    assert_eq!(status.mode, PauseMode::UntilNetworkChange);
+    assert_eq!(h.guard.gate(), Gate::Blocked);
+    assert!(h.env.hold_queue.current_alert().is_none());
+
+    // 3. Route fingerprint settles slightly AND probe resolves new IP "9.9.9.9".
+    //    Pause MUST adopt "9.9.9.9" without clearing or re-opening the popup!
+    *probe_ip.lock().unwrap() = Some("9.9.9.9".to_string());
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.last_route_fp = Some(format!("{fp}-settling"));
+        inner.route_dirty = true;
+    }
+    h.guard.check_route_and_tick(&h.env).await;
+    h.guard.wait_probe_settled_for_test().await;
+
+    assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
+    assert_eq!(h.guard.gate(), Gate::Blocked);
+    assert_eq!(h.io.count("interceptor://risk-detected"), 1);
+    assert!(h.env.hold_queue.current_alert().is_none());
+    {
+        let inner = h.guard.inner.lock().await;
+        assert_eq!(inner.paused_ip.as_deref(), Some("9.9.9.9"));
+        assert!(!inner.pending_pause_ip_bind);
+    }
+
+    // 4. Subsequent regular probe on "9.9.9.9" keeps pause; brief offline flap also keeps pause.
+    *probe_ip.lock().unwrap() = None;
+    h.guard.inner.lock().await.last_probe = None;
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
+    assert_eq!(h.io.count("interceptor://risk-detected"), 1);
+
+    // 5. Real subsequent change to "8.8.8.8" clears UntilNetworkChange pause.
+    *probe_ip.lock().unwrap() = Some("8.8.8.8".to_string());
+    h.guard.inner.lock().await.last_probe = None;
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.pause_mode(), PauseMode::None);
+}

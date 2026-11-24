@@ -8,10 +8,8 @@ use tokio::sync::{Mutex, watch};
 use crate::auditor::geo_matrix::ProviderId;
 use crate::state::AppState;
 
-use super::types::{
-    Gate, GuardPauseStatus, Inner, NetworkGuard, PauseMode, Pending,
-    compute_local_route_fingerprint,
-};
+use super::fingerprint::compute_local_route_fingerprint;
+use super::types::{Gate, GuardPauseStatus, Inner, NetworkGuard, PauseMode, Pending};
 
 impl NetworkGuard {
     pub fn new() -> Self {
@@ -29,7 +27,8 @@ impl NetworkGuard {
         let (kill_tx, _kill_rx) = watch::channel(false);
         let (shutdown_abort_tx, _shutdown_rx) = watch::channel(false);
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(1200))
+            .connect_timeout(Duration::from_millis(500))
+            .timeout(Duration::from_millis(1000))
             // Never reuse keep-alive sockets: they may still point to the previous route.
             .pool_max_idle_per_host(0)
             .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
@@ -115,6 +114,10 @@ impl NetworkGuard {
             return PauseMode::Manual;
         }
         *self.pause_mode.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.pause_mode() != PauseMode::None
     }
 
     pub fn gate_reason(&self) -> Option<String> {
@@ -232,11 +235,23 @@ impl NetworkGuard {
         }
         if let Some(ref old_fp) = g.last_route_fp {
             if fp != *old_fp {
-                g.last_route_fp = Some(fp);
+                g.last_route_fp = Some(fp.clone());
                 if !g.route_dirty {
                     g.dirty_since = Some(Instant::now());
                 }
                 g.route_dirty = true;
+                let settling_pause = !self.is_manual_killswitch()
+                    && g.pending_pause_ip_bind
+                    && *self.pause_mode.lock().unwrap_or_else(|p| p.into_inner())
+                        == PauseMode::UntilNetworkChange;
+                if settling_pause {
+                    // User paused during `detecting` while the route is still settling:
+                    // adopt the updated fingerprint and keep traffic blocked without re-opening alerts.
+                    g.paused_route_fp = Some(fp);
+                    drop(g);
+                    self.abort_active_tunnels();
+                    return true;
+                }
                 g.paused_ip = None;
                 g.pending_pause_ip_bind = false;
                 g.paused_route_fp = None;

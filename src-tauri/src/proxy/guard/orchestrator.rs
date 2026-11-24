@@ -16,13 +16,11 @@ use crate::proxy::hold_queue::{
 use crate::state::KNOWN_PROVIDERS;
 
 use super::audit_summary::audit_enabled;
+use super::fingerprint::compute_local_route_fingerprint;
 use super::policy::{
     all_excepted, all_pinned_or_excepted_for, is_blocked_geo_code, network_change, now_unix_ms,
 };
-use super::types::{
-    ALL_PROVIDERS, Baseline, Env, Gate, GuardCtx, Inner, NetworkGuard, Pending,
-    compute_local_route_fingerprint,
-};
+use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, GuardCtx, Inner, NetworkGuard, Pending};
 
 impl NetworkGuard {
     /// Computes the current local route fingerprint, isolating unit tests from global
@@ -150,6 +148,12 @@ impl NetworkGuard {
         }
 
         let old = inner.baseline.clone();
+        if self.pause_mode() == super::types::PauseMode::UntilNetworkChange
+            && !inner.pending_pause_ip_bind
+            && inner.paused_ip.as_deref() != Some(new_ip.as_str())
+        {
+            self.clear_until_network_change_locked(inner);
+        }
         // Never abort/restart an in-flight audit or already-handled check for the exact same IP
         // unless `needs_reaudit` was explicitly armed (e.g. route unbind / exception removed).
         if !inner.needs_reaudit
@@ -281,6 +285,10 @@ impl NetworkGuard {
         already_blocked: &[&'static str],
         t0: Instant,
     ) {
+        if self.is_paused() {
+            self.hide_popup(env);
+            return;
+        }
         inner.handled_ip = Some(new_ip.clone());
         inner.needs_reaudit = false;
 

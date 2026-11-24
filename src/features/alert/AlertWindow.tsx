@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useReducer, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
-import type { EnrichedPayload, InterceptionAction, RiskInterceptPayload } from "../../types";
+import type { EnrichedPayload, GuardPauseStatus, InterceptionAction, RiskInterceptPayload } from "../../types";
 import {
   MOCK_ALERT_DETECTED_EVENT,
   MOCK_ALERT_ENRICHED_EVENT,
   fetchAppState,
+  getGuardPauseStatus,
   pauseUntilNetworkChange,
   resolveInterception,
   takePendingAlert,
@@ -55,6 +56,7 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
   const [confirmForce, setConfirmForce] = useState<boolean>(false);
   const [persistException, setPersistException] = useState<boolean>(false);
   const [stateHideIpMode, setStateHideIpMode] = useState<boolean | null>(null);
+  const guardPausedRef = useRef<boolean>(false);
 
   const { payload } = state;
   const generation = state.generation;
@@ -85,12 +87,28 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
 
     if (isTauri()) {
       track(
+        listen<GuardPauseStatus>("guard://pause-status-changed", (event) => {
+          const paused = Boolean(event.payload?.paused);
+          guardPausedRef.current = paused;
+          if (paused) dispatch({ type: "cleared" });
+        }),
+      );
+      getGuardPauseStatus()
+        .then((status) => {
+          if (cancelled) return;
+          guardPausedRef.current = Boolean(status?.paused);
+          if (guardPausedRef.current) dispatch({ type: "cleared" });
+        })
+        .catch(() => {});
+      track(
         listen<RiskInterceptPayload>("interceptor://risk-detected", (event) => {
+          if (guardPausedRef.current && !event.payload.is_simulation) return;
           dispatch({ type: "detected", payload: event.payload });
         }),
       );
       track(
         listen<EnrichedPayload>("interceptor://enriched", (event) => {
+          if (guardPausedRef.current) return;
           dispatch({ type: "enriched", payload: event.payload });
         }),
       );
@@ -99,7 +117,9 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
     // Холодный старт окна: первое событие могло прийти до подписки, берём снимок у бэкенда.
     takePendingAlert()
       .then((snapshot) => {
-        if (!cancelled && snapshot) dispatch({ type: "detected", payload: snapshot });
+        if (!cancelled && snapshot && (!guardPausedRef.current || snapshot.is_simulation)) {
+          dispatch({ type: "detected", payload: snapshot });
+        }
       })
       .catch((err) => console.error("Failed to take pending alert:", err));
 
@@ -176,6 +196,10 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
         );
         if (applied && action === "BlockUntilNetworkChange" && payload.scope !== "network") {
           await pauseUntilNetworkChange(payload.gate_reason ?? undefined).catch(() => {});
+        }
+        if (action === "BlockUntilNetworkChange") {
+          guardPausedRef.current = true;
+          dispatch({ type: "cleared" });
         }
         if (onResolved) onResolved(action);
       } catch (err) {

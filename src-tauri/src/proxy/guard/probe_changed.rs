@@ -14,45 +14,7 @@ use super::policy::{
     all_excepted, all_pinned_or_excepted_for, all_unrouted_session_or_excepted,
     is_blocked_geo_code, network_change, now_unix_ms,
 };
-use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, Inner, NetworkGuard, PauseMode, Pending};
-
-/// RAII drop guard ensuring `Inner::probe_in_flight` and `Inner::probe_abort` are cleared
-/// even if the background probe task exits early, is cancelled, or panics.
-struct ProbeInFlightGuard {
-    guard: Arc<NetworkGuard>,
-    armed: bool,
-}
-
-impl ProbeInFlightGuard {
-    fn new(guard: Arc<NetworkGuard>) -> Self {
-        Self { guard, armed: true }
-    }
-
-    fn disarm(&mut self, inner: &mut Inner) {
-        self.armed = false;
-        inner.probe_in_flight = false;
-        inner.probe_abort = None;
-    }
-}
-
-impl Drop for ProbeInFlightGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        if let Ok(mut inner) = self.guard.inner.try_lock() {
-            inner.probe_in_flight = false;
-            inner.probe_abort = None;
-        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let guard = Arc::clone(&self.guard);
-            handle.spawn(async move {
-                let mut inner = guard.inner.lock().await;
-                inner.probe_in_flight = false;
-                inner.probe_abort = None;
-            });
-        }
-    }
-}
+use super::types::{ALL_PROVIDERS, Baseline, Env, Gate, NetworkGuard, PauseMode, Pending};
 
 impl NetworkGuard {
     /// Handles `TickPlan::ProbeChanged(t0, planned_fp)` immediately with ZERO network waits:
@@ -98,6 +60,34 @@ impl NetworkGuard {
             return;
         }
 
+        if self.pause_mode() == PauseMode::UntilNetworkChange && inner.pending_pause_ip_bind {
+            inner.paused_route_fp = Some(planned_fp.clone());
+            self.abort_active_tunnels();
+            self.hide_popup(env);
+            if inner.probe_in_flight {
+                return;
+            }
+            inner.probe_in_flight = true;
+            let epoch = inner.epoch;
+            let (guard, env2) = (Arc::clone(self), env.clone());
+            let handle = tokio::spawn(async move {
+                guard
+                    .run_changed_probe_background(
+                        env2,
+                        None,
+                        epoch,
+                        planned_fp,
+                        was_blocked,
+                        false,
+                        Vec::new(),
+                        Vec::new(),
+                        t0,
+                    )
+                    .await;
+            });
+            inner.probe_abort = Some(handle.abort_handle());
+            return;
+        }
         if self.clear_until_network_change_locked(&mut inner) {
             inner.handled_ip = None;
         }
@@ -231,7 +221,7 @@ impl NetworkGuard {
         already_blocked: Vec<&'static str>,
         t0: Instant,
     ) {
-        let mut in_flight_guard = ProbeInFlightGuard::new(Arc::clone(self));
+        let mut in_flight_guard = super::probe_offline::ProbeInFlightGuard::new(Arc::clone(self));
         let probed = self
             .probe_with_offline_retries(&env, &alert_id, epoch, &planned_fp)
             .await;
@@ -264,15 +254,10 @@ impl NetworkGuard {
             return;
         }
 
-        // If the user paused/closed the `detecting` alert before `probe` resolved, bind `paused_ip`
-        // to the newly probed IP on this route without clearing the pause or re-opening the popup.
+        // If the user paused/closed the `detecting` alert before `probe` resolved, adopt
+        // the newly probed IP on this route without clearing the pause or re-opening the popup.
         if self.pause_mode() == PauseMode::UntilNetworkChange && inner.pending_pause_ip_bind {
-            if let Some(ref new_ip) = probed
-                && !inner.route_dirty
-                && (inner.paused_route_fp.is_none()
-                    || inner.paused_route_fp.as_deref() == Some(planned_fp.as_str()))
-                && !self.probe_is_stale(&inner, &planned_fp)
-            {
+            if let Some(ref new_ip) = probed {
                 let unrouted = st.enabled_unrouted_providers();
                 let matches_pin = !unrouted.is_empty()
                     && unrouted.iter().all(|p| {
@@ -283,12 +268,16 @@ impl NetworkGuard {
                     inner.last_probe = Some(Instant::now());
                     inner.observed_ip = Some(new_ip.clone());
                     inner.paused_ip = Some(new_ip.clone());
+                    inner.paused_route_fp = inner.last_route_fp.clone().or(Some(planned_fp));
                     inner.handled_ip = Some(new_ip.clone());
                     inner.pending_pause_ip_bind = false;
+                    inner.route_dirty = false;
+                    self.hide_popup(&env);
                     return;
                 }
                 self.clear_until_network_change_locked(&mut inner);
             } else {
+                self.hide_popup(&env);
                 return;
             }
         } else if inner.epoch != epoch

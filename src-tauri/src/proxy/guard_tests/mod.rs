@@ -208,7 +208,7 @@ fn all_providers() -> Vec<String> {
 
 #[test]
 fn periodic_sysproxy_sync_skips_unchanged_steady_state_ticks() {
-    use super::probe_loop::PeriodicSysproxySync;
+    use super::fingerprint::PeriodicSysproxySync;
 
     let mut sync = PeriodicSysproxySync::default();
     let t0 = Instant::now();
