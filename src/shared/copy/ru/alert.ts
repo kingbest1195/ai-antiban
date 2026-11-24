@@ -37,6 +37,10 @@ export const alertDialog = {
     title: "Оплата приостановлена для вашей безопасности",
     serviceLabel: "Страница оплаты",
     scoreLabel: "Готовность к оплате",
+    radarLabel: "Статистика карты",
+    radarCritical: "Высокий риск",
+    radarOk: "Проверено",
+    radarInsufficient: "Мало данных",
     cancelAndInspect: "Отменить и проверить",
     allow15m: "Продолжить на свой риск (15 мин)",
     fallbackReason:

@@ -67,8 +67,8 @@ export function mockEvaluatePaymentReadiness(
   let binScore = 30;
   let binStatus: AxisScore["status"] = "ok";
   const binNotes: string[] = [];
-  if (channel === "appleIAP" || channel === "api") {
-    binNotes.push("При оплате через App Store или по ключу данные карты на сайт не передаются.");
+  if (channel === "appleIAP" || channel === "googlePlayIap" || channel === "api") {
+    binNotes.push("При оплате через магазин приложений или по ключу данные карты на сайт не передаются.");
   } else if (!binReport) {
     binScore = 15;
     binStatus = "warning";
@@ -125,6 +125,19 @@ export function mockEvaluatePaymentReadiness(
     } else {
       geoNotes.push("Выбран аккаунт App Store США — оплата идёт через Apple без проверки карты на сайте.");
     }
+  } else if (channel === "googlePlayIap") {
+    const gpCc = normCc(params.googleProfileCountry);
+    if (gpCc === "RU") {
+      geoScore = 0;
+      geoStatus = "critical";
+      blockers.push("Платёжный профиль Google привязан к России — оплата зарубежной картой вызовет ошибку OR-CCSEH-21 / OR-HDT-16.");
+    } else if (gpCc && exitCc && gpCc !== exitCc) {
+      geoScore = 10;
+      geoStatus = "critical";
+      blockers.push(`Конфликт стран Google Play: профиль в стране ${countryName(gpCc) || gpCc} при подключении из ${countryName(exitCc) || exitCc}.`);
+    } else {
+      geoNotes.push("Профиль Google Play и подключение согласованы.");
+    }
   } else if (channel === "api") {
     geoNotes.push("Для оплаты по ключу совпадение страны карты и адреса не требуется.");
   } else if (binReport?.countryCode) {
@@ -169,8 +182,20 @@ export function mockEvaluatePaymentReadiness(
   let chanStatus: AxisScore["status"] = "ok";
   const chanNotes: string[] = [];
   let walletTrap = false;
-  if (channel === "appleIAP" || channel === "api") {
-    chanNotes.push("Этот способ оплаты не использует форму карты на сайте.");
+  if (channel === "appleIAP" || channel === "googlePlayIap" || channel === "api") {
+    if (channel === "googlePlayIap") {
+      const gpCc = normCc(params.googleProfileCountry);
+      if (gpCc === "RU" || (gpCc && exitCc && gpCc !== exitCc)) {
+        chanScore = 0;
+        chanStatus = "critical";
+        walletTrap = true;
+        blockers.push("Профиль Google Payments конфликтует с оплатой (риск OR-CCSEH-21 / OR-HDT-16).");
+      } else {
+        chanNotes.push("Оплата через Google Play не использует форму карты на сайте.");
+      }
+    } else {
+      chanNotes.push("Этот способ оплаты не использует форму карты на сайте.");
+    }
   } else {
     if (!warmupOk) {
       chanScore -= 10;
@@ -245,7 +270,7 @@ export function mockEvaluatePaymentReadiness(
     warnings,
     blockers,
     recommendedAction,
-    requiresMatchingBilling: channel !== "appleIAP" && channel !== "api",
+    requiresMatchingBilling: channel !== "appleIAP" && channel !== "googlePlayIap" && channel !== "api",
     failClosedBin,
     channel,
     evaluatedAt: nowSec(),

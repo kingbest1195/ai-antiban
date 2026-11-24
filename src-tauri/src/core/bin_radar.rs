@@ -217,18 +217,28 @@ fn round1(val: f64) -> f64 {
     (val * 10.0).round() / 10.0
 }
 
-/// Computes exponential-decay window stats over samples with `0.0 <= age_days <= window_days`.
-pub fn compute_window_stats(
+struct WeightedSampleTotals {
+    n: u32,
+    w_total: f64,
+    w_success: f64,
+    w_soft_decline: f64,
+    w_instant_kyc: f64,
+    w_instant_ban: f64,
+}
+
+fn accumulate_window_samples(
     samples: &[TimestampedOutcome],
     window_days: f64,
     half_life_days: f64,
-) -> BinRadarWindowStats {
-    let mut n: u32 = 0;
-    let mut w_total = 0.0_f64;
-    let mut w_success = 0.0_f64;
-    let mut w_soft_decline = 0.0_f64;
-    let mut w_instant_kyc = 0.0_f64;
-    let mut w_instant_ban = 0.0_f64;
+) -> WeightedSampleTotals {
+    let mut totals = WeightedSampleTotals {
+        n: 0,
+        w_total: 0.0,
+        w_success: 0.0,
+        w_soft_decline: 0.0,
+        w_instant_kyc: 0.0,
+        w_instant_ban: 0.0,
+    };
 
     for s in samples {
         if !s.age_days.is_finite() || s.age_days < 0.0 || s.age_days > window_days {
@@ -243,17 +253,27 @@ pub fn compute_window_stats(
         if w <= 0.0 {
             continue;
         }
-        n = n.saturating_add(1);
-        w_total += w;
+        totals.n = totals.n.saturating_add(1);
+        totals.w_total += w;
         match s.outcome {
-            PaymentOutcome::Success => w_success += w,
-            PaymentOutcome::SoftDecline => w_soft_decline += w,
-            PaymentOutcome::InstantKyc => w_instant_kyc += w,
-            PaymentOutcome::InstantBan => w_instant_ban += w,
+            PaymentOutcome::Success => totals.w_success += w,
+            PaymentOutcome::SoftDecline => totals.w_soft_decline += w,
+            PaymentOutcome::InstantKyc => totals.w_instant_kyc += w,
+            PaymentOutcome::InstantBan => totals.w_instant_ban += w,
         }
     }
 
-    if n == 0 || w_total <= 0.0 {
+    totals
+}
+
+/// Computes exponential-decay window stats over samples with `0.0 <= age_days <= window_days`.
+pub fn compute_window_stats(
+    samples: &[TimestampedOutcome],
+    window_days: f64,
+    half_life_days: f64,
+) -> BinRadarWindowStats {
+    let t = accumulate_window_samples(samples, window_days, half_life_days);
+    if t.n == 0 || t.w_total <= 0.0 {
         return BinRadarWindowStats {
             n: 0,
             success_pct: 0.0,
@@ -264,7 +284,55 @@ pub fn compute_window_stats(
     }
 
     BinRadarWindowStats {
-        n,
+        n: t.n,
+        success_pct: round1(t.w_success * 100.0 / t.w_total),
+        soft_decline_pct: round1(t.w_soft_decline * 100.0 / t.w_total),
+        instant_kyc_pct: round1(t.w_instant_kyc * 100.0 / t.w_total),
+        instant_ban_pct: round1(t.w_instant_ban * 100.0 / t.w_total),
+    }
+}
+
+/// Merges optional signed snapshot window stats with local exponential-decay samples.
+pub fn merge_window_stats(
+    base: Option<&BinRadarWindowStats>,
+    samples: &[TimestampedOutcome],
+    window_days: f64,
+    half_life_days: f64,
+) -> BinRadarWindowStats {
+    let local = accumulate_window_samples(samples, window_days, half_life_days);
+    let Some(base_stats) = base.filter(|b| b.n > 0) else {
+        return if local.n == 0 || local.w_total <= 0.0 {
+            BinRadarWindowStats {
+                n: 0,
+                success_pct: 0.0,
+                soft_decline_pct: 0.0,
+                instant_kyc_pct: 0.0,
+                instant_ban_pct: 0.0,
+            }
+        } else {
+            BinRadarWindowStats {
+                n: local.n,
+                success_pct: round1(local.w_success * 100.0 / local.w_total),
+                soft_decline_pct: round1(local.w_soft_decline * 100.0 / local.w_total),
+                instant_kyc_pct: round1(local.w_instant_kyc * 100.0 / local.w_total),
+                instant_ban_pct: round1(local.w_instant_ban * 100.0 / local.w_total),
+            }
+        };
+    };
+
+    if local.n == 0 || local.w_total <= 0.0 {
+        return base_stats.clone();
+    }
+
+    let w_base = base_stats.n as f64;
+    let w_total = w_base + local.w_total;
+    let w_success = w_base * (base_stats.success_pct / 100.0) + local.w_success;
+    let w_soft_decline = w_base * (base_stats.soft_decline_pct / 100.0) + local.w_soft_decline;
+    let w_instant_kyc = w_base * (base_stats.instant_kyc_pct / 100.0) + local.w_instant_kyc;
+    let w_instant_ban = w_base * (base_stats.instant_ban_pct / 100.0) + local.w_instant_ban;
+
+    BinRadarWindowStats {
+        n: base_stats.n.saturating_add(local.n),
         success_pct: round1(w_success * 100.0 / w_total),
         soft_decline_pct: round1(w_soft_decline * 100.0 / w_total),
         instant_kyc_pct: round1(w_instant_kyc * 100.0 / w_total),

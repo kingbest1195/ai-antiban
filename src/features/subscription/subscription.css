@@ -15,6 +15,12 @@
 
 /* Оценка готовности, защита после оплаты и памятка */
 .subs-readiness-controls{display:flex;flex-direction:column;gap:var(--space-3);margin-bottom:var(--space-3)}
+.subs-channel-seg{flex-wrap:wrap}
+.subs-channel-seg .zs-seg__opt{flex:1 1 auto}
+.subs-radar-optin{margin-top:var(--space-3);padding-top:var(--space-2);border-top:1px solid var(--line)}
+.subs-radar-submit{margin-top:var(--space-3);padding-top:var(--space-3);border-top:1px solid var(--line);display:flex;flex-wrap:wrap;align-items:flex-end;gap:var(--space-2)}
+.subs-radar-submit__select{flex:1 1 200px;min-width:0}
+.subs-radar-hint{margin:var(--space-2) 0 0;color:var(--ink-2)}
 .subs-readiness-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-3)}
 .subs-verdict-hero{display:flex;flex-direction:column;gap:var(--space-2);margin-bottom:var(--space-3)}
 .subs-verdict-title{margin:0;font-size:17px;line-height:24px;font-weight:600;color:var(--ink)}
