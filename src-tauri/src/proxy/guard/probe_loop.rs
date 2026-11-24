@@ -373,19 +373,35 @@ impl NetworkGuard {
             return TickPlan::ProbeRegular(current_fp);
         }
 
+        let fp_moved = inner
+            .last_route_fp
+            .as_ref()
+            .is_some_and(|old_fp| *old_fp != current_fp);
         let route_changed = if inner.baseline.is_some() {
-            // `dirty`: a CONNECT already saw the change (and overwrote the fingerprint).
-            dirty
-                || inner
-                    .last_route_fp
-                    .as_ref()
-                    .is_some_and(|old_fp| *old_fp != current_fp)
+            dirty || fp_moved
         } else {
             false
         };
 
         if route_changed {
             inner.last_route_fp = Some(current_fp.clone());
+            if fp_moved {
+                inner.last_fp_change_at = Some(Instant::now());
+            }
+            // Do not kill an already in-flight Pending probe/audit on intermediate utun/IPv6/DNS
+            // flaps: record the latest fingerprint for deferred settling/re-check instead.
+            let already_probing_pending = inner.probe_in_flight
+                || (self.any_provider_gate_pending() && inner.audit_abort.is_some());
+            if already_probing_pending {
+                if !self.is_manual_killswitch()
+                    && inner.pending_pause_ip_bind
+                    && self.pause_mode() == super::types::PauseMode::UntilNetworkChange
+                {
+                    inner.paused_route_fp = Some(current_fp.clone());
+                }
+                inner.deferred_recheck_fp = Some(current_fp);
+                return TickPlan::Done;
+            }
             // Immediately freeze ONLY non-already-blocked enabled unrouted providers (Pending).
             return TickPlan::ProbeChanged(dirty_since.unwrap_or_else(Instant::now), current_fp);
         }

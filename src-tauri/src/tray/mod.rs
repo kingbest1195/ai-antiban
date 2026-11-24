@@ -12,9 +12,9 @@ pub(crate) use view::*;
 mod stress;
 
 use crate::proxy::guard::GuardPauseStatus;
-use crate::{auditor, state, sysproxy};
+use crate::{auditor, proxy, state, sysproxy};
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use tauri::{
@@ -133,6 +133,40 @@ fn apply_view(app: &tauri::AppHandle, view: &TrayView) {
     *slot = Some(prev.merged_with(view.clone()));
 }
 
+fn current_icon_is_green() -> bool {
+    let pending_icon = PENDING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|v| v.icon);
+    let last_icon = LAST_APPLIED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|v| v.icon);
+    pending_icon.or(last_icon) == Some(TrayColor::Green)
+}
+
+fn guard_priority_view_for_app(app: &tauri::AppHandle, has_blocked: bool) -> Option<TrayView> {
+    let startup_ready = app
+        .try_state::<Arc<crate::startup::StartupState>>()
+        .is_none_or(|s| s.is_ready());
+    let sysproxy_active = sysproxy::is_sysproxy_active();
+    let status = app
+        .try_state::<Arc<proxy::NetworkGuard>>()
+        .map(|g| g.pause_status());
+    match status {
+        Some(ref st) => {
+            TrayView::resolve_guard_priority(st, has_blocked, sysproxy_active, startup_ready)
+        }
+        None if has_blocked => Some(TrayView::from_status("red", None)),
+        None if startup_ready && !sysproxy_active => {
+            Some(TrayView::protection_off().merged_with(TrayView::from_killswitch(false)))
+        }
+        None => None,
+    }
+}
+
 /// Updates the system tray icon, menu bar title (macOS), tooltip, and live menu stats based on current audit report.
 /// Safe to call from any thread: the UI work is coalesced and executed on the main thread.
 pub fn update_tray_from_report(
@@ -141,6 +175,10 @@ pub fn update_tray_from_report(
     is_pinned: bool,
     has_blocked: bool,
 ) {
+    if let Some(priority_view) = guard_priority_view_for_app(app, has_blocked) {
+        submit(app, priority_view);
+        return;
+    }
     let stats = app
         .try_state::<state::AppState>()
         .map(|s| s.stats().snapshot_sync())
@@ -152,7 +190,7 @@ pub fn update_tray_from_report(
             &report.telemetry.country_code,
             &report.telemetry.ip,
             is_pinned,
-            has_blocked,
+            false,
             stats.protected_ai_requests,
             stats.intercepted_leaks,
             report.unknown_count,
@@ -163,27 +201,21 @@ pub fn update_tray_from_report(
 /// Immediately updates the tray icon, title, header, and killswitch directly from a
 /// `NetworkGuard` state transition without waiting for the periodic audit watcher.
 pub fn update_tray_from_guard_status(app: &tauri::AppHandle, status: &GuardPauseStatus) {
-    let current_is_green = {
-        let pending_icon = PENDING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|v| v.icon);
-        let last_icon = LAST_APPLIED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|v| v.icon);
-        pending_icon.or(last_icon) == Some(TrayColor::Green)
-    };
-    let view =
-        TrayView::from_guard_status(status, sysproxy::is_sysproxy_active(), current_is_green);
+    let view = TrayView::from_guard_status(
+        status,
+        sysproxy::is_sysproxy_active(),
+        current_icon_is_green(),
+    );
     submit(app, view);
 }
 
 /// The audit could not be completed: yellow icon and "Нет данных, проверено <время>".
 /// `last_checked` = local time of the last successful audit. Safe to call from any thread.
 pub fn update_tray_no_data(app: &tauri::AppHandle, last_checked: Option<&str>) {
+    if let Some(priority_view) = guard_priority_view_for_app(app, false) {
+        submit(app, priority_view);
+        return;
+    }
     submit(app, TrayView::from_audit_error(last_checked));
 }
 
@@ -233,6 +265,38 @@ pub fn inspect_tray_state_transition(
     };
     let bytes = view.icon.map_or(&[][..], |c| c.bytes());
     (color_name, view.title.unwrap_or_default(), bytes)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn resolve_tray_transition_for_test(
+    status: &GuardPauseStatus,
+    blocked_in_state: bool,
+    sysproxy_active: bool,
+    report: Option<&auditor::RiskReport>,
+    is_pinned: bool,
+) -> (&'static str, String) {
+    let view = TrayView::resolve_guard_priority(status, blocked_in_state, sysproxy_active, true)
+        .unwrap_or_else(|| match report {
+            Some(r) => TrayView::from_report(
+                r.overall_status,
+                &r.telemetry.country_code,
+                &r.telemetry.ip,
+                is_pinned,
+                false,
+                0,
+                0,
+                r.unknown_count,
+            ),
+            None => TrayView::from_guard_status(status, sysproxy_active, false),
+        });
+    let color_name = match view.icon {
+        Some(TrayColor::Green) => "green",
+        Some(TrayColor::Yellow) => "yellow",
+        Some(TrayColor::Red) => "red",
+        Some(TrayColor::Gray) => "gray",
+        None => "none",
+    };
+    (color_name, view.title.unwrap_or_default())
 }
 
 #[cfg(test)]

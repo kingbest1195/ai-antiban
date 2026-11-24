@@ -54,9 +54,20 @@ impl NetworkGuard {
             force_reaudit: AtomicBool::new(false),
             pending_route_sync: std::sync::Mutex::new(HashMap::new()),
             restore_epoch: AtomicU64::new(0),
+            verify_in_flight: AtomicBool::new(false),
             client,
             chained_client: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            test_fp_fn: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(super) fn compute_route_fp(&self, upstream_key: Option<&str>) -> String {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(ref f) = *self.test_fp_fn.lock().unwrap_or_else(|p| p.into_inner()) {
+            return f(upstream_key);
+        }
+        compute_local_route_fingerprint(upstream_key)
     }
 
     pub fn restore_epoch(&self) -> u64 {
@@ -227,7 +238,7 @@ impl NetworkGuard {
     /// the tunnels at once and marks the change `route_dirty`, so the next tick handles it without
     /// waiting for `PROBE_MIN_GAP_MS`.
     pub fn check_route_fingerprint_sync(&self, upstream_key: Option<&str>) -> bool {
-        let fp = compute_local_route_fingerprint(upstream_key);
+        let fp = self.compute_route_fp(upstream_key);
         let mut g = match self.inner.try_lock() {
             Ok(guard) => guard,
             Err(_) => return false,
@@ -239,42 +250,83 @@ impl NetworkGuard {
         if let Some(ref old_fp) = g.last_route_fp {
             if fp != *old_fp {
                 g.last_route_fp = Some(fp.clone());
-                if !g.route_dirty {
-                    g.dirty_since = Some(Instant::now());
-                }
-                g.route_dirty = true;
+                g.last_fp_change_at = Some(Instant::now());
                 let settling_pause = !self.is_manual_killswitch()
                     && g.pending_pause_ip_bind
                     && *self.pause_mode.lock().unwrap_or_else(|p| p.into_inner())
                         == PauseMode::UntilNetworkChange;
                 if settling_pause {
                     // User paused during `detecting` while the route is still settling:
-                    // adopt the updated fingerprint and keep traffic blocked without re-opening alerts.
+                    // adopt the updated fingerprint and keep traffic blocked without clearing pause.
+                    g.route_dirty = true;
                     g.paused_route_fp = Some(fp);
                     drop(g);
                     self.abort_active_tunnels();
-                    return true;
+                    return false;
+                }
+                let in_flight = g.probe_in_flight
+                    || (self.any_provider_gate_pending() && g.audit_abort.is_some());
+                if in_flight {
+                    g.deferred_recheck_fp = Some(fp);
+                } else {
+                    if !g.route_dirty {
+                        g.dirty_since = Some(Instant::now());
+                    }
+                    g.route_dirty = true;
                 }
                 g.paused_ip = None;
                 g.pending_pause_ip_bind = false;
                 g.paused_route_fp = None;
+                let mut cleared_pause = false;
                 if !self.is_manual_killswitch() {
                     let mut pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
                     if *pm == PauseMode::UntilNetworkChange {
                         *pm = PauseMode::None;
+                        cleared_pause = true;
                         drop(pm);
                         self.set_gate_reason(None);
                     }
                 }
                 drop(g);
-                self.set_gate(Gate::Pending);
+                self.freeze_open_gates_pending();
                 self.abort_active_tunnels();
-                return true;
+                return !in_flight || cleared_pause;
             }
         } else {
             g.last_route_fp = Some(fp);
         }
         false
+    }
+
+    /// Freezes ONLY currently `Gate::Open` providers to `Gate::Pending`, preserving any
+    /// already `Gate::Blocked` providers (and coercing all to `Blocked` under manual kill-switch).
+    pub(super) fn freeze_open_gates_pending(&self) {
+        {
+            let _g = self.gate_lock.lock().unwrap_or_else(|p| p.into_inner());
+            if *self.kill_tx.borrow() {
+                self.gate_tx.send_replace(Gate::Blocked);
+                for tx in self.provider_gates.values() {
+                    tx.send_replace(Gate::Blocked);
+                }
+            } else {
+                let mut any_pending = false;
+                for tx in self.provider_gates.values() {
+                    if *tx.borrow() == Gate::Open {
+                        tx.send_replace(Gate::Pending);
+                    }
+                    if *tx.borrow() == Gate::Pending {
+                        any_pending = true;
+                    }
+                }
+                let global = if any_pending {
+                    Gate::Pending
+                } else {
+                    Gate::Blocked
+                };
+                self.gate_tx.send_replace(global);
+            }
+        }
+        self.emit_pause_status();
     }
 
     /// Sets the gate for every provider and overall guard state. While the manual kill-switch is

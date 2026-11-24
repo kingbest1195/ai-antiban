@@ -8,7 +8,6 @@ import {
   MOCK_ALERT_ENRICHED_EVENT,
   getGuardPauseStatus,
   getHideIpMode,
-  pauseUntilNetworkChange,
   resolveInterception,
   takePendingAlert,
 } from "../../utils/api";
@@ -223,18 +222,17 @@ export function AlertWindow({ initialPayload, hideIpMode: propHideIpMode, onReso
       }
 
       try {
-        const applied = await resolveInterception(
+        await resolveInterception(
           payload.id,
           action,
           payload.provider,
           payload.scope,
           action === "AllowSession" ? persistException : false,
         );
-        if (applied && action === "BlockUntilNetworkChange" && payload.scope !== "network") {
-          await pauseUntilNetworkChange(payload.gate_reason ?? undefined).catch(() => {});
-        }
         if (action === "BlockUntilNetworkChange") {
-          guardPausedRef.current = true;
+          if (payload.scope === "network") {
+            guardPausedRef.current = true;
+          }
           dispatch({ type: "cleared" });
         }
         if (onResolved) onResolved(action);

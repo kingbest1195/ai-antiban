@@ -12,6 +12,8 @@ use super::types::{Baseline, Env, Inner, NetworkGuard, PauseMode};
 
 const OFFLINE_PROBE_RETRY_DELAYS_MS: &[u64] = &[350, 500, 750, 1000, 1000];
 const OFFLINE_PROBE_MAX_BUDGET_SECS: u64 = 6;
+const FP_SETTLE_WINDOW_MS: u64 = 350;
+const FP_SETTLE_MAX_ROUNDS: usize = 5;
 
 impl NetworkGuard {
     pub(super) async fn probe_with_offline_retries(
@@ -19,7 +21,7 @@ impl NetworkGuard {
         env: &Env,
         alert_id: &Option<String>,
         epoch: u64,
-        planned_fp: &str,
+        _planned_fp: &str,
     ) -> Option<String> {
         let mut probed = self.probe(env).await;
         if probed.is_some() {
@@ -35,8 +37,7 @@ impl NetworkGuard {
             {
                 let inner = self.inner.lock().await;
                 let pause_waiting = self.pause_mode() == PauseMode::UntilNetworkChange
-                    && inner.pending_pause_ip_bind
-                    && inner.paused_route_fp.as_deref() == Some(planned_fp);
+                    && inner.pending_pause_ip_bind;
                 if self.is_manual_killswitch()
                     || (!pause_waiting
                         && (inner.epoch != epoch
@@ -53,6 +54,68 @@ impl NetworkGuard {
             }
         }
         probed
+    }
+
+    /// Probes the new route with offline retries and absorbs intermediate route-fingerprint
+    /// flaps (`utun`/IPv6/DNS) via a short settling window without killing the active alert.
+    pub(super) async fn probe_changed_with_settling(
+        self: &Arc<Self>,
+        env: &Env,
+        alert_id: &Option<String>,
+        epoch: u64,
+        planned_fp: String,
+    ) -> (Option<String>, String) {
+        let mut active_fp = planned_fp;
+        for _ in 0..FP_SETTLE_MAX_ROUNDS {
+            let probed = self
+                .probe_with_offline_retries(env, alert_id, epoch, &active_fp)
+                .await;
+            let (flapped, settle_wait) = {
+                let mut inner = self.inner.lock().await;
+                let pause_waiting = self.pause_mode() == PauseMode::UntilNetworkChange
+                    && inner.pending_pause_ip_bind;
+                if self.is_manual_killswitch()
+                    || (!pause_waiting
+                        && (inner.epoch != epoch
+                            || alert_id
+                                .as_ref()
+                                .is_some_and(|id| !inner.is_current(id, epoch))))
+                {
+                    return (probed, active_fp);
+                }
+                let cur_fp = self.current_local_route_fingerprint();
+                let flapped = inner.deferred_recheck_fp.take().is_some()
+                    || inner.route_dirty
+                    || cur_fp != active_fp;
+                if !flapped {
+                    return (probed, active_fp);
+                }
+                let wait = inner
+                    .last_fp_change_at
+                    .map(|t| Duration::from_millis(FP_SETTLE_WINDOW_MS).saturating_sub(t.elapsed()))
+                    .unwrap_or_else(|| Duration::from_millis(FP_SETTLE_WINDOW_MS));
+                inner.route_dirty = false;
+                active_fp = cur_fp.clone();
+                inner.last_route_fp = Some(cur_fp);
+                if pause_waiting {
+                    inner.paused_route_fp = Some(active_fp.clone());
+                }
+                (true, wait)
+            };
+            if flapped && !settle_wait.is_zero() {
+                tokio::time::sleep(settle_wait).await;
+                let mut inner = self.inner.lock().await;
+                let cur_fp = self.current_local_route_fingerprint();
+                inner.deferred_recheck_fp = None;
+                inner.route_dirty = false;
+                active_fp = cur_fp.clone();
+                inner.last_route_fp = Some(cur_fp);
+            }
+        }
+        let probed = self
+            .probe_with_offline_retries(env, alert_id, epoch, &active_fp)
+            .await;
+        (probed, active_fp)
     }
     #[allow(clippy::too_many_arguments)]
     async fn handle_same_baseline(
@@ -80,15 +143,13 @@ impl NetworkGuard {
                 }
                 let country_ok = baseline_country.is_some_and(|c| !is_blocked_geo_code(c));
                 let st_check = env.state.get_data().await;
-                let has_explicit_pin_mismatch = was_blocked
-                    && st_check.strict_pinning_enabled
-                    && !all_pinned_or_excepted_for(
-                        &st_check,
-                        &st_check.enabled_unrouted_providers(),
-                        ip,
-                    );
+                let enabled_unrouted = st_check.enabled_unrouted_providers();
+                let all_pinned_match = all_pinned_or_excepted_for(&st_check, &enabled_unrouted, ip);
+                let has_explicit_pin_mismatch =
+                    was_blocked && st_check.strict_pinning_enabled && !all_pinned_match;
+                let explicit_reaudit = self.force_reaudit.load(Ordering::SeqCst);
                 if returning_from_other_ip
-                    && !needs_reaudit
+                    && (!needs_reaudit || (all_pinned_match && !explicit_reaudit))
                     && country_ok
                     && !has_explicit_pin_mismatch
                     && !self.is_manual_killswitch()

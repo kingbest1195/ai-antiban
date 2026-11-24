@@ -197,10 +197,27 @@ impl NetworkGuard {
 
     pub(super) async fn update_tray(&self, env: &Env, report: &RiskReport) {
         let st = env.state.get_data().await;
+        if self.is_manual_killswitch()
+            || self.is_paused()
+            || self.any_provider_gate_pending()
+            || self.any_provider_gate_blocked()
+            || !st.blocked_providers.is_empty()
+        {
+            let mut status = self.pause_status();
+            if !self.is_manual_killswitch() && !st.blocked_providers.is_empty() {
+                for p in &st.blocked_providers {
+                    if !status.blocked_providers.contains(p) {
+                        status.blocked_providers.push(p.clone());
+                    }
+                }
+                status.blocked_providers.sort();
+            }
+            env.io.tray_guard_status(&status);
+            return;
+        }
         let is_pinned = is_ip_pinned_for_state(&st, report.provider, &report.telemetry.ip);
-        let held = self.any_provider_gate_closed() || !st.blocked_providers.is_empty();
-        let tray_report = effective_tray_report(report, held, &st);
-        env.io.tray_report(&tray_report, is_pinned, held);
+        let tray_report = effective_tray_report(report, false, &st);
+        env.io.tray_report(&tray_report, is_pinned, false);
     }
 
     /// Re-reads the status for the tray in the background (a full audit: 0.3-2 s must never be
@@ -209,19 +226,44 @@ impl NetworkGuard {
         let guard = Arc::clone(self);
         let env = env.clone();
         tokio::spawn(async move {
+            if guard.is_manual_killswitch()
+                || guard.is_paused()
+                || guard.any_provider_gate_pending()
+            {
+                env.io.tray_guard_status(&guard.pause_status());
+                return;
+            }
             let st = env.state.get_data().await;
             let Some(pid) = st
                 .enabled_providers()
                 .into_iter()
                 .find_map(ProviderId::from_id)
             else {
-                env.io
-                    .tray_status("green", Some("Мониторинг провайдеров отключён"));
+                if guard.is_manual_killswitch() || guard.is_paused() {
+                    env.io.tray_guard_status(&guard.pause_status());
+                } else {
+                    env.io
+                        .tray_status("green", Some("Мониторинг провайдеров отключён"));
+                }
                 return;
             };
             if let Ok(report) = (env.audit)(pid, false).await {
                 guard.update_tray(&env, &report).await;
             }
         });
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn refresh_tray_with_report_for_test(&self, report: &RiskReport) {
+        if let Some(env) = self.env.get() {
+            self.update_tray(env, report).await;
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trigger_refresh_tray_for_test(self: &Arc<Self>) {
+        if let Some(env) = self.env.get() {
+            self.spawn_refresh_tray(env);
+        }
     }
 }

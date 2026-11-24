@@ -84,6 +84,9 @@ pub type AuditFn =
 pub type ProbeFn = Arc<dyn Fn() -> BoxFuture<Option<String>> + Send + Sync>;
 /// Egress telemetry for a manual override (`accept_current`). Production: the resolver.
 pub type ResolveFn = Arc<dyn Fn() -> BoxFuture<Result<NetworkTelemetry, String>> + Send + Sync>;
+/// Test-support override for computing the local route fingerprint.
+#[cfg(any(test, feature = "test-support"))]
+pub type RouteFpFn = Arc<dyn Fn(Option<&str>) -> String + Send + Sync>;
 /// Outcome of [`audit_all`]: one entry per provider in the fixed order anthropic, openai, gemini.
 pub type AuditResults = Vec<(ProviderId, Result<RiskReport, String>)>;
 
@@ -233,6 +236,10 @@ pub(super) struct Inner {
     pub(super) route_dirty: bool,
     /// When `route_dirty` was raised (only for the `ZASTAVA_TIMING` log).
     pub(super) dirty_since: Option<Instant>,
+    /// Timestamp of the last observed route fingerprint change (for burst settling).
+    pub(super) last_fp_change_at: Option<Instant>,
+    /// Latest route fingerprint seen while an in-flight `ProbeChanged` probe or audit was running.
+    pub(super) deferred_recheck_fp: Option<String>,
     /// Background audit of the current alert (cancelled when the alert is superseded).
     pub(super) audit_abort: Option<AbortHandle>,
     /// True while a `ProbeChanged` background probe task is actively resolving the egress IP.
@@ -330,9 +337,13 @@ pub struct NetworkGuard {
     /// Per-provider `HoldQueue` entries record this epoch on registration so expired 60s holds
     /// from an earlier network cannot re-block after recovery.
     pub(super) restore_epoch: AtomicU64,
+    /// True while `verify_and_restore_baseline` or `spawn_verify_restored_baseline` is active.
+    pub(super) verify_in_flight: AtomicBool,
     pub(super) client: reqwest::Client,
     /// Cached client configured with the current `chained_proxy` so ticks do not rebuild it.
     pub(super) chained_client: std::sync::Mutex<Option<(String, reqwest::Client)>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) test_fp_fn: std::sync::Mutex<Option<RouteFpFn>>,
 }
 
 impl Default for NetworkGuard {

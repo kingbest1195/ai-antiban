@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tokio::sync::MutexGuard;
@@ -182,24 +183,22 @@ impl NetworkGuard {
             env.hold_queue.set_alert(payload.clone());
             env.emit("interceptor://risk-detected", &payload);
             env.io.show_alert_popup(Some((id.clone(), t0)));
-            env.io.tray_status("yellow", None);
+            self.emit_pause_status();
             log_timing(&id, "offline_regular_freeze", t0);
             self.spawn_decision_waiter(env, id.clone(), epoch, rx);
             Some(id)
         } else {
-            let (msg, color) = match st.interception_behavior {
-                crate::state::InterceptionBehavior::AutoLockSilent => (
-                    "Потеряна связь с сетью — трафик приостановлен на время проверки",
-                    "red",
-                ),
+            let msg = match st.interception_behavior {
+                crate::state::InterceptionBehavior::AutoLockSilent => {
+                    "Потеряна связь с сетью — трафик приостановлен на время проверки"
+                }
                 crate::state::InterceptionBehavior::AutoAllowTrusted
-                | crate::state::InterceptionBehavior::AskPopup => (
-                    "Потеряна связь с сетью — проверяем безопасность подключения",
-                    "yellow",
-                ),
+                | crate::state::InterceptionBehavior::AskPopup => {
+                    "Потеряна связь с сетью — проверяем безопасность подключения"
+                }
             };
             self.set_gate_reason(Some(msg.to_string()));
-            env.io.tray_status(color, None);
+            self.emit_pause_status();
             None
         };
 
@@ -225,11 +224,9 @@ impl NetworkGuard {
 
     /// True only when an unrouted provider's gate is open and no network transition or unverified
     /// startup state invalidates cached `session_allowed_providers`.
+    /// Never blocks an explicitly allowed provider due to another provider's `PauseMode::UntilNetworkChange`.
     pub async fn can_use_session_allowance(&self, provider: ProviderId) -> bool {
-        if self.gate_for(provider) != Gate::Open
-            || self.is_manual_killswitch()
-            || self.pause_mode() != PauseMode::None
-        {
+        if self.gate_for(provider) != Gate::Open || self.is_manual_killswitch() {
             return false;
         }
         if !self.is_env_installed() {
@@ -321,14 +318,25 @@ impl NetworkGuard {
     }
 
     /// Forces the background guard loop to re-probe immediately after a failed unrouted request.
+    /// Does not set `needs_reaudit` while a probe, pending alert, or baseline verification is active
+    /// so concurrent CONNECT errors never sabotage `probe_apply` or `verify_and_restore_baseline`.
     pub async fn wake_immediate_probe(&self) {
         if !self.is_env_installed() || self.is_manual_killswitch() {
             return;
         }
         {
             let mut inner = self.inner.lock().await;
-            inner.last_probe = None;
-            inner.needs_reaudit = true;
+            let active_check_or_restore = inner.probe_in_flight
+                || inner.pending.is_some()
+                || inner.audit_abort.is_some()
+                || self.verify_in_flight.load(Ordering::SeqCst)
+                || self.any_provider_gate_pending();
+            if !active_check_or_restore {
+                inner.last_probe = None;
+                if !self.is_paused() {
+                    inner.needs_reaudit = true;
+                }
+            }
         }
         self.wake();
     }

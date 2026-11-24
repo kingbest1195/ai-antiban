@@ -304,4 +304,40 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
     let v_off = TrayView::from_guard_status(&open, false, true);
     assert_eq!(v_off.icon, Some(TrayColor::Gray));
     assert_eq!(v_off.title.as_deref(), Some(" Защита выключена"));
+
+    // 7. Strict 6-level priority: manual_killswitch > UntilNetworkChange > pending > blocked > !sysproxy > report.
+    let paused_and_pending = GuardPauseStatus {
+        paused: true,
+        mode: PauseMode::UntilNetworkChange,
+        gate: "pending".to_string(),
+        gate_reason: Some("Пауза".to_string()),
+        manual_killswitch: false,
+        pending_providers: vec!["anthropic".to_string()],
+        blocked_providers: vec!["openai".to_string()],
+    };
+    let p_view = TrayView::resolve_guard_priority(&paused_and_pending, true, false, true)
+        .expect("paused must win");
+    assert_eq!(p_view.icon, Some(TrayColor::Gray));
+    assert_eq!(p_view.title.as_deref(), Some(PAUSED_TITLE));
+
+    // Pending wins over blocked_in_state and !sysproxy_active (never flashes СТОП СЕТИ over Checking).
+    let pending_and_blocked = GuardPauseStatus {
+        paused: false,
+        mode: PauseMode::None,
+        gate: "open".to_string(),
+        gate_reason: None,
+        manual_killswitch: false,
+        pending_providers: vec!["anthropic".to_string()],
+        blocked_providers: vec!["openai".to_string()],
+    };
+    let pend_view = TrayView::resolve_guard_priority(&pending_and_blocked, true, false, true)
+        .expect("pending must win");
+    assert_eq!(pend_view.icon, Some(TrayColor::Yellow));
+    assert_eq!(pend_view.title.as_deref(), Some(CHECKING_TITLE));
+
+    // Blocked in state wins over !sysproxy_active.
+    let blk_view =
+        TrayView::resolve_guard_priority(&open, true, false, true).expect("blocked must win");
+    assert_eq!(blk_view.icon, Some(TrayColor::Red));
+    assert_eq!(blk_view.title.as_deref(), Some(STOP_TITLE));
 }

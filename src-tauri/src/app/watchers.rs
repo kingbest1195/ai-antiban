@@ -90,6 +90,15 @@ async fn wait_next_tray_tick(
     }
 }
 
+fn sync_tray_if_guard_active(handle: &tauri::AppHandle, guard: &proxy::NetworkGuard) -> bool {
+    if guard.is_paused() || guard.any_provider_gate_pending() {
+        crate::tray::update_tray_from_guard_status(handle, &guard.pause_status());
+        true
+    } else {
+        false
+    }
+}
+
 /// Background tray status updater (network changes are handled by the NetworkGuard).
 pub(super) fn spawn_tray_status_watcher(
     app: &tauri::App,
@@ -112,12 +121,13 @@ pub(super) fn spawn_tray_status_watcher(
         let mut last_synced_status: Option<(auditor::OverallStatus, bool)> = None;
         let mut last_observed_ip: Option<String> = None;
         loop {
-            if watcher_guard.any_provider_gate_pending() {
-                crate::tray::update_tray_from_guard_status(
-                    &watcher_handle,
-                    &watcher_guard.pause_status(),
-                );
-                wait_next_tray_tick(Duration::from_millis(1000), &mut gate_rx, &mut kill_rx).await;
+            if sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
+                let delay = if watcher_guard.any_provider_gate_pending() {
+                    Duration::from_millis(1000)
+                } else {
+                    Duration::from_secs(10)
+                };
+                wait_next_tray_tick(delay, &mut gate_rx, &mut kill_rx).await;
                 continue;
             }
             let st_pre = watcher_state.get_data().await;
@@ -127,11 +137,20 @@ pub(super) fn spawn_tray_status_watcher(
                 .filter_map(auditor::ProviderId::from_id)
                 .collect();
             let Some(&pid) = enabled_pids.first() else {
-                crate::tray::update_tray_status(
-                    &watcher_handle,
-                    "green",
-                    Some("Мониторинг провайдеров отключён"),
-                );
+                if !sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
+                    let startup_ready = watcher_handle
+                        .try_state::<Arc<crate::startup::StartupState>>()
+                        .is_none_or(|s| s.is_ready());
+                    if startup_ready && !sysproxy::is_sysproxy_active() {
+                        crate::tray::update_tray_protection_off(&watcher_handle);
+                    } else {
+                        crate::tray::update_tray_status(
+                            &watcher_handle,
+                            "green",
+                            Some("Мониторинг провайдеров отключён"),
+                        );
+                    }
+                }
                 wait_next_tray_tick(Duration::from_secs(10), &mut gate_rx, &mut kill_rx).await;
                 continue;
             };
@@ -143,11 +162,7 @@ pub(super) fn spawn_tray_status_watcher(
                 Ok(mut report) => {
                     failures = 0;
                     last_checked = Some(chrono::Local::now().format("%H:%M").to_string());
-                    if watcher_guard.any_provider_gate_pending() {
-                        crate::tray::update_tray_from_guard_status(
-                            &watcher_handle,
-                            &watcher_guard.pause_status(),
-                        );
+                    if sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
                         wait_next_tray_tick(
                             Duration::from_millis(1000),
                             &mut gate_rx,
@@ -198,22 +213,31 @@ pub(super) fn spawn_tray_status_watcher(
                             false
                         };
 
+                    if sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
+                        wait_next_tray_tick(
+                            Duration::from_millis(1000),
+                            &mut gate_rx,
+                            &mut kill_rx,
+                        )
+                        .await;
+                        continue;
+                    }
                     let startup_ready = watcher_handle
                         .try_state::<Arc<crate::startup::StartupState>>()
                         .is_none_or(|s| s.is_ready());
-                    if watcher_guard.is_paused() {
+                    if has_blocked {
                         crate::tray::update_tray_from_guard_status(
                             &watcher_handle,
                             &watcher_guard.pause_status(),
                         );
-                    } else if !has_blocked && startup_ready && !sysproxy::is_sysproxy_active() {
+                    } else if startup_ready && !sysproxy::is_sysproxy_active() {
                         crate::tray::update_tray_protection_off(&watcher_handle);
                     } else {
                         update_tray_from_report(
                             &watcher_handle,
                             &tray_report,
                             tray_is_pinned,
-                            has_blocked,
+                            false,
                         );
                     }
 
@@ -236,6 +260,15 @@ pub(super) fn spawn_tray_status_watcher(
                             false,
                         )
                         .await;
+                        if sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
+                            wait_next_tray_tick(
+                                Duration::from_millis(1000),
+                                &mut gate_rx,
+                                &mut kill_rx,
+                            )
+                            .await;
+                            continue;
+                        }
                     }
 
                     last_synced_ip = Some(report.telemetry.ip.clone());
@@ -245,8 +278,14 @@ pub(super) fn spawn_tray_status_watcher(
                     if !initial_synced {
                         initial_synced = true;
                         let _ = watcher_handle.emit("network://changed", &report);
-                    } else if ip_changed || status_changed || observed_changed {
-                        if ip_changed || observed_changed {
+                    } else if (ip_changed || status_changed || observed_changed)
+                        && !watcher_guard.is_paused()
+                        && !watcher_guard.any_provider_gate_pending()
+                    {
+                        if ip_changed
+                            && watcher_guard.current_observed_ip().await.as_deref()
+                                != Some(report.telemetry.ip.as_str())
+                        {
                             watcher_guard.wake();
                         }
                         let _ = watcher_handle.emit("network://changed", &report);
@@ -254,11 +293,7 @@ pub(super) fn spawn_tray_status_watcher(
                     wait_next_tray_tick(Duration::from_secs(10), &mut gate_rx, &mut kill_rx).await;
                 }
                 Err(_) => {
-                    if watcher_guard.any_provider_gate_pending() || watcher_guard.is_paused() {
-                        crate::tray::update_tray_from_guard_status(
-                            &watcher_handle,
-                            &watcher_guard.pause_status(),
-                        );
+                    if sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
                         wait_next_tray_tick(
                             Duration::from_millis(1000),
                             &mut gate_rx,

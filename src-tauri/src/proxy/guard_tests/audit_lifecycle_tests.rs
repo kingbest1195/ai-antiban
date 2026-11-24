@@ -34,9 +34,16 @@ async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
         h.env.hold_queue.current_alert().expect("snapshot").phase,
         "detecting"
     );
-    assert_eq!(
-        h.io.trays.lock().unwrap().first().map(String::as_str),
-        Some("yellow")
+    assert!(
+        h.io.trays.lock().unwrap().is_empty(),
+        "guard must not emit raw tray_status overrides"
+    );
+    assert!(
+        h.io.guard_trays
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.gate == "pending" && !s.pending_providers.is_empty())
     );
     assert_eq!(h.guard.gate(), Gate::Pending);
     assert_eq!(h.io.count("interceptor://enriched"), 0);
@@ -215,9 +222,16 @@ async fn test_audit_failure_keeps_gate_closed_and_does_not_reopen_window() {
             .await
             .expect("failed enriched");
     assert_eq!(enriched.0["phase"], "failed");
-    assert_eq!(
-        h.io.trays.lock().unwrap().last().map(String::as_str),
-        Some("red")
+    assert!(
+        h.io.trays.lock().unwrap().is_empty(),
+        "failed enrichment while Pending must not flash red tray_status"
+    );
+    assert!(
+        h.io.guard_trays
+            .lock()
+            .unwrap()
+            .last()
+            .is_some_and(|s| s.gate == "pending" && !s.pending_providers.is_empty())
     );
     assert!(enriched.0["report"].is_null());
     assert!(enriched.0["new_country"].is_null());
