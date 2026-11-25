@@ -24,6 +24,9 @@ pub(super) const MSG_INCOMPATIBLE_ACROSS: &str = "Защита не включе
 разные прокси-серверы, и Застава не может объединить их в одну цепочку. Системные настройки не \
 менялись. Оставьте прокси только на одной службе или используйте один адрес.";
 
+pub(super) const MSG_ALL_HEAL_SUSPENDED_PREFIX: &str =
+    "Защита системного прокси на macOS приостановлена:";
+
 /// An enabled, non-Zastava explicit proxy on a service.
 pub(super) struct Upstream {
     /// `host:port` for the chained PAC.
@@ -172,9 +175,11 @@ fn note_untouched_vpn(names: &[String]) {
 pub(super) struct PlannedPac {
     pub(super) plans: Vec<Plan>,
     pub(super) vpn_untouched: Vec<String>,
+    pub(super) suspended_services: Vec<String>,
     pub(super) unreadable: usize,
     pub(super) chain_admin_auth: bool,
     pub(super) os_pac_deferred: bool,
+    pub(super) os_pac_defer_reason: Option<String>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) upstream_proxy: Option<String>,
 }
@@ -215,7 +220,6 @@ pub(super) fn plan_physical_pac(
         Err(e) => Some(format!("temp_dns_overrides error: {e}")),
     };
     if let Some(reason) = defer_reason {
-        crate::diagnostics::record("sysproxy:macos", &format!("os PAC skipped: {reason}"));
         let (physical, vpn_untouched) = p
             .list_services()
             .ok()
@@ -230,9 +234,11 @@ pub(super) fn plan_physical_pac(
         return Ok(PlannedPac {
             plans: Vec::new(),
             vpn_untouched,
+            suspended_services: Vec::new(),
             unreadable: 0,
             chain_admin_auth: false,
             os_pac_deferred: true,
+            os_pac_defer_reason: Some(reason),
             upstream_proxy,
         });
     }
@@ -247,7 +253,33 @@ pub(super) fn plan_physical_pac(
         .collect();
     let (mut services, vpn_untouched, unclassified) = split_services_by_kind(p, &enabled);
     note_untouched_vpn(&vpn_untouched);
+    let had_physical = !services.is_empty();
+    let mut suspended_services: Vec<String> = Vec::new();
+    if let Some((guard, now)) = heal {
+        let mut fingerprint: Vec<String> = services
+            .iter()
+            .map(|s| format!("svc:{}", s.key()))
+            .collect();
+        for name in &vpn_untouched {
+            fingerprint.push(format!("vpn:{name}"));
+        }
+        guard.network(fingerprint);
+        services.retain(|s| {
+            if guard.is_suspended_at(&s.key(), now) {
+                suspended_services.push(s.name.clone());
+                false
+            } else {
+                true
+            }
+        });
+    }
     if services.is_empty() && !enabled.is_empty() {
+        if had_physical && !suspended_services.is_empty() {
+            return Err(format!(
+                "{MSG_ALL_HEAL_SUSPENDED_PREFIX} внешнее приложение постоянно переписывает настройки ({}).",
+                suspended_services.join(", ")
+            ));
+        }
         crate::diagnostics::record(
             "sysproxy:macos",
             &format!(
@@ -262,17 +294,6 @@ pub(super) fn plan_physical_pac(
             MSG_ONLY_VPN
         }
         .to_string());
-    }
-    if let Some((guard, now)) = heal {
-        let mut fingerprint: Vec<String> = services
-            .iter()
-            .map(|s| format!("svc:{}", s.key()))
-            .collect();
-        for name in &vpn_untouched {
-            fingerprint.push(format!("vpn:{name}"));
-        }
-        guard.network(fingerprint);
-        services.retain(|s| !guard.is_suspended_at(&s.key(), now));
     }
 
     // Phase 1: read and validate everything. Nothing is written yet.
@@ -343,9 +364,11 @@ pub(super) fn plan_physical_pac(
     Ok(PlannedPac {
         plans,
         vpn_untouched,
+        suspended_services,
         unreadable,
         chain_admin_auth,
         os_pac_deferred: false,
+        os_pac_defer_reason: None,
         upstream_proxy: resolved_chained,
     })
 }

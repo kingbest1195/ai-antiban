@@ -373,6 +373,7 @@ export function OverviewScreen(props: OverviewScreenProps) {
                     service={service}
                     report={reports[service.id]}
                     state={state}
+                    hideIpMode={props.hideIpMode}
                     onFix={props.onFixService}
                     onAllow={requestAllow}
                     blockedByUser={Boolean(state?.blocked_providers?.includes(service.id))}

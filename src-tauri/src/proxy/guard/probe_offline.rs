@@ -6,6 +6,7 @@ use tokio::sync::MutexGuard;
 use crate::auditor::geo_matrix::ProviderId;
 use crate::proxy::hold_queue::{PHASE_DETECTING, build_gate_reason};
 
+use super::diag;
 use super::policy::network_change;
 use super::types::{Env, Gate, Inner, NetworkGuard, PauseMode};
 
@@ -104,9 +105,14 @@ impl NetworkGuard {
             .filter(|p| !was_blocked_set.contains(*p))
             .collect();
 
+        let pause_waiting_bind =
+            self.pause_mode() == PauseMode::UntilNetworkChange && inner.pending_pause_ip_bind;
         if non_blocked.is_empty() || self.pause_mode() == PauseMode::UntilNetworkChange {
             self.freeze_providers_pending(&st, &non_blocked, &was_blocked_set);
-            self.abort_active_tunnels();
+            if !pause_waiting_bind && !non_blocked.is_empty() {
+                diag::record_tunnel_abort("regular_probe_offline_paused");
+                self.abort_active_tunnels();
+            }
             return;
         }
 
@@ -120,6 +126,7 @@ impl NetworkGuard {
             .is_some_and(|p| p.alert_emitted && p.target_ip.is_empty())
         {
             self.freeze_providers_pending(&st, &non_blocked, &was_blocked_set);
+            diag::record_tunnel_abort("regular_probe_offline_repeat");
             self.abort_active_tunnels();
             return;
         }
@@ -127,17 +134,10 @@ impl NetworkGuard {
         if let Some(p) = inner.invalidate_alert() {
             env.hold_queue.remove(&p.id).await;
         }
+        diag::record_gate_freeze("regular_probe_offline", &non_blocked);
+        diag::record_tunnel_abort("regular_probe_offline");
         self.freeze_providers_pending_quiet(&st, &non_blocked, &was_blocked_set);
         self.abort_active_tunnels();
-
-        let old_country = inner
-            .baseline
-            .as_ref()
-            .and_then(|b| b.country.clone())
-            .unwrap_or_else(|| "??".to_string());
-        env.state
-            .stats()
-            .record_intercepted("all", "NetworkGuard", "HELD", &old_country);
 
         let epoch = inner.epoch;
         let alert_id = if st.interception_behavior == crate::state::InterceptionBehavior::AskPopup {

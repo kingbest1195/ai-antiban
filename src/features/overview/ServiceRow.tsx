@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { AppStateData, ProviderId, RiskReport } from "../../types";
 import { Badge, Button, ExpandRow, Row } from "../../ui";
 import { overview as copy, providers as providerCopy, status as words } from "../../shared/copy/ru";
+import { maskIpsInText } from "../../shared/lib/format";
 import { failedChecks } from "../checks/checksModel";
 import { needsForceConfirm } from "./useOverviewModel";
 import type { ServiceModel } from "./useOverviewModel";
@@ -13,6 +14,8 @@ interface ServiceRowProps {
   state: AppStateData | null;
   blockedByUser: boolean;
   verifying?: boolean;
+  hideIpMode?: boolean;
+  defaultOpen?: boolean;
   onFix: (provider: ProviderId) => void;
   onAllow: (service: ServiceModel, report: RiskReport | undefined, blockedByUser: boolean) => void;
 }
@@ -23,10 +26,12 @@ export function ServiceRow({
   state,
   blockedByUser,
   verifying,
+  hideIpMode = false,
+  defaultOpen = false,
   onFix,
   onAllow,
 }: ServiceRowProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const meta = providerCopy[service.id];
   const { status } = service;
 
@@ -105,7 +110,11 @@ export function ServiceRow({
   }
 
   const first = report ? failedChecks(report, state)[0] : undefined;
-  const reason = first ? `${first.title}. ${first.result.message}` : status === "critical" ? copy.service.blocked : copy.service.noReason;
+  const reason = first
+    ? `${first.title}. ${maskIpsInText(first.result.message, hideIpMode)}`
+    : status === "critical"
+      ? copy.service.blocked
+      : copy.service.noReason;
 
   return (
     <ExpandRow

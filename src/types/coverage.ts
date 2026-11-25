@@ -105,7 +105,7 @@ export interface RecentGatewayEvent {
   timestamp: number;
   host: string;
   provider: string;
-  action: string; // "PROTECTED" | "HELD" | "BLOCKED" | "DIRECT"
+  action: string; // "PROTECTED" | "MANUAL_ALLOW" | "HELD" | "BLOCKED" | "DIRECT"
   kind?: string;
   country: string;
 }

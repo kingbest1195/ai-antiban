@@ -34,12 +34,13 @@ fn a_russian_locale_next_to_a_signed_proxy_stays_and_the_zone_goes_only_with_the
     let e = env();
     let f = e.ctx.claude_settings();
     let text = format!(
-        "{{\n  \"env\": {{\n    \"HTTPS_PROXY\": \"{URL}\",\n    \"TZ\": \"Europe/Berlin\",\n    \"LANG\": \"ru_RU.UTF-8\",\n    \"LC_TIME\": \"en_US.UTF-8\",\n    \"LC_ALL\": \"ru_RU.UTF-8\"\n  }}\n}}\n"
+        "{{\n  \"env\": {{\n    \"HTTPS_PROXY\": \"{URL}\",\n    \"NODE_USE_ENV_PROXY\": \"1\",\n    \"TZ\": \"Europe/Berlin\",\n    \"LANG\": \"ru_RU.UTF-8\",\n    \"LC_TIME\": \"en_US.UTF-8\",\n    \"LC_ALL\": \"ru_RU.UTF-8\"\n  }}\n}}\n"
     );
     e.fs.put(&f, text.as_bytes(), 0o644);
     assert!(legacy_run(&e, &f, None));
     let after = e.text(&f);
     assert_eq!(raw(&after, &["env", "HTTPS_PROXY"]), None);
+    assert_eq!(raw(&after, &["env", "NODE_USE_ENV_PROXY"]), None);
     assert_eq!(raw(&after, &["env", "TZ"]), None, "co-signed zone");
     assert_eq!(
         raw(&after, &["env", "LC_TIME"]),
@@ -52,8 +53,8 @@ fn a_russian_locale_next_to_a_signed_proxy_stays_and_the_zone_goes_only_with_the
         Some(json_str("ru_RU.UTF-8"))
     );
 
-    // No signed proxy variable: nothing is ours, not even a well-formed zone.
-    let own = "{\n  \"env\": {\n    \"HTTPS_PROXY\": \"http://corp:3128\",\n    \"TZ\": \"Europe/Berlin\",\n    \"LC_ALL\": \"en_US.UTF-8\"\n  }\n}\n";
+    // No signed proxy variable: nothing is ours, not even a well-formed zone or NODE_USE_ENV_PROXY.
+    let own = "{\n  \"env\": {\n    \"HTTPS_PROXY\": \"http://corp:3128\",\n    \"NODE_USE_ENV_PROXY\": \"1\",\n    \"TZ\": \"Europe/Berlin\",\n    \"LC_ALL\": \"en_US.UTF-8\"\n  }\n}\n";
     e.fs.put(&f, own.as_bytes(), 0o644);
     assert!(legacy_run(&e, &f, None));
     assert_eq!(e.text(&f), own);

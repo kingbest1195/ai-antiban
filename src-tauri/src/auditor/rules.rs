@@ -1,10 +1,61 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, OnceLock, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 pub const DEFAULT_PROVIDER_MATRIX_JSON: &str = include_str!("../../../rules/provider_matrix.json");
 pub const DEFAULT_DANGEROUS_ASNS_JSON: &str = include_str!("../../../rules/dangerous_asns.json");
+
+static RUNTIME_PROVIDER_MATRIX: OnceLock<StdRwLock<Option<Arc<ProviderMatrix>>>> = OnceLock::new();
+
+fn runtime_matrix_slot() -> &'static StdRwLock<Option<Arc<ProviderMatrix>>> {
+    RUNTIME_PROVIDER_MATRIX.get_or_init(|| StdRwLock::new(None))
+}
+
+/// Publishes a live `ProviderMatrix` snapshot for synchronous fast-path domain lookups and PAC builds.
+pub fn publish_runtime_provider_matrix(matrix: Arc<ProviderMatrix>) {
+    let mut w = runtime_matrix_slot()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *w = Some(matrix);
+}
+
+/// Seeds the runtime snapshot only if it has not been initialized yet.
+pub fn publish_runtime_provider_matrix_if_unset(matrix: Arc<ProviderMatrix>) {
+    let mut w = runtime_matrix_slot()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if w.is_none() {
+        *w = Some(matrix);
+    }
+}
+
+/// Returns an `Arc` clone of the active runtime `ProviderMatrix` snapshot, if initialized.
+pub fn runtime_provider_matrix_snapshot() -> Option<Arc<ProviderMatrix>> {
+    let slot = RUNTIME_PROVIDER_MATRIX.get()?;
+    let r = slot.read().unwrap_or_else(|e| e.into_inner());
+    r.clone()
+}
+
+/// Runs `f` against the active runtime `ProviderMatrix` snapshot without cloning it.
+pub fn with_runtime_provider_matrix<R>(f: impl FnOnce(Option<&ProviderMatrix>) -> R) -> R {
+    let Some(slot) = RUNTIME_PROVIDER_MATRIX.get() else {
+        return f(None);
+    };
+    let r = slot.read().unwrap_or_else(|e| e.into_inner());
+    f(r.as_deref())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub static RUNTIME_MATRIX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_runtime_provider_matrix_for_test() {
+    if let Some(slot) = RUNTIME_PROVIDER_MATRIX.get() {
+        let mut w = slot.write().unwrap_or_else(|e| e.into_inner());
+        *w = None;
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RecommendedCountry {
@@ -35,10 +86,46 @@ pub struct ProviderRules {
 pub struct ProviderMatrix {
     pub version: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub generated_at_utc: String,
+    #[serde(default)]
+    pub ttl_seconds: u64,
+    #[serde(default)]
+    pub payment_kyc_domains: Vec<String>,
     pub global_blocked_countries: Vec<String>,
     #[serde(default)]
     pub recommended_vps_countries: Vec<RecommendedCountry>,
     pub providers: HashMap<String, ProviderRules>,
+    #[serde(default)]
+    pub signature_ed25519_b64: String,
+}
+
+#[derive(Serialize)]
+struct CanonicalProviderRules<'a> {
+    id: &'a str,
+    display_name: &'a str,
+    domains: &'a [String],
+    blocked_countries: &'a [String],
+    country_block_reasons: BTreeMap<&'a String, &'a String>,
+    warning_countries: BTreeMap<&'a String, &'a String>,
+    strict_impossible_travel: bool,
+    max_country_switches_per_12h: u32,
+    session_ip_stability_for_studio: bool,
+}
+
+#[derive(Serialize)]
+struct CanonicalProviderMatrixPayload<'a> {
+    schema_version: u32,
+    version: &'a str,
+    updated_at: &'a str,
+    generated_at_utc: &'a str,
+    ttl_seconds: u64,
+    payment_kyc_domains: &'a [String],
+    global_blocked_countries: &'a [String],
+    recommended_vps_countries: &'a [RecommendedCountry],
+    providers: BTreeMap<&'a String, CanonicalProviderRules<'a>>,
 }
 
 impl ProviderMatrix {
@@ -48,6 +135,40 @@ impl ProviderMatrix {
 
     pub fn get_provider_rules(&self, provider_id: &str) -> Option<&ProviderRules> {
         self.providers.get(provider_id)
+    }
+
+    /// Deterministic canonical JSON bytes covered by `signature_ed25519_b64`.
+    pub fn canonical_payload_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut providers = BTreeMap::new();
+        for (k, v) in &self.providers {
+            providers.insert(
+                k,
+                CanonicalProviderRules {
+                    id: &v.id,
+                    display_name: &v.display_name,
+                    domains: &v.domains,
+                    blocked_countries: &v.blocked_countries,
+                    country_block_reasons: v.country_block_reasons.iter().collect(),
+                    warning_countries: v.warning_countries.iter().collect(),
+                    strict_impossible_travel: v.strict_impossible_travel,
+                    max_country_switches_per_12h: v.max_country_switches_per_12h,
+                    session_ip_stability_for_studio: v.session_ip_stability_for_studio,
+                },
+            );
+        }
+        let payload = CanonicalProviderMatrixPayload {
+            schema_version: self.schema_version,
+            version: &self.version,
+            updated_at: &self.updated_at,
+            generated_at_utc: &self.generated_at_utc,
+            ttl_seconds: self.ttl_seconds,
+            payment_kyc_domains: &self.payment_kyc_domains,
+            global_blocked_countries: &self.global_blocked_countries,
+            recommended_vps_countries: &self.recommended_vps_countries,
+            providers,
+        };
+        serde_json::to_vec(&payload)
+            .map_err(|e| format!("Failed to serialize canonical provider matrix payload: {e}"))
     }
 }
 
@@ -176,10 +297,17 @@ impl RuleSet {
     pub fn load_bundled() -> Result<Self, serde_json::Error> {
         let provider_matrix = ProviderMatrix::load_bundled()?;
         let dangerous_asns = DangerousAsns::load_bundled()?;
+        publish_runtime_provider_matrix_if_unset(Arc::new(provider_matrix.clone()));
         Ok(Self {
             provider_matrix: Arc::new(RwLock::new(provider_matrix)),
             dangerous_asns: Arc::new(RwLock::new(dangerous_asns)),
         })
+    }
+
+    pub async fn set_provider_matrix(&self, matrix: ProviderMatrix) {
+        publish_runtime_provider_matrix(Arc::new(matrix.clone()));
+        let mut w = self.provider_matrix.write().await;
+        *w = matrix;
     }
 
     pub async fn update_provider_matrix_from_json(
@@ -187,8 +315,7 @@ impl RuleSet {
         json: &str,
     ) -> Result<(), serde_json::Error> {
         let matrix: ProviderMatrix = serde_json::from_str(json)?;
-        let mut w = self.provider_matrix.write().await;
-        *w = matrix;
+        self.set_provider_matrix(matrix).await;
         Ok(())
     }
 
@@ -204,135 +331,5 @@ impl RuleSet {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_load_bundled_rules() {
-        let rules = RuleSet::load_bundled().expect("bundled rules should parse successfully");
-        let matrix = rules.provider_matrix.blocking_read();
-        assert_eq!(matrix.version, "1.1.0");
-        assert!(matrix.global_blocked_countries.contains(&"RU".to_string()));
-        assert!(matrix.global_blocked_countries.contains(&"HK".to_string()));
-        assert!(matrix.providers.contains_key("anthropic"));
-        assert!(matrix.providers.contains_key("openai"));
-        assert!(matrix.providers.contains_key("gemini"));
-
-        let asns = rules.dangerous_asns.blocking_read();
-        assert_eq!(asns.version, "1.3.0");
-        assert_eq!(asns.dnsbl_zones.len(), 5);
-        assert_eq!(asns.asn_entry(9009).map(|e| e.kind), Some(NetworkKind::Vpn));
-        assert_eq!(
-            asns.asn_entry(13335).map(|e| e.kind),
-            Some(NetworkKind::Vpn)
-        );
-        assert_eq!(
-            asns.asn_entry(24940).map(|e| e.kind),
-            Some(NetworkKind::Hosting)
-        );
-        assert_eq!(
-            asns.matches_russian_isp("Rostelecom broadband"),
-            Some("Rostelecom")
-        );
-    }
-    /// Every record of the type lists is traceable: a non-empty source that names a licence.
-    /// A record without a source (or without a licence) must not be in the file.
-    #[test]
-    fn dangerous_asns_schema_every_record_has_source_and_license() {
-        let raw: serde_json::Value =
-            serde_json::from_str(DEFAULT_DANGEROUS_ASNS_JSON).expect("valid JSON");
-        // Strict shape: the typed parse rejects a record with a missing field or an unknown type.
-        let asns = DangerousAsns::load_bundled().expect("schema");
-        assert!(!asns.asns.is_empty() && !asns.isp_keyword_groups.is_empty());
-
-        let has_source = |s: &str| {
-            let t = s.trim();
-            !t.is_empty() && t.to_lowercase().contains("license:")
-        };
-        for e in &asns.asns {
-            assert!(
-                has_source(&e.source),
-                "AS{} has no source with a licence",
-                e.asn
-            );
-            assert!(!e.name.trim().is_empty(), "AS{} has no name", e.asn);
-            assert!(
-                e.kind != NetworkKind::Residential,
-                "AS{}: an ASN is hosting or vpn, residential is keyword-only",
-                e.asn
-            );
-            if e.kind == NetworkKind::Vpn {
-                assert!(
-                    !e.reason.trim().is_empty(),
-                    "AS{}: a vpn entry needs a reason",
-                    e.asn
-                );
-            }
-        }
-        for g in &asns.isp_keyword_groups {
-            assert!(
-                has_source(&g.source),
-                "keyword group {:?} has no source",
-                g.kind
-            );
-            assert!(!g.keywords.is_empty() && g.keywords.iter().all(|k| !k.trim().is_empty()));
-        }
-        // No ASN twice (the first would silently win).
-        let mut seen = std::collections::HashSet::new();
-        for e in &asns.asns {
-            assert!(seen.insert(e.asn), "AS{} is listed twice", e.asn);
-        }
-        // The raw file has no record of the type lists that the typed parse would have dropped.
-        assert_eq!(raw["asns"].as_array().map(Vec::len), Some(asns.asns.len()));
-        assert_eq!(
-            raw["isp_keyword_groups"].as_array().map(Vec::len),
-            Some(asns.isp_keyword_groups.len())
-        );
-    }
-
-    #[test]
-    fn a_record_without_source_is_rejected_by_the_schema() {
-        let bad = DEFAULT_DANGEROUS_ASNS_JSON.replacen("\"source\"", "\"src\"", 1);
-        assert!(serde_json::from_str::<DangerousAsns>(&bad).is_err());
-        let bad_type =
-            DEFAULT_DANGEROUS_ASNS_JSON.replacen("\"type\": \"vpn\"", "\"type\": \"magic\"", 1);
-        assert!(serde_json::from_str::<DangerousAsns>(&bad_type).is_err());
-    }
-
-    #[test]
-    fn provider_matrix_is_valid() {
-        let m = ProviderMatrix::load_bundled().expect("provider_matrix.json");
-        assert!(!m.providers.is_empty());
-    }
-
-    #[test]
-    fn keyword_kind_hosting_wins_over_residential() {
-        let asns = DangerousAsns::load_bundled().unwrap();
-        assert_eq!(
-            asns.keyword_kind("Example Cloud Communications"),
-            Some(NetworkKind::Hosting)
-        );
-        assert_eq!(
-            asns.keyword_kind("Example Broadband Ltd"),
-            Some(NetworkKind::Residential)
-        );
-        assert_eq!(asns.keyword_kind("Example Net"), None);
-    }
-
-    #[test]
-    fn keyword_kind_uses_word_boundaries_and_vpn_wins() {
-        let asns = DangerousAsns::load_bundled().unwrap();
-        assert_eq!(
-            asns.keyword_kind("Example VPN Hosting"),
-            Some(NetworkKind::Vpn)
-        );
-        assert_eq!(asns.keyword_kind("NordVPN Server"), Some(NetworkKind::Vpn));
-        // Substrings inside larger words must not falsely trigger VPN or hosting.
-        assert_eq!(
-            asns.keyword_kind("Vector Telecom"),
-            Some(NetworkKind::Residential)
-        );
-        assert_eq!(asns.keyword_kind("Subvpnware Ltd"), None);
-        assert_eq!(asns.keyword_kind("Cloudflare Inc."), None);
-    }
-}
+#[path = "rules_tests.rs"]
+mod tests;

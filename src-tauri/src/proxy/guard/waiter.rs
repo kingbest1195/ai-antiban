@@ -9,9 +9,62 @@ use crate::proxy::hold_queue::{DEFAULT_HOLD_TTL_SECS, HoldResolution};
 use crate::state::IpHistoryEntry;
 
 use super::policy::{effective_tray_report, is_ip_pinned_for_state};
-use super::types::{Baseline, Env, NetworkGuard, PauseMode};
+use super::types::{Baseline, Env, Gate, GuardPauseStatus, NetworkGuard, PauseMode};
 
 impl NetworkGuard {
+    pub fn pause_status(&self) -> GuardPauseStatus {
+        let mode = self.pause_mode();
+        let manual_killswitch = self.is_manual_killswitch();
+        let gate = match self.gate() {
+            Gate::Open => "open",
+            Gate::Pending => "pending",
+            Gate::Blocked => "blocked",
+        }
+        .to_string();
+        let mut pending_providers = Vec::new();
+        let mut blocked_providers = Vec::new();
+        for (pid, tx) in &self.provider_gates {
+            let g = if manual_killswitch {
+                Gate::Blocked
+            } else {
+                *tx.borrow()
+            };
+            match g {
+                Gate::Pending => pending_providers.push(pid.as_str().to_string()),
+                Gate::Blocked => blocked_providers.push(pid.as_str().to_string()),
+                Gate::Open => {}
+            }
+        }
+        pending_providers.sort();
+        blocked_providers.sort();
+        let has_active_risk_alert = self
+            .env
+            .get()
+            .and_then(|env| env.hold_queue.current_alert())
+            .is_some_and(|a| {
+                !a.is_simulation
+                    && (a.phase == crate::proxy::hold_queue::PHASE_READY
+                        || a.phase == crate::proxy::hold_queue::PHASE_FAILED)
+            });
+        GuardPauseStatus {
+            paused: mode != PauseMode::None,
+            mode,
+            gate,
+            gate_reason: self.gate_reason(),
+            manual_killswitch,
+            pending_providers,
+            blocked_providers,
+            has_active_risk_alert,
+        }
+    }
+
+    pub(super) fn emit_pause_status(&self) {
+        if let Some(env) = self.env.get() {
+            let status = self.pause_status();
+            env.io.tray_guard_status(&status);
+            env.emit("guard://pause-status-changed", &status);
+        }
+    }
     /// Waits for the user's decision (or the hold TTL) and applies it, unless the alert was
     /// superseded meanwhile. Anything but an explicit `Allow` blocks ONLY `affected` (critical /
     /// blocked-geo / failed) providers, never `healthy` (including `Yellow`) providers.

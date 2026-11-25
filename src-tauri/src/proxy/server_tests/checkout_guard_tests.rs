@@ -245,7 +245,7 @@ async fn manual_killswitch_blocks_payment_hosts_in_direct_mode() {
 }
 
 #[tokio::test]
-async fn active_payment_route_selection_follows_anthropic_direct_without_openai_split_ip() {
+async fn active_payment_route_selection_prefers_enabled_routed_provider_over_direct() {
     crate::sysproxy::force_os_dry_run();
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
@@ -288,7 +288,7 @@ async fn active_payment_route_selection_follows_anthropic_direct_without_openai_
     let server = Arc::new(
         ProxyServer::bind_ephemeral(
             offline_test_auditor(),
-            state,
+            state.clone(),
             Arc::new(HoldQueue::new()),
             Some(upstream_addr),
         )
@@ -300,12 +300,129 @@ async fn active_payment_route_selection_follows_anthropic_direct_without_openai_
     let srv = Arc::clone(&server);
     let srv_task = tokio::spawn(async move { srv.run().await });
 
-    // api.stripe.com must follow Anthropic (Direct -> 200 via upstream_addr), NOT OpenAI's closed route (502).
+    // 1. Even with Anthropic=Direct, enabled OpenAI's route wins over Direct and fails closed (502).
     let resp = send_connect(addr, "api.stripe.com").await;
     assert!(
-        resp.contains("200 Connection Established"),
-        "payment host must stay on Anthropic Direct instead of OpenAI route, got: {resp}"
+        resp.contains("502 Bad Gateway"),
+        "payment host must prefer enabled routed provider over Direct Anthropic (fail-closed 502), got: {resp}"
     );
+    assert_eq!(server.direct_connects.load(Ordering::SeqCst), 0);
+
+    // 2. When OpenAI's route is live, payment CONNECT succeeds via that route with zero direct connects.
+    let route_entry = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let route_port = route_entry.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        if let Ok((mut client, _)) = route_entry.accept().await {
+            let mut buf = [0u8; 512];
+            let _ = client.read(&mut buf).await;
+            let _ = client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await;
+        }
+    });
+    state
+        .upsert_route(crate::routing::Route {
+            id: "openai-only".to_string(),
+            label: "OpenAI Live Route".to_string(),
+            country: Some("US".to_string()),
+            exit_ip: None,
+            expires_at: None,
+            sub_url: None,
+            grace_extended: false,
+            entries: vec![crate::routing::Entry {
+                proto: crate::routing::EntryProto::Http,
+                host: "127.0.0.1".to_string(),
+                port: route_port,
+                username: None,
+                password: None,
+                sni: None,
+            }],
+            raw_key: format!("http://127.0.0.1:{route_port}"),
+            enabled: true,
+            added_at: 0,
+        })
+        .await
+        .unwrap();
+
+    let resp_ok = send_connect(addr, "api.stripe.com").await;
+    assert!(
+        resp_ok.contains("200 Connection Established"),
+        "payment host must connect through routed provider over Direct Anthropic, got: {resp_ok}"
+    );
+    assert_eq!(server.direct_connects.load(Ordering::SeqCst), 0);
+    srv_task.abort();
+}
+
+#[tokio::test]
+async fn handle_payment_connect_attributes_routed_provider_instead_of_anthropic() {
+    crate::sysproxy::force_os_dry_run();
+    let state = AppState::new_in_memory();
+    state
+        .upsert_route(crate::routing::Route {
+            id: "gemini-pay-disabled".to_string(),
+            label: "Gemini Pay Route".to_string(),
+            country: Some("NL".to_string()),
+            exit_ip: None,
+            expires_at: None,
+            sub_url: None,
+            grace_extended: false,
+            entries: vec![crate::routing::Entry {
+                proto: crate::routing::EntryProto::Socks5,
+                host: "127.0.0.1".to_string(),
+                port: 1080,
+                username: None,
+                password: None,
+                sni: None,
+            }],
+            raw_key: "socks5://127.0.0.1:1080".to_string(),
+            enabled: false,
+            added_at: 0,
+        })
+        .await
+        .unwrap();
+    // Anthropic remains Direct, OpenAI remains Direct, Gemini is bound to disabled route.
+    state
+        .bind_provider_route("gemini", Some("gemini-pay-disabled"))
+        .await
+        .unwrap();
+
+    let snapshot = state.get_data().await;
+    let picked =
+        crate::proxy::server::http_handler::active_payment_route_selection(&state, &snapshot)
+            .await
+            .expect("expected Gemini route selection");
+    assert_eq!(picked.0, crate::auditor::geo_matrix::ProviderId::Gemini);
+
+    let server = Arc::new(
+        ProxyServer::bind_ephemeral(
+            offline_test_auditor(),
+            state.clone(),
+            Arc::new(HoldQueue::new()),
+            None,
+        )
+        .await
+        .unwrap(),
+    );
+    let addr = server.bound_addr;
+    let srv = Arc::clone(&server);
+    let srv_task = tokio::spawn(async move { srv.run().await });
+
+    let resp = send_connect(addr, "api.stripe.com").await;
+    assert!(resp.contains("403 Forbidden"), "{resp}");
+    assert!(
+        resp.contains("gemini"),
+        "payment connect must blame gemini (not hardcoded anthropic), got: {resp}"
+    );
+    assert!(!resp.contains("anthropic"), "{resp}");
+
+    let stats_snap = state.stats().snapshot().await;
+    let ev = stats_snap
+        .recent_events
+        .iter()
+        .find(|e| e.host == "api.stripe.com" && e.action == VERDICT_ROUTE_DOWN)
+        .expect("expected ROUTE_DOWN stats event for api.stripe.com");
+    assert_eq!(ev.provider, "gemini");
+
     srv_task.abort();
 }
 

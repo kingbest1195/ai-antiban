@@ -127,8 +127,12 @@ impl ProxyServer {
         let sanitized_detail = detail
             .map(crate::diagnostics::sanitize_diagnostic_text)
             .unwrap_or_else(|| reason.message().to_string());
-        crate::diagnostics::record(
-            "proxy:route",
+        crate::proxy::upstream::record_route_diag_throttled(
+            &format!(
+                "refuse:{route_id}:{}:{}",
+                provider.as_str(),
+                reason.as_str()
+            ),
             &format!(
                 "refuse_route_down route={route_id} provider={} reason={} detail={sanitized_detail}",
                 provider.as_str(),

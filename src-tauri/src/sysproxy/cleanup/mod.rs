@@ -6,6 +6,10 @@ mod restore;
 mod shutdown;
 mod signatures;
 
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::sysproxy) use migration::LEGACY_MIGRATION_MARK;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::sysproxy) use restore::restore_and_migrate;
 pub(super) use restore::{
     RestoreOptions, cleanup_cli_files, restore_and_migrate_with, restore_and_migrate_with_options,
     restore_user_env,
@@ -27,8 +31,6 @@ pub use signatures::{legacy_env_plan, legacy_env_plan_with_gateway};
 use super::journal::{self, RecoveryReport};
 use super::{Run, state, with_journal};
 use restore::cleanup_cli_files as restore_cleanup_cli_files;
-#[cfg(test)]
-use restore::restore_and_migrate;
 use shutdown::SHUTDOWN_GUARD;
 use std::sync::Once;
 use tauri::{Emitter, Manager};
@@ -243,8 +245,7 @@ use crate::sysproxy::platform::{FakePlatform, PacState, PlatOp, Platform, RegKin
 use crate::sysproxy::{Os, SystemProbe};
 #[cfg(test)]
 pub(super) use migration::{
-    LAUNCHD_MIGRATION_MARK, LEGACY_MIGRATION_MARK, VPN_PAC_MIGRATION_MARK, migrate_legacy,
-    migrate_legacy_pac,
+    LAUNCHD_MIGRATION_MARK, VPN_PAC_MIGRATION_MARK, migrate_legacy, migrate_legacy_pac,
 };
 #[cfg(all(test, target_os = "macos"))]
 pub(super) use restore::restore_with_probe_options;

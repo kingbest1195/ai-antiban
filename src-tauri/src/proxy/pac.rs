@@ -19,6 +19,17 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "poe.com",
     "perplexity.ai",
     "pplx.ai",
+    "clau.de",
+    "cursorapi.com",
+    "statsigapi.net",
+    "featuregates.org",
+    "ingest.sentry.io",
+    "ingest.us.sentry.io",
+    "ingest.de.sentry.io",
+    "api.segment.io",
+    "api-iam.intercom.io",
+    "workos.com",
+    "authkit.com",
     // OpenAI / ChatGPT / Microsoft Copilot / DeepSeek / Mistral / Grok
     "chatgpt.com",
     "openai.com",
@@ -48,6 +59,11 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "api.x.ai",
     "mistral.ai",
     "chat.mistral.ai",
+    "sora.com",
+    "featureassets.org",
+    "prodregistryv2.org",
+    "livekit.cloud",
+    "exafunction.com",
     // Google Gemini / AI Studio / Cloud Code / Antigravity / Labs
     "gemini.google.com",
     "gemini.google",
@@ -83,19 +99,56 @@ pub const DEFAULT_AI_DOMAINS: &[&str] = &[
     "labs.google",
     "oauth2.googleapis.com",
     "iamcredentials.googleapis.com",
+    "jnn-pa.googleapis.com",
+    "signaler-pa.googleapis.com",
+    "apis.google.com",
+    "autopush-cloudcode-pa.googleapis.com",
+    "geller-pa.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+    "serviceusage.googleapis.com",
+    "daily-antigravity.sandbox.googleapis.com",
+    "antigravity-unleash.goog",
+    "stitch.withgoogle.com",
+    "firebase.studio",
 ];
 
-fn append_payment_and_kyc_domains(domains: &mut Vec<String>) {
+fn append_unique_domains<'a>(domains: &mut Vec<String>, extra: impl IntoIterator<Item = &'a str>) {
     if domains.is_empty() {
         return;
     }
-    for &d in PAYMENT_AND_KYC_DOMAINS {
+    for d in extra {
         if !domains
             .iter()
             .any(|existing| existing.eq_ignore_ascii_case(d))
         {
             domains.push(d.to_string());
         }
+    }
+}
+
+fn append_payment_and_kyc_domains(domains: &mut Vec<String>) {
+    let used_runtime = crate::auditor::rules::with_runtime_provider_matrix(|matrix| {
+        if let Some(m) = matrix
+            && !m.payment_kyc_domains.is_empty()
+        {
+            append_unique_domains(domains, m.payment_kyc_domains.iter().map(String::as_str));
+            true
+        } else {
+            false
+        }
+    });
+    if !used_runtime {
+        append_unique_domains(domains, PAYMENT_AND_KYC_DOMAINS.iter().copied());
+    }
+}
+
+fn append_matrix_payment_and_kyc_domains(matrix: &ProviderMatrix, domains: &mut Vec<String>) {
+    append_unique_domains(
+        domains,
+        matrix.payment_kyc_domains.iter().map(String::as_str),
+    );
+    if matrix.payment_kyc_domains.is_empty() {
+        append_payment_and_kyc_domains(domains);
     }
 }
 
@@ -113,7 +166,7 @@ pub fn get_all_ai_domains(matrix: &ProviderMatrix) -> Vec<String> {
     if domains.is_empty() {
         domains = DEFAULT_AI_DOMAINS.iter().map(|s| s.to_string()).collect();
     }
-    append_payment_and_kyc_domains(&mut domains);
+    append_matrix_payment_and_kyc_domains(matrix, &mut domains);
     domains
 }
 
@@ -189,7 +242,7 @@ pub fn get_all_ai_domains_filtered(
             domains.push(clean);
         }
     }
-    append_payment_and_kyc_domains(&mut domains);
+    append_matrix_payment_and_kyc_domains(matrix, &mut domains);
     domains
 }
 

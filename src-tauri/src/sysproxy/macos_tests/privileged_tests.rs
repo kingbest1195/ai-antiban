@@ -88,3 +88,80 @@ fn privileged_script_clears_pac_via_state_off_without_empty_url() {
     );
     assert!(!script.contains("-setautoproxyurl"), "{script}");
 }
+
+#[test]
+fn heal_guard_post_retain_empty_surfaces_error_and_records_state_change_diagnostics() {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    let (fs, p) = setup();
+    let mut j = open(&fs);
+    let guard = HealGuard::new();
+    let diag_state = Mutex::new(None);
+    let summary_state = Mutex::new(None);
+    let noted = AtomicBool::new(false);
+    let mut logs: Vec<String> = Vec::new();
+    let t0 = Instant::now();
+
+    let run = |p: &FakePlatform,
+               j: &mut Journal,
+               t: Instant,
+               logs: &mut Vec<String>|
+     -> Result<EnableReport, String> {
+        super::super::apply::apply_pac_with_summary(
+            j,
+            p,
+            PAC,
+            Some((&guard, t)),
+            &diag_state,
+            Some(&summary_state),
+            &noted,
+            false,
+            &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+        )
+    };
+
+    // 1. Initial apply logs state once; steady-state repeat logs nothing.
+    run(&p, &mut j, t0, &mut logs).unwrap();
+    run(&p, &mut j, t0 + Duration::from_secs(5), &mut logs).unwrap();
+    assert_eq!(
+        logs.len(),
+        1,
+        "expected deduplicated active state: {logs:?}"
+    );
+    assert!(logs[0].contains("applied=[Wi-Fi]"));
+
+    // 2. Temp DNS defer logs state transition once, then deduplicates.
+    p.set_temp_dns(true);
+    let rep_def = run(&p, &mut j, t0 + Duration::from_secs(10), &mut logs).unwrap();
+    assert!(rep_def.os_pac_deferred);
+    run(&p, &mut j, t0 + Duration::from_secs(15), &mut logs).unwrap();
+    assert_eq!(logs.len(), 2, "expected single deferred log: {logs:?}");
+    assert!(logs[1].contains("pac deferred"));
+
+    // 3. Clearing temp DNS logs transition back to active.
+    p.set_temp_dns(false);
+    run(&p, &mut j, t0 + Duration::from_secs(20), &mut logs).unwrap();
+    assert_eq!(logs.len(), 3, "{logs:?}");
+
+    // 4. Exhaust HealGuard on sole physical service -> post-retain empty returns Err + diagnostic.
+    for step in 1..=HEAL_MAX_REWRITES as u64 {
+        p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
+        run(&p, &mut j, t0 + Duration::from_secs(20 + step), &mut logs).unwrap();
+    }
+    let err = run(&p, &mut j, t0 + Duration::from_secs(30), &mut logs).unwrap_err();
+    assert!(
+        err.contains("приостановлена") && err.contains("Wi-Fi"),
+        "{err}"
+    );
+    let err2 = run(&p, &mut j, t0 + Duration::from_secs(35), &mut logs).unwrap_err();
+    assert_eq!(err, err2);
+    assert_eq!(
+        logs.iter()
+            .filter(|l| l.contains("all physical services suspended by HealGuard"))
+            .count(),
+        1,
+        "suspended state should be logged once until state changes: {logs:?}"
+    );
+}

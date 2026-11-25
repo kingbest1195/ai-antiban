@@ -73,63 +73,16 @@ impl ProxyServer {
             }
             None => {
                 if crate::auditor::geo_matrix::is_payment_or_kyc_host(&host) {
-                    let pay_selection = super::http_handler::active_payment_route_selection(
-                        &self.state,
-                        &st_snapshot,
-                    )
-                    .await;
-                    match &pay_selection {
-                        RouteSelection::Missing(id) => {
-                            return self
-                                .refuse_route_down(
-                                    client,
-                                    &host,
-                                    ProviderId::Anthropic,
-                                    id,
-                                    RouteDownReason::Missing,
-                                    None,
-                                    is_canary,
-                                )
-                                .await;
-                        }
-                        RouteSelection::Invalid(why) => {
-                            return self
-                                .refuse_route_down(
-                                    client,
-                                    &host,
-                                    ProviderId::Anthropic,
-                                    INVALID_PROFILE_ROUTE_ID,
-                                    RouteDownReason::Invalid,
-                                    Some(why),
-                                    is_canary,
-                                )
-                                .await;
-                        }
-                        RouteSelection::Route(r) => {
-                            if let Err(reason) =
-                                r.check_usable(crate::auditor::network::current_timestamp())
-                            {
-                                return self
-                                    .refuse_route_down(
-                                        client,
-                                        &host,
-                                        ProviderId::Anthropic,
-                                        &r.id,
-                                        reason,
-                                        None,
-                                        is_canary,
-                                    )
-                                    .await;
-                            }
-                        }
-                        RouteSelection::Direct => {}
-                    }
                     return self
-                        .tunnel_to_target(client, &host, port, None, &pay_selection)
+                        .handle_payment_connect(client, &host, port, &st_snapshot, is_canary)
                         .await;
                 }
                 // Direct pass-through for non-AI or monitoring-disabled domains: allows terminal
                 // users to set HTTPS_PROXY cleanly without interfering with excluded providers.
+                // Do not emit domain_drift when a known provider was intentionally disabled by user.
+                if ProviderId::from_host(&host).is_none() {
+                    crate::proxy::domain_drift::observe_direct_host(&host);
+                }
                 self.state.stats().record_direct_bypassed_host(&host);
                 return self
                     .tunnel_to_target(client, &host, port, None, &RouteSelection::Direct)
@@ -206,7 +159,9 @@ impl ProxyServer {
                 self.auditor.resolver.invalidate_direct_cache().await;
             }
 
-            Box::pin(self.guard.ensure_fresh()).await;
+            if !is_canary || self.guard.gate_for(provider) == Gate::Open {
+                Box::pin(self.guard.ensure_fresh()).await;
+            }
             match self.guard.gate_for(provider) {
                 Gate::Open => {}
                 Gate::Pending => {
@@ -228,6 +183,15 @@ impl ProxyServer {
                     }
                 }
                 Gate::Blocked => {
+                    if is_canary {
+                        self.state.stats().record_intercepted(
+                            &host,
+                            provider.as_str(),
+                            "BLOCKED",
+                            "??",
+                        );
+                        return send_canary_intercepted(client).await;
+                    }
                     if !self
                         .try_silent_recovery_on_startup(provider, &selection, route.is_some())
                         .await
@@ -238,9 +202,6 @@ impl ProxyServer {
                             "BLOCKED",
                             "??",
                         );
-                        if is_canary {
-                            return send_canary_intercepted(client).await;
-                        }
                         return send_forbidden(
                         client,
                         "Network change blocked by Zastava Risk Auditor: switch back to the trusted IP or confirm the new network.",
@@ -252,22 +213,26 @@ impl ProxyServer {
         }
 
         // Step 1: Check if provider is blocked
-        if self.state.is_provider_blocked(provider.as_str()).await
-            && !self
-                .try_silent_recovery_on_startup(provider, &selection, route.is_some())
-                .await
-        {
-            self.state
-                .stats()
-                .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
+        if self.state.is_provider_blocked(provider.as_str()).await {
             if is_canary {
+                self.state
+                    .stats()
+                    .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
                 return send_canary_intercepted(client).await;
             }
-            return send_forbidden(
-                client,
-                "Requests to this provider are blocked until network change.",
-            )
-            .await;
+            if !self
+                .try_silent_recovery_on_startup(provider, &selection, route.is_some())
+                .await
+            {
+                self.state
+                    .stats()
+                    .record_intercepted(&host, provider.as_str(), "BLOCKED", "??");
+                return send_forbidden(
+                    client,
+                    "Requests to this provider are blocked until network change.",
+                )
+                .await;
+            }
         }
 
         // Step 2: Check if provider has active session allowance
@@ -416,11 +381,19 @@ impl ProxyServer {
                     .record_ip_history_for_selection(provider.as_str(), &selection, entry)
                     .await;
             }
-            self.state.stats().record_protected(
-                &host,
-                provider.as_str(),
-                &report.telemetry.country_code,
-            );
+            if crate::core::sanctions::is_blocked_geo_code(&report.telemetry.country_code) {
+                self.state.stats().record_manual_allow(
+                    &host,
+                    provider.as_str(),
+                    &report.telemetry.country_code,
+                );
+            } else {
+                self.state.stats().record_protected(
+                    &host,
+                    provider.as_str(),
+                    &report.telemetry.country_code,
+                );
+            }
             return self
                 .tunnel_to_target(client, &host, port, Some(provider), &selection)
                 .await;

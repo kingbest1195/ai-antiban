@@ -48,6 +48,7 @@ export const shell = {
     title: (service: string) => `Запрос к ${service} приостановлен`,
     gateReasonLabel: "Причина:",
     ruText: "Вы вышли в сеть из России без VPN.",
+    detectingIpText: "Определяем новый адрес…",
     ipText: (ip: string, country: string) => `Адрес ${ip}${country ? ` · ${country}` : ""}.`,
     allow: "Снять паузу",
     pauseUntilNetworkChange: "Пауза до смены сети",

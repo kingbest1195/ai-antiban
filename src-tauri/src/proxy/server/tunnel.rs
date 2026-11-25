@@ -1,11 +1,10 @@
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use crate::auditor::geo_matrix::ProviderId;
-use crate::proxy::guard::{Gate, NetworkGuard, gate_closed, shutdown_aborted};
+use crate::proxy::guard::{Gate, shutdown_aborted};
 use crate::proxy::route_watch::RouteWatch;
 use crate::proxy::upstream::handshakes::configure_tcp_stream;
 use crate::proxy::upstream::{
@@ -17,6 +16,13 @@ use super::responses::{
     KILLSWITCH_MESSAGE, is_peer_gone, killswitch_engaged, killswitch_stopped, send_bad_gateway,
     send_forbidden, send_routing_changed, send_status,
 };
+#[cfg(test)]
+pub(super) use super::tunnel_relay::pump;
+#[cfg(not(any(test, feature = "test-support")))]
+use super::tunnel_relay::pump;
+#[cfg(any(test, feature = "test-support"))]
+use super::tunnel_relay::pump_with_drain;
+use super::tunnel_relay::tunnel_stalled;
 use super::{
     CHAINED_CONNECT_TIMEOUT_SECS, ProxyServer, ROUTE_ENTRY_TIMEOUT_SECS, TunnelPolicy,
     UPSTREAM_CONNECT_TIMEOUT_SECS,
@@ -54,6 +60,39 @@ impl ProxyServer {
         port: u16,
         gateway_port: u16,
     ) -> Result<UpstreamStream, std::io::Error> {
+        self.connect_via_chained_or_direct(host, port, gateway_port, true)
+            .await
+    }
+
+    /// Outbound connection for AI / payment / Clean Room direct-mode traffic: routes through the
+    /// chained proxy when active and FAILS CLOSED if the chained proxy is unreachable or refuses
+    /// (zero fallback to `connect_direct`). Goes direct only when no chained proxy is active.
+    pub(super) async fn connect_ai_transit(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<UpstreamStream, std::io::Error> {
+        self.connect_ai_transit_with_port(host, port, self.bound_addr.port())
+            .await
+    }
+
+    pub(super) async fn connect_ai_transit_with_port(
+        &self,
+        host: &str,
+        port: u16,
+        gateway_port: u16,
+    ) -> Result<UpstreamStream, std::io::Error> {
+        self.connect_via_chained_or_direct(host, port, gateway_port, false)
+            .await
+    }
+
+    async fn connect_via_chained_or_direct(
+        &self,
+        host: &str,
+        port: u16,
+        gateway_port: u16,
+        allow_direct_fallback: bool,
+    ) -> Result<UpstreamStream, std::io::Error> {
         if let Some(cp) = self.transit.chained_proxy(gateway_port) {
             match connect_via_chained_proxy(
                 &cp,
@@ -71,7 +110,14 @@ impl ProxyServer {
                         format!("the upstream proxy refused the tunnel (status {status})"),
                     ));
                 }
-                Err(ChainedError::Unreachable(_)) => {} // fall back to direct, once
+                Err(ChainedError::Unreachable(err)) => {
+                    if !allow_direct_fallback {
+                        return Err(std::io::Error::new(
+                            err.kind(),
+                            format!("upstream chained proxy unreachable (fail-closed): {err}"),
+                        ));
+                    }
+                }
             }
         }
         self.connect_direct(host, port)
@@ -88,11 +134,12 @@ impl ProxyServer {
         port: u16,
     ) -> Result<(), std::io::Error> {
         configure_tcp_stream(client);
-        // The manual kill-switch ("СТОП СЕТИ") stops transit traffic too; subscribe first so a
-        // switch-on during the connect is noticed.
+        // Scope `manual_killswitch` strictly to AI/payment/KYC hosts — never block or 503
+        // non-AI transit apps (Discord, PUBG, RDP). Shutdown still aborts all tunnels.
+        let guard_kill = crate::auditor::geo_matrix::is_payment_or_kyc_host(host);
         let mut kill_rx = self.guard.subscribe_killswitch();
         let mut shutdown_rx = self.guard.subscribe_shutdown_abort();
-        if *kill_rx.borrow_and_update() || *shutdown_rx.borrow_and_update() {
+        if *shutdown_rx.borrow_and_update() || (guard_kill && *kill_rx.borrow_and_update()) {
             return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
         }
         let connected = if let Some(redirect_addr) = self.upstream_redirect {
@@ -113,6 +160,8 @@ impl ProxyServer {
                 configure_tcp_stream(&s);
                 UpstreamStream::Plain(s)
             })
+        } else if guard_kill {
+            self.connect_ai_transit(host, port).await
         } else {
             self.connect_transit(host, port).await
         };
@@ -124,17 +173,24 @@ impl ProxyServer {
                 return Err(e);
             }
         };
-        if self.guard.is_manual_killswitch() {
+        if guard_kill && self.guard.is_manual_killswitch() {
             return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
         }
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
         client.flush().await?;
-        let res = tokio::select! {
-            res = tokio::io::copy_bidirectional(client, &mut target) => res.map(|_| ()),
-            _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
-            _ = shutdown_aborted(&mut shutdown_rx) => Err(tunnel_stalled()),
+        let res = if guard_kill {
+            tokio::select! {
+                res = tokio::io::copy_bidirectional(client, &mut target) => res.map(|_| ()),
+                _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+                _ = shutdown_aborted(&mut shutdown_rx) => Err(tunnel_stalled()),
+            }
+        } else {
+            tokio::select! {
+                res = tokio::io::copy_bidirectional(client, &mut target) => res.map(|_| ()),
+                _ = shutdown_aborted(&mut shutdown_rx) => Err(tunnel_stalled()),
+            }
         };
         match res {
             Err(e) if is_peer_gone(&e) => Ok(()),
@@ -178,16 +234,44 @@ impl ProxyServer {
 
         if let Some(r) = route {
             let chained = self.transit.chained_proxy(self.bound_addr.port());
-            let mut target = match connect_via_route_with_chained(
-                r,
-                host,
-                port,
-                Duration::from_secs(ROUTE_ENTRY_TIMEOUT_SECS),
-                self.bound_addr.port(),
-                chained.as_deref(),
-            )
-            .await
-            {
+            let target_res = {
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(tls) = &self.route_tls_override {
+                    crate::proxy::upstream::connect_via_route_with_tls(
+                        r,
+                        host,
+                        port,
+                        Duration::from_secs(ROUTE_ENTRY_TIMEOUT_SECS),
+                        tls,
+                        self.bound_addr.port(),
+                        chained.as_deref(),
+                    )
+                    .await
+                } else {
+                    connect_via_route_with_chained(
+                        r,
+                        host,
+                        port,
+                        Duration::from_secs(ROUTE_ENTRY_TIMEOUT_SECS),
+                        self.bound_addr.port(),
+                        chained.as_deref(),
+                    )
+                    .await
+                }
+                #[cfg(not(any(test, feature = "test-support")))]
+                {
+                    connect_via_route_with_chained(
+                        r,
+                        host,
+                        port,
+                        Duration::from_secs(ROUTE_ENTRY_TIMEOUT_SECS),
+                        self.bound_addr.port(),
+                        chained.as_deref(),
+                    )
+                    .await
+                }
+            };
+            let mut target = match target_res {
                 Ok(s) => s,
                 Err(e) => {
                     let provider = provider
@@ -221,15 +305,33 @@ impl ProxyServer {
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 .await?;
             client.flush().await?;
-            let res = pump(
-                client,
-                &mut target,
-                &self.guard,
-                TunnelPolicy::KillSwitchOnly,
-                provider,
-                watch,
-            )
-            .await;
+            let res = {
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    pump_with_drain(
+                        client,
+                        &mut target,
+                        &self.guard,
+                        TunnelPolicy::KillSwitchOnly,
+                        provider,
+                        watch,
+                        self.half_close_drain_timeout,
+                    )
+                    .await
+                }
+                #[cfg(not(any(test, feature = "test-support")))]
+                {
+                    pump(
+                        client,
+                        &mut target,
+                        &self.guard,
+                        TunnelPolicy::KillSwitchOnly,
+                        provider,
+                        watch,
+                    )
+                    .await
+                }
+            };
             return match res {
                 Err(e) if is_peer_gone(&e) => Ok(()),
                 other => other,
@@ -256,7 +358,7 @@ impl ProxyServer {
                 UpstreamStream::Plain(s)
             })
         } else {
-            self.connect_transit(host, port).await
+            self.connect_ai_transit(host, port).await
         };
 
         let mut target = match connect_res {
@@ -295,198 +397,30 @@ impl ProxyServer {
             .await?;
         client.flush().await?;
 
-        pump(
-            client,
-            &mut target,
-            &self.guard,
-            TunnelPolicy::FollowGate,
-            provider,
-            watch,
-        )
-        .await
-    }
-}
-
-/// Bidirectional relay that obeys the network guard. Direct tunnels (`FollowGate`): while the gate
-/// is closed no byte is forwarded, and the session aborts when the route changes, the gate closes or
-/// the manual kill-switch is engaged. Routed tunnels (`KillSwitchOnly`) are only stopped by the
-/// manual kill-switch. Both end as soon as the routing of their provider changes (`watch`).
-pub(super) async fn pump(
-    client: &mut TcpStream,
-    target: &mut UpstreamStream,
-    guard: &Arc<NetworkGuard>,
-    policy: TunnelPolicy,
-    provider: Option<ProviderId>,
-    watch: Option<RouteWatch>,
-) -> Result<(), std::io::Error> {
-    let relay = relay(client, target, guard, policy, provider);
-    match watch {
-        Some(mut w) => {
-            tokio::select! {
-                res = relay => res,
-                _ = w.stale() => Err(tunnel_route_changed()),
-            }
-        }
-        None => relay.await,
-    }
-}
-
-async fn relay(
-    client: &mut TcpStream,
-    target: &mut UpstreamStream,
-    guard: &Arc<NetworkGuard>,
-    policy: TunnelPolicy,
-    provider: Option<ProviderId>,
-) -> Result<(), std::io::Error> {
-    let (mut cr, mut cw) = client.split();
-    if let UpstreamStream::Plain(tcp) = target {
-        // Zero-overhead split for plain TCP (direct, SOCKS5, HTTP entries).
-        let (mut tr, mut tw) = tcp.split();
-        let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
-        let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
-        tokio::try_join!(c2t, t2c)?;
-    } else {
-        let (mut tr, mut tw) = tokio::io::split(target);
-        let c2t = forward(&mut cr, &mut tw, guard, policy, provider);
-        let t2c = forward(&mut tr, &mut cw, guard, policy, provider);
-        tokio::try_join!(c2t, t2c)?;
-    }
-    Ok(())
-}
-
-fn tunnel_route_changed() -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::ConnectionReset,
-        "tunnel aborted: the routing of this service changed",
-    )
-}
-
-fn tunnel_stalled() -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::ConnectionReset,
-        "tunnel aborted: network route changed or closed",
-    )
-}
-
-async fn forward<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    guard: &Arc<NetworkGuard>,
-    policy: TunnelPolicy,
-    provider: Option<ProviderId>,
-) -> Result<(), std::io::Error>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    match policy {
-        TunnelPolicy::FollowGate => forward_follow_gate(reader, writer, guard, provider).await,
-        TunnelPolicy::KillSwitchOnly => forward_killswitch_only(reader, writer, guard).await,
-    }
-}
-
-async fn forward_follow_gate<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    guard: &Arc<NetworkGuard>,
-    provider: Option<ProviderId>,
-) -> Result<(), std::io::Error>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut rx = match provider {
-        Some(p) => guard.subscribe_for(p),
-        None => guard.subscribe(),
-    };
-    let mut abort_rx = guard.subscribe_tunnel_abort();
-    let mut kill_rx = guard.subscribe_killswitch();
-    let mut buf = vec![0u8; 64 * 1024];
-
-    loop {
-        // The manual kill-switch or any gate exit from Open immediately tears down direct tunnels.
-        if *kill_rx.borrow_and_update()
-            || *rx.borrow_and_update() != Gate::Open
-            || abort_rx.has_changed().unwrap_or(false)
+        #[cfg(any(test, feature = "test-support"))]
         {
-            return Err(tunnel_stalled());
+            pump_with_drain(
+                client,
+                &mut target,
+                &self.guard,
+                TunnelPolicy::FollowGate,
+                provider,
+                watch,
+                self.half_close_drain_timeout,
+            )
+            .await
         }
-
-        let n = tokio::select! {
-            res = reader.read(&mut buf) => res?,
-            _ = gate_closed(&mut rx) => {
-                return Err(tunnel_stalled());
-            }
-            _ = abort_rx.changed() => {
-                return Err(tunnel_stalled());
-            }
-            changed = kill_rx.changed() => {
-                if changed.is_err() || *kill_rx.borrow_and_update() {
-                    return Err(tunnel_stalled());
-                }
-                continue;
-            }
-        };
-
-        if n == 0 {
-            let _ = writer.flush().await;
-            let _ = writer.shutdown().await;
-            return Ok(());
-        }
-
-        // Data read right before the freeze is held back and the tunnel is torn down immediately.
-        let current_gate = match provider {
-            Some(p) => guard.gate_for(p),
-            None => guard.gate(),
-        };
-        if current_gate != Gate::Open
-            || *rx.borrow_and_update() != Gate::Open
-            || guard.is_manual_killswitch()
-            || abort_rx.has_changed().unwrap_or(false)
+        #[cfg(not(any(test, feature = "test-support")))]
         {
-            return Err(tunnel_stalled());
+            pump(
+                client,
+                &mut target,
+                &self.guard,
+                TunnelPolicy::FollowGate,
+                provider,
+                watch,
+            )
+            .await
         }
-        writer.write_all(&buf[..n]).await?;
-    }
-}
-
-async fn forward_killswitch_only<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    guard: &Arc<NetworkGuard>,
-) -> Result<(), std::io::Error>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut kill_rx = guard.subscribe_killswitch();
-    let mut shutdown_rx = guard.subscribe_shutdown_abort();
-    let mut buf = vec![0u8; 64 * 1024];
-
-    loop {
-        if *kill_rx.borrow_and_update() || *shutdown_rx.borrow_and_update() {
-            return Err(tunnel_stalled());
-        }
-        let n = tokio::select! {
-            res = reader.read(&mut buf) => res?,
-            changed = kill_rx.changed() => {
-                if changed.is_err() || *kill_rx.borrow_and_update() {
-                    return Err(tunnel_stalled());
-                }
-                continue;
-            }
-            _ = shutdown_aborted(&mut shutdown_rx) => {
-                return Err(tunnel_stalled());
-            }
-        };
-        if n == 0 {
-            let _ = writer.flush().await;
-            let _ = writer.shutdown().await;
-            return Ok(());
-        }
-        if guard.is_manual_killswitch() || *shutdown_rx.borrow_and_update() {
-            return Err(tunnel_stalled());
-        }
-        writer.write_all(&buf[..n]).await?;
     }
 }

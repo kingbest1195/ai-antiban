@@ -574,3 +574,53 @@ fn deferred_os_pac_still_detects_socks_and_http_upstreams_readonly() {
     );
     assert_eq!(p.os_writes(), 0);
 }
+
+#[test]
+fn suppresses_effective_proxy_diff_spam_when_browser_pac_policy_is_active() {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    let p = FakePlatform::new();
+    p.add_service(wifi());
+    let _vpn = p.add_vpn_service("Happ Plus", true);
+    p.set_effective_pac(Some("http://vpn.example/p.pac"), false);
+    let mut j = open(&FakeFs::new());
+    let guard = HealGuard::new();
+    let diag_state = Mutex::new(None);
+    let noted = AtomicBool::new(false);
+    let mut logs: Vec<String> = Vec::new();
+    let t0 = Instant::now();
+
+    for offset in [0u64, 5, 305, 610] {
+        super::super::apply::apply_pac_with_options(
+            &mut j,
+            &p,
+            PAC,
+            Some((&guard, t0 + Duration::from_secs(offset))),
+            &diag_state,
+            &noted,
+            true,
+            &mut |comp, msg| logs.push(format!("[{comp}] {msg}")),
+        )
+        .unwrap();
+    }
+    assert_eq!(logs.len(), 1, "expected single info note, got: {logs:?}");
+    assert!(logs[0].contains("browser PAC policies active"));
+    assert!(!logs[0].contains("effective proxy differs while vpn active"));
+
+    let mut warn_logs: Vec<String> = Vec::new();
+    super::super::apply::apply_pac_with_options(
+        &mut j,
+        &p,
+        PAC,
+        Some((&guard, t0 + Duration::from_secs(620))),
+        &Mutex::new(None),
+        &AtomicBool::new(false),
+        false,
+        &mut |comp, msg| warn_logs.push(format!("[{comp}] {msg}")),
+    )
+    .unwrap();
+    assert_eq!(warn_logs.len(), 1);
+    assert!(warn_logs[0].contains("effective proxy differs while vpn active"));
+}

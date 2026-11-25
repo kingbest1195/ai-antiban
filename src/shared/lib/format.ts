@@ -55,12 +55,67 @@ export function formatIp(ip: string | null | undefined, hideIpMode = false): str
   return "•••.•••.•••.•••";
 }
 
-/** Маскирует все IPv4- и IPv6-адреса внутри произвольной строки, если включён `hideIpMode`. */
+const isValidOctet = (s: string) => /^\d{1,3}$/.test(s) && Number(s) <= 255;
+
+const hasDomainLetterLabel = (token: string) =>
+  /\.[a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*/.test(token);
+
+function extractTokenAround(text: string, start: number, end: number): string {
+  let lo = start;
+  while (lo > 0 && !/[\s(),;<>"'«»]/.test(text[lo - 1])) lo -= 1;
+  let hi = end;
+  while (hi < text.length && !/[\s(),;<>"'«»]/.test(text[hi])) hi += 1;
+  return text.slice(lo, hi);
+}
+
+function isPrecededByNumericSegment(full: string, offset: number, sep: string): boolean {
+  if (offset < 2 || full[offset - 1] !== sep || !/\d/.test(full[offset - 2])) return false;
+  let k = offset - 2;
+  while (k > 0 && /\d/.test(full[k - 1])) k -= 1;
+  return k === 0 || !/[a-zA-Z]/.test(full[k - 1]);
+}
+
+/** Маскирует все IPv4- и IPv6-адреса (включая PTR-хосты с точкой/дефисом) внутри произвольной строки, если включён `hideIpMode`. */
 export function maskIpsInText(text: string, hideIpMode = false): string {
   if (!text || !hideIpMode) return text;
-  const maskedV4 = text.replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.(\d{1,3})\b/g, "•••.•••.•••.$1");
+  const maskedDotV4 = text.replace(
+    /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/g,
+    (match, o1, o2, o3, o4, offset: number, full: string) => {
+      if (![o1, o2, o3, o4].every(isValidOctet)) return match;
+      const prev = offset > 0 ? full[offset - 1] : "";
+      const prev2 = offset > 1 ? full[offset - 2] : "";
+      const after = full.slice(offset + match.length);
+      if (/\d/.test(prev) || isPrecededByNumericSegment(full, offset, ".")) return match;
+      if (/^\d|^\.\d/.test(after)) return match;
+      if ((prev === "v" || prev === "V") && (offset === 1 || !/[a-zA-Z0-9]/.test(prev2))) {
+        return match;
+      }
+      const token = extractTokenAround(full, offset, offset + match.length);
+      if (prev === "/" && offset >= 2 && /[a-zA-Z]/.test(prev2) && !hasDomainLetterLabel(token)) {
+        return match;
+      }
+      return `•••.•••.•••.${o4}`;
+    },
+  );
+  const maskedPtrV4 = maskedDotV4.replace(
+    /(?<!\d)(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})(?!\d|-\d)/g,
+    (match, o1, o2, o3, o4, offset: number, full: string) => {
+      if (![o1, o2, o3, o4].every(isValidOctet)) return match;
+      const prev = offset > 0 ? full[offset - 1] : "";
+      const prev2 = offset > 1 ? full[offset - 2] : "";
+      const after = full.slice(offset + match.length);
+      if (/\d/.test(prev) || isPrecededByNumericSegment(full, offset, "-")) return match;
+      if (/^\d|^-\d/.test(after)) return match;
+      if ((prev === "v" || prev === "V") && (offset === 1 || !/[a-zA-Z0-9]/.test(prev2))) {
+        return match;
+      }
+      const token = extractTokenAround(full, offset, offset + match.length);
+      if (!hasDomainLetterLabel(token)) return match;
+      return `•••-•••-•••-${o4}`;
+    },
+  );
   // Маскируем IPv6 (с `::` или >= 3 двоеточиями с hex-группами, не затрагивая время вроде 14:03:27).
-  return maskedV4.replace(
+  return maskedPtrV4.replace(
     /\[?([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{1,4}\]?/g,
     (match) => {
       if (/^\d{1,2}:\d{2}:\d{2}$/.test(match)) return match;

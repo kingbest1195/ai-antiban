@@ -26,6 +26,16 @@ pub const PAYMENT_AND_KYC_DOMAINS: &[&str] = &[
     "arkoselabs.com",
     "pay.google.com",
     "payments.google.com",
+    "paddle.com",
+    "stripe.network",
+    "stripecdn.com",
+    "funcaptcha.com",
+    "recaptcha.net",
+    "lemonsqueezy.com",
+    "veriff.com",
+    "veriff.me",
+    "sumsub.com",
+    "onfido.com",
 ];
 
 const ANTHROPIC_DOMAINS: &[&str] = &[
@@ -45,6 +55,17 @@ const ANTHROPIC_DOMAINS: &[&str] = &[
     "poe.com",
     "perplexity.ai",
     "pplx.ai",
+    "clau.de",
+    "cursorapi.com",
+    "statsigapi.net",
+    "featuregates.org",
+    "ingest.sentry.io",
+    "ingest.us.sentry.io",
+    "ingest.de.sentry.io",
+    "api.segment.io",
+    "api-iam.intercom.io",
+    "workos.com",
+    "authkit.com",
 ];
 
 const OPENAI_DOMAINS: &[&str] = &[
@@ -76,6 +97,11 @@ const OPENAI_DOMAINS: &[&str] = &[
     "api.x.ai",
     "mistral.ai",
     "chat.mistral.ai",
+    "sora.com",
+    "featureassets.org",
+    "prodregistryv2.org",
+    "livekit.cloud",
+    "exafunction.com",
 ];
 
 pub const AI_STUDIO_DOMAINS: &[&str] = &[
@@ -119,6 +145,17 @@ const GEMINI_DOMAINS: &[&str] = &[
     "labs.google",
     "oauth2.googleapis.com",
     "iamcredentials.googleapis.com",
+    "jnn-pa.googleapis.com",
+    "signaler-pa.googleapis.com",
+    "apis.google.com",
+    "autopush-cloudcode-pa.googleapis.com",
+    "geller-pa.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
+    "serviceusage.googleapis.com",
+    "daily-antigravity.sandbox.googleapis.com",
+    "antigravity-unleash.goog",
+    "stitch.withgoogle.com",
+    "firebase.studio",
 ];
 
 fn normalize_host(raw_host: &str) -> String {
@@ -141,14 +178,32 @@ fn matches_domain(host: &str, domain: &str) -> bool {
             && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
 }
 
+fn matches_any_domain(host: &str, domains: &[String]) -> bool {
+    domains.iter().any(|raw| {
+        let d = raw
+            .trim()
+            .trim_start_matches("*.")
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        !d.is_empty() && matches_domain(host, &d)
+    })
+}
+
 pub fn is_payment_or_kyc_host(raw_host: &str) -> bool {
     let host = normalize_host(raw_host);
     if host.is_empty() {
         return false;
     }
-    PAYMENT_AND_KYC_DOMAINS
-        .iter()
-        .any(|d| matches_domain(&host, d))
+    crate::auditor::rules::with_runtime_provider_matrix(|matrix| {
+        if let Some(m) = matrix
+            && !m.payment_kyc_domains.is_empty()
+        {
+            return matches_any_domain(&host, &m.payment_kyc_domains);
+        }
+        PAYMENT_AND_KYC_DOMAINS
+            .iter()
+            .any(|d| matches_domain(&host, d))
+    })
 }
 
 pub fn is_ai_studio_host(raw_host: &str) -> bool {
@@ -161,16 +216,47 @@ pub(super) fn match_provider_host(raw_host: &str) -> Option<ProviderId> {
     if host.is_empty() {
         return None;
     }
-    if ANTHROPIC_DOMAINS.iter().any(|d| matches_domain(&host, d)) {
+    if host == "canary-test.anthropic.zastava.local" {
         return Some(ProviderId::Anthropic);
     }
-    if OPENAI_DOMAINS.iter().any(|d| matches_domain(&host, d)) {
-        return Some(ProviderId::Openai);
-    }
-    if GEMINI_DOMAINS.iter().any(|d| matches_domain(&host, d)) {
-        return Some(ProviderId::Gemini);
-    }
-    None
+    crate::auditor::rules::with_runtime_provider_matrix(|matrix| {
+        if let Some(m) = matrix
+            && !m.providers.is_empty()
+        {
+            for (key, pid) in [
+                ("anthropic", ProviderId::Anthropic),
+                ("openai", ProviderId::Openai),
+                ("gemini", ProviderId::Gemini),
+            ] {
+                if let Some(rules) = m.providers.get(key)
+                    && matches_any_domain(&host, &rules.domains)
+                {
+                    return Some(pid);
+                }
+            }
+            for (key, rules) in &m.providers {
+                if matches!(key.as_str(), "anthropic" | "openai" | "gemini") {
+                    continue;
+                }
+                if let Some(pid) = ProviderId::from_id(key)
+                    && matches_any_domain(&host, &rules.domains)
+                {
+                    return Some(pid);
+                }
+            }
+            return None;
+        }
+        if ANTHROPIC_DOMAINS.iter().any(|d| matches_domain(&host, d)) {
+            return Some(ProviderId::Anthropic);
+        }
+        if OPENAI_DOMAINS.iter().any(|d| matches_domain(&host, d)) {
+            return Some(ProviderId::Openai);
+        }
+        if GEMINI_DOMAINS.iter().any(|d| matches_domain(&host, d)) {
+            return Some(ProviderId::Gemini);
+        }
+        None
+    })
 }
 
 pub(super) fn match_provider_host_with_custom(

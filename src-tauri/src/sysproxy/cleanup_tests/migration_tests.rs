@@ -97,14 +97,27 @@ fn the_second_migration_run_makes_no_calls_at_all() {
     let mut j = open(&fs);
     migrate_legacy(&mut j, &p, None);
     assert!(j.has_mark(LAUNCHD_MIGRATION_MARK));
+    assert!(j.has_mark(LEGACY_MIGRATION_MARK));
+    let writes_before = p.os_writes();
     p.clear_calls();
     assert!(migrate_legacy(&mut j, &p, None).is_empty());
-    assert!(p.calls().is_empty(), "{:?}", p.calls());
-    // And after a restart (the mark is durable).
+    assert_eq!(p.os_writes(), writes_before);
+    assert!(
+        p.calls().iter().all(|c| c == "get_inet:AutoConfigURL"),
+        "only the continuous read-only AutoConfigURL check may run: {:?}",
+        p.calls()
+    );
+    // And after a restart (the marks are durable).
     drop(j);
     let mut j2 = open(&fs);
+    p.clear_calls();
     assert!(migrate_legacy(&mut j2, &p, None).is_empty());
-    assert!(p.calls().is_empty());
+    assert_eq!(p.os_writes(), writes_before);
+    assert!(
+        p.calls().iter().all(|c| c == "get_inet:AutoConfigURL"),
+        "{:?}",
+        p.calls()
+    );
 }
 
 #[test]
@@ -248,4 +261,78 @@ fn the_start_pass_cuts_an_old_block_out_of_zshenv_and_leaves_a_half_marker_alone
     assert!(!report.has_failures());
     assert!(report.external() >= 1, "{}", report.summary());
     assert_eq!(fs.get(&zshenv).unwrap(), broken.as_bytes());
+}
+
+#[test]
+fn orphaned_windows_auto_config_url_is_swept_even_when_legacy_mark_already_exists() {
+    for (url, defer_physical_pac) in [
+        ("http://127.0.0.1:8899/proxy.pac", false),
+        ("http://127.0.0.1:54321/proxy.pac", false),
+        ("http://localhost:49152/proxy.pac", true),
+    ] {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        j.set_mark(&p, LEGACY_MIGRATION_MARK).unwrap();
+        p.seed_inet("AutoConfigURL", RegValue::sz(url));
+        p.seed_inet("ProxyEnable", RegValue::dword(0));
+        p.clear_calls();
+
+        let items = migrate_legacy_pac(&mut j, &p, None, defer_physical_pac);
+        assert_eq!(
+            p.inet_of("AutoConfigURL"),
+            None,
+            "orphaned {url} must be swept even with LEGACY_MIGRATION_MARK"
+        );
+        assert_eq!(p.inet_of("ProxyEnable"), Some(RegValue::dword(0)));
+        assert!(
+            p.calls().iter().any(|c| c == "notify_inet_refresh"),
+            "WinINet refresh must be called after sweeping {url}"
+        );
+        assert!(
+            items.iter().any(
+                |i| i.resource == "legacy:inet:AutoConfigURL" && i.outcome == Outcome::Restored
+            ),
+            "{items:?}"
+        );
+    }
+
+    // Foreign or non-Zastava PAC URLs stay untouched even without LEGACY_MIGRATION_MARK.
+    for foreign in [
+        "http://corp.example/proxy.pac",
+        "https://127.0.0.1:54321/proxy.pac",
+        "http://127.0.0.1:54321/other.pac",
+    ] {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        let mut j = open(&fs);
+        j.set_mark(&p, LEGACY_MIGRATION_MARK).unwrap();
+        p.seed_inet("AutoConfigURL", RegValue::sz(foreign));
+        p.clear_calls();
+        let items = migrate_legacy_pac(&mut j, &p, None, false);
+        assert!(items.is_empty());
+        assert_eq!(p.inet_of("AutoConfigURL"), Some(RegValue::sz(foreign)));
+        assert_eq!(p.os_writes(), 0);
+    }
+
+    // ExternalChange on an old Zastava AutoConfigURL entry (different loopback port) releases the
+    // journal entry and the continuous sweep cleans the orphaned PAC in the same pass.
+    let (fs, p) = (FakeFs::new(), FakePlatform::new());
+    let mut j = open(&fs);
+    j.set_mark(&p, LEGACY_MIGRATION_MARK).unwrap();
+    j.apply(
+        &p,
+        &Resource::Inet {
+            name: "AutoConfigURL".into(),
+        },
+        Value::Reg(Some(RegValue::sz("http://127.0.0.1:8899/proxy.pac"))),
+    )
+    .unwrap();
+    p.seed_inet(
+        "AutoConfigURL",
+        RegValue::sz("http://127.0.0.1:54321/proxy.pac"),
+    );
+    p.clear_calls();
+    let rep = restore_and_migrate(&mut j, &p);
+    assert!(!rep.has_failures());
+    assert_eq!(p.inet_of("AutoConfigURL"), None);
+    assert!(p.calls().iter().any(|c| c == "notify_inet_refresh"));
 }

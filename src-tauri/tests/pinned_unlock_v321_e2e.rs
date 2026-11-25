@@ -135,6 +135,10 @@ async fn e2e_pinned_offline_multihop_ru_de_return_to_pinned_recovers_without_sti
         .unwrap(),
     );
     let exit_probe = Arc::clone(&exit);
+    let fixed_fp = zastava_lib::proxy::guard::compute_local_route_fingerprint(None);
+    server
+        .guard
+        .set_route_fingerprint_fn_for_test(Some(Arc::new(move |_| fixed_fp.clone())));
     server.guard.start_with_test_env(
         auditor.clone(),
         state.clone(),
@@ -158,8 +162,11 @@ async fn e2e_pinned_offline_multihop_ru_de_return_to_pinned_recovers_without_sti
     assert_connect_ok_echo(server.bound_addr, "claude.ai").await;
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 
-    // 2. Offline -> freezes Pending, blocks connect on hold deny.
+    // 2. Offline (2 consecutive probe() == None) -> freezes Pending, blocks connect on hold deny.
     *exit.lock().unwrap() = None;
+    server.guard.wake_immediate_probe().await;
+    server.guard.ensure_fresh().await;
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
     server.guard.wake_immediate_probe().await;
     server.guard.ensure_fresh().await;
     assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Pending);
@@ -293,6 +300,10 @@ async fn e2e_connect_silent_recovery_works_repeatedly_and_respects_killswitch() 
         .unwrap(),
     );
     let exit_probe = Arc::clone(&exit);
+    let fixed_fp = zastava_lib::proxy::guard::compute_local_route_fingerprint(None);
+    server
+        .guard
+        .set_route_fingerprint_fn_for_test(Some(Arc::new(move |_| fixed_fp.clone())));
     server.guard.start_with_test_env(
         auditor.clone(),
         state.clone(),

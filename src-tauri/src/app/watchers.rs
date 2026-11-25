@@ -1,7 +1,7 @@
 //! Background watchers: tray status polling, GitHub update check, and CoworkVMService guard.
 
 use crate::tray::update_tray_from_report;
-use crate::{auditor, bunker, commands, cowork_guard, proxy, state, sysproxy, updater};
+use crate::{auditor, bunker, commands, proxy, state, sysproxy, updater};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -361,83 +361,8 @@ pub(super) fn spawn_update_checker(app: &tauri::App, app_state: &state::AppState
     });
 }
 
-/// Pure trigger predicate for the Windows `CoworkVMService` guard watcher.
-///
-/// Triggers `\Zastava\CoworkVMServiceManualGuard` only when OS effects are enabled, the
-/// platform supports the guard, the Task Scheduler task is installed, and either:
-/// - `start_type == Some(2)` (Store update reset service startup back to Automatic), OR
-/// - `service_running && !claude_process_running` (service is running while Claude is closed).
-pub(crate) fn should_trigger_cowork_guard(
-    status: &cowork_guard::CoworkGuardStatus,
-    claude_process_running: bool,
-    os_effects_enabled: bool,
-) -> bool {
-    if !os_effects_enabled || !status.supported || !status.task_installed {
-        return false;
-    }
-    status.start_type == Some(2) || (status.service_running && !claude_process_running)
-}
-
-fn is_claude_process_running() -> bool {
-    if !crate::sysproxy::os_effects_enabled() {
-        return false;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        crate::win_native::process::is_process_running_by_name("claude.exe")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        false
-    }
-}
-
-/// Periodically verifies Windows `CoworkVMService` Start type / macOS AI helpers every 60s.
-/// If a Windows Store update resets `CoworkVMService\Start` back to `2` (Automatic) or the
-/// service is left running with Claude closed while the Task Scheduler guard is installed,
-/// triggers the guard task automatically and notifies the UI.
-pub(super) fn spawn_cowork_guard_watcher(app: &tauri::App) {
-    let handle = app.handle().clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        loop {
-            if let Ok(mut status) =
-                tokio::task::spawn_blocking(cowork_guard::get_cowork_guard_status).await
-            {
-                let os_effects = crate::sysproxy::os_effects_enabled();
-                let claude_running = if os_effects
-                    && status.supported
-                    && status.service_present
-                    && status.task_installed
-                    && status.start_type != Some(2)
-                    && status.service_running
-                {
-                    tokio::task::spawn_blocking(is_claude_process_running)
-                        .await
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-                if should_trigger_cowork_guard(&status, claude_running, os_effects) {
-                    let triggered =
-                        tokio::task::spawn_blocking(cowork_guard::trigger_cowork_guard_task)
-                            .await
-                            .unwrap_or(false);
-                    if triggered {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        if let Ok(refreshed) =
-                            tokio::task::spawn_blocking(cowork_guard::get_cowork_guard_status).await
-                        {
-                            status = refreshed;
-                        }
-                    }
-                }
-                let _ = handle.emit("cowork-guard://status", &status);
-            }
-            tokio::time::sleep(Duration::from_secs(60)).await;
-        }
-    });
-}
+#[cfg(test)]
+use super::cowork_watcher::{is_claude_process_running, should_trigger_cowork_guard};
 
 /// Periodically triggers Data Bunker automatic snapshot creation (default every 24h)
 /// off the main thread when `bunker.auto_backup_enabled == true`.
@@ -491,6 +416,37 @@ pub(super) fn spawn_route_subscription_refresher(
             let _ = handle.emit("routes://updated", ());
         }
     });
+}
+
+/// Non-blocking background refresh for `provider_matrix.json` (25s post-startup, then every 6h).
+pub(super) fn spawn_provider_matrix_refresher(app: &tauri::App, risk_auditor: &auditor::Auditor) {
+    let handle = app.handle().clone();
+    let rules = risk_auditor.rules.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        loop {
+            if !crate::startup::is_shutting_down_global() {
+                let data_dir = handle.path().app_data_dir().ok();
+                let _ =
+                    auditor::matrix_sync::refresh_provider_matrix_bg(data_dir.as_deref(), &rules)
+                        .await;
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+        }
+    });
+}
+
+pub(super) fn spawn_background_watchers(
+    app: &tauri::App,
+    risk_auditor: &auditor::Auditor,
+    app_state: &state::AppState,
+    guard: Arc<proxy::NetworkGuard>,
+) {
+    spawn_tray_status_watcher(app, risk_auditor, app_state, guard);
+    spawn_update_checker(app, app_state);
+    spawn_bunker_scheduler(app, app_state);
+    spawn_route_subscription_refresher(app, risk_auditor, app_state);
+    spawn_provider_matrix_refresher(app, risk_auditor);
 }
 
 #[path = "watchers_paused.rs"]

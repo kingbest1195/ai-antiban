@@ -304,7 +304,7 @@ pub fn evaluate_udp_stun(
 }
 
 /// Builders of STUN datagrams for tests (also used by the audit tests of `auditor`).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "stun_testing.rs"]
 pub mod testing;
 

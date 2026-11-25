@@ -8,6 +8,7 @@ import type {
   InterceptorResolvedPayload,
   ProfileSwitchResult,
   RiskInterceptPayload,
+  RiskReport,
   UpdateCheckResult,
   UpdateProgressPayload,
   UpdateStatusPayload,
@@ -15,6 +16,12 @@ import type {
 import { applyEnriched } from "../../features/alert/alertState";
 import { auditConnection, pinCurrentIp } from "../../utils/api";
 import { toast as t } from "../copy/ru";
+import {
+  AUDIT_REFRESH_DEDUPE_MS,
+  isConfirmedIpChange,
+  isRedundantNetworkAudit,
+} from "./gatewayReports";
+import type { RecentAuditRefresh } from "./gatewayReports";
 import { parseAdminAuthError } from "./useProtectionToggles";
 import type { ShowToast } from "./useToasts";
 
@@ -41,6 +48,8 @@ export interface TrayEventHandlers {
   setKillswitchFrozen: (frozen: boolean) => void;
   setInterceptPayload: Dispatch<SetStateAction<RiskInterceptPayload | null>>;
   guardPauseStatus?: GuardPauseStatus | null;
+  currentIp?: string | null;
+  lastAuditRefreshed?: RecentAuditRefresh | null;
   invalidateReports?: (onlyProviders?: string[], includeAll?: boolean) => void;
   applyUpdateProgress: (payload: UpdateProgressPayload) => void;
   applyUpdateAvailable: (payload: UpdateCheckResult) => void;
@@ -78,22 +87,47 @@ export function handleNetworkChangedEvent(
   void handlers.runFullAudit(true);
 }
 
-/** Склеивает всплески `network://changed`: инвалидация сразу на первом событии, аудит — один раз после паузы. */
+/**
+ * Склеивает всплески `network://changed`:
+ * - пропускает лишние сбросы и повторный `runFullAudit(true)`, если `audit://refreshed` уже доставил отчёт для того же IP;
+ * - не сбрасывает отчёты в `0 из 14` при пустом или неизменном IP (инвалидирует только при подтверждённой смене IP).
+ */
 export function createNetworkChangedCoalescer(
-  getHandlers: () => Pick<TrayEventHandlers, "invalidateReports" | "runFullAudit">,
+  getHandlers: () => Pick<
+    TrayEventHandlers,
+    "invalidateReports" | "runFullAudit" | "currentIp" | "lastAuditRefreshed"
+  >,
   delayMs = 250,
-): { trigger: () => void; cancel: () => void } {
+  dedupeWindowMs = AUDIT_REFRESH_DEDUPE_MS,
+): { trigger: (payload?: Partial<RiskReport> | null) => void; cancel: () => void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let lastPayloadIp: string | null = null;
   return {
-    trigger: () => {
+    trigger: (payload?: Partial<RiskReport> | null) => {
+      const handlers = getHandlers();
+      const payloadIp = payload?.telemetry?.ip?.trim() || null;
+      if (isRedundantNetworkAudit(handlers.lastAuditRefreshed, payloadIp, Date.now(), dedupeWindowMs)) {
+        return;
+      }
+      if (payloadIp) {
+        lastPayloadIp = payloadIp;
+      }
       if (timer === null) {
-        getHandlers().invalidateReports?.();
+        if (isConfirmedIpChange(handlers.currentIp, payloadIp)) {
+          handlers.invalidateReports?.();
+        }
       } else {
         clearTimeout(timer);
       }
       timer = setTimeout(() => {
         timer = null;
-        void getHandlers().runFullAudit(true);
+        const latest = getHandlers();
+        const ipToCheck = lastPayloadIp;
+        lastPayloadIp = null;
+        if (isRedundantNetworkAudit(latest.lastAuditRefreshed, ipToCheck, Date.now(), dedupeWindowMs)) {
+          return;
+        }
+        void latest.runFullAudit(true);
       }, delayMs);
     },
     cancel: () => {
@@ -101,11 +135,12 @@ export function createNetworkChangedCoalescer(
         clearTimeout(timer);
         timer = null;
       }
+      lastPayloadIp = null;
     },
   };
 }
 
-/** При `detecting` / `failed` / сетевом риске сбрасывает устаревшие отчёты, чтобы сервис не выглядел «Доступен». */
+/** При `detecting` сохраняет прошлые отчёты (без сброса в `0 из 14`); сбрасывает только при `failed` или подтверждённом сетевом риске. */
 export function handleRiskDetectedEvent(
   handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload" | "guardPauseStatus">,
   payload: RiskInterceptPayload,
@@ -114,7 +149,9 @@ export function handleRiskDetectedEvent(
     handlers.setInterceptPayload(null);
     return;
   }
-  if (payload.phase === "detecting" || payload.phase === "failed" || payload.scope === "network") {
+  if (payload.phase === "detecting") {
+    void handlers.refreshState();
+  } else if (payload.phase === "failed" || payload.scope === "network") {
     const only = payload.scope === "provider" ? [payload.provider] : undefined;
     handlers.invalidateReports?.(only, false);
     void handlers.refreshState();
@@ -254,9 +291,20 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
       }
     });
 
-    const networkChangedCoalescer = createNetworkChangedCoalescer(() => ref.current);
-    on("network://changed", () => {
-      networkChangedCoalescer.trigger();
+    let lastAuditRefreshed: RecentAuditRefresh | null = null;
+    on<RiskReport>("audit://refreshed", (report) => {
+      const ip = report?.telemetry?.ip?.trim();
+      if (ip && ip !== "--") {
+        lastAuditRefreshed = { ip, at: Date.now() };
+      }
+    });
+
+    const networkChangedCoalescer = createNetworkChangedCoalescer(() => ({
+      ...ref.current,
+      lastAuditRefreshed: ref.current.lastAuditRefreshed ?? lastAuditRefreshed,
+    }));
+    on<RiskReport | null | undefined>("network://changed", (payload) => {
+      networkChangedCoalescer.trigger(payload);
     });
 
     on<string>("sysproxy://admin-auth-required", (payload) => {

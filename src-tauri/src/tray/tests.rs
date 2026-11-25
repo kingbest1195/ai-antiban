@@ -3,11 +3,21 @@ use crate::proxy::guard::PauseMode;
 use auditor::OverallStatus as S;
 
 fn report_view(s: S, pinned: bool, blocked: bool) -> TrayView {
-    TrayView::from_report(s, "NL", "1.2.3.4", pinned, blocked, 5, 2, 0)
+    TrayView::from_report(s, "NL", "1.2.3.4", pinned, blocked, 5, 2, false, 0)
 }
 
 fn incomplete_view(s: S, blocked: bool, unknown: u8) -> TrayView {
-    TrayView::from_report(s, "NL", "1.2.3.4", false, blocked, 5, 2, unknown)
+    TrayView::from_report(
+        s,
+        "NL",
+        "1.2.3.4",
+        false,
+        blocked,
+        5,
+        2,
+        unknown > 0,
+        unknown,
+    )
 }
 
 #[test]
@@ -381,4 +391,114 @@ fn guard_status_drives_instant_tray_transitions_without_waiting_for_audit() {
         .expect("active risk alert must win");
     assert_eq!(alert_view.icon, Some(TrayColor::Red));
     assert_eq!(alert_view.title.as_deref(), Some(STOP_TITLE));
+}
+
+#[test]
+fn exempt_dns_unknown_keeps_tray_green_when_report_is_not_incomplete() {
+    let mut checks = vec![auditor::CheckResult::ok("GEO_ALLOWED", "ok"); 14];
+    checks[6] = auditor::CheckResult::unknown(
+        "DNS_WHOAMI_TIMEOUT",
+        "timeout",
+        auditor::UnknownReason::Timeout,
+    );
+    let verdict = auditor::score_checks(&checks, false);
+    assert_eq!(verdict.overall_status, S::Green);
+    assert_eq!(verdict.unknown_count, 1);
+    assert!(!verdict.incomplete);
+
+    let view = TrayView::from_report(
+        verdict.overall_status,
+        "NL",
+        "1.2.3.4",
+        false,
+        false,
+        5,
+        2,
+        verdict.incomplete,
+        verdict.unknown_count,
+    );
+    assert_eq!(view.icon, Some(TrayColor::Green));
+    assert_eq!(view.title.as_deref(), Some(" Защита · NL"));
+    assert!(view.header.as_ref().unwrap().0.ends_with("Шлюз активен"));
+    assert!(
+        !view
+            .tooltip
+            .as_deref()
+            .unwrap()
+            .contains("не удалось выполнить")
+    );
+    assert_eq!(view.report_backed, Some(true));
+
+    // Non-exempt unknown marks report incomplete -> Yellow "Проверено частично · NL".
+    checks[6] = auditor::CheckResult::unknown(
+        "DNS_WHOAMI_FAKE_IP",
+        "fake ip",
+        auditor::UnknownReason::InternalError,
+    );
+    let non_exempt = auditor::score_checks(&checks, false);
+    assert!(non_exempt.incomplete);
+    let partial = TrayView::from_report(
+        non_exempt.overall_status,
+        "NL",
+        "1.2.3.4",
+        false,
+        false,
+        5,
+        2,
+        non_exempt.incomplete,
+        non_exempt.unknown_count,
+    );
+    assert_eq!(partial.icon, Some(TrayColor::Yellow));
+    assert_eq!(partial.title.as_deref(), Some(" Проверено частично · NL"));
+    assert_eq!(partial.report_backed, Some(true));
+}
+
+#[test]
+fn from_guard_status_preserves_report_backed_yellow_and_only_recovers_non_report_states() {
+    let open = GuardPauseStatus {
+        paused: false,
+        mode: PauseMode::None,
+        gate: "open".to_string(),
+        gate_reason: None,
+        manual_killswitch: false,
+        pending_providers: vec![],
+        blocked_providers: vec![],
+        has_active_risk_alert: false,
+    };
+
+    // Report-backed Yellow ("Внимание · NL") and incomplete Yellow ("Проверено частично · NL")
+    // must NOT be clobbered with bare " Защита" when guard emits Open.
+    for yellow_report in [
+        report_view(S::Yellow, false, false),
+        incomplete_view(S::Green, false, 1),
+    ] {
+        let with_tooltip = yellow_report
+            .clone()
+            .merged_with(TrayView::from_tooltip("Застава · tooltip".to_string()));
+        assert_eq!(with_tooltip.report_backed, Some(true));
+
+        let guard_open =
+            TrayView::from_guard_status(&open, true, with_tooltip.report_backed == Some(true));
+        assert!(guard_open.icon.is_none());
+        assert!(guard_open.title.is_none());
+        let merged = with_tooltip.merged_with(guard_open);
+        assert_eq!(merged.icon, Some(TrayColor::Yellow));
+        assert_eq!(merged.title, yellow_report.title);
+        assert_eq!(merged.report_backed, Some(true));
+    }
+
+    // Non-report states (Red / Gray / startup Checking) clear report_backed -> Open emits bare " Защита".
+    for non_report in [
+        TrayView::checking(),
+        TrayView::protection_off(),
+        report_view(S::Red, false, false),
+        report_view(S::Green, false, true),
+    ] {
+        assert_eq!(non_report.report_backed, Some(false));
+        let recovered =
+            TrayView::from_guard_status(&open, true, non_report.report_backed == Some(true));
+        assert_eq!(recovered.icon, Some(TrayColor::Green));
+        assert_eq!(recovered.title.as_deref(), Some(" Защита"));
+        assert_eq!(recovered.report_backed, Some(false));
+    }
 }

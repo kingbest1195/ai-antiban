@@ -7,6 +7,48 @@
 
 ---
 
+## [3.2.1] — 2026-11-25
+
+Патч-релиз **Застава v3.2.1**: ремедиация регрессий `v3.2.0` по пользовательским отчётам — стабильность `NetworkGuard` и реакции шлюза до передачи данных (`~0.056 мс` P50 / `< 0.2 мс` P99), некрадущий фокус отложенный `alert-popup`, устранение `EOF` на длинных сессиях Ключа Заставы (`>20–30 мин`), изоляция не-ИИ приложений (Discord, игры, RDP) от ручного Kill-Switch и снижение фонового Win32-следа на Windows, рабочий встроенный откат через NSIS, маскирование IPv4 в Reverse DNS PTR при режиме «Скрыть IP», поддержка OpenAI Codex CLI (`~/.codex/`) + `NODE_USE_ENV_PROXY=1`, расширенная матрица ИИ/платёжных доменов с подписанным Ed25519 hot-обновлением и исправления гигиены macOS sysproxy/DNS.
+
+### Добавлено
+* **Подписанное Ed25519 hot-обновление `ProviderMatrix` и детектор дрейфа companion-доменов (`auditor/matrix_sync.rs`, `auditor/rules.rs`, `proxy/domain_drift.rs`, `diagnostics/bundle.rs`, `app/watchers.rs`):**
+  * Offline-first 3-уровневый загрузчик (`<app_data_dir>/rules/provider_matrix.json` → `.cache.json` → встроенный `DEFAULT_PROVIDER_MATRIX_JSON`) с проверкой подписи Ed25519 через `ring`, защитой от отката `schema_version`/версии/даты и фоновым обновлением раз в 6 часов (через 25 с после старта).
+  * Единый runtime-снимок `ProviderMatrix` (с новой секцией `payment_kyc_domains`), синхронизирующий `ProviderId::from_host`, `is_payment_or_kyc_host` и `build_pac_script`.
+  * Неблокирующий детектор `domain_drift::observe_direct_host` (сессионный дедуп до 64 хостов, события `[domain:drift]` и поле `unmapped_companion_domains` в `DiagnosticBundle`).
+* **Поддержка OpenAI Codex CLI и `NODE_USE_ENV_PROXY=1` (`sysproxy/ide.rs`, `sysproxy/cli_protection/`, `proxy/coverage/{catalog.rs, cli_scanners.rs}`):**
+  * В `PROXY_VARS` добавлена переменная `NODE_USE_ENV_PROXY=1` (с очисткой при teardown), чтобы `fetch` в Node `22.21+`/`24` (Claude Code CLI, MCP-серверы) уважал `HTTP_PROXY`/`HTTPS_PROXY`.
+  * Добавлены обнаружение и защита конфигурации OpenAI Codex CLI (`~/.codex/`).
+* **Диагностика `NetworkGuard` (`proxy/guard/diag.rs`):** rate-limited запись структурированных событий смены отпечатка маршрута, причин сбоя проб, заморозки гейтов и прерывания туннелей в `diagnostics::record("guard", ...)`.
+* **Бенчмарк реакции шлюза и E2E-наборы (`tests/v321_reaction_bench_e2e.rs`, `tests/key_long_session_e2e.rs`, `tests/v321_slice2_e2e.rs`):** сквозные тесты `EntryProto::Https` backpressure/half-close, нулевой утечки при `Gate::Pending`, `0 мс` детекции падения `utun`, `Crash Test` канарейки и Ed25519 hot-update.
+
+### Изменено
+* **Расширена матрица ИИ- и платёжных доменов (`rules/provider_matrix.json`, `auditor/geo_matrix/domains.rs`, `proxy/pac.rs`):** восстановлены `jnn-pa.googleapis.com`, `signaler-pa.googleapis.com`, `apis.google.com`, добавлены верифицированные домены Anthropic/Claude, OpenAI/Sora/Codex, Google/Antigravity/Firebase Studio и секция `payment_kyc_domains` (`paddle.com`, `stripe.network`, `stripecdn.com`, `funcaptcha.com`, `recaptcha.net`, `lemonsqueezy.com`, `veriff.*`, `sumsub.com`, `onfido.com`).
+* **Честные события `MANUAL_ALLOW` и дедупликация кодов проверок (`state/stats.rs`, `connect_hold.rs`, `connect.rs`, `EventsModal.tsx`, `auditor/probes/whoami/verdict.rs`):**
+  * Ручные пропуски и `trusted_exceptions` с заблокированным гео (`RU`/`BY`) записываются как `MANUAL_ALLOW` и отображаются жёлтым бейджем `⚠ Разрешено вручную · {country}` вместо зелёного статуса; удалены псевдо-события `"all"` в `recent_events`/`intercepted_leaks`.
+  * Разведены коды проверок DNS: при `Unmeasured` в проверке резолвера проверка №10 возвращает `NotApplicable` (вместо дубля `DNS_WHOAMI_SINGLE_SOURCE`), а при изолированном ключе Заставы — `DNS_COUNTRY_KEY_ISOLATED` (вместо дубля `DNS_KEY_REMOTE_RESOLVE`).
+
+### Исправлено
+* **Стабильность `NetworkGuard`, конкурентные пробы и мгновенная реакция на `utun` (`proxy/guard/*`, `proxy/server/tunnel.rs`, `commands/crash_test.rs`):**
+  * Удалён `fast_fail`-обход fallback; `build_probe_client` (`2500 мс` connect / `4000 мс` total) опрашивает `1.1.1.1/cdn-cgi/trace` и `api.ipify.org` конкурентно через `tokio::select!`.
+  * Введено 2-ударное подтверждение офлайна (при мгновенной Fail-Closed реакции на падение/смену default UDP route или исчезновение активного `utun`/IPv4 с 0 мс дебаунсом), возвращён `ROUTE_CHECK_INTERVAL_MS = 250`, кэшируются тяжёлые опросы ОС (`GetAdaptersAddresses`, `system_conf`, `runtime_protection_flags`), стабилизирован IPv6 `/64` / `fe80::` и Windows-фильтр виртуальных адаптеров, исправлен `pending_pause_ip_bind` и баг `800 ms` канарейки в `crash_test.rs`.
+  * В `forward_follow_gate` добавлен краткий grace-период в `Gate::Pending` (до `2500 мс`) без преждевременного разрыва туннелей на транзиентных пробах (с мгновенным обрывом при `Gate::Blocked`), а для ИИ/платёжных хостов через `chained_proxy` убран небезопасный direct fallback (`connect_ai_transit`).
+* **UX попапа перехвата, баннер адреса, трей и startup self-heal (`popup.rs`, `AppShell.tsx`, `gatewayReports.ts`, `useGatewayState.ts`, `tray/{mod.rs, view.rs}`, `commands/audit/mod.rs`):**
+  * Убран `set_focus()` из `show_on_main`, показ `alert-popup` отложен до `phase == "ready"` либо удержания входящего `CONNECT > 1200 мс`; баннер при `detecting` показывает `«Определяем новый адрес…»`, а транзиентное состояние больше не сбрасывает отчёты проверок из `11 из 11` в `0 из 14`.
+  * Устранён шторм заголовка трея (`TrayView::from_report` учитывает `report.incomplete`, `report_backed` защищает активный отчёт от перезаписи, обновление трея закреплено за основным провайдером); startup self-heal перепроверяет все включённые провайдеры с отсутствующим отчётом (исправляя залипшее `«Проверить: Gemini»`).
+  * Точная атрибуция провайдера для alias-слушателей Чистой комнаты (`alias_provider`) и `handle_payment_connect` + 5-секундный throttling `[proxy:route]`.
+* **Ключ Заставы: устранение `EOF` на длинных сессиях (`proxy/server/{tunnel_relay.rs, mod.rs}`, `proxy/route_watch.rs`):**
+  * Добавлен трекинг `need_flush` и флаш `UpstreamStream::Tls` на `Poll::Pending`/границе батча; на client half-close для TLS-апстрима выполняется только `flush()` без преждевременного `shutdown()` (`close_notify`); добавлен ограниченный `45s` таймаут дренажа half-close, `MAX_CONCURRENT_CONNECTIONS` поднят до `1024` с ответом `HTTP 503`, а `RouteWatch::is_stale()` игнорирует metadata-only обновления маршрута (`expires_at`/`grace_extended`).
+* **Windows: изоляция Kill-Switch, мёртвый `ProxyEnable=1`, снижение античит-следа и откат (`proxy/server/{tunnel.rs, http_handler.rs}`, `sysproxy/{windows.rs, journal/recovery.rs, cleanup/migration.rs}`, `app/watchers.rs`, `proxy/coverage/process_lookup.rs`, `win_native/process.rs`, `updater/{github.rs, install.rs}`, `.github/workflows/release.yml`):**
+  * Исключена блокировка `manual_killswitch` для не-ИИ транзитного трафика (Discord, игры, RDP); перед восстановлением `ProxyEnable=1` выполняется нативная проверка loopback-прокси (`150 мс`); сигнатурная очистка `AutoConfigURL` выполняется независимо от `LEGACY_MIGRATION_MARK` с вызовом `InternetSetOptionW(39 & 37)`.
+  * Остановлены холостые `CreateToolhelp32Snapshot` при неактивном `CoworkVMService`, `lookup_process_name_by_port` ограничен ИИ-соединениями при отсутствии однозначного `User-Agent`, убран статический WDK-импорт `NtQueryInformationProcess` из IAT.
+  * В `latest.json` ключ `"windows-x86_64"` переключён на NSIS (`exeEntry`), добавлен `.no_proxy()` в `list_rollback_versions()` и `rollback_updater_builder`, а при попытке отката установленного MSI на версию `< 3.2.1` возвращается чистая ошибка до `cleanup_on_shutdown_once` и `exit(0)`.
+* **macOS `HealGuard`, гигиена DNS-аудитора и маскирование PTR (`sysproxy/macos/{planner.rs, apply.rs}`, `auditor/seams/dns/mod.rs`, `core/redact.rs`, `src/shared/lib/format.ts`, `auditor/network/mod.rs`):**
+  * В `planner.rs` проверка пустых сервисов перенесена после `HealGuard::retain(...)` с записью смены состояния `[sysproxy:macos]`; подавлен спам `effective proxy differs while vpn active` при `skipped_vpn` + `browser_pac_policy_active`, добавлен rate-limit (`5 мин`) и адаптивный `120s` cooldown для `[auditor:dns]` `TxtOutcome::Failed`.
+  * В `core/redact.rs`, `auditor/network/mod.rs` и `src/shared/lib/format.ts` добавлено маскирование точечных и дефисных IPv4-октетов внутри PTR-имени узла при режиме «Скрыть IP».
+
+---
+
 ## [3.2.0] — 2026-11-24
 
 Минорный релиз **Застава v3.2.0**: навигатор безопасной оплаты подписок ИИ (Claude, ChatGPT, Cursor и Gemini), локальная статистика проходимости карт и автопонижение ненадёжных провайдеров с криптографической проверкой бандлов, телепорт рабочего контекста в другой ИИ внутри Бункера, единая «Чистая комната» для Claude и Gemini / AI Studio с быстрым переключением профилей, 1-кликовый сброс кеша входа при ошибке 403 в Antigravity и 6 крупных платформенных исправлений стабильности на macOS и Windows.

@@ -13,7 +13,7 @@ use crate::proxy::hold_queue::{PHASE_DETECTING, build_gate_reason};
 use crate::state::KNOWN_PROVIDERS;
 
 use super::audit_summary::audit_enabled;
-use super::fingerprint::compute_local_route_fingerprint;
+use super::diag;
 use super::policy::{
     all_excepted, all_pinned_or_excepted_for, any_blocked_pinned_or_excepted_for,
     is_blocked_geo_code, network_change,
@@ -88,7 +88,7 @@ impl NetworkGuard {
             country: Some(cc.to_string()),
             trusted: true,
         });
-        inner.last_route_fp = Some(compute_local_route_fingerprint(upstream_key));
+        inner.last_route_fp = Some(self.compute_route_fp(upstream_key));
         inner.route_dirty = false;
     }
 
@@ -239,21 +239,15 @@ impl NetworkGuard {
             .collect();
 
         self.freeze_providers_pending_quiet(&st, &non_blocked, &was_blocked_set);
+        if !non_blocked.is_empty() {
+            diag::record_gate_freeze("confirmed_ip_change", &non_blocked);
+            diag::record_tunnel_abort("confirmed_ip_change");
+        }
         self.abort_active_tunnels();
         if let Some(p) = inner.invalidate_alert() {
             env.hold_queue.remove(&p.id).await;
         }
         env.auditor.resolver.invalidate_direct_cache().await;
-
-        if !non_blocked.is_empty() {
-            let old_country = old
-                .as_ref()
-                .and_then(|b| b.country.clone())
-                .unwrap_or_else(|| "??".to_string());
-            env.state
-                .stats()
-                .record_intercepted("all", "NetworkGuard", "HELD", &old_country);
-        }
 
         // Instant alert-first for AskPopup when at least one enabled unrouted provider was open
         // and the new IP is not pinned/excepted; silent/pinned modes keep zero popup and load

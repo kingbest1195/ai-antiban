@@ -165,6 +165,22 @@ pub(super) fn apply_files(
         out.report.items.extend(items);
     }
 
+    // 3. OpenAI Codex CLI settings (~/.codex/settings.json if the ~/.codex directory exists)
+    let codex_dir = ctx.home.join(".codex");
+    let codex_settings = codex_dir.join("settings.json");
+    let codex_present = ctx.fs.exists(&codex_dir);
+    let (c_proxy, c_tz) = if codex_present {
+        (plan.proxy_url, plan.tz)
+    } else {
+        (None, None)
+    };
+    let r = apply_agent_settings(j, p, ctx, &codex_settings, c_proxy, c_tz);
+    if codex_present {
+        note("Codex CLI", r, &mut out);
+    } else if let Ok(items) = r {
+        out.report.items.extend(items);
+    }
+
     // 3. Shell profiles (~/.zshrc, ~/.bash_profile) or PowerShell profiles, `global_terminal` only.
     // NEVER ~/.zshenv, and NEVER proxy vars or TZ / LANG / LC_TIME into the global
     // HKCU\Environment: the Windows CRT (_tzset) and Qt/Electron cannot parse IANA timezones and

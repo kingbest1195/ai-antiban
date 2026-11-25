@@ -19,14 +19,78 @@ pub(super) fn identify_by_user_agent(ua: &str) -> Option<&'static str> {
     if ua_lower.starts_with("curl/") {
         return Some("curl");
     }
-    if ua_lower.contains("claude-code") || ua_lower.contains("claude_code") {
+    if ua_lower.contains("claude-code")
+        || ua_lower.contains("claude_code")
+        || ua_lower.contains("claude-cli")
+    {
         return Some("claude-code");
     }
-    if ua_lower.contains("python-requests") || ua_lower.contains("aiohttp") {
+    if ua_lower.contains("gemini-cli") {
+        return Some("gemini-cli");
+    }
+    if ua_lower.contains("opencode") {
+        return Some("opencode");
+    }
+    if ua_lower.contains("python-requests")
+        || ua_lower.contains("aiohttp")
+        || ua_lower.contains("python-httpx")
+        || ua_lower.contains("httpx/")
+        || ua_lower.contains("python-urllib")
+    {
         return Some("python");
     }
     if ua_lower.contains("node-fetch") || ua_lower.contains("undici") {
         return Some("node");
+    }
+
+    // Desktop AI apps & IDEs (checked before generic Chromium tokens because Electron UAs embed Chrome/).
+    if ua_lower.contains("chatgpt/") && !ua_lower.contains("atlas") {
+        return Some("chatgpt");
+    }
+    for (needle, id) in [
+        ("claude/", "claude"),
+        ("antigravity/", "antigravity"),
+        ("cursor/", "cursor"),
+        ("windsurf/", "windsurf"),
+        ("vscode/", "vscode"),
+        ("visual studio code", "vscode"),
+    ] {
+        if ua_lower.contains(needle) {
+            return Some(id);
+        }
+    }
+    if ua_lower.contains("electron/") {
+        return None;
+    }
+
+    for (needle, browser) in [
+        ("edg/", "msedge"),
+        ("edga/", "msedge"),
+        ("edgios/", "msedge"),
+        ("edge/", "msedge"),
+        ("yabrowser/", "yandex"),
+        ("opr/", "opera"),
+        ("opera/", "opera"),
+        ("firefox/", "firefox"),
+        ("fxios/", "firefox"),
+        ("vivaldi/", "vivaldi"),
+        ("brave/", "brave"),
+        ("zen/", "zen"),
+        ("waterfox/", "waterfox"),
+        ("arc/", "arc"),
+        ("chrome/", "chrome"),
+        ("crios/", "chrome"),
+        ("chromium/", "chrome"),
+    ] {
+        if ua_lower.contains(needle) {
+            return Some(browser);
+        }
+    }
+    if ua_lower.contains("mozilla/")
+        && ua_lower.contains("applewebkit/")
+        && ua_lower.contains("safari/")
+    {
+        return Some("safari");
     }
     None
 }

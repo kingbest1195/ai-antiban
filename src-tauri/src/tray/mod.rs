@@ -133,18 +133,18 @@ fn apply_view(app: &tauri::AppHandle, view: &TrayView) {
     *slot = Some(prev.merged_with(view.clone()));
 }
 
-fn current_icon_is_green() -> bool {
-    let pending_icon = PENDING
+fn has_active_report_view() -> bool {
+    let pending_report = PENDING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .and_then(|v| v.icon);
-    let last_icon = LAST_APPLIED
+        .and_then(|v| v.report_backed);
+    let last_report = LAST_APPLIED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
-        .and_then(|v| v.icon);
-    pending_icon.or(last_icon) == Some(TrayColor::Green)
+        .and_then(|v| v.report_backed);
+    pending_report.or(last_report) == Some(true)
 }
 
 fn guard_priority_view_for_app(app: &tauri::AppHandle, has_blocked: bool) -> Option<TrayView> {
@@ -200,6 +200,7 @@ pub fn update_tray_from_report(
             false,
             stats.protected_ai_requests,
             stats.intercepted_leaks,
+            report.incomplete,
             report.unknown_count,
         ),
     );
@@ -217,7 +218,7 @@ pub fn update_tray_from_guard_status(app: &tauri::AppHandle, status: &GuardPause
         sysproxy::is_sysproxy_active(),
         startup_ready,
     )
-    .unwrap_or_else(|| TrayView::from_guard_status(status, true, current_icon_is_green()));
+    .unwrap_or_else(|| TrayView::from_guard_status(status, true, has_active_report_view()));
     submit(app, view);
 }
 
@@ -278,7 +279,17 @@ pub fn inspect_tray_state_transition(
     let view = if !has_blocked && !sysproxy_active {
         TrayView::protection_off()
     } else {
-        TrayView::from_report(status, "US", "198.51.100.1", true, has_blocked, 1, 0, 0)
+        TrayView::from_report(
+            status,
+            "US",
+            "198.51.100.1",
+            true,
+            has_blocked,
+            1,
+            0,
+            false,
+            0,
+        )
     };
     let color_name = match view.icon {
         Some(TrayColor::Green) => "green",
@@ -309,6 +320,7 @@ pub fn resolve_tray_transition_for_test(
                 false,
                 0,
                 0,
+                r.incomplete,
                 r.unknown_count,
             ),
             None => TrayView::from_guard_status(status, sysproxy_active, false),

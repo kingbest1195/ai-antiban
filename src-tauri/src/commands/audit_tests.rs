@@ -506,3 +506,62 @@ mod pin_tests {
         assert_eq!(st3.pinned_ip_for_provider("anthropic", false), None);
     }
 }
+
+#[test]
+fn secondary_provider_never_hijacks_tray_while_primary_enabled_provider_is_active() {
+    let mut st = state::AppStateData::default();
+    // Pinned Gemini route on a Zastava Key must not hijack the tray while Anthropic is enabled on VPN.
+    st.provider_routes
+        .insert("gemini".to_string(), "fr-1".to_string());
+    st.pinned_ips
+        .insert("gemini".to_string(), "136.244.114.42".to_string());
+
+    assert_eq!(
+        primary_tray_provider(&st),
+        Some(auditor::ProviderId::Anthropic)
+    );
+    assert!(should_sync_tray_for_audit(
+        &st,
+        auditor::ProviderId::Anthropic
+    ));
+    assert!(!should_sync_tray_for_audit(
+        &st,
+        auditor::ProviderId::Openai
+    ));
+    assert!(!should_sync_tray_for_audit(
+        &st,
+        auditor::ProviderId::Gemini
+    ));
+
+    // When Anthropic monitoring is disabled, OpenAI becomes the canonical tray provider.
+    st.disabled_providers.insert("anthropic".to_string());
+    assert_eq!(
+        primary_tray_provider(&st),
+        Some(auditor::ProviderId::Openai)
+    );
+    assert!(!should_sync_tray_for_audit(
+        &st,
+        auditor::ProviderId::Anthropic
+    ));
+    assert!(should_sync_tray_for_audit(&st, auditor::ProviderId::Openai));
+    assert!(!should_sync_tray_for_audit(
+        &st,
+        auditor::ProviderId::Gemini
+    ));
+
+    // When both Anthropic and OpenAI are disabled, Gemini becomes the canonical tray provider.
+    st.disabled_providers.insert("openai".to_string());
+    assert_eq!(
+        primary_tray_provider(&st),
+        Some(auditor::ProviderId::Gemini)
+    );
+    assert!(should_sync_tray_for_audit(&st, auditor::ProviderId::Gemini));
+
+    // When all providers are disabled, no provider audit syncs the tray.
+    st.disabled_providers.insert("gemini".to_string());
+    assert_eq!(primary_tray_provider(&st), None);
+    assert!(!should_sync_tray_for_audit(
+        &st,
+        auditor::ProviderId::Gemini
+    ));
+}

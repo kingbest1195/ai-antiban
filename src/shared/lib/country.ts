@@ -119,6 +119,13 @@ export function formatRouteBadgeLabel(label: string | null | undefined, country:
 
 const GLOBAL_BLOCKED_COUNTRIES = ["RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU"] as const;
 
+/** Проверяет, входит ли код страны в глобальный список заблокированных гео (синхронизировано с `core::sanctions::is_blocked_geo_code`). */
+export function isBlockedGeoCode(country: string | null | undefined): boolean {
+  const normalized = normalizeCountryCode(country);
+  if (!normalized) return false;
+  return (GLOBAL_BLOCKED_COUNTRIES as readonly string[]).includes(normalized);
+}
+
 /** Страны, где AI-провайдер блокирует доступ (синхронизировано с rules/provider_matrix.json). */
 export const BLOCKED_COUNTRIES_BY_PROVIDER: Record<ProviderId, readonly string[]> = {
   anthropic: [...GLOBAL_BLOCKED_COUNTRIES, "VE", "AF", "MM", "SD", "YE"],

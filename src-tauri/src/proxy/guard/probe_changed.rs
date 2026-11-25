@@ -6,6 +6,7 @@ use crate::auditor::geo_matrix::ProviderId;
 use crate::core::timing::log_timing;
 use crate::proxy::hold_queue::{PHASE_DETECTING, build_gate_reason};
 
+use super::diag;
 use super::policy::{
     all_excepted, all_pinned_or_excepted_for, all_unrouted_session_or_excepted,
     any_blocked_pinned_or_excepted_for, is_blocked_geo_code, network_change,
@@ -55,10 +56,10 @@ impl NetworkGuard {
             return;
         }
 
+        let default_moved = std::mem::take(&mut inner.default_route_moved);
         let paused_until_change = self.pause_mode() == PauseMode::UntilNetworkChange;
         if paused_until_change && inner.pending_pause_ip_bind {
             inner.paused_route_fp = Some(planned_fp.clone());
-            self.abort_active_tunnels();
             self.hide_popup(env);
             if inner.probe_in_flight {
                 return;
@@ -105,17 +106,12 @@ impl NetworkGuard {
             env.hold_queue.remove(&p.id).await;
         }
         self.freeze_providers_pending_quiet(&st, &non_blocked, &was_blocked_set);
-        self.abort_active_tunnels();
-
+        if default_moved && !non_blocked.is_empty() {
+            diag::record_tunnel_abort("default_route_moved");
+            self.abort_active_tunnels();
+        }
         if !non_blocked.is_empty() {
-            let old_country = inner
-                .baseline
-                .as_ref()
-                .and_then(|b| b.country.clone())
-                .unwrap_or_else(|| "??".to_string());
-            env.state
-                .stats()
-                .record_intercepted("all", "NetworkGuard", "HELD", &old_country);
+            diag::record_gate_freeze("route_changed", &non_blocked);
         }
 
         let epoch = inner.epoch;
@@ -248,6 +244,7 @@ impl NetworkGuard {
                     || any_blocked_pinned_or_excepted_for(&st, &unrouted, new_ip);
                 if !matches_pin {
                     inner.last_probe = Some(Instant::now());
+                    inner.consecutive_probe_failures = 0;
                     inner.observed_ip = Some(new_ip.clone());
                     inner.paused_ip = Some(new_ip.clone());
                     inner.paused_route_fp = inner.last_route_fp.clone().or(Some(planned_fp));
@@ -282,6 +279,7 @@ impl NetworkGuard {
                 return;
             }
             inner.last_probe = Some(Instant::now());
+            diag::record_tunnel_abort("probe_changed_offline");
             self.abort_active_tunnels();
             env.auditor.resolver.invalidate_direct_cache().await;
             let enabled_unrouted = st.enabled_unrouted_providers();
@@ -314,6 +312,7 @@ impl NetworkGuard {
             return;
         }
         inner.last_probe = Some(Instant::now());
+        inner.consecutive_probe_failures = 0;
 
         let prev_observed_ip = inner.observed_ip.replace(new_ip.clone());
         self.unblock_disabled_and_routed(&env, &st).await;

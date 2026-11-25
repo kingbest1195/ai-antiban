@@ -1,5 +1,6 @@
 pub mod allow_error;
 pub mod coverage;
+pub mod domain_drift;
 pub mod guard;
 pub mod hold_queue;
 pub mod http_forward;
@@ -34,6 +35,7 @@ pub use upstream::{connect_via_upstream, parse_upstream_key};
 struct AliasHandle {
     port: u16,
     route_id: Option<String>,
+    provider: Option<crate::auditor::geo_matrix::ProviderId>,
     stop_tx: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -118,9 +120,23 @@ impl ProxyManager {
         bound_route_id: Option<String>,
         preferred_port: Option<u16>,
     ) -> Result<u16, String> {
+        self.ensure_profile_alias_with_provider(profile_id, bound_route_id, None, preferred_port)
+            .await
+    }
+
+    /// Ensures a loopback alias listener is running for `profile_id` bound to `bound_route_id`
+    /// and attributed to `alias_provider` (so non-AI subresources blame the profile's provider).
+    pub async fn ensure_profile_alias_with_provider(
+        &self,
+        profile_id: &str,
+        bound_route_id: Option<String>,
+        alias_provider: Option<crate::auditor::geo_matrix::ProviderId>,
+        preferred_port: Option<u16>,
+    ) -> Result<u16, String> {
         let mut guard = self.aliases.lock().await;
         if let Some(existing) = guard.get(profile_id)
             && existing.route_id == bound_route_id
+            && existing.provider == alias_provider
             && !existing.task.is_finished()
         {
             return Ok(existing.port);
@@ -137,7 +153,12 @@ impl ProxyManager {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let alias_srv = Arc::new(
             self.server
-                .bind_alias_on(bound_route_id.clone(), desired_port, Some(stop_rx))
+                .bind_alias_on(
+                    bound_route_id.clone(),
+                    alias_provider,
+                    desired_port,
+                    Some(stop_rx),
+                )
                 .await
                 .map_err(|e| {
                     format!("Не удалось запустить локальный прокси-алиас песочницы: {e}")
@@ -154,6 +175,7 @@ impl ProxyManager {
             AliasHandle {
                 port,
                 route_id: bound_route_id,
+                provider: alias_provider,
                 stop_tx,
                 task,
             },

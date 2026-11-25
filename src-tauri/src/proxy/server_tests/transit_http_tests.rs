@@ -340,3 +340,53 @@ async fn repeated_connects_to_one_host_resolve_it_once() {
     assert_eq!(env.resolves.load(Ordering::SeqCst), 1);
     assert_eq!(env.dial_count(), 3);
 }
+
+#[test]
+fn disabled_provider_does_not_trigger_domain_drift_on_connect_or_plain_http() {
+    let _lock = crate::proxy::domain_drift::DRIFT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::proxy::domain_drift::clear_for_test();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let echo = spawn_echo().await;
+        let env = start(echo, &[PUBLIC_V4], None).await;
+        env.server
+            .state
+            .set_provider_monitoring("openai", false)
+            .await
+            .unwrap();
+
+        let (mut c, head) = open_tunnel(env.addr(), "api.openai.com:443").await;
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        ping(&mut c, b"ok").await;
+
+        let _ = exchange(
+            env.addr(),
+            b"GET http://chatgpt.com/health HTTP/1.1\r\nHost: chatgpt.com\r\n\r\n",
+        )
+        .await;
+
+        let (mut c2, head2) = open_tunnel(env.addr(), "new-telemetry.claude.example:443").await;
+        assert!(head2.starts_with("HTTP/1.1 200"), "{head2}");
+        ping(&mut c2, b"ok").await;
+
+        let recorded = crate::proxy::domain_drift::recorded_unmapped_companion_domains();
+        assert!(
+            !recorded.contains(&"api.openai.com".to_string()),
+            "{recorded:?}"
+        );
+        assert!(
+            !recorded.contains(&"chatgpt.com".to_string()),
+            "{recorded:?}"
+        );
+        assert!(
+            recorded.contains(&"new-telemetry.claude.example".to_string()),
+            "{recorded:?}"
+        );
+    });
+    crate::proxy::domain_drift::clear_for_test();
+}

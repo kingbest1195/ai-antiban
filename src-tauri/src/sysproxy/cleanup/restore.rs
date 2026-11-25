@@ -254,7 +254,7 @@ pub(crate) fn restore_with_probe_options(
 /// Restore of everything in the journal plus the one-time legacy migration, and the cut of an old
 /// Zastava block out of `~/.zshenv` by its exact markers (a half marker or an edited block is
 /// left as it is and named in the log).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn restore_and_migrate(j: &mut Journal, p: &dyn Platform) -> RecoveryReport {
     restore_and_migrate_with_options(j, p, false, RestoreOptions::default())
 }

@@ -136,12 +136,57 @@ pub(crate) fn migrate_launchd_leftovers(
     items
 }
 
-/// One-time cleanup of PAC / WinINet values with the Zastava signature (see
-/// [`LEGACY_MIGRATION_MARK`]):
-/// * macOS: a PAC that is switched on and points at `http://127.0.0.1|localhost:<our port>/proxy.pac`
-///   is switched off and its URL is cleared (the URL is ours, so nothing foreign is lost);
-/// * Windows: an `AutoConfigURL` with the same signature is deleted (`ProxyEnable` is never
-///   touched).
+/// Checks whether `url` matches Zastava's PAC signature (`gateway_port` or any loopback port).
+fn is_orphaned_zastava_auto_config_url(url: &str, gateway_port: Option<u16>) -> bool {
+    is_zastava_pac_signature(url, gateway_port)
+        || crate::sysproxy::parse_gateway_port_from_pac_url(url)
+            .is_some_and(|port| is_zastava_pac_signature(url, Some(port)))
+}
+
+/// Continuously sweeps orphaned Windows WinINet `AutoConfigURL` entries matching Zastava's PAC
+/// signature (any loopback port) when not owned by an active journal entry, and refreshes WinINet.
+pub(crate) fn sweep_orphaned_windows_auto_config_url(
+    j: &Journal,
+    p: &dyn Platform,
+    gateway_port: Option<u16>,
+) -> (Option<ReportItem>, bool) {
+    if j.entry(&Resource::Inet {
+        name: "AutoConfigURL".into(),
+    })
+    .is_some()
+    {
+        return (None, true);
+    }
+    match p.get_inet("AutoConfigURL") {
+        Ok(Some(RegValue {
+            kind: RegKind::Sz | RegKind::ExpandSz,
+            data,
+        })) if is_orphaned_zastava_auto_config_url(&data, gateway_port) => {
+            let ok = p.delete_inet("AutoConfigURL").is_ok();
+            if ok {
+                let _ = p.notify_inet_refresh();
+            }
+            let item = ReportItem {
+                resource: "legacy:inet:AutoConfigURL".to_string(),
+                outcome: if ok {
+                    Outcome::Restored
+                } else {
+                    Outcome::Failed("delete")
+                },
+            };
+            (Some(item), ok)
+        }
+        Ok(_) | Err(PlatformError::Unsupported(_)) => (None, true),
+        Err(_) => (None, false),
+    }
+}
+
+/// Cleanup of PAC / WinINet values with the Zastava signature:
+/// * macOS (one-time via [`LEGACY_MIGRATION_MARK`]): a PAC that is switched on and points at
+///   `http://127.0.0.1|localhost:<our port>/proxy.pac` is switched off and its URL is cleared;
+/// * Windows (continuous on every cleanup/recovery pass, regardless of [`LEGACY_MIGRATION_MARK`]):
+///   an orphaned `AutoConfigURL` with Zastava's PAC signature on any loopback port is deleted and
+///   WinINet is refreshed (`ProxyEnable` is never touched here).
 ///
 /// Resources already in the journal belong to the journal and are skipped.
 pub(crate) fn migrate_legacy_pac(
@@ -151,111 +196,90 @@ pub(crate) fn migrate_legacy_pac(
     defer_physical_pac: bool,
 ) -> Vec<ReportItem> {
     let mut items = Vec::new();
-    if j.has_mark(LEGACY_MIGRATION_MARK) {
-        return items;
-    }
     let mut complete = true;
 
-    // 2. macOS PAC with the signature, left switched on by a build that was killed.
-    match p.list_services() {
-        Ok(services) => {
-            let mut candidates = Vec::new();
-            let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
-            // Only physical services here; VPN services have their own, gentler pass.
-            for (svc, kind) in classify_services(p, &enabled) {
-                if !kind.is_physical() {
-                    continue;
-                }
-                let svc = &svc;
-                if j.entry(&Resource::Pac {
-                    service: svc.clone(),
-                })
-                .is_some()
-                {
-                    continue;
-                }
-                match p.get_pac(svc) {
-                    Ok(st) => {
-                        let signed = st
-                            .url
-                            .as_deref()
-                            .is_some_and(|u| is_zastava_pac_signature(u, gateway_port));
-                        if signed && st.enabled == Some(true) {
-                            if defer_physical_pac {
-                                // Left for the enable pass; the marker waits until it has run.
-                                complete = false;
-                            } else {
-                                candidates.push(svc.clone());
+    // 2. macOS PAC with the signature, left switched on by a build that was killed (one-time).
+    if !j.has_mark(LEGACY_MIGRATION_MARK) {
+        match p.list_services() {
+            Ok(services) => {
+                let mut candidates = Vec::new();
+                let enabled: Vec<_> = services.into_iter().filter(|s| s.enabled).collect();
+                // Only physical services here; VPN services have their own, gentler pass.
+                for (svc, kind) in classify_services(p, &enabled) {
+                    if !kind.is_physical() {
+                        continue;
+                    }
+                    let svc = &svc;
+                    if j.entry(&Resource::Pac {
+                        service: svc.clone(),
+                    })
+                    .is_some()
+                    {
+                        continue;
+                    }
+                    match p.get_pac(svc) {
+                        Ok(st) => {
+                            let signed = st
+                                .url
+                                .as_deref()
+                                .is_some_and(|u| is_zastava_pac_signature(u, gateway_port));
+                            if signed && st.enabled == Some(true) {
+                                if defer_physical_pac {
+                                    // Left for the enable pass; the marker waits until it has run.
+                                    complete = false;
+                                } else {
+                                    candidates.push(svc.clone());
+                                }
                             }
                         }
+                        Err(PlatformError::Unsupported(_)) => {}
+                        Err(_) => complete = false,
                     }
-                    Err(PlatformError::Unsupported(_)) => {}
-                    Err(_) => complete = false,
                 }
-            }
-            if !candidates.is_empty() {
-                // Same guard as for every other write through networksetup.
-                if matches!(p.temp_dns_overrides(), Ok(false)) {
-                    for svc in candidates {
-                        let ok = p
-                            .set_pac(
-                                &svc,
-                                &PacState {
-                                    url: Some(String::new()),
-                                    enabled: Some(false),
+                if !candidates.is_empty() {
+                    // Same guard as for every other write through networksetup.
+                    if matches!(p.temp_dns_overrides(), Ok(false)) {
+                        for svc in candidates {
+                            let ok = p
+                                .set_pac(
+                                    &svc,
+                                    &PacState {
+                                        url: Some(String::new()),
+                                        enabled: Some(false),
+                                    },
+                                )
+                                .is_ok();
+                            complete &= ok;
+                            items.push(ReportItem {
+                                resource: format!("legacy:pac:{}", svc.key()),
+                                outcome: if ok {
+                                    Outcome::Restored
+                                } else {
+                                    Outcome::Failed("set_pac")
                                 },
-                            )
-                            .is_ok();
-                        complete &= ok;
-                        items.push(ReportItem {
-                            resource: format!("legacy:pac:{}", svc.key()),
-                            outcome: if ok {
-                                Outcome::Restored
-                            } else {
-                                Outcome::Failed("set_pac")
-                            },
-                        });
-                    }
-                } else {
-                    complete = false;
-                }
-            }
-        }
-        Err(PlatformError::Unsupported(_)) => {}
-        Err(_) => complete = false,
-    }
-
-    // 3. Windows AutoConfigURL with the signature.
-    if j.entry(&Resource::Inet {
-        name: "AutoConfigURL".into(),
-    })
-    .is_none()
-    {
-        match p.get_inet("AutoConfigURL") {
-            Ok(Some(RegValue {
-                kind: RegKind::Sz,
-                data,
-            })) if is_zastava_pac_signature(&data, gateway_port) => {
-                let ok = p.delete_inet("AutoConfigURL").is_ok();
-                if ok {
-                    let _ = p.notify_inet_refresh();
-                }
-                complete &= ok;
-                items.push(ReportItem {
-                    resource: "legacy:inet:AutoConfigURL".to_string(),
-                    outcome: if ok {
-                        Outcome::Restored
+                            });
+                        }
                     } else {
-                        Outcome::Failed("delete")
-                    },
-                });
+                        complete = false;
+                    }
+                }
             }
-            Ok(_) | Err(PlatformError::Unsupported(_)) => {}
+            Err(PlatformError::Unsupported(_)) => {}
             Err(_) => complete = false,
         }
     }
 
-    if complete && j.set_mark(p, LEGACY_MIGRATION_MARK).is_err() {
+    // 3. Windows AutoConfigURL with the signature (always swept regardless of LEGACY_MIGRATION_MARK).
+    let (win_item, win_ok) = sweep_orphaned_windows_auto_config_url(j, p, gateway_port);
+    if let Some(item) = win_item {
+        items.push(item);
+    }
+    complete &= win_ok;
+
+    if !j.has_mark(LEGACY_MIGRATION_MARK)
+        && complete
+        && j.set_mark(p, LEGACY_MIGRATION_MARK).is_err()
+    {
         // The marker is not durable: the (idempotent) migration simply runs again next time.
     }
     items

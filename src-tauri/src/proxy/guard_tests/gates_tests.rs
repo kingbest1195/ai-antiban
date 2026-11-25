@@ -198,3 +198,60 @@ async fn test_guard_status_transitions_update_tray_immediately_without_audit() {
     assert!(!last.paused);
     assert!(!last.manual_killswitch);
 }
+
+#[test]
+fn utun_drop_surfaces_at_zero_ms_while_additive_ipv6_churn_debounces() {
+    use super::super::fingerprint_os::{UtunDebounceState, stabilize_non_default_utun_entries_in};
+
+    let mut st = UtunDebounceState::default();
+    let t0 = Instant::now();
+    let udp = "192.168.1.10|192.168.1.10|none";
+
+    // Initial utun4 IPv4 established with udp_sig.
+    let s0 = stabilize_non_default_utun_entries_in(
+        &mut st,
+        udp,
+        vec!["en0=192.168.1.10".into()],
+        vec!["utun4=10.8.0.2".into()],
+        t0,
+    );
+    assert_eq!(s0, "en0=192.168.1.10,utun4=10.8.0.2");
+
+    // Additive IPv6 churn while utun4 IPv4 remains up is debounced for 2000ms.
+    let s1 = stabilize_non_default_utun_entries_in(
+        &mut st,
+        udp,
+        vec!["en0=192.168.1.10".into()],
+        vec!["utun4=10.8.0.2".into(), "utun4=fd7a:115c::/64".into()],
+        t0 + Duration::from_millis(100),
+    );
+    assert_eq!(s1, "en0=192.168.1.10,utun4=10.8.0.2");
+
+    // Disappearance of utun4 surfaces IMMEDIATELY at 0ms debounce (1ms later).
+    let s2 = stabilize_non_default_utun_entries_in(
+        &mut st,
+        udp,
+        vec!["en0=192.168.1.10".into()],
+        vec![],
+        t0 + Duration::from_millis(101),
+    );
+    assert_eq!(s2, "en0=192.168.1.10");
+
+    // Re-establish utun4=10.8.0.2 and utun4=fd7a::/64 after 2000ms, then drop ONLY IPv4 -> 0ms!
+    let t1 = t0 + Duration::from_secs(3);
+    let _ = stabilize_non_default_utun_entries_in(
+        &mut st,
+        "192.168.1.11|192.168.1.11|none",
+        vec!["en0=192.168.1.11".into()],
+        vec!["utun4=10.8.0.2".into(), "utun4=fd7a::/64".into()],
+        t1,
+    );
+    let s3 = stabilize_non_default_utun_entries_in(
+        &mut st,
+        "192.168.1.11|192.168.1.11|none",
+        vec!["en0=192.168.1.11".into()],
+        vec!["utun4=fd7a::/64".into()],
+        t1 + Duration::from_millis(5),
+    );
+    assert_eq!(s3, "en0=192.168.1.11,utun4=fd7a::/64");
+}

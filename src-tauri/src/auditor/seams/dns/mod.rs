@@ -5,8 +5,10 @@ mod scutil;
 #[cfg(target_os = "windows")]
 mod win;
 
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use super::BoxFuture;
 use hickory::{hickory_a_query, hickory_ptr_query, hickory_txt_query};
@@ -14,6 +16,82 @@ use hickory::{hickory_a_query, hickory_ptr_query, hickory_txt_query};
 use scutil::macos_scutil_nameservers;
 #[cfg(any(target_os = "macos", test))]
 pub(crate) use scutil::parse_scutil_dns_nameservers;
+
+const DNS_DIAG_DEDUP_TTL: Duration = Duration::from_secs(300);
+const DNS_DIAG_MAX_ENTRIES: usize = 64;
+
+static DNS_DIAG_CACHE: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static LAST_SCUTIL_NAMESERVER_SIG: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new(String::new()));
+
+pub fn nameserver_signature(ips: &[IpAddr]) -> String {
+    if ips.is_empty() {
+        return "none".to_string();
+    }
+    ips.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub(crate) fn last_known_nameserver_sig() -> String {
+    LAST_SCUTIL_NAMESERVER_SIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+fn set_last_known_nameserver_sig(sig: &str) {
+    let mut guard = LAST_SCUTIL_NAMESERVER_SIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.as_str() != sig {
+        *guard = sig.to_string();
+    }
+}
+
+fn txt_outcome_tag(outcome: &TxtOutcome) -> &'static str {
+    match outcome {
+        TxtOutcome::Records(_) => "Records",
+        TxtOutcome::NotFound => "NotFound",
+        TxtOutcome::Timeout => "Timeout",
+        TxtOutcome::Failed => "Failed",
+        TxtOutcome::Unsupported => "Unsupported",
+    }
+}
+
+pub fn should_record_dns_diag_in(
+    cache: &Mutex<HashMap<String, Instant>>,
+    stage: &str,
+    host: &str,
+    outcome: &TxtOutcome,
+    nameserver_sig: &str,
+    now: Instant,
+) -> bool {
+    let key = format!(
+        "{stage}|{host}|{}|{nameserver_sig}",
+        txt_outcome_tag(outcome)
+    );
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, ts| now.saturating_duration_since(*ts) < DNS_DIAG_DEDUP_TTL);
+    if let Some(&prev) = guard.get(&key)
+        && now.saturating_duration_since(prev) < DNS_DIAG_DEDUP_TTL
+    {
+        return false;
+    }
+    if guard.len() >= DNS_DIAG_MAX_ENTRIES {
+        guard.clear();
+    }
+    guard.insert(key, now);
+    true
+}
+
+fn clear_dns_diag_for_host(cache: &Mutex<HashMap<String, Instant>>, host: &str) {
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let needle = format!("|{host}|");
+    guard.retain(|k, _| !k.contains(&needle));
+}
 
 /// Raw outcome of one name lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +261,7 @@ async fn system_a_lookup(host: &str, limit: Duration) -> LookupOutcome {
     #[cfg(target_os = "macos")]
     {
         let scutil_ips = macos_scutil_nameservers().await;
+        set_last_known_nameserver_sig(&nameserver_signature(&scutil_ips));
         if !scutil_ips.is_empty() {
             let outcome = hickory_a_query(&name, per_try, Some(&scutil_ips)).await;
             if matches!(outcome, LookupOutcome::Addrs(_) | LookupOutcome::NotFound) {
@@ -221,31 +300,58 @@ async fn system_txt_lookup(host: &str, limit: Duration) -> TxtOutcome {
     }
 
     #[cfg(target_os = "macos")]
-    {
+    let ns_sig = {
         let scutil_ips = macos_scutil_nameservers().await;
+        let sig = nameserver_signature(&scutil_ips);
+        set_last_known_nameserver_sig(&sig);
         if !scutil_ips.is_empty() {
             let outcome = hickory_txt_query(&name, per_try, Some(&scutil_ips)).await;
-            if matches!(outcome, TxtOutcome::Records(_) | TxtOutcome::NotFound) {
+            if matches!(outcome, TxtOutcome::Records(_)) {
+                clear_dns_diag_for_host(&DNS_DIAG_CACHE, host);
                 return outcome;
             }
-            crate::diagnostics::record(
-                "auditor:dns",
-                &format!(
-                    "scutil TXT lookup for {host} via {} servers returned {outcome:?}, trying fallback",
-                    scutil_ips.len()
-                ),
-            );
+            if matches!(outcome, TxtOutcome::NotFound) {
+                return outcome;
+            }
+            if should_record_dns_diag_in(
+                &DNS_DIAG_CACHE,
+                "scutil",
+                host,
+                &outcome,
+                &sig,
+                Instant::now(),
+            ) {
+                crate::diagnostics::record(
+                    "auditor:dns",
+                    &format!(
+                        "scutil TXT lookup for {host} via {} servers returned {outcome:?}, trying fallback",
+                        scutil_ips.len()
+                    ),
+                );
+            }
             let remaining = limit.saturating_sub(started.elapsed());
             if remaining < Duration::from_millis(250) {
                 return outcome;
             }
         }
-    }
+        sig
+    };
+    #[cfg(not(target_os = "macos"))]
+    let ns_sig = "system".to_string();
 
     let remaining = limit.saturating_sub(started.elapsed());
     let fallback_try = Duration::from_millis((remaining.as_millis() as u64 / 2).clamp(400, 1000));
     let outcome = hickory_txt_query(&name, fallback_try, None).await;
-    if !matches!(outcome, TxtOutcome::Records(_)) {
+    if matches!(outcome, TxtOutcome::Records(_)) {
+        clear_dns_diag_for_host(&DNS_DIAG_CACHE, host);
+    } else if should_record_dns_diag_in(
+        &DNS_DIAG_CACHE,
+        "system",
+        host,
+        &outcome,
+        &ns_sig,
+        Instant::now(),
+    ) {
         crate::diagnostics::record(
             "auditor:dns",
             &format!("system TXT lookup for {host} finished with {outcome:?}"),
@@ -295,3 +401,6 @@ pub(super) fn is_name_not_found(e: &std::io::Error) -> bool {
     .iter()
     .any(|m| text.contains(m))
 }
+
+#[cfg(test)]
+mod tests;

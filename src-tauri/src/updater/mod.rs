@@ -180,5 +180,14 @@ pub async fn check_for_updates(app: &tauri::AppHandle) -> Result<UpdateCheckResu
     })))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use super::install::{
+        WINDOWS_MSI_TARGET, WINDOWS_NSIS_TARGET, WindowsInstallKind, classify_windows_install,
+        configure_rollback_builder, validate_windows_rollback_compatibility,
+        windows_rollback_target,
+    };
+}
+
 #[cfg(test)]
 mod tests;

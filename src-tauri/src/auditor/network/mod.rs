@@ -106,6 +106,22 @@ pub fn evaluate_reverse_dns_ptr_with_ptr(
     telemetry: &NetworkTelemetry,
     ptr_hostname: Option<&str>,
 ) -> CheckResult {
+    evaluate_reverse_dns_ptr_with_ptr_for_mode(telemetry, ptr_hostname, false)
+}
+
+/// Gate 10 evaluator with optional `hide_ip_mode` masking on displayed PTR/host strings.
+pub fn evaluate_reverse_dns_ptr_with_ptr_for_mode(
+    telemetry: &NetworkTelemetry,
+    ptr_hostname: Option<&str>,
+    hide_ip_mode: bool,
+) -> CheckResult {
+    fn display(raw: &str, hide_ip_mode: bool) -> std::borrow::Cow<'_, str> {
+        if hide_ip_mode {
+            std::borrow::Cow::Owned(crate::core::redact::sanitize_diagnostic_text(raw))
+        } else {
+            std::borrow::Cow::Borrowed(raw)
+        }
+    }
     let ptr_clean = ptr_hostname.map(str::trim).filter(|t| !t.is_empty());
     let mut examined = Vec::new();
     if let Some(ptr) = ptr_clean {
@@ -125,10 +141,11 @@ pub fn evaluate_reverse_dns_ptr_with_ptr(
         let lower = text.to_lowercase();
         for &marker in SUSPICIOUS_ANONYMIZER_MARKERS {
             if lower.contains(marker) {
+                let shown = display(text, hide_ip_mode);
                 let res = CheckResult::warning(
                     "REVERSE_DNS_ANONYMIZER_MARKER",
                     format!(
-                        "В данных узла ({text}) обнаружен маркер публичного анонимайзера «{marker}». Антифрод-системы ИИ блокируют такие адреса. Рекомендуется сменить сервер на чистый VPS."
+                        "В данных узла ({shown}) обнаружен маркер публичного анонимайзера «{marker}». Антифрод-системы ИИ блокируют такие адреса. Рекомендуется сменить сервер на чистый VPS."
                     ),
                     Some(crate::auditor::geo_matrix::GUIDE_PERSONAL_VPN.to_string()),
                 );
@@ -142,10 +159,11 @@ pub fn evaluate_reverse_dns_ptr_with_ptr(
     }
 
     if let Some(ptr) = ptr_clean {
+        let shown = display(ptr, hide_ip_mode);
         return CheckResult::ok(
             "REVERSE_DNS_CLEAN",
             format!(
-                "PTR-запись выходного IP ({ptr}) проверена: маркеров публичных анонимайзеров из встроенного списка не обнаружено."
+                "PTR-запись выходного IP ({shown}) проверена: маркеров публичных анонимайзеров из встроенного списка не обнаружено."
             ),
         )
         .with_measured_via("rdns:ptr");
@@ -165,10 +183,11 @@ pub fn evaluate_reverse_dns_ptr_with_ptr(
         );
     };
 
+    let shown = display(detail, hide_ip_mode);
     CheckResult::ok(
         "REVERSE_DNS_CLEAN",
         format!(
-            "PTR-запись недоступна; по данным узла/провайдера ({detail}) маркеров публичных анонимайзеров из встроенного списка не обнаружено."
+            "PTR-запись недоступна; по данным узла/провайдера ({shown}) маркеров публичных анонимайзеров из встроенного списка не обнаружено."
         ),
     )
 }

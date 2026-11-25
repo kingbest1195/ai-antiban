@@ -45,7 +45,11 @@ async fn test_probe_changed_shows_window_under_150ms_before_2500ms_probe_complet
     assert_eq!(det["network_change"]["old_ip"], "1.1.1.1");
     assert!(det["network_change"]["new_ip"].is_null());
     assert!(det["network_change"]["new_country"].is_null());
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.io.shows.load(Ordering::SeqCst),
+        0,
+        "popup must be deferred during detecting until ready or held CONNECT > 1200ms"
+    );
     assert_eq!(h.guard.gate(), Gate::Pending);
     assert_eq!(h.io.count("interceptor://enriched"), 0);
 
@@ -53,7 +57,8 @@ async fn test_probe_changed_shows_window_under_150ms_before_2500ms_probe_complet
     assert!(h.guard.tick_lock.try_lock().is_ok());
     assert!(h.guard.inner.try_lock().is_ok());
 
-    // After 2500ms probe + audit complete, `interceptor://enriched` delivers phase: ready + new_ip/country.
+    // After 2500ms probe + audit complete, `interceptor://enriched` delivers phase: ready + new_ip/country
+    // and surfaces the popup once.
     let (enr, enr_at) =
         h.io.wait_for("interceptor://enriched", 4000)
             .await
@@ -63,6 +68,7 @@ async fn test_probe_changed_shows_window_under_150ms_before_2500ms_probe_complet
     assert_eq!(enr["network_change"]["new_ip"], "9.9.9.9");
     assert_eq!(enr["network_change"]["new_country"], "RU");
     assert!(enr["report"].is_object());
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -94,21 +100,22 @@ async fn test_probe_changed_offline_retries_and_transitions_to_failed_without_lo
         inner.last_route_fp = Some(format!("{}-old", compute_local_route_fingerprint(None)));
     }
 
-    // Offline VPN drop: popup shows immediately at 0ms (`phase: detecting`, `new_ip: None`).
+    // Offline VPN drop: risk-detected fires immediately (`phase: detecting`), popup stays deferred.
     h.guard.check_route_and_tick(&h.env).await;
     let det =
         h.io.first("interceptor://risk-detected")
             .expect("immediate detecting on offline drop");
     assert_eq!(det.0["phase"], PHASE_DETECTING);
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
     assert_eq!(h.guard.gate(), Gate::Pending);
 
-    // Exhaust offline retries -> transitions cleanly to `phase: failed` without losing alert or gating state.
+    // Exhaust offline retries -> transitions cleanly to `phase: failed` and shows popup once.
     let enr =
         h.io.wait_for("interceptor://enriched", 10_000)
             .await
             .expect("offline failed enrichment");
     assert_eq!(enr.0["phase"], PHASE_FAILED);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
     assert!(enr.0["network_change"]["new_ip"].is_null());
     assert!(enr.0["network_change"]["new_country"].is_null());
     assert!(enr.0["report"].is_null());
@@ -156,12 +163,17 @@ async fn test_probe_changed_false_alarm_shows_detecting_then_hides_on_baseline_r
 
     h.guard.check_route_and_tick(&h.env).await;
     assert_eq!(h.io.count("interceptor://risk-detected"), 1);
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
     assert_eq!(h.guard.gate(), Gate::Pending);
 
-    // Wait for background probe returning baseline IP -> quietly hides popup and opens gate.
+    // Wait for background probe returning baseline IP -> quietly opens gate without ever flashing popup.
     h.guard.wait_probe_settled_for_test().await;
     assert_eq!(h.guard.gate(), Gate::Open);
+    assert_eq!(
+        h.io.shows.load(Ordering::SeqCst),
+        0,
+        "transient false alarm must never flash alert popup"
+    );
     assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
     assert!(h.io.count("interceptor://resolved") >= 1);
     assert!(h.env.hold_queue.current_alert().is_none());
@@ -248,14 +260,15 @@ async fn test_pausing_or_closing_popup_in_detecting_phase_binds_new_probed_ip_wi
         inner.last_route_fp = Some(format!("{}-old", compute_local_route_fingerprint(None)));
     }
 
-    // 1. Route change emits `phase: "detecting"` immediately while 250ms probe is in flight.
+    // 1. Route change emits `phase: "detecting"` immediately while 250ms probe is in flight;
+    //    popup stays deferred until ready/failed or a held CONNECT exceeds 1200ms.
     h.guard.check_route_and_tick(&h.env).await;
     let det =
         h.io.first("interceptor://risk-detected")
             .expect("detecting alert");
     let alert_id = det.0["id"].as_str().unwrap().to_string();
     assert_eq!(det.0["phase"], PHASE_DETECTING);
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
 
     // 2. User clicks "Пауза до смены сети" / ✕ / Esc WHILE still in `phase: "detecting"`.
     h.guard
@@ -285,7 +298,7 @@ async fn test_pausing_or_closing_popup_in_detecting_phase_binds_new_probed_ip_wi
     }
 
     // 3. Background probe finishes (returns "9.9.9.9") -> binds `paused_ip = Some("9.9.9.9")`
-    //    without clearing pause or popping a second alert.
+    //    without clearing pause or popping an alert.
     h.guard.wait_probe_settled_for_test().await;
     assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
     assert_eq!(h.guard.gate(), Gate::Blocked);
@@ -294,14 +307,52 @@ async fn test_pausing_or_closing_popup_in_detecting_phase_binds_new_probed_ip_wi
         Some("9.9.9.9")
     );
     assert!(!h.guard.inner.lock().await.pending_pause_ip_bind);
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
 
     // 4. Subsequent 1s `ProbeRegular` on "9.9.9.9" keeps pause intact and never re-shows popup!
     h.guard.inner.lock().await.last_probe = None;
     h.guard.check_route_and_tick(&h.env).await;
     assert_eq!(h.guard.pause_mode(), PauseMode::UntilNetworkChange);
     assert_eq!(h.guard.gate(), Gate::Blocked);
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_held_connect_past_1200ms_surfaces_deferred_detecting_popup() {
+    let h = harness_env(
+        slow_audit(Duration::from_secs(3), "9.9.9.9", OverallStatus::Red),
+        "9.9.9.9",
+        |env| {
+            env.probe = Some(Arc::new(|| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    Some("9.9.9.9".to_string())
+                })
+            }));
+        },
+    )
+    .await;
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.last_route_fp = Some(format!("{}-old", compute_local_route_fingerprint(None)));
+    }
+
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.gate(), Gate::Pending);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
+
+    let guard = Arc::clone(&h.guard);
+    let waiter = tokio::spawn(async move { guard.await_decision_for(ProviderId::Anthropic).await });
+    tokio::time::sleep(Duration::from_millis(1250)).await;
+    assert_eq!(
+        h.io.shows.load(Ordering::SeqCst),
+        1,
+        "held CONNECT past 1200ms must surface deferred detecting popup"
+    );
+
+    h.guard.inner.lock().await.invalidate_alert();
+    h.guard.set_gate(Gate::Blocked);
+    let _ = waiter.await;
 }
 
 #[tokio::test]

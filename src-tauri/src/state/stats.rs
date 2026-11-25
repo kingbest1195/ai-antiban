@@ -11,7 +11,7 @@ pub struct RecentGatewayEvent {
     pub timestamp: u64,
     pub host: String,
     pub provider: String,
-    pub action: String, // "PROTECTED" | "HELD" | "BLOCKED" | "DIRECT"
+    pub action: String, // "PROTECTED" | "HELD" | "BLOCKED" | "DIRECT" | "MANUAL_ALLOW"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub country: String,
@@ -74,6 +74,14 @@ impl GatewayStatsTracker {
     }
 
     pub fn record_protected(&self, host: &str, provider: &str, country: &str) {
+        self.record_ai_allowed(host, provider, "PROTECTED", country);
+    }
+
+    pub fn record_manual_allow(&self, host: &str, provider: &str, country: &str) {
+        self.record_ai_allowed(host, provider, "MANUAL_ALLOW", country);
+    }
+
+    fn record_ai_allowed(&self, host: &str, provider: &str, action: &str, country: &str) {
         // Crash-test canary probes must never inflate real user counters.
         if host.starts_with("canary-test.") {
             return;
@@ -86,7 +94,7 @@ impl GatewayStatsTracker {
             timestamp: crate::auditor::network::current_timestamp(),
             host: host.to_string(),
             provider: provider.to_string(),
-            action: "PROTECTED".to_string(),
+            action: action.to_string(),
             kind: None,
             country: country.to_string(),
         };

@@ -82,6 +82,8 @@ pub struct DiagnosticBundle {
     pub audit_reports: BTreeMap<String, DiagnosticProviderAudit>,
     pub gateway_stats: DiagnosticGatewayStats,
     pub recent_diagnostics: Vec<String>,
+    #[serde(default)]
+    pub unmapped_companion_domains: Vec<String>,
 }
 
 pub fn build_error_diagnostics_report(
@@ -318,6 +320,11 @@ pub fn build_sanitized_diagnostic_bundle(
             .iter()
             .map(|line| sanitize_diagnostic_text(line))
             .collect(),
+        unmapped_companion_domains:
+            crate::proxy::domain_drift::recorded_unmapped_companion_domains()
+                .into_iter()
+                .map(|h| sanitize_diagnostic_text(&h))
+                .collect(),
     }
 }
 

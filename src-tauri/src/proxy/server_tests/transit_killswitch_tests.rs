@@ -114,61 +114,73 @@ async fn engage_killswitch(env: &Env, on: bool) {
 }
 
 #[tokio::test]
-async fn manual_killswitch_refuses_new_transit_until_it_is_released() {
+async fn manual_killswitch_allows_non_ai_transit_while_blocking_ai_and_payment_hosts() {
     let echo = spawn_echo().await;
     let (origin, _seen) = spawn_http_server("fine").await;
     let env = start(echo, &[PUBLIC_V4], None).await;
     engage_killswitch(&env, true).await;
 
-    let (_c, head) = open_tunnel(env.addr(), "ghcr.io:443").await;
-    assert!(head.starts_with("HTTP/1.1 503"), "{head}");
-    assert!(head.contains("Сеть остановлена вручную"), "{head}");
-    let resp = exchange(
-        env.addr(),
-        b"GET http://files.example.test/ HTTP/1.1\r\n\r\n",
-    )
-    .await;
-    assert!(resp.starts_with("HTTP/1.1 503"), "{resp}");
-    assert!(resp.contains("Сеть остановлена вручную"), "{resp}");
-    assert_eq!(env.dial_count(), 0);
-
-    engage_killswitch(&env, false).await;
+    // Non-AI transit CONNECT (Discord/PUBG/GitHub) passes cleanly even under manual_killswitch.
     let (mut c, head) = open_tunnel(env.addr(), "ghcr.io:443").await;
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-    ping(&mut c, b"after release").await;
+    ping(&mut c, b"transit during manual killswitch").await;
 
-    let env2 = start(origin, &[PUBLIC_V4], None).await;
-    engage_killswitch(&env2, true).await;
-    engage_killswitch(&env2, false).await;
+    // Non-AI plain HTTP passes cleanly without 503.
+    let env_http = start(origin, &[PUBLIC_V4], None).await;
+    engage_killswitch(&env_http, true).await;
     let resp = exchange(
-        env2.addr(),
+        env_http.addr(),
         b"GET http://files.example.test/ HTTP/1.1\r\n\r\n",
     )
     .await;
     assert!(resp.ends_with("fine"), "{resp}");
+
+    // AI and payment/KYC hosts stay strictly blocked under manual_killswitch.
+    let (_c_ai, ai_head) = open_tunnel(env.addr(), "api.anthropic.com:443").await;
+    assert!(ai_head.starts_with("HTTP/1.1 403"), "{ai_head}");
+    let (_c_pay, pay_head) = open_tunnel(env.addr(), "checkout.stripe.com:443").await;
+    assert!(pay_head.starts_with("HTTP/1.1 403"), "{pay_head}");
+    let pay_http = exchange(
+        env.addr(),
+        b"GET http://checkout.stripe.com/ HTTP/1.1\r\n\r\n",
+    )
+    .await;
+    assert!(pay_http.starts_with("HTTP/1.1 503"), "{pay_http}");
+    assert!(pay_http.contains("Сеть остановлена вручную"), "{pay_http}");
+
+    engage_killswitch(&env, false).await;
+    let (_c_pay2, pay_head2) = open_tunnel(env.addr(), "api.stripe.com:443").await;
+    assert!(pay_head2.starts_with("HTTP/1.1 200"), "{pay_head2}");
 }
 
 #[tokio::test]
-async fn manual_killswitch_cuts_running_transit_streams() {
+async fn manual_killswitch_keeps_non_ai_transit_running_and_cuts_payment_streams() {
     let echo = spawn_echo().await;
     let env = start(echo, &[PUBLIC_V4], None).await;
-    let (mut c, head) = open_tunnel(env.addr(), "ghcr.io:443").await;
-    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
-    ping(&mut c, b"alive").await;
-    engage_killswitch(&env, true).await;
-    let mut buf = [0u8; 16];
-    match tokio::time::timeout(Duration::from_secs(3), c.read(&mut buf)).await {
-        Ok(Ok(0)) | Ok(Err(_)) => {}
-        other => panic!("the tunnel must be cut by the kill-switch: {other:?}"),
-    }
-    // Releasing the switch does not bring the closed tunnel back.
-    engage_killswitch(&env, false).await;
-    assert!(c.write_all(b"x").await.is_err() || matches!(c.read(&mut buf).await, Ok(0) | Err(_)));
+    let (mut transit_c, transit_head) = open_tunnel(env.addr(), "ghcr.io:443").await;
+    assert!(transit_head.starts_with("HTTP/1.1 200"), "{transit_head}");
+    ping(&mut transit_c, b"alive-transit").await;
 
-    // Plain HTTP stream (slow download) is cut as well.
-    let download = spawn_slow_download(20).await;
-    let env = start(download, &[PUBLIC_V4], None).await;
-    let mut c = TcpStream::connect(env.addr()).await.unwrap();
+    let (mut pay_c, pay_head) = open_tunnel(env.addr(), "api.stripe.com:443").await;
+    assert!(pay_head.starts_with("HTTP/1.1 200"), "{pay_head}");
+    ping(&mut pay_c, b"alive-pay").await;
+
+    engage_killswitch(&env, true).await;
+
+    // Non-AI transit stream keeps working cleanly.
+    ping(&mut transit_c, b"still-alive-transit").await;
+
+    // Payment/KYC stream is cut immediately.
+    let mut buf = [0u8; 16];
+    match tokio::time::timeout(Duration::from_secs(3), pay_c.read(&mut buf)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        other => panic!("payment tunnel must be cut by the kill-switch: {other:?}"),
+    }
+
+    // Plain HTTP slow download on non-AI host survives manual_killswitch.
+    let download = spawn_slow_download(4).await;
+    let env_dl = start(download, &[PUBLIC_V4], None).await;
+    let mut c = TcpStream::connect(env_dl.addr()).await.unwrap();
     c.write_all(b"GET http://files.example.test/big HTTP/1.1\r\n\r\n")
         .await
         .unwrap();
@@ -176,7 +188,7 @@ async fn manual_killswitch_cuts_running_transit_streams() {
     let mut buf = vec![0u8; 64 * 1024];
     got += c.read(&mut buf).await.unwrap();
     assert!(got > 0);
-    engage_killswitch(&env, true).await;
+    engage_killswitch(&env_dl, true).await;
     let end = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             match c.read(&mut buf).await {
@@ -186,26 +198,32 @@ async fn manual_killswitch_cuts_running_transit_streams() {
         }
     })
     .await;
-    assert!(end.is_ok(), "plain HTTP stream must be cut");
+    assert!(end.is_ok(), "non-AI plain HTTP stream should finish");
     assert!(
-        got < 20 * 64 * 1024,
-        "the download was interrupted ({got} bytes)"
+        got >= 4 * 64 * 1024,
+        "non-AI plain HTTP download was unexpectedly cut ({got} bytes)"
     );
 }
 
 #[tokio::test]
-async fn automatic_freeze_does_not_cut_transit_but_the_manual_switch_does() {
+async fn automatic_freeze_does_not_cut_transit_or_payment_but_manual_switch_cuts_payment() {
     let echo = spawn_echo().await;
     let env = start(echo, &[PUBLIC_V4], None).await;
-    let (mut c, _) = open_tunnel(env.addr(), "ghcr.io:443").await;
-    ping(&mut c, b"one").await;
+    let (mut transit_c, _) = open_tunnel(env.addr(), "ghcr.io:443").await;
+    let (mut pay_c, _) = open_tunnel(env.addr(), "api.stripe.com:443").await;
+    ping(&mut transit_c, b"one").await;
+    ping(&mut pay_c, b"pay-one").await;
+
     env.server.guard.freeze_for_test().await;
-    ping(&mut c, b"two").await;
+    ping(&mut transit_c, b"two").await;
+    ping(&mut pay_c, b"pay-two").await;
     assert!(!env.server.guard.is_manual_killswitch());
+
     engage_killswitch(&env, true).await;
+    ping(&mut transit_c, b"three").await;
     let mut buf = [0u8; 4];
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(3), c.read(&mut buf)).await,
+        tokio::time::timeout(Duration::from_secs(3), pay_c.read(&mut buf)).await,
         Ok(Ok(0)) | Ok(Err(_))
     ));
 }
@@ -325,4 +343,59 @@ async fn abort_all_tunnels_on_shutdown_cuts_transit_and_routed_tunnels() {
         tokio::time::timeout(Duration::from_secs(2), routed_stream.read(&mut buf)).await,
         Ok(Ok(0)) | Ok(Err(_))
     ));
+}
+
+#[tokio::test]
+async fn ai_and_payment_connect_fail_closed_when_chained_proxy_is_dead() {
+    let echo = spawn_echo().await;
+    let dead = dead_addr().await;
+    let env = start(echo, &[PUBLIC_V4], Some(dead)).await;
+
+    // 1. Direct call to connect_ai_transit must fail closed with 0 direct connects.
+    let err = env
+        .server
+        .connect_ai_transit("api.anthropic.com", 443)
+        .await
+        .err()
+        .expect("connect_ai_transit must fail closed when chained proxy is unreachable");
+    assert!(
+        err.to_string().contains("fail-closed"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(env.dial_count(), 0);
+    assert_eq!(env.server.direct_connect_count(), 0);
+
+    // 2. Payment/KYC CONNECT over gateway must fail closed (502) with 0 direct connects.
+    let (_pay_c, pay_head) = open_tunnel(env.addr(), "api.stripe.com:443").await;
+    assert!(pay_head.starts_with("HTTP/1.1 502"), "{pay_head}");
+    assert_eq!(env.dial_count(), 0);
+
+    // 3. Unrouted AI CONNECT over gateway must also fail closed (502) with 0 direct connects.
+    // Seed cached telemetry so auditor passes and tunnel_to_target reaches connect_ai_transit.
+    env.server
+        .auditor
+        .resolver
+        .set_cached(crate::auditor::NetworkTelemetry {
+            ip: "185.100.10.2".to_string(),
+            country_code: "NL".to_string(),
+            hostname: Some("nl-vps.example.net".to_string()),
+            asn: Some(20473),
+            org: Some("Choopa".to_string()),
+            isp: Some("Choopa".to_string()),
+            timezone: Some("Europe/Amsterdam".to_string()),
+            resolved_at: crate::auditor::network::current_timestamp(),
+        })
+        .await;
+    let (_ai_c, ai_head) = open_tunnel(env.addr(), "api.anthropic.com:443").await;
+    assert!(
+        ai_head.starts_with("HTTP/1.1 502"),
+        "AI CONNECT must fail closed (502) when chained proxy is dead, got: {ai_head}"
+    );
+    assert_eq!(env.dial_count(), 0);
+
+    // 4. Non-AI transit CONNECT still falls back to direct once.
+    let (mut non_ai_c, non_ai_head) = open_tunnel(env.addr(), "ghcr.io:443").await;
+    assert!(non_ai_head.starts_with("HTTP/1.1 200"), "{non_ai_head}");
+    ping(&mut non_ai_c, b"transit fallback ok").await;
+    assert_eq!(env.dial_count(), 1);
 }

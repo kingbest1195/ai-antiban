@@ -1,6 +1,6 @@
 [package]
 name = "zastava"
-version = "3.2.0"
+version = "3.2.1"
 description = "Zastava - AI Network Gateway & Privacy Guardian"
 authors = ["Zastava Team"]
 edition = "2024"

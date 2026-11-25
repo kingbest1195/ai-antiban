@@ -9,11 +9,12 @@ pub use chained::{
 };
 use entry_connect::connect_entry_with;
 
+use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
@@ -44,6 +45,14 @@ pub enum UpstreamStream {
 }
 
 impl UpstreamStream {
+    pub fn is_tls(&self) -> bool {
+        match self {
+            UpstreamStream::Plain(_) => false,
+            UpstreamStream::Tls(_) => true,
+            UpstreamStream::Prefixed { inner, .. } => inner.is_tls(),
+        }
+    }
+
     pub(crate) fn with_prefix(self, prefix: Vec<u8>) -> Self {
         if prefix.is_empty() {
             self
@@ -136,6 +145,28 @@ pub(crate) fn production_tls_config() -> io::Result<Arc<ClientConfig>> {
 }
 
 const ROUTE_ENTRY_STAGGER: Duration = Duration::from_millis(500);
+const ROUTE_DIAG_THROTTLE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Records a `[proxy:route]` diagnostic entry at most once per `throttle_key` within 5 seconds
+/// so parallel Chrome socket retries cannot flood and overwrite the 120-entry `diagnostics::RING`.
+pub(crate) fn record_route_diag_throttled(throttle_key: &str, message: &str) {
+    static LAST_LOGGED: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let map = LAST_LOGGED.get_or_init(|| Mutex::new(HashMap::new()));
+    let now = Instant::now();
+    {
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = guard.get(throttle_key)
+            && now.duration_since(*prev) < ROUTE_DIAG_THROTTLE_WINDOW
+        {
+            return;
+        }
+        if guard.len() >= 128 {
+            guard.retain(|_, ts| now.duration_since(*ts) < ROUTE_DIAG_THROTTLE_WINDOW);
+        }
+        guard.insert(throttle_key.to_string(), now);
+    }
+    crate::diagnostics::record("proxy:route", message);
+}
 
 async fn connect_via_route_inner(
     route: &Route,
@@ -147,8 +178,8 @@ async fn connect_via_route_inner(
     chained_proxy: Option<&str>,
 ) -> io::Result<UpstreamStream> {
     if route.entries.is_empty() {
-        crate::diagnostics::record(
-            "proxy:route",
+        record_route_diag_throttled(
+            &format!("empty:{}", route.id),
             &format!(
                 "route={} phase=connect err=route has no entry nodes",
                 route.id
@@ -166,6 +197,7 @@ async fn connect_via_route_inner(
     if route.entries.len() == 1 {
         let entry = &route.entries[0];
         match connect_entry_with(
+            &route.id,
             entry,
             target_host,
             target_port,
@@ -191,12 +223,14 @@ async fn connect_via_route_inner(
         let mut set: JoinSet<(usize, io::Result<UpstreamStream>)> = JoinSet::new();
         let mut next_idx = 0usize;
         let spawn_entry = |set: &mut JoinSet<(usize, io::Result<UpstreamStream>)>, idx: usize| {
+            let route_id = route.id.clone();
             let entry = route.entries[idx].clone();
             let host = target_host.to_string();
             let tls = Arc::clone(tls);
             let cp = chained_proxy.map(str::to_string);
             set.spawn(async move {
                 let res = connect_entry_with(
+                    &route_id,
                     &entry,
                     &host,
                     target_port,
@@ -253,8 +287,8 @@ async fn connect_via_route_inner(
 
     let joined_errors: Vec<String> = errors.into_iter().flatten().collect();
     let summary = format!("all entry nodes failed ({})", joined_errors.join("; "));
-    crate::diagnostics::record(
-        "proxy:route",
+    record_route_diag_throttled(
+        &format!("failed:{}", route.id),
         &format!(
             "route={} err={}",
             route.id,
@@ -262,6 +296,34 @@ async fn connect_via_route_inner(
         ),
     );
     Err(io::Error::new(last_kind, summary))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn build_test_tls_config(roots: RootCertStore) -> io::Result<Arc<ClientConfig>> {
+    build_tls_config(roots).map(Arc::new)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_via_route_with_tls(
+    route: &Route,
+    target_host: &str,
+    target_port: u16,
+    per_entry_timeout: Duration,
+    tls: &Arc<ClientConfig>,
+    gateway_port: u16,
+    chained_proxy: Option<&str>,
+) -> io::Result<UpstreamStream> {
+    connect_via_route_inner(
+        route,
+        target_host,
+        target_port,
+        per_entry_timeout,
+        tls,
+        gateway_port,
+        chained_proxy,
+    )
+    .await
 }
 
 #[cfg(test)]

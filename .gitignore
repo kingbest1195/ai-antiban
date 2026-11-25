@@ -12,11 +12,18 @@ dist
 dist-ssr
 *.local
 src-tauri/target
+src-tauri/target-release/
 target
-binaries/
-.agents/
 *.dmg
+
+# Internal engineering specs, docs & agent workspaces (local-only, never commit)
 spec-*.md
+ARCHITECTURE.md
+CONSTITUTION.md
+.claude/
+.gemini/
+.agent/
+.agents/
 
 # Editor directories and files
 .vscode/*
@@ -32,14 +39,13 @@ spec-*.md
 # Design system package (source for src/ui, not shipped)
 design/
 
-# Social & marketing content (Threads posts, generated cards)
+# Social, site & marketing content (Threads posts, landing site, generated cards)
+site/
 threads/
 threads_content/
-
 
 # Local screenshots staging (copied into docs/ by hand)
 .shots/
 
 # Local builds handed to the owner
 binaries/
-src-tauri/target-release/

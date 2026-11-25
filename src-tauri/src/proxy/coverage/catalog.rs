@@ -22,6 +22,7 @@ pub fn get_known_app_info(id: &str) -> Option<KnownAppInfo> {
         "jetbrains" => ("jetbrains", "JetBrains IDE (PyCharm, IntelliJ...)", "ide"),
         "claude-code" => ("claude-code", "Claude Code", "cli"),
         "gemini-cli" => ("gemini-cli", "Gemini CLI", "cli"),
+        "codex-cli" => ("codex-cli", "Codex CLI", "cli"),
         "opencode" => ("opencode", "OpenCode", "cli"),
         "node-cli" => ("node-cli", "Node.js / CLI", "cli"),
         "python-cli" => ("python-cli", "Python / CLI", "cli"),
@@ -113,6 +114,13 @@ pub fn classify_process_name(name: &str) -> &'static str {
     if lower == "gemini" || lower.contains("gemini-cli") {
         return "gemini-cli";
     }
+    if lower == "codex"
+        || lower.contains("codex-cli")
+        || lower.contains("codex_cli")
+        || has("codex")
+    {
+        return "codex-cli";
+    }
     if has("opencode") {
         return "opencode";
     }
@@ -143,6 +151,16 @@ pub fn resolve_app_identity(
             return (
                 "claude-code".to_string(),
                 "Claude Code".to_string(),
+                "cli".to_string(),
+            );
+        }
+        if ua_lower.contains("codex-cli")
+            || ua_lower.contains("codex_cli")
+            || ua_lower.starts_with("codex/")
+        {
+            return (
+                "codex-cli".to_string(),
+                "Codex CLI".to_string(),
                 "cli".to_string(),
             );
         }

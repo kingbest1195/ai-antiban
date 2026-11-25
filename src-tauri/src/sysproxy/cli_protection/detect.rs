@@ -42,7 +42,8 @@ pub(crate) fn files_show_protection(ctx: &FileCtx) -> bool {
         }
     }
     let gw = state().gateway_port();
-    for settings in [ctx.claude_settings(), ctx.gemini_settings()] {
+    let codex_settings = ctx.home.join(".codex").join("settings.json");
+    for settings in [ctx.claude_settings(), ctx.gemini_settings(), codex_settings] {
         let Some(content) = read(&settings) else {
             continue;
         };
@@ -75,7 +76,8 @@ pub(crate) fn files_show_tz_sync(ctx: &FileCtx) -> bool {
         json_raw(text, &[container, "LANG"]).as_deref() == Some(safe.as_str())
             && json_raw(text, &[container, "LC_TIME"]).as_deref() == Some(safe.as_str())
     };
-    for settings in [ctx.claude_settings(), ctx.gemini_settings()] {
+    let codex_settings = ctx.home.join(".codex").join("settings.json");
+    for settings in [ctx.claude_settings(), ctx.gemini_settings(), codex_settings] {
         if read(&settings).is_some_and(|t| has_locale(&t, AGENT_ENV_KEY)) {
             return true;
         }

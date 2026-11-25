@@ -102,15 +102,15 @@ impl NetworkGuard {
             .unwrap_or_else(|| "Защита поставлена на паузу до следующей смены сети".to_string());
         self.set_pause_mode_raw(PauseMode::UntilNetworkChange);
         self.set_gate_reason(Some(cleaned_reason.clone()));
-        self.abort_active_tunnels();
 
         let enabled_unrouted = state.enabled_unrouted_providers().await;
         for p in &enabled_unrouted {
             let _ = state.block_provider(p).await;
         }
         let st = state.get_data().await;
-        {
+        let should_abort_tunnels = {
             let mut inner = self.inner.lock().await;
+            let already_waiting_bind = inner.pending_pause_ip_bind;
             inner.pause_epoch = inner.pause_epoch.wrapping_add(1);
             let target_ip = inner.pending.as_ref().map(|p| p.target_ip.clone());
             let detecting_unresolved = inner.probe_in_flight
@@ -129,6 +129,10 @@ impl NetworkGuard {
             }
             self.bind_pause_ip_locked(&mut inner, target_ip.as_deref(), detecting_unresolved);
             self.sync_gates_with_state_and_pending(&st, inner.pending.as_ref());
+            !already_waiting_bind && !detecting_unresolved
+        };
+        if should_abort_tunnels {
+            self.abort_active_tunnels();
         }
         if let Some(env) = self.env.get() {
             self.hide_popup(env);
@@ -373,7 +377,10 @@ impl NetworkGuard {
         }
     }
 
-    async fn await_gate_rx(mut rx: watch::Receiver<Gate>) -> Gate {
+    async fn await_gate_rx_with_limit(
+        rx: &mut watch::Receiver<Gate>,
+        limit: Duration,
+    ) -> Option<Gate> {
         let fut = async {
             loop {
                 let g = *rx.borrow_and_update();
@@ -385,7 +392,13 @@ impl NetworkGuard {
                 }
             }
         };
-        tokio::time::timeout(Duration::from_secs(DEFAULT_HOLD_TTL_SECS + 15), fut)
+        tokio::time::timeout(limit, fut).await.ok()
+    }
+
+    #[cfg(test)]
+    async fn await_gate_rx(mut rx: watch::Receiver<Gate>) -> Gate {
+        let total_limit = Duration::from_secs(DEFAULT_HOLD_TTL_SECS + 15);
+        Self::await_gate_rx_with_limit(&mut rx, total_limit)
             .await
             .unwrap_or(Gate::Blocked)
     }
@@ -397,7 +410,18 @@ impl NetworkGuard {
     }
 
     /// Waits for a specific provider's gate decision while pending.
+    /// If the gate stays `Pending` (`detecting`) past 1200ms while a real AI CONNECT is held,
+    /// surfaces the deferred `alert-popup`.
     pub async fn await_decision_for(&self, provider: ProviderId) -> Gate {
-        Self::await_gate_rx(self.subscribe_for(provider)).await
+        let mut rx = self.subscribe_for(provider);
+        let grace = Duration::from_millis(1200);
+        if let Some(g) = Self::await_gate_rx_with_limit(&mut rx, grace).await {
+            return g;
+        }
+        self.show_detecting_popup_if_pending().await;
+        let rem = Duration::from_secs(DEFAULT_HOLD_TTL_SECS + 15).saturating_sub(grace);
+        Self::await_gate_rx_with_limit(&mut rx, rem)
+            .await
+            .unwrap_or(Gate::Blocked)
     }
 }

@@ -10,18 +10,22 @@
 
 use super::journal::{ApplyOutcome, EntryState, Journal, Resource, Value};
 use super::macos::HealGuard;
-use super::parsing::{is_local_proxy_reachable, windows_proxy_override_bypasses_all};
+use super::parsing::{
+    is_local_proxy_reachable, strip_proxy_scheme, windows_proxy_override_bypasses_all,
+};
 use super::platform::{PResult, Platform, RegKind, RegValue};
 use super::{
     EnableReport, os_effects_enabled, parse_gateway_port_from_pac_url, parse_windows_proxy_server,
     set_chained_proxy,
 };
-use std::time::Instant;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+use std::time::{Duration, Instant};
 
 pub(super) const AUTO_CONFIG_URL: &str = "AutoConfigURL";
 pub(super) const PROXY_ENABLE: &str = "ProxyEnable";
 const PROXY_SERVER: &str = "ProxyServer";
 const PROXY_OVERRIDE: &str = "ProxyOverride";
+const LOOPBACK_PROBE_TIMEOUT: Duration = Duration::from_millis(150);
 
 fn inet(name: &str) -> Resource {
     Resource::Inet {
@@ -172,6 +176,131 @@ pub(super) fn enable_inet_with_heal(
         .configured
         .push("Windows Internet Settings (WinINet)".to_string());
     Ok(report)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedProxyHost {
+    LoopbackV4(u16),
+    LoopbackV6(u16),
+    Localhost(u16),
+    Remote,
+}
+
+fn parse_proxy_server_endpoint(raw: &str) -> Option<ParsedProxyHost> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (_, rest) = strip_proxy_scheme(trimmed);
+    let clean = rest.trim().trim_end_matches('/');
+    let clean = clean.rsplit_once('@').map_or(clean, |(_, hp)| hp);
+    let (host, port_str) = clean.rsplit_once(':')?;
+    let port = port_str.trim().parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    let clean_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if clean_host.is_empty() {
+        return None;
+    }
+    match clean_host.as_str() {
+        "127.0.0.1" => Some(ParsedProxyHost::LoopbackV4(port)),
+        "::1" => Some(ParsedProxyHost::LoopbackV6(port)),
+        "localhost" => Some(ParsedProxyHost::Localhost(port)),
+        _ => Some(ParsedProxyHost::Remote),
+    }
+}
+
+fn parse_windows_proxy_server_hosts(raw: &str) -> Vec<ParsedProxyHost> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    if raw.contains('=') {
+        raw.split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|part| {
+                let (_, val) = part.split_once('=')?;
+                parse_proxy_server_endpoint(val)
+            })
+            .collect()
+    } else {
+        parse_proxy_server_endpoint(raw).into_iter().collect()
+    }
+}
+
+fn probe_loopback_addr(addr: SocketAddr) -> bool {
+    TcpStream::connect_timeout(&addr, LOOPBACK_PROBE_TIMEOUT).is_ok()
+}
+
+fn is_parsed_loopback_reachable(endpoint: &ParsedProxyHost) -> bool {
+    match *endpoint {
+        ParsedProxyHost::LoopbackV4(port) => {
+            probe_loopback_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+        }
+        ParsedProxyHost::LoopbackV6(port) => {
+            probe_loopback_addr(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))
+        }
+        ParsedProxyHost::Localhost(port) => {
+            probe_loopback_addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+                || probe_loopback_addr(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))
+        }
+        ParsedProxyHost::Remote => true,
+    }
+}
+
+/// Returns `true` when restoring a `ProxyEnable=1` baseline would point WinINet at a dead
+/// loopback `ProxyServer` (all parsed endpoints are loopback and none accept a 150ms TCP
+/// connect). Callers must restore `ProxyEnable=0` instead so non-AI apps are not stranded.
+pub(crate) fn should_fallback_dead_loopback_proxy_enable(
+    platform: &dyn Platform,
+    res: &Resource,
+    baseline: &Value,
+    journal_proxy_server: Option<&RegValue>,
+) -> bool {
+    let Resource::Inet { name } = res else {
+        return false;
+    };
+    if name != PROXY_ENABLE
+        || !matches!(baseline, Value::Reg(Some(r)) if r.kind == RegKind::Dword && r.data != "0")
+    {
+        return false;
+    }
+    let proxy_server = match platform.get_inet(PROXY_SERVER) {
+        Ok(Some(v)) => Some(v),
+        Ok(None) => journal_proxy_server.cloned(),
+        Err(_) => return false,
+    };
+    let Some(RegValue {
+        kind: RegKind::Sz | RegKind::ExpandSz,
+        data,
+    }) = proxy_server
+    else {
+        return false;
+    };
+    let hosts = parse_windows_proxy_server_hosts(&data);
+    if hosts.is_empty() || hosts.iter().any(|h| matches!(h, ParsedProxyHost::Remote)) {
+        return false;
+    }
+    let mut seen: Vec<&ParsedProxyHost> = Vec::with_capacity(hosts.len());
+    for h in &hosts {
+        if !seen.contains(&h) {
+            seen.push(h);
+        }
+    }
+    if seen.into_iter().any(is_parsed_loopback_reachable) {
+        return false;
+    }
+    crate::diagnostics::record(
+        "sysproxy:windows",
+        "ProxyEnable=1 baseline suppressed to 0: loopback ProxyServer is unreachable",
+    );
+    true
 }
 
 #[cfg(test)]

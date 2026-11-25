@@ -19,8 +19,9 @@ async fn evaluate_all_with_substituted_probes_all_timing_out_is_incomplete() {
     assert_eq!(report.dnsbl_result.reason, Some(UnknownReason::Timeout));
     assert!(report.ipv6_result.status.is_ok());
     assert_eq!(report.ipv6_result.code, "IPV6_BLOCKED_OR_TIMEOUT");
-    // The real DNS resolver, its country and the UDP probe could not be measured either.
-    for i in [6, 10, 12] {
+    // The real DNS resolver and the UDP probe could not be measured; DNS Country is NotApplicable
+    // when resolver is Unmeasured so unknown_count is not doubled.
+    for i in [6, 12] {
         assert!(
             report.checks[i].is_unknown(),
             "check {i}: {:?}",
@@ -32,6 +33,8 @@ async fn evaluate_all_with_substituted_probes_all_timing_out_is_incomplete() {
             "check {i}"
         );
     }
+    assert!(report.checks[10].is_not_applicable());
+    assert_eq!(report.checks[10].code, "DNS_COUNTRY_UNMEASURED");
     assert!(report.checks.iter().all(|c| c.checked_at.is_some()));
     assert!(report.incomplete);
     assert!(report.unknown_count >= 4, "{}", report.unknown_count);
@@ -63,7 +66,6 @@ async fn evaluate_all_internet_off_every_network_check_is_unknown() {
         (6, "dns"),
         (7, "timezone"),
         (9, "reverse dns"),
-        (10, "dns country"),
         (11, "locale"),
     ];
     for (i, name) in names {
@@ -79,8 +81,8 @@ async fn evaluate_all_internet_off_every_network_check_is_unknown() {
     }
     assert!(report.checks[5].status.is_ok());
     assert_eq!(report.checks[5].code, "IPV6_UNREACHABLE_SAFE");
-    // Not applicable here: pinning off, first session, no location setting on this host.
-    for i in [1, 2, 8] {
+    // Not applicable here: pinning off, first session, no location setting, and unmeasured DNS country.
+    for i in [1, 2, 8, 10] {
         assert!(
             report.checks[i].is_not_applicable(),
             "check {i}: {:?}",
@@ -88,8 +90,8 @@ async fn evaluate_all_internet_off_every_network_check_is_unknown() {
         );
     }
     assert_eq!(report.checks.len(), 14);
-    assert_eq!(report.unknown_count, 9);
-    assert_eq!(report.applicable_count, 11);
+    assert_eq!(report.unknown_count, 8);
+    assert_eq!(report.applicable_count, 10);
     assert!(report.incomplete && report.trust_score <= 94);
 }
 
@@ -260,16 +262,42 @@ async fn evaluate_all_fake_ip_dns_recognizes_safe_tun_mode_when_os_dns_is_clean(
         udp_exiting_as("203.0.113.9"),
     );
     let stub_report = audit(stub_env, rich_telemetry()).await;
-    for i in [6, 10] {
-        let c = &stub_report.checks[i];
-        assert_eq!(
-            (c.status, c.reason),
-            (CheckStatus::Unknown, Some(UnknownReason::SourceRefused)),
-            "check {i}: {c:?}"
-        );
-    }
-    assert_eq!(stub_report.unknown_count, 2);
+    assert_eq!(
+        (stub_report.checks[6].status, stub_report.checks[6].reason),
+        (CheckStatus::Unknown, Some(UnknownReason::SourceRefused)),
+        "check 6: {:?}",
+        stub_report.checks[6]
+    );
+    assert!(stub_report.checks[10].is_not_applicable());
+    assert_eq!(stub_report.checks[10].code, "DNS_COUNTRY_UNMEASURED");
+    assert_eq!(stub_report.unknown_count, 1);
     assert!(stub_report.incomplete && stub_report.trust_score <= 94);
+}
+
+/// When Akamai A succeeds and Google TXT fails (`DNS_WHOAMI_SINGLE_SOURCE`), check 6 reports it
+/// once while check 10 is `NotApplicable` (`unknown_count == 1`, never 2).
+#[tokio::test]
+async fn evaluate_all_single_source_txt_failure_does_not_double_unknown_count() {
+    let dns = zones_answering(FakeDns::new(LookupOutcome::Timeout))
+        .with(whoami::AKAMAI_HOST, addr("203.0.113.9"))
+        .with_txt(whoami::GOOGLE_TXT_HOST, TxtOutcome::Failed);
+    let env = env_with_udp(
+        dns,
+        probe_locating("NL"),
+        FakeSystem {
+            global_ipv6: Some(true),
+            ..FakeSystem::healthy()
+        },
+        udp_exiting_as("203.0.113.9"),
+    );
+    let report = audit(env, rich_telemetry()).await;
+    assert_eq!(report.checks[6].code, "DNS_WHOAMI_SINGLE_SOURCE");
+    assert_eq!(report.checks[10].code, "DNS_COUNTRY_UNMEASURED");
+    assert!(report.checks[10].is_not_applicable());
+    assert_eq!(report.unknown_count, 1);
+    assert_eq!(report.overall_status, OverallStatus::Green);
+    assert_eq!(report.trust_score, 100);
+    assert!(!report.incomplete);
 }
 
 /// The resolver is in Russia while the exit is in NL: both DNS checks warn.

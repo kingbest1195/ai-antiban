@@ -110,6 +110,10 @@ async fn e2e_offline_probe_freezes_connect_even_with_stale_session_and_cached_te
 
     let online = Arc::new(AtomicBool::new(true));
     let online_probe = Arc::clone(&online);
+    let fixed_fp = zastava_lib::proxy::guard::compute_local_route_fingerprint(None);
+    server
+        .guard
+        .set_route_fingerprint_fn_for_test(Some(Arc::new(move |_| fixed_fp.clone())));
     server.guard.start_with_test_env(
         auditor.clone(),
         state.clone(),
@@ -149,7 +153,13 @@ async fn e2e_offline_probe_freezes_connect_even_with_stale_session_and_cached_te
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 
     // 2) Simulate mid-VPN switch (`probe() == None`, same local route fingerprint).
+    //    Per v3.2.1 blip-resilience, 1st isolated probe() == None keeps Gate::Open;
+    //    2nd consecutive offline probe immediately freezes Gate::Pending (<150ms).
     online.store(false, Ordering::SeqCst);
+    server.guard.wake_immediate_probe().await;
+    server.guard.ensure_fresh().await;
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+
     // Allow immediate re-probe by clearing throttling timestamp via wake helper and invoking ensure_fresh.
     server.guard.wake_immediate_probe().await;
     let t0 = Instant::now();
@@ -241,6 +251,10 @@ async fn e2e_established_unrouted_tunnel_tears_down_immediately_on_offline_probe
 
     let online = Arc::new(AtomicBool::new(true));
     let online_probe = Arc::clone(&online);
+    let fixed_fp = zastava_lib::proxy::guard::compute_local_route_fingerprint(None);
+    server
+        .guard
+        .set_route_fingerprint_fn_for_test(Some(Arc::new(move |_| fixed_fp.clone())));
     server.guard.start_with_test_env(
         auditor,
         state,
@@ -274,8 +288,12 @@ async fn e2e_established_unrouted_tunnel_tears_down_immediately_on_offline_probe
     client.read_exact(&mut echo).await.unwrap();
     assert_eq!(&echo, b"ping");
 
-    // Simulate transient VPN drop (`probe() == None`) -> active tunnel MUST tear down immediately (<500ms).
+    // Simulate sustained VPN drop (2 consecutive `probe() == None` with stable local route)
+    // -> active tunnel MUST tear down immediately (<500ms).
     online.store(false, Ordering::SeqCst);
+    server.guard.wake_immediate_probe().await;
+    server.guard.ensure_fresh().await;
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
     server.guard.wake_immediate_probe().await;
     server.guard.ensure_fresh().await;
     assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Pending);

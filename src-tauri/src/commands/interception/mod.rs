@@ -73,16 +73,18 @@ pub async fn resolve_interception(
         return Ok(true);
     }
 
-    let outcome = resolve_interception_with_params(ResolveInterceptionParams {
-        id: &id,
-        action,
-        provider: &provider,
-        scope: scope.as_deref(),
-        persist_exception: persist_exception.unwrap_or(false),
-        proxy_manager: &proxy_manager,
-        state: &state,
-        auditor: &auditor,
-    })
+    let outcome = Box::pin(resolve_interception_with_params(
+        ResolveInterceptionParams {
+            id: &id,
+            action,
+            provider: &provider,
+            scope: scope.as_deref(),
+            persist_exception: persist_exception.unwrap_or(false),
+            proxy_manager: &proxy_manager,
+            state: &state,
+            auditor: &auditor,
+        },
+    ))
     .await?;
 
     let _ = &outcome.pause_status;

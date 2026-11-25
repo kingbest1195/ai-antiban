@@ -8,6 +8,7 @@ mod route_audit;
 mod route_guard;
 mod ssrf;
 mod tunnel;
+mod tunnel_relay;
 
 pub use checkout_guard::CheckoutGuardState;
 
@@ -22,11 +23,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
 use crate::auditor::Auditor;
+use crate::auditor::geo_matrix::ProviderId;
 use crate::proxy::guard::NetworkGuard;
 use crate::proxy::hold_queue::{DEFAULT_HOLD_TTL_SECS, HoldQueue};
 use crate::proxy::transit::Transit;
@@ -35,15 +37,11 @@ use crate::state::AppState;
 use responses::{is_absolute_http_target, send_gateway_info};
 
 #[cfg(test)]
-use crate::auditor::geo_matrix::ProviderId;
-#[cfg(test)]
 use crate::proxy::guard::Gate;
 #[cfg(test)]
 use crate::proxy::hold_queue::HoldResolution;
 #[cfg(test)]
 use std::net::IpAddr;
-#[cfg(test)]
-use tokio::io::AsyncWriteExt;
 
 const FIRST_REQUEST_TIMEOUT_SECS: u64 = 10;
 const UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 15;
@@ -53,7 +51,8 @@ const PLAIN_HTTP_IDLE_TIMEOUT_SECS: u64 = 60;
 /// Connect (+ CONNECT handshake) timeout for the chained proxy; after it transit traffic falls
 /// back to a direct connection once.
 const CHAINED_CONNECT_TIMEOUT_SECS: u64 = 8;
-const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+pub const HALF_CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(45);
 /// Per-entry connect timeout when tunneling through a route (DNS + direct + optional chained fallback).
 const ROUTE_ENTRY_TIMEOUT_SECS: u64 = 12;
 /// The crash-test canary is only reported as PROTECTED when its route really carries a tunnel.
@@ -104,7 +103,12 @@ pub struct ProxyServer {
     hold_ttl: Duration,
     is_alias: bool,
     alias_route_id: Option<String>,
+    alias_provider: Option<ProviderId>,
     alias_stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    #[cfg(any(test, feature = "test-support"))]
+    route_tls_override: Option<Arc<tokio_rustls::rustls::ClientConfig>>,
+    #[cfg(any(test, feature = "test-support"))]
+    half_close_drain_timeout: Duration,
 }
 
 impl Drop for ProxyServer {
@@ -155,7 +159,12 @@ impl ProxyServer {
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
             is_alias: false,
             alias_route_id: None,
+            alias_provider: None,
             alias_stop_rx: None,
+            #[cfg(any(test, feature = "test-support"))]
+            route_tls_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            half_close_drain_timeout: HALF_CLOSE_DRAIN_TIMEOUT,
         })
     }
 
@@ -191,13 +200,36 @@ impl ProxyServer {
             hold_ttl: Duration::from_secs(DEFAULT_HOLD_TTL_SECS),
             is_alias: false,
             alias_route_id: None,
+            alias_provider: None,
             alias_stop_rx: None,
+            #[cfg(any(test, feature = "test-support"))]
+            route_tls_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            half_close_drain_timeout: HALF_CLOSE_DRAIN_TIMEOUT,
         })
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_hold_ttl(mut self, ttl: Duration) -> Self {
         self.hold_ttl = ttl;
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_route_tls_config(mut self, cfg: Arc<tokio_rustls::rustls::ClientConfig>) -> Self {
+        self.route_tls_override = Some(cfg);
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_max_concurrent_connections(mut self, max: usize) -> Self {
+        self.conn_limiter = Arc::new(Semaphore::new(max));
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_half_close_drain_timeout(mut self, timeout: Duration) -> Self {
+        self.half_close_drain_timeout = timeout;
         self
     }
 
@@ -213,6 +245,7 @@ impl ProxyServer {
     pub async fn bind_alias_on(
         &self,
         bound_route_id: Option<String>,
+        alias_provider: Option<ProviderId>,
         preferred_port: Option<u16>,
         alias_stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Result<Self, std::io::Error> {
@@ -244,12 +277,17 @@ impl ProxyServer {
             hold_ttl: self.hold_ttl,
             is_alias: true,
             alias_route_id: bound_route_id,
+            alias_provider,
             alias_stop_rx,
+            #[cfg(any(test, feature = "test-support"))]
+            route_tls_override: self.route_tls_override.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            half_close_drain_timeout: self.half_close_drain_timeout,
         })
     }
 
     pub async fn bind_alias(&self, bound_route_id: Option<String>) -> Result<Self, std::io::Error> {
-        self.bind_alias_on(bound_route_id, None, None).await
+        self.bind_alias_on(bound_route_id, None, None, None).await
     }
 
     /// Number of direct (non-routed) outbound connections attempted, including the test redirect.
@@ -280,7 +318,25 @@ impl ProxyServer {
                     let permit = match Arc::clone(&self.conn_limiter).try_acquire_owned() {
                         Ok(p) => p,
                         Err(_) => {
-                            eprintln!("Proxy connection limit reached, dropping {client_addr}");
+                            eprintln!(
+                                "Proxy connection limit reached, returning 503 to {client_addr}"
+                            );
+                            tokio::spawn(async move {
+                                let mut stream = stream;
+                                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                                    let mut discard = [0u8; 1024];
+                                    let _ = stream.try_read(&mut discard);
+                                    let _ = responses::send_status(
+                                        &mut stream,
+                                        "503 Service Unavailable",
+                                        "Превышен лимит одновременных подключений шлюза Заставы.",
+                                    )
+                                    .await;
+                                    let _ = stream.try_read(&mut discard);
+                                    let _ = stream.shutdown().await;
+                                })
+                                .await;
+                            });
                             continue;
                         }
                     };

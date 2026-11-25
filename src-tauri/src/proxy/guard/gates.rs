@@ -1,15 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tokio::sync::{Mutex, watch};
 
 use crate::auditor::geo_matrix::ProviderId;
 use crate::state::AppState;
 
-use super::fingerprint::compute_local_route_fingerprint;
-use super::types::{Gate, GuardPauseStatus, Inner, NetworkGuard, PauseMode, Pending};
+use super::diag;
+use super::fingerprint::{
+    compute_local_route_fingerprint, default_udp_route_changed, is_default_udp_route_dropped,
+};
+use super::types::{Gate, Inner, NetworkGuard, PauseMode, Pending};
 
 impl NetworkGuard {
     pub fn new() -> Self {
@@ -25,14 +28,7 @@ impl NetworkGuard {
         let (tunnel_abort_tx, _abort_rx) = watch::channel(0u64);
         let (kill_tx, _kill_rx) = watch::channel(false);
         let (shutdown_abort_tx, _shutdown_rx) = watch::channel(false);
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(400))
-            .timeout(Duration::from_millis(800))
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(0)
-            .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
-            .build()
-            .unwrap_or_default();
+        let client = super::probe_http::build_probe_client(None).unwrap_or_default();
         Self {
             gate_tx,
             provider_gates,
@@ -148,60 +144,6 @@ impl NetworkGuard {
         *g = mode;
     }
 
-    pub fn pause_status(&self) -> GuardPauseStatus {
-        let mode = self.pause_mode();
-        let manual_killswitch = self.is_manual_killswitch();
-        let gate = match self.gate() {
-            Gate::Open => "open",
-            Gate::Pending => "pending",
-            Gate::Blocked => "blocked",
-        }
-        .to_string();
-        let mut pending_providers = Vec::new();
-        let mut blocked_providers = Vec::new();
-        for (pid, tx) in &self.provider_gates {
-            let g = if manual_killswitch {
-                Gate::Blocked
-            } else {
-                *tx.borrow()
-            };
-            match g {
-                Gate::Pending => pending_providers.push(pid.as_str().to_string()),
-                Gate::Blocked => blocked_providers.push(pid.as_str().to_string()),
-                Gate::Open => {}
-            }
-        }
-        pending_providers.sort();
-        blocked_providers.sort();
-        let has_active_risk_alert = self
-            .env
-            .get()
-            .and_then(|env| env.hold_queue.current_alert())
-            .is_some_and(|a| {
-                !a.is_simulation
-                    && (a.phase == crate::proxy::hold_queue::PHASE_READY
-                        || a.phase == crate::proxy::hold_queue::PHASE_FAILED)
-            });
-        GuardPauseStatus {
-            paused: mode != PauseMode::None,
-            mode,
-            gate,
-            gate_reason: self.gate_reason(),
-            manual_killswitch,
-            pending_providers,
-            blocked_providers,
-            has_active_risk_alert,
-        }
-    }
-
-    pub(super) fn emit_pause_status(&self) {
-        if let Some(env) = self.env.get() {
-            let status = self.pause_status();
-            env.io.tray_guard_status(&status);
-            env.emit("guard://pause-status-changed", &status);
-        }
-    }
-
     pub fn subscribe(&self) -> watch::Receiver<Gate> {
         self.gate_tx.subscribe()
     }
@@ -255,58 +197,66 @@ impl NetworkGuard {
             g.last_route_fp = Some(fp);
             return false;
         }
-        if let Some(ref old_fp) = g.last_route_fp {
-            if fp != *old_fp {
-                g.last_route_fp = Some(fp.clone());
-                g.last_fp_change_at = Some(Instant::now());
-                if let Some(abort) = g.verify_abort.take() {
-                    abort.abort();
-                }
-                g.verify_ip = None;
-                let settling_pause = !self.is_manual_killswitch()
-                    && g.pending_pause_ip_bind
-                    && *self.pause_mode.lock().unwrap_or_else(|p| p.into_inner())
-                        == PauseMode::UntilNetworkChange;
-                if settling_pause {
-                    // User paused during `detecting` while the route is still settling:
-                    // adopt the updated fingerprint and keep traffic blocked without clearing pause.
-                    g.route_dirty = true;
-                    g.paused_route_fp = Some(fp);
-                    drop(g);
-                    self.abort_active_tunnels();
-                    return false;
-                }
-                let in_flight = g.probe_in_flight
-                    || (self.any_provider_gate_pending() && g.audit_abort.is_some());
-                if in_flight {
-                    g.deferred_recheck_fp = Some(fp.clone());
-                } else {
-                    if !g.route_dirty {
-                        g.dirty_since = Some(Instant::now());
-                    }
-                    g.route_dirty = true;
-                }
-                let mut pause_active = false;
-                if !self.is_manual_killswitch() {
-                    let pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
-                    pause_active = *pm == PauseMode::UntilNetworkChange;
-                }
-                if pause_active {
-                    // Keep PauseMode::UntilNetworkChange active while verifying the new network
-                    // silently in the background; update paused_route_fp and keep blocked
-                    // providers Gate::Blocked.
-                    g.paused_route_fp = Some(fp);
-                } else {
-                    g.paused_ip = None;
-                    g.pending_pause_ip_bind = false;
-                    g.paused_route_fp = None;
-                }
-                drop(g);
-                self.freeze_open_gates_pending();
-                self.abort_active_tunnels();
-                return !in_flight;
+        if let Some(ref old_fp) = g.last_route_fp.clone()
+            && fp != *old_fp
+        {
+            diag::record_fp_change(old_fp, &fp);
+            let default_moved =
+                default_udp_route_changed(old_fp, &fp) || is_default_udp_route_dropped(&fp);
+            g.last_route_fp = Some(fp.clone());
+            g.last_fp_change_at = Some(Instant::now());
+            if let Some(abort) = g.verify_abort.take() {
+                abort.abort();
             }
-        } else {
+            g.verify_ip = None;
+            let settling_pause = !self.is_manual_killswitch()
+                && g.pending_pause_ip_bind
+                && *self.pause_mode.lock().unwrap_or_else(|p| p.into_inner())
+                    == PauseMode::UntilNetworkChange;
+            if settling_pause {
+                // User paused during `detecting` while the route is still settling:
+                // adopt the updated fingerprint and keep traffic blocked without clearing pause
+                // or repeatedly aborting tunnels.
+                g.route_dirty = true;
+                g.paused_route_fp = Some(fp);
+                return false;
+            }
+            let in_flight =
+                g.probe_in_flight || (self.any_provider_gate_pending() && g.audit_abort.is_some());
+            if in_flight {
+                g.deferred_recheck_fp = Some(fp.clone());
+            } else {
+                if !g.route_dirty {
+                    g.dirty_since = Some(Instant::now());
+                }
+                g.route_dirty = true;
+                if default_moved {
+                    g.default_route_moved = true;
+                }
+            }
+            let mut pause_active = false;
+            if !self.is_manual_killswitch() {
+                let pm = self.pause_mode.lock().unwrap_or_else(|p| p.into_inner());
+                pause_active = *pm == PauseMode::UntilNetworkChange;
+            }
+            if pause_active {
+                // Keep PauseMode::UntilNetworkChange active while verifying the new network
+                // silently in the background; update paused_route_fp and keep blocked
+                // providers Gate::Blocked.
+                g.paused_route_fp = Some(fp);
+            } else {
+                g.paused_ip = None;
+                g.pending_pause_ip_bind = false;
+                g.paused_route_fp = None;
+            }
+            drop(g);
+            self.freeze_open_gates_pending();
+            if default_moved {
+                diag::record_tunnel_abort("sync_default_route_moved");
+                self.abort_active_tunnels();
+            }
+            return !in_flight;
+        } else if g.last_route_fp.is_none() {
             g.last_route_fp = Some(fp);
         }
         false

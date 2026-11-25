@@ -94,12 +94,12 @@ pub fn evaluate_dns_country_for_route_with_protection(
                 .with_sources(&u.sources);
             }
             return CheckResult::unknown(
-                u.code,
+                "DNS_COUNTRY_UNMEASURED",
                 format!(
-                    "Согласованность страны DNS и выходного узла не проверена: {}.",
+                    "Согласованность страны DNS и выходного узла неприменима: {}.",
                     u.detail
                 ),
-                u.reason,
+                UnknownReason::NotApplicable,
             )
             .with_sources(&u.sources);
         }
@@ -143,7 +143,7 @@ pub fn evaluate_dns_country_for_route_with_protection(
         }
         if zastava_isolated && country == "RU" {
             return CheckResult::ok(
-                "DNS_KEY_REMOTE_RESOLVE",
+                "DNS_COUNTRY_KEY_ISOLATED",
                 format!(
                     "Обычные non-AI сайты в стандартном браузере по-прежнему используют DNS ОС ({ip}, {country}), а трафик к AI-провайдерам резолвится удалённо через ВПН Заставы ({exit}) по TCP CONNECT."
                 ),

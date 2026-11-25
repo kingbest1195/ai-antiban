@@ -95,6 +95,10 @@ pub(crate) struct TrayView {
     pub stats_text: Option<String>,
     pub header: Option<(String, TrayColor)>,
     pub killswitch: Option<(&'static str, TrayColor)>,
+    /// `Some(true)` when the active icon/title comes from a Green/Yellow `RiskReport`.
+    /// Cleared (`Some(false)`) by Red/Gray/Checking/NoData/ProtectionOff so `from_guard_status`
+    /// only emits bare `" Защита"` when recovering from non-report states.
+    pub report_backed: Option<bool>,
 }
 
 impl TrayView {
@@ -107,9 +111,9 @@ impl TrayView {
         has_blocked: bool,
         protected: u64,
         leaks: u64,
+        incomplete: bool,
         unknown_count: u8,
     ) -> Self {
-        let incomplete = unknown_count > 0;
         let (color, title, header_suffix) = if has_blocked {
             (TrayColor::Red, STOP_TITLE.to_string(), "СТОП СЕТИ")
         } else {
@@ -147,11 +151,12 @@ impl TrayView {
         } else {
             (KS_FREEZE_TEXT, TrayColor::Red)
         };
-        let unfinished = if incomplete {
+        let unfinished = if incomplete && unknown_count > 0 {
             format!(" · {}", unfinished_checks_text(unknown_count))
         } else {
             String::new()
         };
+        let report_backed = Some(matches!(color, TrayColor::Green | TrayColor::Yellow));
         TrayView {
             icon: Some(color),
             title: Some(title),
@@ -166,6 +171,7 @@ impl TrayView {
                 color,
             )),
             killswitch: Some(killswitch),
+            report_backed,
         }
     }
 
@@ -190,6 +196,7 @@ impl TrayView {
                 tooltip: Some("Застава · СТОП СЕТИ (Ручная блокировка ИИ)".to_string()),
                 header: Some((format!("Застава v{ver} — СТОП СЕТИ"), TrayColor::Red)),
                 killswitch: Some((KS_UNFREEZE_TEXT, TrayColor::Green)),
+                report_backed: Some(false),
                 ..Default::default()
             });
         }
@@ -209,6 +216,7 @@ impl TrayView {
                     TrayColor::Gray,
                 )),
                 killswitch: Some((KS_UNFREEZE_TEXT, TrayColor::Green)),
+                report_backed: Some(false),
                 ..Default::default()
             });
         }
@@ -236,6 +244,7 @@ impl TrayView {
                     TrayColor::Yellow,
                 )),
                 killswitch: Some(ks),
+                report_backed: Some(false),
                 ..Default::default()
             });
         }
@@ -257,6 +266,7 @@ impl TrayView {
                 tooltip: Some(tip),
                 header: Some((format!("Застава v{ver} — СТОП СЕТИ"), TrayColor::Red)),
                 killswitch: Some((KS_UNFREEZE_TEXT, TrayColor::Green)),
+                report_backed: Some(false),
                 ..Default::default()
             });
         }
@@ -271,13 +281,13 @@ impl TrayView {
     pub(crate) fn from_guard_status(
         status: &GuardPauseStatus,
         sysproxy_active: bool,
-        current_icon_is_green: bool,
+        has_active_report_view: bool,
     ) -> Self {
         if let Some(view) = Self::resolve_guard_priority(status, false, sysproxy_active, true) {
             return view;
         }
-        if current_icon_is_green {
-            // Preserve the existing country/pin/IP report while ensuring killswitch state is open.
+        if has_active_report_view {
+            // Preserve the existing active Green/Yellow report (country/pin/warning/IP) while ensuring killswitch is open.
             return TrayView::from_killswitch(false);
         }
         let ver = env!("CARGO_PKG_VERSION");
@@ -287,6 +297,7 @@ impl TrayView {
             tooltip: Some("Застава · Шлюз активен".to_string()),
             header: Some((format!("Застава v{ver} — Шлюз активен"), TrayColor::Green)),
             killswitch: Some((KS_FREEZE_TEXT, TrayColor::Red)),
+            report_backed: Some(false),
             ..Default::default()
         }
     }
@@ -306,6 +317,7 @@ impl TrayView {
                 format!("Застава v{} — {NO_DATA_HEADER}", env!("CARGO_PKG_VERSION")),
                 TrayColor::Yellow,
             )),
+            report_backed: Some(false),
             ..Default::default()
         }
     }
@@ -321,6 +333,7 @@ impl TrayView {
                 format!("Застава v{} — {CHECKING_HEADER}", env!("CARGO_PKG_VERSION")),
                 TrayColor::Yellow,
             )),
+            report_backed: Some(false),
             ..Default::default()
         }
     }
@@ -338,6 +351,7 @@ impl TrayView {
             icon: Some(icon),
             title: Some(title.to_string()),
             tooltip: Some(format!("Застава · {title}")),
+            report_backed: Some(false),
             ..Default::default()
         }
     }
@@ -355,6 +369,7 @@ impl TrayView {
                 ),
                 TrayColor::Gray,
             )),
+            report_backed: Some(false),
             ..Default::default()
         }
     }
@@ -392,6 +407,7 @@ impl TrayView {
         take!(stats_text);
         take!(header);
         take!(killswitch);
+        take!(report_backed);
         self
     }
 }

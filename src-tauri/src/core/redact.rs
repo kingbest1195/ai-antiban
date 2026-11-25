@@ -142,6 +142,115 @@ pub fn redact_sensitive_kv(token: &str, prev_was_bearer: bool) -> String {
     token.to_string()
 }
 
+fn has_hostname_domain_label(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b == b'.' && idx + 1 < bytes.len() {
+            let mut has_alpha = false;
+            let mut j = idx + 1;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-') {
+                if bytes[j].is_ascii_alphabetic() {
+                    has_alpha = true;
+                }
+                j += 1;
+            }
+            if has_alpha
+                && j > idx + 1
+                && (j == bytes.len() || matches!(bytes[j], b'.' | b':' | b'/'))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_preceded_by_numeric_segment(bytes: &[u8], start: usize, sep: u8) -> bool {
+    if start < 2 || bytes[start - 1] != sep || !bytes[start - 2].is_ascii_digit() {
+        return false;
+    }
+    let mut k = start - 2;
+    while k > 0 && bytes[k - 1].is_ascii_digit() {
+        k -= 1;
+    }
+    k == 0 || !bytes[k - 1].is_ascii_alphabetic()
+}
+
+fn parse_embedded_ipv4_at(bytes: &[u8], start: usize, sep: u8) -> Option<usize> {
+    if start > 0 {
+        let prev = bytes[start - 1];
+        if prev.is_ascii_digit()
+            || is_preceded_by_numeric_segment(bytes, start, sep)
+            || ((prev == b'v' || prev == b'V')
+                && (start == 1 || !bytes[start - 2].is_ascii_alphanumeric()))
+        {
+            return None;
+        }
+    }
+    let mut pos = start;
+    for oct in 0..4 {
+        if oct > 0 {
+            if pos >= bytes.len() || bytes[pos] != sep {
+                return None;
+            }
+            pos += 1;
+        }
+        let d_start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() && pos - d_start < 3 {
+            pos += 1;
+        }
+        if pos == d_start || (pos < bytes.len() && bytes[pos].is_ascii_digit()) {
+            return None;
+        }
+        std::str::from_utf8(&bytes[d_start..pos])
+            .ok()?
+            .parse::<u8>()
+            .ok()?;
+    }
+    if pos < bytes.len() {
+        let next = bytes[pos];
+        if next.is_ascii_digit()
+            || (next == sep && pos + 1 < bytes.len() && bytes[pos + 1].is_ascii_digit())
+        {
+            return None;
+        }
+    }
+    if start == 0 && pos == bytes.len() {
+        return None;
+    }
+    Some(pos)
+}
+
+fn mask_embedded_ptr_ipv4(token: &str) -> Option<String> {
+    if !has_hostname_domain_label(token) {
+        return None;
+    }
+    let bytes = token.as_bytes();
+    let mut out = String::with_capacity(token.len());
+    let mut i = 0usize;
+    let mut replaced = false;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            if let Some(end) = parse_embedded_ipv4_at(bytes, i, b'.') {
+                out.push_str(MASKED_IPV4);
+                i = end;
+                replaced = true;
+                continue;
+            }
+            if let Some(end) = parse_embedded_ipv4_at(bytes, i, b'-') {
+                out.push_str("xxx-xxx-xxx-xxx");
+                i = end;
+                replaced = true;
+                continue;
+            }
+        }
+        let ch = token[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    replaced.then_some(out)
+}
+
 /// Masks IPv4/IPv6 addresses, raw proxy URLs, `zastava://` keys, and credential tokens in
 /// diagnostic strings before export.
 pub fn sanitize_diagnostic_text(raw: &str) -> String {
@@ -200,6 +309,9 @@ pub fn sanitize_diagnostic_text(raw: &str) -> String {
             out.push(':');
             out.push_str(&masked);
             out.push_str(trailing_dots);
+        } else if let Some(masked_ptr) = mask_embedded_ptr_ipv4(core) {
+            out.push_str(&masked_ptr);
+            out.push_str(trailing_dots);
         } else {
             out.push_str(&kv_cleaned);
         }
@@ -224,5 +336,38 @@ mod tests {
         assert!(!clean.contains("secret"));
         assert!(!clean.contains("abc123"));
         assert!(clean.contains("socks5://[REDACTED]"));
+    }
+
+    #[test]
+    fn masks_embedded_dot_and_dash_ptr_ipv4_without_false_positives() {
+        let ptr_msg = "PTR-запись выходного IP (64.176.194.110.vultrusercontent.com), \
+                       static.5.101.220.185.clients.your-server.de, \
+                       185-220-101-5.isp.net и ec2-54-12-34-56.compute-1.amazonaws.com; \
+                       версии v2.1.2, v1.2.3.4, Chrome/131.0.0.0, дата 2026-11-25, id 12-34-56-78 и 1.2.3.4.5.example.com.";
+        let clean = sanitize_diagnostic_text(ptr_msg);
+
+        assert!(!clean.contains("64.176.194.110"), "{clean}");
+        assert!(!clean.contains("5.101.220.185"), "{clean}");
+        assert!(!clean.contains("185-220-101-5"), "{clean}");
+        assert!(!clean.contains("54-12-34-56"), "{clean}");
+        assert!(
+            clean.contains("xxx.xxx.xxx.xxx.vultrusercontent.com"),
+            "{clean}"
+        );
+        assert!(
+            clean.contains("static.xxx.xxx.xxx.xxx.clients.your-server.de"),
+            "{clean}"
+        );
+        assert!(clean.contains("xxx-xxx-xxx-xxx.isp.net"), "{clean}");
+        assert!(
+            clean.contains("ec2-xxx-xxx-xxx-xxx.compute-1.amazonaws.com"),
+            "{clean}"
+        );
+        assert!(clean.contains("v2.1.2"), "{clean}");
+        assert!(clean.contains("v1.2.3.4"), "{clean}");
+        assert!(clean.contains("Chrome/131.0.0.0"), "{clean}");
+        assert!(clean.contains("2026-11-25"), "{clean}");
+        assert!(clean.contains("12-34-56-78"), "{clean}");
+        assert!(clean.contains("1.2.3.4.5.example.com"), "{clean}");
     }
 }

@@ -124,7 +124,15 @@ fn a_vpn_client_that_keeps_rewriting_the_pac_does_not_start_a_ping_pong() {
         // The VPN client puts its own PAC back, every pass.
         p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
         let before = p.os_writes();
-        refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(5 * i)).unwrap();
+        let res = refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(5 * i));
+        if i <= HEAL_MAX_REWRITES as u64 {
+            res.unwrap();
+        } else {
+            assert!(
+                res.is_err(),
+                "pass {i}: all physical services suspended must surface explicit Err"
+            );
+        }
         if p.os_writes() > before {
             healed += 1;
         }
@@ -171,7 +179,10 @@ fn rewrites_far_apart_are_not_a_ping_pong_and_a_new_network_resumes_the_heal() {
         refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(i)).unwrap();
     }
     p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
-    refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(10)).unwrap();
+    assert!(
+        refresh_pac(&mut j, &p, PAC, &guard, base + Duration::from_secs(10)).is_err(),
+        "suspended sole physical service must not return silent Ok"
+    );
     assert_eq!(
         p.pac_of(&wifi()).url.as_deref(),
         Some("http://vpn.example/p.pac")
@@ -459,17 +470,21 @@ fn vpn_disconnect_resets_heal_guard_so_physical_pac_heals_again() {
     }
     assert!(guard.is_suspended(&wifi().key()));
 
-    // While the same VPN stays connected, Wi-Fi stays suspended (no ping-pong).
+    // While the same VPN stays connected, Wi-Fi stays suspended (no ping-pong) and returns explicit Err.
     p.seed_pac(&wifi(), pac(None, Some(false)));
-    let rep = refresh_pac(
+    let err = refresh_pac(
         &mut j,
         &p,
         PAC,
         &guard,
         t0 + Duration::from_secs(HEAL_MAX_REWRITES as u64 + 5),
     )
-    .unwrap();
-    assert!(rep.configured.is_empty());
+    .unwrap_err();
+    assert!(
+        err.contains("приостановлена") && err.contains("Wi-Fi"),
+        "{err}"
+    );
+    assert_eq!(p.pac_of(&wifi()), pac(None, Some(false)));
 
     // Once the VPN disconnects, fingerprint changes and Wi-Fi PAC heals immediately.
     p.set_vpn_connection("WireGuard", false);
@@ -660,7 +675,7 @@ fn heal_guard_auto_resets_suspension_after_cooldown() {
         refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(step)).unwrap();
     }
     p.seed_pac(&wifi(), pac(Some("http://vpn.example/p.pac"), Some(true)));
-    refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(10)).unwrap();
+    assert!(refresh_pac(&mut j, &p, PAC, &guard, t0 + Duration::from_secs(10)).is_err());
     assert!(guard.is_suspended_at(&wifi().key(), t0 + Duration::from_secs(10)));
     assert_eq!(
         p.pac_of(&wifi()).url.as_deref(),

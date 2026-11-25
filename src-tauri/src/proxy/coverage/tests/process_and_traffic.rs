@@ -438,3 +438,89 @@ fn stale_confirmation_without_a_readable_fact_is_unknown() {
     assert!(claude.installed);
     assert_eq!(claude.ai_requests, 1);
 }
+
+#[test]
+fn ai_requests_with_known_browser_or_cli_ua_skip_os_process_lookup() {
+    let probe = FakeProbe::answering(LSOF_CLAUDE);
+    let (_, t) = tracker(Arc::clone(&probe));
+
+    let cases = [
+        (
+            51001,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "browsers",
+        ),
+        (
+            51002,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+            "browsers",
+        ),
+        (
+            51003,
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
+            "browsers",
+        ),
+        (
+            51004,
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+            "browsers",
+        ),
+        (51005, "claude-code/1.0.2", "claude-code"),
+        (51006, "gemini-cli/0.4.0", "gemini-cli"),
+        (51007, "opencode/0.2.1", "opencode"),
+        (51008, "python-httpx/0.27.0", "python-cli"),
+        (
+            51009,
+            "Mozilla/5.0 AppleWebKit/537.36 Claude/1.0.0 Chrome/130.0.0.0 Electron/33.0.0 Safari/537.36",
+            "claude-desktop",
+        ),
+        (
+            51010,
+            "Mozilla/5.0 AppleWebKit/537.36 Cursor/0.45.0 Chrome/130.0.0.0 Electron/33.0.0 Safari/537.36",
+            "cursor",
+        ),
+    ];
+
+    for (port, ua, _) in cases {
+        t.record_incoming_blocking(port, Some(ua), TrafficKind::AiRequest);
+    }
+    assert_eq!(
+        probe.count(),
+        0,
+        "OS process lookup must be skipped when User-Agent identifies browser/CLI/IDE"
+    );
+
+    let rig = Rig::new();
+    let snap = t.snapshot(&rig.env(PacSource::Services, false), true);
+    assert_eq!(app(&snap, "browsers").ai_requests, 4);
+    assert_eq!(app(&snap, "claude-code").ai_requests, 1);
+    assert_eq!(app(&snap, "gemini-cli").ai_requests, 1);
+    assert_eq!(app(&snap, "opencode").ai_requests, 1);
+    assert_eq!(app(&snap, "python-cli").ai_requests, 1);
+    assert_eq!(app(&snap, "claude-desktop").ai_requests, 1);
+    assert_eq!(app(&snap, "cursor").ai_requests, 1);
+}
+
+#[test]
+fn pac_fetch_without_known_ua_and_unknown_electron_behave_safely() {
+    let probe = FakeProbe::answering(LSOF_CLAUDE);
+    let (_, t) = tracker(Arc::clone(&probe));
+
+    // Non-AI / system PAC fetch without identifiable UA must not trigger OS process lookup.
+    t.record_incoming_blocking(
+        52001,
+        Some("WinHTTP-Autoproxy-Service/5.1"),
+        TrafficKind::PacFetch,
+    );
+    t.record_incoming_blocking(52002, None, TrafficKind::PacFetch);
+    assert_eq!(probe.count(), 0);
+
+    // Unrecognized Electron UA for AI request still falls back to OS process lookup instead of
+    // misattributing to `browsers`.
+    t.record_incoming_blocking(
+        52003,
+        Some("Mozilla/5.0 Chrome/130.0.0.0 Electron/33.0.0 Safari/537.36"),
+        TrafficKind::AiRequest,
+    );
+    assert_eq!(probe.count(), 1);
+}

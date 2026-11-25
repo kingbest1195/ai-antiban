@@ -21,7 +21,6 @@ pub async fn run_vpn_crash_test_step(
     state: tauri::State<'_, state::AppState>,
 ) -> Result<CrashTestStepResult, String> {
     let proxy_addr = proxy_manager.server.bound_addr;
-    let start = std::time::Instant::now();
 
     let connect_fut = async {
         let mut stream = tokio::net::TcpStream::connect(proxy_addr).await?;
@@ -51,6 +50,7 @@ pub async fn run_vpn_crash_test_step(
         }
     };
 
+    let start = std::time::Instant::now();
     match tokio::time::timeout(Duration::from_millis(800), connect_fut).await {
         Ok(Ok(resp)) => {
             let latency_ms = start.elapsed().as_secs_f64() * 1000.0;

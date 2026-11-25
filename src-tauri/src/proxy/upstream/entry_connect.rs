@@ -96,12 +96,23 @@ async fn handshake_on_tcp(
     }
 }
 
-fn record_route_phase(phase: RoutePhase, entry: &Entry, note: &str) {
+fn record_route_phase(route_id: &str, phase: RoutePhase, entry: &Entry, note: &str) {
     let clean = sanitize_diagnostic_text(note);
-    crate::diagnostics::record(
-        "proxy:route",
+    let status_tag = if note.starts_with("status=") {
+        "ok"
+    } else {
+        "err"
+    };
+    let key = format!(
+        "phase:{route_id}:{}:{}:{}",
+        phase.as_str(),
+        entry.endpoint(),
+        status_tag
+    );
+    super::record_route_diag_throttled(
+        &key,
         &format!(
-            "phase={} proto={} endpoint={} {clean}",
+            "route={route_id} phase={} proto={} endpoint={} {clean}",
             phase.as_str(),
             entry.proto.as_str(),
             entry.endpoint()
@@ -154,6 +165,7 @@ async fn connect_chained_attempt(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn connect_entry_with(
+    route_id: &str,
     entry: &Entry,
     target_host: &str,
     target_port: u16,
@@ -238,14 +250,14 @@ pub(super) async fn connect_entry_with(
                             d = &mut direct_fut => match d {
                                 Ok(stream) => return Ok(stream),
                                 Err(pe) => {
-                                    record_route_phase(pe.phase, entry, &format!("err={}", pe.err));
+                                    record_route_phase(route_id, pe.phase, entry, &format!("err={}", pe.err));
                                     return match chained_fut.await {
                                         Ok(stream) => {
-                                            record_route_phase(RoutePhase::TcpChained, entry, "status=recovered_via_chained");
+                                            record_route_phase(route_id, RoutePhase::TcpChained, entry, "status=recovered_via_chained");
                                             Ok(stream)
                                         }
                                         Err(cpe) => {
-                                            record_route_phase(cpe.phase, entry, &format!("err={}", cpe.err));
+                                            record_route_phase(route_id, cpe.phase, entry, &format!("err={}", cpe.err));
                                             Err(cpe.err)
                                         }
                                     };
@@ -253,13 +265,13 @@ pub(super) async fn connect_entry_with(
                             },
                             c = &mut chained_fut => match c {
                                 Ok(stream) => {
-                                    record_route_phase(RoutePhase::TcpChained, entry, "status=recovered_via_chained");
+                                    record_route_phase(route_id, RoutePhase::TcpChained, entry, "status=recovered_via_chained");
                                     return Ok(stream);
                                 }
                                 Err(cpe) => {
-                                    record_route_phase(cpe.phase, entry, &format!("err={}", cpe.err));
+                                    record_route_phase(route_id, cpe.phase, entry, &format!("err={}", cpe.err));
                                     return direct_fut.await.map_err(|pe| {
-                                        record_route_phase(pe.phase, entry, &format!("err={}", pe.err));
+                                        record_route_phase(route_id, pe.phase, entry, &format!("err={}", pe.err));
                                         pe.err
                                     });
                                 }
@@ -297,7 +309,7 @@ pub(super) async fn connect_entry_with(
     let (direct_phase, direct_err) = match direct_res {
         Ok(stream) => return Ok(stream),
         Err(pe) => {
-            record_route_phase(pe.phase, entry, &format!("err={}", pe.err));
+            record_route_phase(route_id, pe.phase, entry, &format!("err={}", pe.err));
             (pe.phase, pe.err)
         }
     };
@@ -327,7 +339,12 @@ pub(super) async fn connect_entry_with(
                 entry.proto.as_str()
             ),
         );
-        record_route_phase(RoutePhase::TcpChained, entry, &format!("err={err}"));
+        record_route_phase(
+            route_id,
+            RoutePhase::TcpChained,
+            entry,
+            &format!("err={err}"),
+        );
         return Err(err);
     }
 
@@ -335,6 +352,7 @@ pub(super) async fn connect_entry_with(
     {
         Ok(stream) => {
             record_route_phase(
+                route_id,
                 RoutePhase::TcpChained,
                 entry,
                 "status=recovered_via_chained",
@@ -342,7 +360,7 @@ pub(super) async fn connect_entry_with(
             Ok(stream)
         }
         Err(pe) => {
-            record_route_phase(pe.phase, entry, &format!("err={}", pe.err));
+            record_route_phase(route_id, pe.phase, entry, &format!("err={}", pe.err));
             Err(pe.err)
         }
     }

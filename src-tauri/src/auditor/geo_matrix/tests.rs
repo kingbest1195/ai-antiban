@@ -304,6 +304,9 @@ fn test_gemini_full_domain_coverage_and_subdomains() {
         "accounts.google.com",
         "oauth2.googleapis.com",
         "iamcredentials.googleapis.com",
+        "jnn-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "apis.google.com",
     ] {
         assert_eq!(
             ProviderId::from_host(host),
@@ -320,11 +323,8 @@ fn test_gemini_full_domain_coverage_and_subdomains() {
         "www.google.com",
         "play.google.com",
         "ogs.google.com",
-        "apis.google.com",
         "footprints-pa.googleapis.com",
         "people-pa.googleapis.com",
-        "signaler-pa.googleapis.com",
-        "jnn-pa.googleapis.com",
         "myactivity.google.com",
         "myaccount.google.com",
     ] {
@@ -476,4 +476,133 @@ fn test_payment_and_kyc_host_matching() {
             "did not expect payment/kyc match for {non_payment}"
         );
     }
+}
+
+#[test]
+fn test_v3_2_1_expanded_ai_and_payment_kyc_domains() {
+    for host in [
+        "clau.de",
+        "cursorapi.com",
+        "statsigapi.net",
+        "featuregates.org",
+        "ingest.sentry.io",
+        "ingest.us.sentry.io",
+        "ingest.de.sentry.io",
+        "api.segment.io",
+        "api-iam.intercom.io",
+        "workos.com",
+        "authkit.com",
+    ] {
+        assert_eq!(
+            ProviderId::from_host(host),
+            Some(ProviderId::Anthropic),
+            "{host}"
+        );
+    }
+    for host in [
+        "sora.com",
+        "featureassets.org",
+        "prodregistryv2.org",
+        "livekit.cloud",
+        "exafunction.com",
+    ] {
+        assert_eq!(
+            ProviderId::from_host(host),
+            Some(ProviderId::Openai),
+            "{host}"
+        );
+    }
+    for host in [
+        "jnn-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "apis.google.com",
+        "autopush-cloudcode-pa.googleapis.com",
+        "geller-pa.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "serviceusage.googleapis.com",
+        "daily-antigravity.sandbox.googleapis.com",
+        "antigravity-unleash.goog",
+        "stitch.withgoogle.com",
+        "firebase.studio",
+    ] {
+        assert_eq!(
+            ProviderId::from_host(host),
+            Some(ProviderId::Gemini),
+            "{host}"
+        );
+    }
+    for host in [
+        "paddle.com",
+        "vendors.paddle.com",
+        "stripe.network",
+        "stripecdn.com",
+        "funcaptcha.com",
+        "recaptcha.net",
+        "lemonsqueezy.com",
+        "veriff.com",
+        "veriff.me",
+        "sumsub.com",
+        "onfido.com",
+    ] {
+        assert!(
+            is_payment_or_kyc_host(host),
+            "expected payment/kyc match for {host}"
+        );
+    }
+}
+
+#[test]
+fn runtime_provider_matrix_snapshot_updates_from_host_and_payment_lookup() {
+    use crate::auditor::rules::{
+        RUNTIME_MATRIX_TEST_LOCK, clear_runtime_provider_matrix_for_test,
+        publish_runtime_provider_matrix,
+    };
+    use std::sync::Arc;
+
+    struct RestoreGuard;
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            if let Ok(bundled) = ProviderMatrix::load_bundled() {
+                publish_runtime_provider_matrix(Arc::new(bundled));
+            } else {
+                clear_runtime_provider_matrix_for_test();
+            }
+        }
+    }
+
+    let _lock = RUNTIME_MATRIX_TEST_LOCK.blocking_lock();
+    let _restore = RestoreGuard;
+
+    // Uninitialized snapshot safely falls back to compile-time slices.
+    clear_runtime_provider_matrix_for_test();
+    assert_eq!(
+        ProviderId::from_host("claude.ai"),
+        Some(ProviderId::Anthropic)
+    );
+    assert!(is_payment_or_kyc_host("checkout.stripe.com"));
+    assert_eq!(ProviderId::from_host("dynamic-claude-edge.example"), None);
+    assert!(!is_payment_or_kyc_host("dynamic-pay-edge.example"));
+
+    // Publishing a live ProviderMatrix snapshot immediately updates both lookups.
+    let mut matrix = ProviderMatrix::load_bundled().unwrap();
+    matrix
+        .providers
+        .get_mut("anthropic")
+        .unwrap()
+        .domains
+        .push("dynamic-claude-edge.example".to_string());
+    matrix
+        .payment_kyc_domains
+        .push("dynamic-pay-edge.example".to_string());
+    publish_runtime_provider_matrix(Arc::new(matrix));
+
+    assert_eq!(
+        ProviderId::from_host("sub.dynamic-claude-edge.example"),
+        Some(ProviderId::Anthropic)
+    );
+    assert!(is_payment_or_kyc_host("checkout.dynamic-pay-edge.example"));
+    assert_eq!(
+        ProviderId::from_host("canary-test.anthropic.zastava.local"),
+        Some(ProviderId::Anthropic)
+    );
 }

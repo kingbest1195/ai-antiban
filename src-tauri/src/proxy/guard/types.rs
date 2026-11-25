@@ -17,8 +17,8 @@ use crate::auditor::{Auditor, NetworkTelemetry, RiskReport};
 use crate::proxy::hold_queue::HoldQueue;
 use crate::state::AppState;
 
-/// Fast kernel routing / interface / DNS table check interval (< 200ms reaction on VPN disconnect).
-pub const ROUTE_CHECK_INTERVAL_MS: u64 = 150;
+/// Fast kernel routing / interface / DNS table check interval (250ms cadence).
+pub const ROUTE_CHECK_INTERVAL_MS: u64 = 250;
 /// Remote IP probe interval when route fingerprint has not changed.
 pub const PROBE_INTERVAL_MS: u64 = 1000;
 /// Minimum gap between two remote HTTP probes.
@@ -261,6 +261,12 @@ pub(super) struct Inner {
     pub(super) pending_pause_ip_bind: bool,
     /// Route fingerprint active when `pending_pause_ip_bind` was armed.
     pub(super) paused_route_fp: Option<String>,
+    /// Consecutive failed regular IP probes while default UDP route was unchanged.
+    pub(super) consecutive_probe_failures: u32,
+    /// True when the pending `route_dirty` / `ProbeChanged` transition saw a default UDP route move/drop.
+    pub(super) default_route_moved: bool,
+    /// Alert id for which `show_alert_popup` was already triggered (prevents duplicate shows).
+    pub(super) popup_shown_alert_id: Option<String>,
     /// Monotonic pause epoch bumped whenever pause/manual killswitch is engaged.
     pub(super) pause_epoch: u64,
 }
@@ -281,6 +287,7 @@ impl Inner {
             abort.abort();
         }
         self.verify_ip = None;
+        self.popup_shown_alert_id = None;
         self.pending.take()
     }
 
@@ -296,6 +303,7 @@ impl Inner {
             abort.abort();
         }
         self.verify_ip = None;
+        self.popup_shown_alert_id = None;
         self.pending.take()
     }
 

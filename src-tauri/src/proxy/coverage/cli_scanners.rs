@@ -12,6 +12,7 @@ fn agent_settings_path(ctx: &FileCtx, id: &str) -> Option<PathBuf> {
     match id {
         "claude-code" => Some(ctx.claude_settings()),
         "gemini-cli" => Some(ctx.gemini_settings()),
+        "codex-cli" => Some(ctx.home.join(".codex").join("settings.json")),
         _ => None,
     }
 }
@@ -110,7 +111,7 @@ pub(super) fn cli_fact(
 }
 
 fn agent_settings_path_known(id: &str) -> bool {
-    matches!(id, "claude-code" | "gemini-cli")
+    matches!(id, "claude-code" | "gemini-cli" | "codex-cli")
 }
 
 /// Checks whether an application is installed on this machine (real home).
@@ -177,6 +178,7 @@ pub(crate) fn check_app_installed_in(id: &str, ctx: &FileCtx) -> bool {
         }
         "claude-code" => ex(&ctx.home.join(".claude")),
         "gemini-cli" => ex(&ctx.home.join(".gemini")),
+        "codex-cli" => ex(&ctx.home.join(".codex")),
         "opencode" => {
             ex(&ctx.home.join(".config").join("opencode"))
                 || ex(&ctx.home.join(".opencode").join("bin").join("opencode"))

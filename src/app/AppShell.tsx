@@ -237,12 +237,18 @@ export function AppShell() {
                 )}
                 {payload.network_change?.new_country === "RU"
                   ? copy.intercept.ruText
-                  : copy.intercept.ipText(
-                      formatIp(payload.report?.telemetry?.ip, hideIpMode),
-                      formatCountryWithCode(payload.report?.telemetry?.country_code) ||
-                        payload.report?.telemetry?.country_code ||
-                        "--",
-                    )}
+                  : payload.phase === "detecting" ||
+                      !payload.report?.telemetry?.ip ||
+                      payload.report.telemetry.ip === "--"
+                    ? copy.intercept.detectingIpText
+                    : copy.intercept.ipText(
+                        formatIp(payload.report.telemetry.ip, hideIpMode),
+                        formatCountryWithCode(payload.report.telemetry.country_code) ||
+                          (payload.report.telemetry.country_code &&
+                          payload.report.telemetry.country_code !== "--"
+                            ? payload.report.telemetry.country_code
+                            : ""),
+                      )}
               </>
             )}
           </Banner>

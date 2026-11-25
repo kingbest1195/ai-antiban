@@ -319,8 +319,6 @@ async fn sec7_8_rdns_and_external_list_unknown_cooldown_and_pac_domain_trim() {
         "www.google.com",
         "play.google.com",
         "ogs.google.com",
-        "apis.google.com",
-        "jnn-pa.googleapis.com",
         "myaccount.google.com",
     ] {
         assert_eq!(ProviderId::from_host(noisy), None);
@@ -333,6 +331,9 @@ async fn sec7_8_rdns_and_external_list_unknown_cooldown_and_pac_domain_trim() {
         "alkalimakersuite-pa.clients6.google.com",
         "accounts.google.com",
         "oauth2.googleapis.com",
+        "apis.google.com",
+        "jnn-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
     ] {
         assert_eq!(ProviderId::from_host(kept), Some(ProviderId::Gemini));
         assert!(

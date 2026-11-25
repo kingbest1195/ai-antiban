@@ -30,26 +30,22 @@ import {
   applyProgress,
   dataAge,
   emptyPartial,
+  fetchMissingProviderReports,
   invalidateStaleReports,
   isValidGatewayLatency,
   mergeProviderReport,
+  needsStartupSelfHeal,
+  pickActiveReport,
   shouldInvalidateOnPauseStatus,
+  shouldRefreshOnFocus,
   shouldSuppressSelfHeal,
 } from "./gatewayReports";
 import type { ShowToast } from "./useToasts";
 import { pickWorstReport } from "../../features/checks/checksModel";
 
 export {
-  CHECK_SLOTS,
-  FOCUS_REFRESH_MS,
-  STALE_REPORT_MS,
-  applyProgress,
-  dataAge,
-  emptyPartial,
-  invalidateStaleReports,
-  mergeProviderReport,
-  shouldInvalidateOnPauseStatus,
-  shouldSuppressSelfHeal,
+  CHECK_SLOTS, FOCUS_REFRESH_MS, STALE_REPORT_MS, applyProgress, dataAge, emptyPartial,
+  invalidateStaleReports, mergeProviderReport, shouldInvalidateOnPauseStatus, shouldSuppressSelfHeal,
 };
 
 interface Options {
@@ -352,65 +348,45 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const disabledSet = useMemo(
-    () => new Set((state?.disabled_providers ?? []).map((p) => p.toLowerCase())),
-    [state?.disabled_providers],
-  );
-  const activeReport =
-    (!disabledSet.has("anthropic") && reports.anthropic) ||
-    (!disabledSet.has("openai") && reports.openai) ||
-    (!disabledSet.has("gemini") && reports.gemini) ||
-    reports.anthropic ||
-    reports.openai ||
-    reports.gemini ||
-    null;
+  const activeReport = useMemo(() => pickActiveReport(reports, state?.disabled_providers), [reports, state?.disabled_providers]);
   /** Худший из трёх отчётов: его показывает «Проверки» без выбранного сервиса, по нему считается бейдж вкладки. */
-  const checksReport = useMemo(
-    () => pickWorstReport(reports, state?.disabled_providers)?.report ?? null,
-    [reports, state?.disabled_providers],
-  );
+  const checksReport = useMemo(() => pickWorstReport(reports, state?.disabled_providers)?.report ?? null, [reports, state?.disabled_providers]);
 
   const guardSuppressedRef = useRef(false);
   guardSuppressedRef.current = shouldSuppressSelfHeal(guardPauseStatus);
+  const selfHealPlan = useMemo(() => needsStartupSelfHeal(activeReport, reports, state?.disabled_providers), [activeReport, reports, state?.disabled_providers]);
+  const missingProvidersRef = useRef<ProviderId[]>([]);
+  missingProvidersRef.current = selfHealPlan.missingProviders;
+  const missingProvidersKey = selfHealPlan.missingProviders.join(",");
 
-  // Самолечение на старте: если первый аудит упёрся в холодный старт сети/PAC и вернулся без IP или провайдера,
-  // перепроверяем сами, до шести раз с шагом 1,5 с. При pending/paused шлюзе не запускаем.
-  useEffect(() => {
-    if (shouldSuppressSelfHeal(guardPauseStatus)) {
-      return;
-    }
-
-    const missingIp = !activeReport || !activeReport.telemetry?.ip || activeReport.telemetry.ip === "--";
-    const missingProvider =
-      activeReport &&
-      !activeReport.telemetry?.asn &&
-      !activeReport.telemetry?.isp &&
-      !activeReport.telemetry?.org;
-
-    if (!missingIp && !missingProvider) {
-      return;
-    }
-
-    let attempts = 0;
-    const maxAttempts = 6;
-    const timer = setInterval(() => {
-      // Пока идёт аудит или шлюз в pending/paused, новый не запускаем.
-      if (inFlight.current > 0 || guardSuppressedRef.current) return;
-      attempts += 1;
-      if (attempts > maxAttempts) {
-        clearInterval(timer);
-        return;
+  const refreshMissingProviders = useCallback(async (providers: ProviderId[]) => {
+    if (providers.length === 0) return;
+    inFlight.current += 1;
+    setRefreshing(true);
+    try {
+      const updates = await fetchMissingProviderReports(providers, auditConnection);
+      if (updates.length > 0) {
+        setReports((prev) => updates.reduce((acc, [id, rep]) => mergeProviderReport(acc, id, rep), prev));
       }
-      runFullAudit(true, true);
-    }, 1500);
+    } finally {
+      inFlight.current -= 1;
+      if (inFlight.current <= 0) setRefreshing(false);
+    }
+  }, []);
 
+  // Самолечение на старте: добираем IP/провайдера И недостающие отчёты любых включённых провайдеров.
+  useEffect(() => {
+    if (shouldSuppressSelfHeal(guardPauseStatus) || !selfHealPlan.needed) return;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      if (inFlight.current > 0 || guardSuppressedRef.current) return;
+      if (++attempts > 6) { clearInterval(timer); return; }
+      if (selfHealPlan.missingIpOrProvider) void runFullAudit(true, true);
+      else void refreshMissingProviders(missingProvidersRef.current);
+    }, 1500);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    activeReport?.telemetry?.ip, activeReport?.telemetry?.asn,
-    activeReport?.telemetry?.isp, activeReport?.telemetry?.org,
-    guardPauseStatus?.gate, guardPauseStatus?.paused,
-  ]);
+  }, [selfHealPlan.needed, selfHealPlan.missingIpOrProvider, missingProvidersKey, guardPauseStatus?.gate, guardPauseStatus?.paused]);
 
   // Раз в 30 секунд пересчитываем возраст отчёта.
   useEffect(() => {
@@ -447,16 +423,23 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
     };
   }, []);
 
-  // Возврат фокуса/видимости окна: перепроверяем, если с последнего отчёта прошло > 3 минут.
+  // Возврат фокуса/видимости окна: перепроверяем, если прошло > 3 минут или у включённого провайдера нет отчёта.
   const runFullAuditRef = useRef(runFullAudit);
   runFullAuditRef.current = runFullAudit;
+  const refreshMissingRef = useRef(refreshMissingProviders);
+  refreshMissingRef.current = refreshMissingProviders;
   useEffect(() => {
     const maybeRefresh = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       if (inFlight.current > 0) return;
       const last = reportAtRef.current;
-      if (last == null || Date.now() - last <= FOCUS_REFRESH_MS) return;
-      void runFullAuditRef.current(false, true);
+      const missing = missingProvidersRef.current;
+      if (!shouldRefreshOnFocus(last, Date.now(), missing.length > 0)) return;
+      if (last == null || Date.now() - last > FOCUS_REFRESH_MS) {
+        void runFullAuditRef.current(false, true);
+      } else {
+        void refreshMissingRef.current(missing);
+      }
     };
     const onVisibility = () => {
       if (document.visibilityState === "visible") maybeRefresh();

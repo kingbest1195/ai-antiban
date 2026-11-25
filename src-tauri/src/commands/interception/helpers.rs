@@ -98,7 +98,7 @@ async fn expand_risky_block_targets(
             continue;
         }
         let is_risky = match auditor::ProviderId::from_id(p) {
-            Some(pid) => match auditor.evaluate_all(pid, state, false).await {
+            Some(pid) => match Box::pin(auditor.evaluate_all(pid, state, false)).await {
                 Ok(r) => !proxy::guard::report_allowed_for_state(&r, &st, false),
                 Err(_) => true,
             },
@@ -369,16 +369,18 @@ pub(crate) async fn resolve_interception_core_with(
     state: &state::AppState,
     auditor: &auditor::Auditor,
 ) -> Result<ResolveInterceptionOutcome, proxy::AllowError> {
-    resolve_interception_with_params(ResolveInterceptionParams {
-        id,
-        action,
-        provider,
-        scope,
-        persist_exception,
-        proxy_manager,
-        state,
-        auditor,
-    })
+    Box::pin(resolve_interception_with_params(
+        ResolveInterceptionParams {
+            id,
+            action,
+            provider,
+            scope,
+            persist_exception,
+            proxy_manager,
+            state,
+            auditor,
+        },
+    ))
     .await
 }
 

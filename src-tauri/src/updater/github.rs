@@ -225,6 +225,7 @@ pub(super) fn latest_release_url() -> String {
 /// [`CURRENT_VERSION`] (newest-first, up to 8 entries) that include a `latest.json` asset.
 pub async fn list_rollback_versions() -> Result<Vec<RollbackReleaseInfo>, UpdateFailure> {
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(ROLLBACK_HTTP_TIMEOUT)
         .build()
         .map_err(|_| UpdateFailure::Network)?;

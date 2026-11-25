@@ -29,7 +29,8 @@ async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
     assert_eq!(detected["network_change"]["old_country"], "DE");
     assert_eq!(detected["network_change"]["new_ip"], "9.9.9.9");
     assert!(detected["network_change"]["new_country"].is_null());
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    // Popup is deferred during `phase == "detecting"` until `ready` (or held CONNECT > 1200ms).
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
     assert_eq!(
         h.env.hold_queue.current_alert().expect("snapshot").phase,
         "detecting"
@@ -49,8 +50,8 @@ async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
     assert_eq!(h.io.count("interceptor://enriched"), 0);
     assert_eq!(h.io.count("network://changed"), 0);
 
-    // Once the 2 s audit lands with Critical risk, enriched (phase = ready) and
-    // network://changed are emitted.
+    // Once the 2 s audit lands with Critical risk, enriched (phase = ready), popup show,
+    // and network://changed are emitted.
     let (enriched, enriched_at) =
         h.io.wait_for("interceptor://enriched", 4000)
             .await
@@ -59,6 +60,7 @@ async fn test_window_shown_before_slow_audit_and_events_are_ordered() {
     assert_eq!(enriched["phase"], "ready");
     assert_eq!(enriched["network_change"]["new_country"], "NL");
     assert!(enriched["report"].is_object());
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
 
     let changed =
         h.io.wait_for("network://changed", 1000)

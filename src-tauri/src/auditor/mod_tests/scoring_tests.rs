@@ -188,7 +188,7 @@ fn bug3_via_zastava_key_dns_scoring_respects_all_preconditions() {
     );
     let country_ok = evaluate_dns_country_for_route_with_protection(&ru_view, "NL", true, healthy);
     assert_eq!(dns_ok.code, "DNS_KEY_REMOTE_RESOLVE");
-    assert_eq!(country_ok.code, "DNS_KEY_REMOTE_RESOLVE");
+    assert_eq!(country_ok.code, "DNS_COUNTRY_KEY_ISOLATED");
 
     let verdict_ok = score_checks(&all_checks(&[(6, dns_ok), (10, country_ok)]), false);
     assert_eq!(verdict_ok.overall_status, OverallStatus::Green);

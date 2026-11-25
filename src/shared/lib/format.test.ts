@@ -21,6 +21,32 @@ describe("formatIp и maskIpsInText: режим скрытия IP для скр�
     );
     expect(maskIpsInText("IP 10.0.0.1", false)).toBe("IP 10.0.0.1");
   });
+
+  it("маскирует dot- и dash-разделённые IPv4 внутри PTR-хостов без ложных срабатываний на даты и версии", () => {
+    const ptrText =
+      "PTR (64.176.194.110.vultrusercontent.com), static.5.101.220.185.clients.your-server.de, " +
+      "185-220-101-5.isp.net, ip64-176-194-110.isp.net и ec2-54-12-34-56.compute-1.amazonaws.com; " +
+      "версии v2.1.2, v1.2.3.4, v1-2-3-4.example.com, Chrome/131.0.0.0, дата 2026-11-25, id 12-34-56-78 и 1.2.3.4.5.example.com.";
+    const masked = maskIpsInText(ptrText, true);
+
+    expect(masked).not.toContain("64.176.194.110");
+    expect(masked).not.toContain("5.101.220.185");
+    expect(masked).not.toContain("185-220-101-5");
+    expect(masked).not.toContain("64-176-194-110");
+    expect(masked).not.toContain("54-12-34-56");
+    expect(masked).toContain("•••.•••.•••.110.vultrusercontent.com");
+    expect(masked).toContain("static.•••.•••.•••.185.clients.your-server.de");
+    expect(masked).toContain("•••-•••-•••-5.isp.net");
+    expect(masked).toContain("ip•••-•••-•••-110.isp.net");
+    expect(masked).toContain("ec2-•••-•••-•••-56.compute-1.amazonaws.com");
+    expect(masked).toContain("v2.1.2");
+    expect(masked).toContain("v1.2.3.4");
+    expect(masked).toContain("v1-2-3-4.example.com");
+    expect(masked).toContain("Chrome/131.0.0.0");
+    expect(masked).toContain("2026-11-25");
+    expect(masked).toContain("12-34-56-78");
+    expect(masked).toContain("1.2.3.4.5.example.com");
+  });
 });
 
 describe("resolvePinnedIp: попровайдерный и глобальный пин", () => {

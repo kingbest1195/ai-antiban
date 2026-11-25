@@ -216,13 +216,29 @@ impl Journal {
                         }
                         Err(_) => return Outcome::Failed("read"),
                     }
-                    match write_value(
-                        &*self.fs,
-                        platform,
-                        &*self.policy_store,
-                        res,
-                        &entry.baseline,
-                    ) {
+                    let journal_proxy_server = self
+                        .entry(&Resource::Inet {
+                            name: "ProxyServer".to_string(),
+                        })
+                        .and_then(|e| match &e.baseline {
+                            super::entry::Value::Reg(Some(r)) => Some(r),
+                            _ => None,
+                        });
+                    let target_value =
+                        if crate::sysproxy::windows::should_fallback_dead_loopback_proxy_enable(
+                            platform,
+                            res,
+                            &entry.baseline,
+                            journal_proxy_server,
+                        ) {
+                            super::entry::Value::Reg(Some(
+                                crate::sysproxy::platform::RegValue::dword(0),
+                            ))
+                        } else {
+                            entry.baseline.clone()
+                        };
+                    match write_value(&*self.fs, platform, &*self.policy_store, res, &target_value)
+                    {
                         Ok(Notified::Yes) => Outcome::Restored,
                         Ok(Notified::Failed) => {
                             // The baseline is back; keep the record so the notification is retried.

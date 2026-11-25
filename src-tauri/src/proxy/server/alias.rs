@@ -20,7 +20,7 @@ use super::responses::{
     KILLSWITCH_MESSAGE, is_peer_gone, killswitch_engaged, killswitch_stopped, send_bad_gateway,
     send_canary_intercepted, send_forbidden, send_routing_changed, send_status,
 };
-use super::tunnel::pump;
+use super::tunnel_relay::pump;
 use super::{
     PLAIN_HTTP_IDLE_TIMEOUT_SECS, ProxyServer, ROUTE_ENTRY_TIMEOUT_SECS, TunnelPolicy,
     UPSTREAM_CONNECT_TIMEOUT_SECS, wait_optional_stop,
@@ -68,7 +68,9 @@ impl ProxyServer {
             return Ok(());
         }
 
-        let provider = provider_opt.unwrap_or(ProviderId::Anthropic);
+        let provider = provider_opt
+            .or(self.alias_provider)
+            .unwrap_or(ProviderId::Anthropic);
         let mut routing_rx = self.state.subscribe_routing();
         let mut stop_rx = self.alias_stop_rx.clone();
         let selection = match self.resolve_alias_selection().await {
@@ -166,7 +168,7 @@ impl ProxyServer {
                         &mut target,
                         &self.guard,
                         TunnelPolicy::FollowGate,
-                        provider_opt,
+                        provider_opt.or(self.alias_provider),
                         None,
                     ) => res,
                     _ = wait_optional_stop(&mut stop_rx) => {
@@ -261,7 +263,8 @@ impl ProxyServer {
             }
             RouteSelection::Direct => {
                 self.guard.ensure_fresh().await;
-                if self.guard.gate_for(ProviderId::Anthropic) != Gate::Open {
+                let direct_provider = self.alias_provider.unwrap_or(ProviderId::Anthropic);
+                if self.guard.gate_for(direct_provider) != Gate::Open {
                     return send_forbidden(
                         client,
                         "Alias direct gate is closed by Zastava Network Guard.",
@@ -343,7 +346,7 @@ impl ProxyServer {
             .and_then(|r| r)
             .map(UpstreamStream::Plain)
         } else {
-            self.connect_transit_with_port(host, port, self.main_gateway_port())
+            self.connect_ai_transit_with_port(host, port, self.main_gateway_port())
                 .await
         }
     }
@@ -360,7 +363,7 @@ async fn alias_route_is_stale(state: &crate::state::AppState, expected: &Route) 
     let Some(current) = state.get_route(&expected.id).await else {
         return true;
     };
-    if &current != expected {
+    if !crate::proxy::route_watch::same_transport_identity(expected, &current) {
         return true;
     }
     current.check_usable(current_timestamp()).is_err()
@@ -403,3 +406,7 @@ async fn wait_optional_alias_route_stale(
         None => std::future::pending::<()>().await,
     }
 }
+
+#[cfg(test)]
+#[path = "alias_tests.rs"]
+mod tests;

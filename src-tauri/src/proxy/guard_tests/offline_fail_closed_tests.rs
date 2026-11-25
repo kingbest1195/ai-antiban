@@ -54,7 +54,8 @@ async fn test_regular_probe_offline_freezes_gate_clears_session_invalidates_cach
             .is_some()
     );
 
-    // Simulate VPN switch / brief drop with identical local route fingerprint (`probe() == None`).
+    // 1st transient probe() == None with identical local route fingerprint must NOT freeze gate,
+    // abort tunnels, or flash popup (requires 2 consecutive failures unless UDP route dropped).
     online.store(false, Ordering::SeqCst);
     {
         let mut inner = h.guard.inner.lock().await;
@@ -62,22 +63,44 @@ async fn test_regular_probe_offline_freezes_gate_clears_session_invalidates_cach
         inner.last_route_fp = Some(h.guard.current_local_route_fingerprint());
     }
 
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(
+        h.guard.gate_for(ProviderId::Anthropic),
+        Gate::Open,
+        "single probe blip with stable UDP route must keep Gate::Open"
+    );
+    assert!(
+        !abort_rx.has_changed().unwrap_or(false),
+        "single probe blip must not abort active tunnels"
+    );
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
+    assert!(
+        h.state.is_provider_session_allowed("anthropic").await,
+        "single blip must not revoke session allowance"
+    );
+
+    // 2nd consecutive probe() == None freezes fail-closed immediately (<150ms), aborts active
+    // unrouted tunnels, revokes session allowance, and invalidates stale direct telemetry cache.
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.last_probe = None;
+    }
     let t0 = TInstant::now();
     h.guard.check_route_and_tick(&h.env).await;
     let elapsed = t0.elapsed();
 
     assert!(
         elapsed < Duration::from_millis(150),
-        "offline regular probe must freeze fail-closed immediately (<150ms), took {elapsed:?}"
+        "2nd consecutive offline regular probe must freeze fail-closed immediately (<150ms), took {elapsed:?}"
     );
     assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Pending);
     assert!(
         abort_rx.has_changed().unwrap_or(false),
-        "active unrouted tunnels must be aborted immediately"
+        "active unrouted tunnels must be aborted immediately on 2nd failure"
     );
     assert!(
         !h.state.is_provider_session_allowed("anthropic").await,
-        "stale session_allowed_providers must be revoked on offline probe"
+        "stale session_allowed_providers must be revoked on offline freeze"
     );
     assert!(
         h.env
@@ -86,7 +109,7 @@ async fn test_regular_probe_offline_freezes_gate_clears_session_invalidates_cach
             .cached_direct_country("1.1.1.1")
             .await
             .is_none(),
-        "stale direct telemetry cache must be invalidated on offline probe"
+        "stale direct telemetry cache must be invalidated on offline freeze"
     );
     assert!(
         !h.guard
@@ -100,7 +123,8 @@ async fn test_regular_probe_offline_freezes_gate_clears_session_invalidates_cach
             .expect("alert risk-detected event emitted");
     assert_eq!(det["phase"], PHASE_DETECTING);
     assert_eq!(det["scope"], "network");
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    // Popup is deferred during PHASE_DETECTING until ready/failed or held CONNECT > 1200ms.
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
 
     let pause_ev =
         h.io.first("guard://pause-status-changed")
@@ -120,7 +144,7 @@ async fn test_regular_probe_offline_freezes_gate_clears_session_invalidates_cach
         inner.last_probe = None;
     }
     h.guard.check_route_and_tick(&h.env).await;
-    assert_eq!(h.io.shows.load(Ordering::SeqCst), 1);
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
 
     // Cleanly invalidate background retry task so test exits immediately.
     h.guard.inner.lock().await.invalidate_alert();
@@ -148,10 +172,17 @@ async fn test_regular_probe_offline_recovers_cleanly_when_same_baseline_returns(
     )
     .await;
 
+    // Two consecutive offline failures with stable route fingerprint freeze Gate::Pending.
     {
         let mut inner = h.guard.inner.lock().await;
         inner.last_probe = None;
         inner.last_route_fp = Some(h.guard.current_local_route_fingerprint());
+    }
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.last_probe = None;
     }
     h.guard.check_route_and_tick(&h.env).await;
     assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Pending);
@@ -170,6 +201,53 @@ async fn test_regular_probe_offline_recovers_cleanly_when_same_baseline_returns(
     h.guard.wait_probe_settled_for_test().await;
     assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
     assert!(h.io.hides.load(Ordering::SeqCst) >= 1);
+}
+
+#[tokio::test]
+async fn test_single_probe_blip_resets_counter_on_recovery_and_never_freezes() {
+    let online = Arc::new(AtomicBool::new(false));
+    let online_flag = Arc::clone(&online);
+    let h = harness_env(
+        slow_audit(Duration::from_millis(10), "1.1.1.1", OverallStatus::Green),
+        "1.1.1.1",
+        move |env| {
+            env.probe = Some(Arc::new(move || {
+                let is_on = online_flag.load(Ordering::SeqCst);
+                Box::pin(async move {
+                    if is_on {
+                        Some("1.1.1.1".to_string())
+                    } else {
+                        None
+                    }
+                })
+            }));
+        },
+    )
+    .await;
+
+    let abort_rx = h.guard.subscribe_tunnel_abort();
+    {
+        let mut inner = h.guard.inner.lock().await;
+        inner.last_probe = None;
+        inner.last_route_fp = Some(h.guard.current_local_route_fingerprint());
+    }
+    // Blip #1 -> stays Open.
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+
+    // Recovery -> resets consecutive failure counter.
+    online.store(true, Ordering::SeqCst);
+    h.guard.inner.lock().await.last_probe = None;
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+
+    // Isolated Blip #2 -> still only 1 consecutive failure, so stays Open and never aborts tunnels.
+    online.store(false, Ordering::SeqCst);
+    h.guard.inner.lock().await.last_probe = None;
+    h.guard.check_route_and_tick(&h.env).await;
+    assert_eq!(h.guard.gate_for(ProviderId::Anthropic), Gate::Open);
+    assert!(!abort_rx.has_changed().unwrap_or(false));
+    assert_eq!(h.io.shows.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

@@ -149,8 +149,14 @@ pub async fn update_clean_profile_route_in(
         .is_some()
     {
         let normalized_route_id = normalize_alias_route_id(clean_route_id.as_deref());
+        let alias_provider = ProviderId::from_id(&updated.provider);
         proxy_mgr
-            .ensure_profile_alias(id.as_str(), normalized_route_id)
+            .ensure_profile_alias_with_provider(
+                id.as_str(),
+                normalized_route_id,
+                alias_provider,
+                None,
+            )
             .await?;
     }
     Ok(updated)
@@ -273,10 +279,16 @@ pub async fn prepare_clean_browser_launch_with_env<E: DetectorEnv>(
     }
 
     let normalized_route_id = normalize_alias_route_id(profile.bound_route_id.as_deref());
+    let alias_provider = ProviderId::from_id(&profile.provider);
     let profile_dir = clean_profile_dir(data_dir, &id);
     let preferred_port = read_sandbox_meta(&profile_dir).map(|m| m.alias_port);
     let alias_port = proxy_mgr
-        .ensure_profile_alias_preferred(id.as_str(), normalized_route_id, preferred_port)
+        .ensure_profile_alias_with_provider(
+            id.as_str(),
+            normalized_route_id,
+            alias_provider,
+            preferred_port,
+        )
         .await?;
     Ok((id, profile, audit, alias_port))
 }

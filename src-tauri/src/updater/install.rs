@@ -3,11 +3,87 @@
 use super::{
     CURRENT_VERSION, InstallUpdateResult, RestoreOutcome, UPDATER_PUBKEY, UpdateFailure,
     UpdateProgressPayload, UpdateStatusPayload, is_newer_version, is_older_version, map_error,
-    rollback_manifest_url, updater_builder,
+    normalize_semver, rollback_manifest_url, updater_builder,
 };
+use std::path::Path;
 use std::time::Duration;
+use tauri::utils::config::BundleType;
 use tauri::{Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterBuilder, UpdaterExt};
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub const WINDOWS_NSIS_TARGET: &str = "windows-x86_64-nsis";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub const WINDOWS_MSI_TARGET: &str = "windows-x86_64-msi";
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const MSI_ROLLBACK_MIN_VERSION: &str = "3.2.1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub enum WindowsInstallKind {
+    Nsis,
+    Msi,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) fn is_program_files_dir(dir: &Path) -> bool {
+    dir.to_string_lossy().split(['/', '\\']).any(|seg| {
+        seg.eq_ignore_ascii_case("program files") || seg.eq_ignore_ascii_case("program files (x86)")
+    })
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn classify_windows_install(
+    bundle_type: Option<BundleType>,
+    install_dir: Option<&Path>,
+    has_nsis_uninstaller: bool,
+) -> WindowsInstallKind {
+    match bundle_type {
+        Some(BundleType::Msi) => WindowsInstallKind::Msi,
+        Some(BundleType::Nsis) => WindowsInstallKind::Nsis,
+        _ if has_nsis_uninstaller => WindowsInstallKind::Nsis,
+        _ if install_dir.is_some_and(is_program_files_dir) => WindowsInstallKind::Msi,
+        _ => WindowsInstallKind::Nsis,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_install_kind() -> WindowsInstallKind {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let has_uninstaller = exe_dir.as_deref().is_some_and(|dir| {
+        dir.join("uninstall.exe").is_file() || dir.join("Uninstall.exe").is_file()
+    });
+    classify_windows_install(
+        tauri::utils::platform::bundle_type(),
+        exe_dir.as_deref(),
+        has_uninstaller,
+    )
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn windows_rollback_target(kind: WindowsInstallKind) -> &'static str {
+    match kind {
+        WindowsInstallKind::Nsis => WINDOWS_NSIS_TARGET,
+        WindowsInstallKind::Msi => WINDOWS_MSI_TARGET,
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn validate_windows_rollback_compatibility(
+    kind: WindowsInstallKind,
+    target_version: &str,
+) -> Result<(), UpdateFailure> {
+    if kind == WindowsInstallKind::Msi && is_older_version(MSI_ROLLBACK_MIN_VERSION, target_version)
+    {
+        let clean = normalize_semver(target_version).unwrap_or_else(|| target_version.to_string());
+        return Err(UpdateFailure::Install(format!(
+            "Встроенный откат с MSI-установки на версию v{clean} (ниже v{MSI_ROLLBACK_MIN_VERSION}) не поддерживается Windows Installer. Защита не отключалась. Скачайте NSIS-установщик (*_x64-setup.exe) или нужный релиз вручную со страницы релизов на GitHub."
+        )));
+    }
+    Ok(())
+}
 
 /// Download, verify, then install. Order is the safety contract of this module:
 ///
@@ -119,22 +195,41 @@ pub async fn install_update(app: &tauri::AppHandle) -> Result<InstallUpdateResul
     run_install_pipeline(app, update, false).await
 }
 
+/// Configures a rollback [`UpdaterBuilder`] with `.no_proxy()`, pinned pubkey, version
+/// comparator, and (on Windows) an explicit NSIS/MSI target override.
+pub fn configure_rollback_builder<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    manifest_url: url::Url,
+    target_version: String,
+    windows_kind: Option<WindowsInstallKind>,
+) -> Result<UpdaterBuilder, UpdateFailure> {
+    let mut builder = app
+        .updater_builder()
+        .no_proxy()
+        .pubkey(UPDATER_PUBKEY)
+        .endpoints(vec![manifest_url])
+        .map_err(|e| map_error(&e))?
+        .version_comparator(move |_current, release| {
+            let rel_ver = release.version.to_string();
+            rel_ver == target_version && is_older_version(CURRENT_VERSION, &rel_ver)
+        });
+    if let Some(kind) = windows_kind {
+        builder = builder.target(windows_rollback_target(kind));
+    }
+    Ok(builder)
+}
+
 /// Builds a rollback [`UpdaterBuilder`] pinned to [`UPDATER_PUBKEY`] and the exact target version.
 pub fn rollback_updater_builder<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     manifest_url: url::Url,
     target_version: String,
 ) -> Result<UpdaterBuilder, UpdateFailure> {
-    app.updater_builder()
-        .pubkey(UPDATER_PUBKEY)
-        .endpoints(vec![manifest_url])
-        .map_err(|e| map_error(&e))
-        .map(|b| {
-            b.version_comparator(move |_current, release| {
-                let rel_ver = release.version.to_string();
-                rel_ver == target_version && is_older_version(CURRENT_VERSION, &rel_ver)
-            })
-        })
+    #[cfg(target_os = "windows")]
+    let windows_kind = Some(detect_windows_install_kind());
+    #[cfg(not(target_os = "windows"))]
+    let windows_kind = None;
+    configure_rollback_builder(app, manifest_url, target_version, windows_kind)
 }
 
 /// Downloads, verifies (minisign), and installs a signed older release for rollback.
@@ -143,6 +238,8 @@ pub async fn install_rollback_version(
     version: &str,
 ) -> Result<InstallUpdateResult, UpdateFailure> {
     let (target_version, manifest_url) = rollback_manifest_url(version)?;
+    #[cfg(target_os = "windows")]
+    validate_windows_rollback_compatibility(detect_windows_install_kind(), &target_version)?;
     let updater = rollback_updater_builder(app, manifest_url, target_version)?
         .build()
         .map_err(|e| map_error(&e))?;
@@ -164,6 +261,10 @@ async fn run_install_pipeline(
     update: Update,
     is_rollback: bool,
 ) -> Result<InstallUpdateResult, UpdateFailure> {
+    #[cfg(target_os = "windows")]
+    if is_rollback {
+        validate_windows_rollback_compatibility(detect_windows_install_kind(), &update.version)?;
+    }
     let status_downloading = if is_rollback {
         format!(
             "Скачивание подписанного отката v{} (minisign)...",

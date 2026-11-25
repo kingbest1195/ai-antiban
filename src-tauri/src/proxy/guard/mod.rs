@@ -15,19 +15,23 @@
 //! blocked until the user decides or the hold expires.
 
 mod alerts;
+mod alerts_enrich;
 mod audit_outcome;
 mod audit_outcome_fallback;
 mod audit_summary;
 mod baseline_restore;
 mod baseline_verify;
 mod decisions;
+mod diag;
 mod fingerprint;
+mod fingerprint_os;
 mod gates;
 mod killswitch;
 mod orchestrator;
 mod policy;
 mod probe_apply;
 mod probe_changed;
+mod probe_http;
 mod probe_loop;
 mod probe_offline;
 mod routes_sync;
@@ -39,6 +43,8 @@ pub use decisions::try_auto_unblock_pinned_providers;
 pub use fingerprint::compute_local_route_fingerprint;
 #[cfg(any(test, feature = "test-support"))]
 pub use fingerprint::format_windows_interfaces_signature;
+#[cfg(any(test, feature = "test-support"))]
+pub use fingerprint_os::{UtunDebounceState, stabilize_non_default_utun_for_test};
 pub use killswitch::{gate_closed, shutdown_aborted, wait_open};
 pub(crate) use policy::{
     effective_tray_report, is_ip_pinned_for_state, is_report_pinned_travel_only,

@@ -189,6 +189,26 @@ fn test_reverse_dns_ptr_detection() {
         crate::auditor::geo_matrix::CheckStatus::Ok
     );
     assert_eq!(clean_res.code, "REVERSE_DNS_CLEAN");
+
+    // With hide_ip_mode=true, both dot- and dash-separated PTR IPv4 octets are masked.
+    let masked_dash =
+        evaluate_reverse_dns_ptr_with_ptr_for_mode(&clean_tel, Some("185-220-101-5.isp.net"), true);
+    assert_eq!(masked_dash.code, "REVERSE_DNS_CLEAN");
+    assert!(!masked_dash.message.contains("185-220-101-5"));
+    assert!(masked_dash.message.contains("xxx-xxx-xxx-xxx.isp.net"));
+
+    let masked_dot = evaluate_reverse_dns_ptr_with_ptr_for_mode(
+        &clean_tel,
+        Some("64.176.194.110.vultrusercontent.com"),
+        true,
+    );
+    assert_eq!(masked_dot.code, "REVERSE_DNS_CLEAN");
+    assert!(!masked_dot.message.contains("64.176.194.110"));
+    assert!(
+        masked_dot
+            .message
+            .contains("xxx.xxx.xxx.xxx.vultrusercontent.com")
+    );
 }
 
 #[test]

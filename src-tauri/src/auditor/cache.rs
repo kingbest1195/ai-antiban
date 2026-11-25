@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-use crate::auditor::geo_matrix::{CheckResult, UnknownReason};
+use crate::auditor::geo_matrix::{CheckResult, SourceState, UnknownReason};
 use crate::auditor::ip_type::TorListCache;
 use crate::auditor::probes::whoami::{GeoInfo, ResolverView};
 
@@ -34,6 +34,9 @@ pub const RDNS_TTL: Duration = Duration::from_secs(600);
 pub const UNKNOWN_TTL: Duration = Duration::from_secs(5);
 /// Cooldown for failed/unmeasured whoami DNS resolver probes so transient VPN flaps don't thrash every 10s.
 pub const RESOLVER_UNKNOWN_TTL: Duration = Duration::from_secs(25);
+/// Extended cooldown when Akamai A succeeds while Google TXT fails (e.g. VPN stub DNS rejecting TXT)
+/// and system DNS servers have not changed.
+pub const RESOLVER_TXT_FAILED_TTL: Duration = Duration::from_secs(120);
 /// Cooldown for failed external list/reputation lookups (DNSBL, Tor, rDNS) over double-tunnel VPNs.
 pub const EXTERNAL_LIST_UNKNOWN_TTL: Duration = Duration::from_secs(30);
 
@@ -88,6 +91,30 @@ impl<V: Clone> TtlCache<V> {
     where
         Fut: std::future::Future<Output = V>,
     {
+        self.get_or_compute_with_ttl_fn(
+            key,
+            |value| {
+                if is_valid(value) {
+                    ttl
+                } else {
+                    unknown_ttl.min(ttl)
+                }
+            },
+            compute,
+        )
+        .await
+    }
+
+    /// Like [`Self::get_or_compute`] where `ttl_for(&value)` selects the cache lifetime per outcome.
+    pub async fn get_or_compute_with_ttl_fn<Fut>(
+        &self,
+        key: &str,
+        ttl_for: impl Fn(&V) -> Duration,
+        compute: Fut,
+    ) -> V
+    where
+        Fut: std::future::Future<Output = V>,
+    {
         // Held across `compute` on purpose (single-flight); dropping the future releases it.
         let mut entries = self.entries.lock().await;
         let now = Instant::now();
@@ -103,11 +130,7 @@ impl<V: Clone> TtlCache<V> {
         if entries.len() >= MAX_ENTRIES {
             entries.clear();
         }
-        let ttl = if is_valid(&value) {
-            ttl
-        } else {
-            unknown_ttl.min(ttl)
-        };
+        let ttl = ttl_for(&value);
         entries.insert(
             key.to_string(),
             Entry {
@@ -147,6 +170,110 @@ where
         .await
 }
 
+/// Returns `true` when Akamai A succeeded while Google TXT failed (single-source unmeasured),
+/// indicating a stub DNS resolver blocking TXT queries while A records resolve normally.
+fn is_single_source_txt_failed(view: &ResolverView) -> bool {
+    let ResolverView::Unmeasured(u) = view else {
+        return false;
+    };
+    if u.code != "DNS_WHOAMI_SINGLE_SOURCE" {
+        return false;
+    }
+    let akamai_ok = u
+        .sources
+        .iter()
+        .any(|s| s.source == "Akamai" && s.state == SourceState::Answered);
+    let google_failed = u
+        .sources
+        .iter()
+        .any(|s| s.source == "Google" && s.state == SourceState::Failed);
+    akamai_ok && google_failed
+}
+
+/// Resolver-specific TTL cache that extends cooldown to [`RESOLVER_TXT_FAILED_TTL`] when only
+/// Google TXT fails while Akamai A succeeds and the system DNS servers remain unchanged.
+#[derive(Default)]
+pub struct ResolverCache {
+    inner: TtlCache<ResolverView>,
+    last_dns_sig: std::sync::Mutex<Option<String>>,
+}
+
+impl ResolverCache {
+    pub async fn get_or_compute_with_unknown_ttl<Fut>(
+        &self,
+        key: &str,
+        ttl: Duration,
+        unknown_ttl: Duration,
+        is_valid: impl Fn(&ResolverView) -> bool,
+        compute: Fut,
+    ) -> ResolverView
+    where
+        Fut: std::future::Future<Output = ResolverView>,
+    {
+        let dns_sig = crate::auditor::seams::last_known_nameserver_sig();
+        self.get_or_compute_with_dns_sig(key, ttl, unknown_ttl, &dns_sig, is_valid, compute)
+            .await
+    }
+
+    pub async fn get_or_compute_with_dns_sig<Fut>(
+        &self,
+        key: &str,
+        ttl: Duration,
+        unknown_ttl: Duration,
+        dns_sig: &str,
+        is_valid: impl Fn(&ResolverView) -> bool,
+        compute: Fut,
+    ) -> ResolverView
+    where
+        Fut: std::future::Future<Output = ResolverView>,
+    {
+        if !dns_sig.is_empty() {
+            let changed = {
+                let guard = self.last_dns_sig.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_deref().is_some_and(|prev| prev != dns_sig)
+            };
+            if changed {
+                self.inner.clear().await;
+            }
+        }
+        let val = self
+            .inner
+            .get_or_compute_with_ttl_fn(
+                key,
+                |v| {
+                    if is_valid(v) {
+                        ttl
+                    } else if is_single_source_txt_failed(v) {
+                        RESOLVER_TXT_FAILED_TTL
+                    } else {
+                        unknown_ttl.min(ttl)
+                    }
+                },
+                compute,
+            )
+            .await;
+        let post_sig = crate::auditor::seams::last_known_nameserver_sig();
+        let recorded_sig = if !post_sig.is_empty() {
+            post_sig
+        } else {
+            dns_sig.to_string()
+        };
+        if !recorded_sig.is_empty() {
+            *self.last_dns_sig.lock().unwrap_or_else(|e| e.into_inner()) = Some(recorded_sig);
+        }
+        val
+    }
+
+    pub async fn clear(&self) {
+        self.inner.clear().await;
+        *self.last_dns_sig.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.inner.is_empty().await
+    }
+}
+
 /// The caches of the provider-independent checks.
 #[derive(Default)]
 pub struct CheckCache {
@@ -156,7 +283,7 @@ pub struct CheckCache {
     /// `scutil`, time zone, locale and location checks (key = check + its inputs).
     pub os: TtlCache<CheckResult>,
     /// The DNS resolver that sees the requests (whoami), under one key.
-    pub resolver: TtlCache<ResolverView>,
+    pub resolver: ResolverCache,
     /// Per resolver address: its country (and ASN / organisation), or why it could not be found.
     pub geo: TtlCache<Result<GeoInfo, UnknownReason>>,
     /// STUN verdict per HTTP exit address.
@@ -182,123 +309,5 @@ impl CheckCache {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auditor::geo_matrix::UnknownReason;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    async fn run(
-        cache: &TtlCache<CheckResult>,
-        calls: &AtomicUsize,
-        key: &str,
-        ttl: Duration,
-        make: impl Fn() -> CheckResult,
-    ) -> CheckResult {
-        cached_check(cache, key, ttl, async {
-            calls.fetch_add(1, Ordering::SeqCst);
-            make()
-        })
-        .await
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn valid_result_is_reused_until_ttl_expires() {
-        let cache = TtlCache::default();
-        let calls = AtomicUsize::new(0);
-        let ok = || CheckResult::ok("A", "a");
-        run(&cache, &calls, "k", IPV6_TTL, ok).await;
-        tokio::time::advance(Duration::from_secs(59)).await;
-        run(&cache, &calls, "k", IPV6_TTL, ok).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        tokio::time::advance(Duration::from_secs(2)).await;
-        run(&cache, &calls, "k", IPV6_TTL, ok).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn unknown_is_only_remembered_for_a_few_seconds() {
-        let cache = TtlCache::default();
-        let calls = AtomicUsize::new(0);
-        let unknown = || CheckResult::unknown("U", "u", UnknownReason::Timeout);
-        run(&cache, &calls, "k", DNSBL_TTL, unknown).await;
-        tokio::time::advance(Duration::from_secs(3)).await;
-        let r = run(&cache, &calls, "k", DNSBL_TTL, unknown).await;
-        assert!(r.is_unknown());
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "reused within the short window"
-        );
-        tokio::time::advance(Duration::from_secs(3)).await;
-        run(&cache, &calls, "k", DNSBL_TTL, unknown).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "a failure is retried, not kept for 10 min"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn keys_are_independent_and_clear_invalidates() {
-        let cache = TtlCache::default();
-        let calls = AtomicUsize::new(0);
-        let ok = || CheckResult::ok("A", "a");
-        run(&cache, &calls, "a", OS_TTL, ok).await;
-        run(&cache, &calls, "b", OS_TTL, ok).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        cache.clear().await;
-        run(&cache, &calls, "a", OS_TTL, ok).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn concurrent_callers_share_one_probe() {
-        let cache = std::sync::Arc::new(TtlCache::default());
-        let calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let mut tasks = Vec::new();
-        for _ in 0..3 {
-            let (cache, calls) = (cache.clone(), calls.clone());
-            tasks.push(tokio::spawn(async move {
-                cached_check(&cache, "ip", DNSBL_TTL, async {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    CheckResult::ok("A", "a")
-                })
-                .await
-            }));
-        }
-        for t in tasks {
-            assert!(t.await.unwrap().status.is_ok());
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn resolver_unknown_ttl_avoids_thrashing_every_few_seconds() {
-        let cache = TtlCache::default();
-        let calls = AtomicUsize::new(0);
-        let run_probe = || {
-            cache.get_or_compute_with_unknown_ttl(
-                "whoami",
-                WHOAMI_TTL,
-                RESOLVER_UNKNOWN_TTL,
-                |r: &CheckResult| !r.is_unknown(),
-                async {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    CheckResult::unknown("DNS_WHOAMI_TIMEOUT", "t", UnknownReason::Timeout)
-                },
-            )
-        };
-        run_probe().await;
-        tokio::time::advance(Duration::from_secs(10)).await;
-        run_probe().await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "reused across 10s poll");
-        tokio::time::advance(Duration::from_secs(16)).await;
-        run_probe().await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "retried after 25s cooldown"
-        );
-    }
-}
+#[path = "cache_tests.rs"]
+mod tests;

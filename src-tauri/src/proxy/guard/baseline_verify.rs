@@ -54,10 +54,20 @@ impl NetworkGuard {
     ) {
         let t0 = Instant::now();
         let new_fp = self.current_local_route_fingerprint();
-        let already_in_flight = {
+        let (already_in_flight, default_moved) = {
             let mut inner = self.inner.lock().await;
+            let default_moved = inner.last_route_fp.as_ref().is_none_or(|old| {
+                super::fingerprint::default_udp_route_changed(old, &new_fp)
+                    || super::fingerprint::is_default_udp_route_dropped(&new_fp)
+            });
+            if let Some(ref old) = inner.last_route_fp
+                && *old != new_fp
+            {
+                super::diag::record_fp_change(old, &new_fp);
+            }
             inner.last_route_fp = Some(new_fp.clone());
             inner.last_fp_change_at = Some(t0);
+            inner.default_route_moved = default_moved;
             if let Some(abort) = inner.verify_abort.take() {
                 abort.abort();
             }
@@ -67,11 +77,14 @@ impl NetworkGuard {
             if in_flight {
                 inner.deferred_recheck_fp = Some(new_fp.clone());
             }
-            in_flight
+            (in_flight, default_moved)
         };
         if !self.is_manual_killswitch() {
             self.freeze_open_gates_pending();
-            self.abort_active_tunnels();
+            if already_in_flight && default_moved {
+                super::diag::record_tunnel_abort("fp_moved_during_regular_probe");
+                self.abort_active_tunnels();
+            }
             if !already_in_flight {
                 self.begin_changed_probe(env, t0, new_fp, was_blocked).await;
             }

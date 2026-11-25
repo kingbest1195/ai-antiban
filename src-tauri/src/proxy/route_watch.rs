@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 use crate::auditor::geo_matrix::ProviderId;
-use crate::routing::RouteSelection;
+use crate::routing::{Route, RouteSelection, route_fingerprint};
 use crate::state::AppState;
 
 /// How often an open tunnel re-checks `expires_at` of its route.
@@ -36,20 +36,22 @@ impl RouteWatch {
         }
     }
 
-    /// True when the provider's effective selection is no longer the snapshot, or the snapshot's
-    /// route can no longer carry traffic (disabled / expired).
+    /// True when the provider's effective selection changed in transport identity (route id, entry
+    /// nodes, or local-entry policy), or the current route can no longer carry traffic (disabled /
+    /// expired). Metadata-only refreshes (`expires_at`, `grace_extended`, `label`, etc.) keep
+    /// live active tunnels open.
     pub async fn is_stale(&self) -> bool {
         let current = self.state.route_selection(self.provider.as_str()).await;
-        if current != self.snapshot {
-            return true;
-        }
-        match &current {
-            RouteSelection::Route(r) => r
-                .check_usable(crate::auditor::network::current_timestamp())
-                .is_err(),
-            RouteSelection::Direct => false,
-            // Never a valid tunnel state.
-            RouteSelection::Missing(_) | RouteSelection::Invalid(_) => true,
+        match (&self.snapshot, &current) {
+            (RouteSelection::Direct, RouteSelection::Direct) => false,
+            (RouteSelection::Route(snap), RouteSelection::Route(curr)) => {
+                !same_transport_identity(snap, curr)
+                    || curr
+                        .check_usable(crate::auditor::network::current_timestamp())
+                        .is_err()
+            }
+            // Never keep a tunnel on mismatched selection or Missing/Invalid states.
+            _ => true,
         }
     }
 
@@ -74,4 +76,11 @@ impl RouteWatch {
             }
         }
     }
+}
+
+pub(crate) fn same_transport_identity(a: &Route, b: &Route) -> bool {
+    a.id == b.id
+        && a.entries == b.entries
+        && route_fingerprint(a) == route_fingerprint(b)
+        && a.allows_local_entries() == b.allows_local_entries()
 }

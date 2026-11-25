@@ -85,7 +85,7 @@ impl ProxyServer {
                     .state
                     .record_ip_history_for_selection(provider.as_str(), selection, entry)
                     .await;
-                self.state.stats().record_protected(
+                self.state.stats().record_manual_allow(
                     host,
                     provider.as_str(),
                     &report.telemetry.country_code,
@@ -115,9 +115,17 @@ impl ProxyServer {
                         || (!st_now.blocked_providers.contains(provider.as_str())
                             && self.guard.gate_for(provider) == Gate::Open))
                 {
-                    self.state
-                        .stats()
-                        .record_protected(host, provider.as_str(), "OK");
+                    if crate::core::sanctions::is_blocked_geo_code(&report.telemetry.country_code) {
+                        self.state.stats().record_manual_allow(
+                            host,
+                            provider.as_str(),
+                            &report.telemetry.country_code,
+                        );
+                    } else {
+                        self.state
+                            .stats()
+                            .record_protected(host, provider.as_str(), "OK");
+                    }
                     return self
                         .tunnel_to_target(client, host, port, Some(provider), selection)
                         .await;
@@ -203,9 +211,19 @@ impl ProxyServer {
                             || (!st_now.blocked_providers.contains(provider.as_str())
                                 && self.guard.gate_for(provider) == Gate::Open))
                     {
-                        self.state
-                            .stats()
-                            .record_protected(host, provider.as_str(), "OK");
+                        if crate::core::sanctions::is_blocked_geo_code(
+                            &report.telemetry.country_code,
+                        ) {
+                            self.state.stats().record_manual_allow(
+                                host,
+                                provider.as_str(),
+                                &report.telemetry.country_code,
+                            );
+                        } else {
+                            self.state
+                                .stats()
+                                .record_protected(host, provider.as_str(), "OK");
+                        }
                         return self
                             .tunnel_to_target(client, host, port, Some(provider), selection)
                             .await;

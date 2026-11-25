@@ -44,9 +44,12 @@
   Pop $1
   Pop $0
 
-  ; Clean up OS autostart entry and CoworkVMService boot-guard scheduled task if installed.
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Zastava"
-  ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall-cowork-guard'
+  ; Clean up OS autostart entry and CoworkVMService boot-guard scheduled task only on real
+  ; uninstall (preserve them during /UPDATE upgrades and rollbacks).
+  ${If} $UpdateMode <> 1
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Zastava"
+    ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --uninstall-cowork-guard'
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

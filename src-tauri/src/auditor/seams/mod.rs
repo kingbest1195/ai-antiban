@@ -17,6 +17,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(test)]
 use dns::is_name_not_found;
 pub(crate) use dns::is_usable_nameserver;
+pub(crate) use dns::last_known_nameserver_sig;
 #[cfg(any(target_os = "macos", test))]
 #[allow(unused_imports)]
 pub(crate) use dns::parse_scutil_dns_nameservers;
@@ -64,3 +65,5 @@ mod tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod fakes;
+#[cfg(any(test, feature = "test-support"))]
+pub use dns::{nameserver_signature, should_record_dns_diag_in};

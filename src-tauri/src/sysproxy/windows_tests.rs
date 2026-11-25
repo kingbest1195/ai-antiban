@@ -203,6 +203,10 @@ fn explicit_proxy_is_detected_for_the_chain_but_never_rewritten() {
 
 #[test]
 fn vpn_override_on_windows_rechains_and_heals_pac_and_proxy_enable() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_addr = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let expected_chained = format!("http://{proxy_addr}");
+
     let (fs, p) = (FakeFs::new(), FakePlatform::new());
     let mut j = open(&fs);
     enable_inet(&mut j, &p, PAC).unwrap();
@@ -211,10 +215,10 @@ fn vpn_override_on_windows_rechains_and_heals_pac_and_proxy_enable() {
 
     p.seed_inet(AUTO_CONFIG_URL, RegValue::sz(""));
     p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
-    p.seed_inet(PROXY_SERVER, RegValue::sz("127.0.0.1:10808"));
+    p.seed_inet(PROXY_SERVER, RegValue::sz(&proxy_addr));
     assert_eq!(
         detect_chained(&p, Some(8899)).unwrap().as_deref(),
-        Some("http://127.0.0.1:10808")
+        Some(expected_chained.as_str())
     );
 
     let rep = enable_inet(&mut j, &p, PAC).unwrap();
@@ -230,10 +234,7 @@ fn vpn_override_on_windows_rechains_and_heals_pac_and_proxy_enable() {
     j.restore_all(&p);
     assert_eq!(p.inet_of(AUTO_CONFIG_URL), Some(RegValue::sz("")));
     assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(1)));
-    assert_eq!(
-        p.inet_of(PROXY_SERVER),
-        Some(RegValue::sz("127.0.0.1:10808"))
-    );
+    assert_eq!(p.inet_of(PROXY_SERVER), Some(RegValue::sz(&proxy_addr)));
 }
 
 #[test]
@@ -291,4 +292,85 @@ fn resolve_chained_target_clears_stale_when_no_upstream_exists() {
     // VPN exits and blanks ProxyServer -> chained target clears to None.
     p.seed_inet(PROXY_SERVER, RegValue::sz(""));
     assert_eq!(resolve_chained_target(&j, &p, Some(8899)).unwrap(), None);
+}
+
+fn unused_loopback_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+#[test]
+fn dead_loopback_proxy_server_baseline_restores_proxy_enable_zero_and_records_diag() {
+    let dead_port = unused_loopback_port();
+    let formats = [
+        format!("127.0.0.1:{dead_port}"),
+        format!("localhost:{dead_port}"),
+        format!("[::1]:{dead_port}"),
+        format!("http://127.0.0.1:{dead_port}"),
+        format!("https://127.0.0.1:{dead_port}"),
+        format!("socks=127.0.0.1:{dead_port}"),
+        format!("http=127.0.0.1:{dead_port};https=localhost:{dead_port}"),
+    ];
+    for proxy_server in formats {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        p.seed_inet(PROXY_SERVER, RegValue::sz(&proxy_server));
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        assert_eq!(p.inet_of(PROXY_ENABLE), Some(RegValue::dword(0)));
+        p.clear_calls();
+
+        let rep = j.restore_all(&p);
+        assert!(!rep.has_failures(), "{proxy_server}: {:?}", rep.items);
+        assert!(j.is_empty(), "{proxy_server}");
+        assert_eq!(
+            p.inet_of(PROXY_ENABLE),
+            Some(RegValue::dword(0)),
+            "dead loopback {proxy_server} must not strand WinINet on ProxyEnable=1"
+        );
+        assert!(
+            p.calls().iter().any(|c| c == "notify_inet_refresh"),
+            "WinINet refresh must be called for {proxy_server}"
+        );
+    }
+    assert!(
+        crate::diagnostics::dump()
+            .iter()
+            .any(|line| line.contains("[sysproxy:windows]") && line.contains("ProxyEnable=1")),
+        "diagnostic record must be emitted when suppressing dead loopback ProxyEnable=1"
+    );
+}
+
+#[test]
+fn reachable_loopback_and_non_loopback_proxy_server_preserves_proxy_enable_one() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let live_port = listener.local_addr().unwrap().port();
+    let dead_port = unused_loopback_port();
+
+    let preserved_cases = [
+        format!("127.0.0.1:{live_port}"),
+        format!("socks=localhost:{live_port}"),
+        format!("http=127.0.0.1:{live_port};https=127.0.0.1:{live_port}"),
+        "10.20.30.40:3128".to_string(),
+        "corp.example:3128".to_string(),
+        format!("http=127.0.0.1:{dead_port};https=corp.example:3128"),
+    ];
+
+    for proxy_server in preserved_cases {
+        let (fs, p) = (FakeFs::new(), FakePlatform::new());
+        p.seed_inet(PROXY_ENABLE, RegValue::dword(1));
+        p.seed_inet(PROXY_SERVER, RegValue::sz(&proxy_server));
+        let mut j = open(&fs);
+        enable_inet(&mut j, &p, PAC).unwrap();
+        p.clear_calls();
+
+        let rep = j.restore_all(&p);
+        assert!(!rep.has_failures(), "{proxy_server}: {:?}", rep.items);
+        assert_eq!(
+            p.inet_of(PROXY_ENABLE),
+            Some(RegValue::dword(1)),
+            "reachable or non-loopback {proxy_server} must preserve ProxyEnable=1"
+        );
+        assert!(p.calls().iter().any(|c| c == "notify_inet_refresh"));
+    }
 }

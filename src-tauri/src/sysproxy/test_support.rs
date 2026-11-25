@@ -2,12 +2,18 @@
 
 use super::browser_policies::{self, FakePolicyStore, PolicyApplyReport};
 use super::fs::Fs;
-use super::journal::{Journal, JournalError};
+use super::journal::{Journal, JournalError, RecoveryReport};
 use super::macos::{self, HEAL_WINDOW, HealGuard};
 use super::platform::Platform;
 use super::state::state;
 use super::windows;
 use super::{EnableReport, FileCtx, Os, SystemProbe};
+
+pub const LEGACY_MIGRATION_MARK: &str = super::cleanup::LEGACY_MIGRATION_MARK;
+
+pub fn restore_and_migrate_for_test(j: &mut Journal, p: &dyn Platform) -> RecoveryReport {
+    super::cleanup::restore_and_migrate(j, p)
+}
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -135,4 +141,36 @@ pub fn open_journal_with_fake_policies(
     data_dir: &Path,
 ) -> Result<Journal, JournalError> {
     Ok(Journal::open(fs, data_dir)?.with_policy_store(FakePolicyStore::new()))
+}
+
+/// Applies CLI/IDE settings into an arbitrary [`Fs`] (e.g. `FakeFs`) for integration tests.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_cli_protection_in_fs(
+    j: &mut Journal,
+    p: &dyn Platform,
+    fs: Arc<dyn Fs>,
+    home: &Path,
+    ide_roots: Vec<PathBuf>,
+    proxy_url: Option<&str>,
+    tz: Option<&str>,
+    mode: crate::state::CliMode,
+) -> (Vec<String>, RecoveryReport) {
+    let port = proxy_url
+        .map(|u| super::shell_rc::normalize_proxy_url_and_port(u).1)
+        .unwrap_or(8899);
+    let ctx = FileCtx::new(fs, home.to_path_buf(), ide_roots);
+    super::cli_protection::apply_cli_files_in(j, p, &ctx, proxy_url, port, tz, mode)
+}
+
+/// Restores CLI/IDE settings from an arbitrary [`Fs`] (e.g. `FakeFs`) for integration tests.
+pub fn disable_cli_protection_in_fs(
+    j: &mut Journal,
+    p: &dyn Platform,
+    fs: Arc<dyn Fs>,
+    home: &Path,
+    ide_roots: Vec<PathBuf>,
+    mode: crate::state::CliMode,
+) -> RecoveryReport {
+    let ctx = FileCtx::new(fs, home.to_path_buf(), ide_roots);
+    super::cli_protection::disable_cli_files_in(j, p, &ctx, mode)
 }

@@ -1,42 +1,12 @@
 //! Fast (< 0.1ms) in-process route, interface, and DNS fingerprint helpers (zero subprocesses).
 
-#[cfg(unix)]
-use std::ffi::CStr;
 #[cfg(any(unix, target_os = "windows", test, feature = "test-support"))]
 use std::net::IpAddr;
-#[cfg(unix)]
-use std::net::{Ipv4Addr, Ipv6Addr};
 
-#[cfg(any(unix, target_os = "windows", test, feature = "test-support"))]
-fn is_tunnel_interface_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.starts_with("utun")
-        || lower.starts_with("tun")
-        || lower.starts_with("tap")
-        || lower.starts_with("wg")
-        || lower.starts_with("ppp")
-        || lower.starts_with("ipsec")
-        || lower.contains("wintun")
-        || lower.contains("wireguard")
-}
-
-/// Stabilizes IPv6 addresses on non-tunnel interfaces to their `/64` prefix so transient
-/// SLAAC/privacy-extension temporary address churn on idle Wi-Fi never causes phantom `fp` flaps,
-/// while real network/prefix changes and VPN `utun`/Wintun transitions still fire immediately.
-#[cfg(any(unix, target_os = "windows", test, feature = "test-support"))]
-fn format_stable_ip_for_fp(ip: IpAddr, is_tunnel: bool) -> String {
-    match ip {
-        IpAddr::V4(v4) => v4.to_string(),
-        IpAddr::V6(v6) => {
-            if is_tunnel {
-                v6.to_string()
-            } else {
-                let seg = v6.segments();
-                format!("{:x}:{:x}:{:x}:{:x}::/64", seg[0], seg[1], seg[2], seg[3])
-            }
-        }
-    }
-}
+#[cfg(any(target_os = "windows", test, feature = "test-support"))]
+pub use super::fingerprint_os::format_windows_interfaces_signature;
+use super::fingerprint_os::{cached_interfaces_and_dns, format_stable_ip_for_fp};
+pub(super) use super::fingerprint_os::{default_udp_route_changed, is_default_udp_route_dropped};
 
 fn udp_route_ip(bind: &str, target: &str) -> String {
     std::net::UdpSocket::bind(bind)
@@ -46,172 +16,23 @@ fn udp_route_ip(bind: &str, target: &str) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-fn system_dns_signature() -> String {
-    let Ok((cfg, _)) = hickory_resolver::system_conf::read_system_conf() else {
-        return "none".to_string();
-    };
-    let mut ips: Vec<String> = cfg
-        .name_servers()
-        .iter()
-        .map(|ns| ns.ip.to_string())
-        .collect();
-    ips.sort();
-    ips.dedup();
-    if ips.is_empty() {
-        "none".to_string()
-    } else {
-        ips.join(",")
-    }
-}
-
-#[cfg(unix)]
-fn active_interfaces_signature() -> String {
-    struct IfAddrsGuard(*mut libc::ifaddrs);
-    impl Drop for IfAddrsGuard {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { libc::freeifaddrs(self.0) };
-            }
-        }
-    }
-
-    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut ifap) } != 0 || ifap.is_null() {
-        return "none".to_string();
-    }
-    let _guard = IfAddrsGuard(ifap);
-
-    let mut entries: Vec<String> = Vec::new();
-    let mut cur = ifap;
-    while !cur.is_null() {
-        let ifa = unsafe { &*cur };
-        cur = ifa.ifa_next;
-
-        let flags = ifa.ifa_flags;
-        let is_up_running = (flags & (libc::IFF_UP as u32)) != 0
-            && (flags & (libc::IFF_RUNNING as u32)) != 0
-            && (flags & (libc::IFF_LOOPBACK as u32)) == 0;
-        if !is_up_running || ifa.ifa_addr.is_null() || ifa.ifa_name.is_null() {
-            continue;
-        }
-
-        let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
-        let ip: Option<IpAddr> = match family {
-            libc::AF_INET => {
-                let sin = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
-                Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
-                    sin.sin_addr.s_addr,
-                ))))
-            }
-            libc::AF_INET6 => {
-                let sin6 = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
-                let addr = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-                if addr.is_unicast_link_local() {
-                    None
-                } else {
-                    Some(IpAddr::V6(addr))
-                }
-            }
-            _ => None,
-        };
-        let Some(ip) = ip.filter(|addr| !addr.is_loopback() && !addr.is_unspecified()) else {
-            continue;
-        };
-
-        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }.to_string_lossy();
-        let stable_ip = format_stable_ip_for_fp(ip, is_tunnel_interface_name(&name));
-        entries.push(format!("{name}={stable_ip}"));
-    }
-
-    entries.sort();
-    entries.dedup();
-    if entries.is_empty() {
-        "none".to_string()
-    } else {
-        entries.join(",")
-    }
-}
-
-#[cfg(any(target_os = "windows", test, feature = "test-support"))]
-pub fn format_windows_interfaces_signature(
-    adapters: &[crate::win_native::network::AdapterInfo],
-) -> String {
-    const IF_TYPE_SOFTWARE_LOOPBACK: u32 = 24;
-    let mut entries: Vec<String> = Vec::new();
-    for adapter in adapters {
-        if !adapter.is_up || adapter.if_type == IF_TYPE_SOFTWARE_LOOPBACK {
-            continue;
-        }
-        let name = {
-            let trimmed = adapter.adapter_name.trim();
-            if trimmed.is_empty() {
-                adapter.friendly_name.trim()
-            } else {
-                trimmed
-            }
-        };
-        if name.is_empty() {
-            continue;
-        }
-        for raw in adapter.ipv4_addrs.iter().chain(adapter.ipv6_addrs.iter()) {
-            let Ok(ip) = raw.trim().parse::<IpAddr>() else {
-                continue;
-            };
-            if ip.is_loopback() || ip.is_unspecified() {
-                continue;
-            }
-            if let IpAddr::V6(v6) = ip
-                && v6.is_unicast_link_local()
-            {
-                continue;
-            }
-            let is_tunnel = is_tunnel_interface_name(name)
-                || is_tunnel_interface_name(&adapter.friendly_name)
-                || adapter.if_type == 53
-                || adapter.if_type == 131;
-            let stable_ip = format_stable_ip_for_fp(ip, is_tunnel);
-            entries.push(format!("{name}={stable_ip}"));
-        }
-    }
-    entries.sort();
-    entries.dedup();
-    if entries.is_empty() {
-        "none".to_string()
-    } else {
-        entries.join(",")
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn active_interfaces_signature() -> String {
-    match crate::win_native::network::get_adapters_addresses() {
-        Ok(adapters) => format_windows_interfaces_signature(&adapters),
-        Err(_) => "none".to_string(),
-    }
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn active_interfaces_signature() -> String {
-    "none".to_string()
-}
-
 /// Computes the local default-route, active-interface (`utun`/tunnel), and DNS fingerprint
-/// in < 0.1ms using in-process lookups without spawning any subprocesses or transmitting packets.
+/// using cached OS interface/DNS lookups (>= 1000ms / >= 2000ms) and fast 250ms UDP route checks.
 pub fn compute_local_route_fingerprint(upstream_key: Option<&str>) -> String {
     let ip_cf = udp_route_ip("0.0.0.0:0", "1.1.1.1:80");
     let ip_dns = udp_route_ip("0.0.0.0:0", "8.8.8.8:53");
     let ip_v6_raw = udp_route_ip("[::]:0", "[2606:4700:4700::1111]:80");
     let ip_v6 = if ip_cf == "none" {
-        ip_v6_raw
+        ip_v6_raw.clone()
     } else if let Ok(IpAddr::V6(v6)) = ip_v6_raw.parse::<IpAddr>() {
-        format_stable_ip_for_fp(IpAddr::V6(v6), false)
+        format_stable_ip_for_fp(IpAddr::V6(v6), true)
     } else {
-        ip_v6_raw
+        ip_v6_raw.clone()
     };
-    let dns_sig = system_dns_signature();
-    let if_sig = active_interfaces_signature();
+    let udp_sig = format!("{ip_cf}|{ip_dns}|{ip_v6}");
+    let (if_sig, dns_sig) = cached_interfaces_and_dns(&[&ip_cf, &ip_dns, &ip_v6_raw], &udp_sig);
     format!(
-        "{ip_cf}|{ip_dns}|{ip_v6}|dns:{dns_sig}|if:{if_sig}|upstream:{}",
+        "{udp_sig}|dns:{dns_sig}|if:{if_sig}|upstream:{}",
         upstream_key.unwrap_or("")
     )
 }

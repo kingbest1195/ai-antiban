@@ -109,6 +109,7 @@ export function useAppShellController() {
     setKillswitchFrozen: toggles.setKillswitchFrozen,
     setInterceptPayload: intercept.setInterceptPayload,
     guardPauseStatus: gw.guardPauseStatus,
+    currentIp: gw.currentIp,
     invalidateReports: gw.invalidateReports,
     applyUpdateProgress: updater.applyUpdateProgress,
     applyUpdateAvailable: updater.applyUpdateAvailable,

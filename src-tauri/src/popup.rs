@@ -40,7 +40,7 @@ pub fn init_alert_popup(app: &tauri::App) {
 }
 
 /// Positions the alert-popup window directly under the notch or top-right of the screen
-/// and focuses it immediately so hidden-WebView throttling never delays rendering.
+/// without stealing foreground focus from the user's active application.
 pub fn show_and_position_alert_popup(app: &tauri::AppHandle) {
     show_and_position_alert_popup_timed(app, None);
 }
@@ -86,7 +86,6 @@ fn show_on_main(app: &tauri::AppHandle) {
         #[cfg(target_os = "macos")]
         let _ = popup.set_visible_on_all_workspaces(true);
         let _ = popup.show();
-        let _ = popup.set_focus();
     } else if let Some(main_win) = app.get_webview_window("main") {
         let _ = main_win.unminimize();
         let _ = main_win.show();

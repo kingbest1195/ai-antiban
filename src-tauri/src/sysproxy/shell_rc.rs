@@ -69,6 +69,7 @@ pub(super) fn build_shell_block(port: u16, proxy_url: Option<&str>, tz: Option<&
         }
         exports.push_str(&format!("\n  export NO_PROXY=\"{NO_PROXY_VALUE}\""));
         exports.push_str(&format!("\n  export no_proxy=\"{NO_PROXY_VALUE}\""));
+        exports.push_str("\n  export NODE_USE_ENV_PROXY=\"1\"");
     }
     if let Some(timezone) = tz.and_then(sanitize_timezone) {
         exports.push_str(&format!(
@@ -109,6 +110,7 @@ pub(super) fn build_powershell_block(
         }
         assignments.push_str(&format!("\n  $env:NO_PROXY = \"{NO_PROXY_VALUE}\""));
         assignments.push_str(&format!("\n  $env:no_proxy = \"{NO_PROXY_VALUE}\""));
+        assignments.push_str("\n  $env:NODE_USE_ENV_PROXY = \"1\"");
     }
     if let Some(timezone) = tz.and_then(sanitize_timezone) {
         assignments.push_str(&format!(
@@ -236,6 +238,7 @@ fn assignment_is_generated(name: &str, value: &str) -> bool {
                 .is_some_and(all_digits)
         }
         "NO_PROXY" | "no_proxy" => is_known_no_proxy_value(value),
+        "NODE_USE_ENV_PROXY" => value == "1",
         "TZ" => sanitize_timezone(value).as_deref() == Some(value),
         "LANG" | "LC_TIME" | "LC_ALL" => value == "en_US.UTF-8",
         _ => false,

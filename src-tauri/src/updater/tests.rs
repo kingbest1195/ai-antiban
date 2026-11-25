@@ -336,3 +336,233 @@ fn test_rollback_manifest_url_validation() {
         "https://github.com/kingbest1195/ai-antiban/releases/download/v2.0.0/latest.json"
     );
 }
+
+#[test]
+fn test_windows_install_classification_and_rollback_target() {
+    use super::install::{
+        WINDOWS_MSI_TARGET, WINDOWS_NSIS_TARGET, WindowsInstallKind, classify_windows_install,
+        windows_rollback_target,
+    };
+    use std::path::Path;
+    use tauri::utils::config::BundleType;
+
+    // Explicit bundle_type() takes precedence.
+    assert_eq!(
+        classify_windows_install(Some(BundleType::Msi), None, false),
+        WindowsInstallKind::Msi
+    );
+    assert_eq!(
+        classify_windows_install(Some(BundleType::Nsis), None, false),
+        WindowsInstallKind::Nsis
+    );
+
+    // SignPath builds pass --no-binary-patching so bundle_type() is None:
+    // NSIS uninstaller wins even if installed into Program Files.
+    assert_eq!(
+        classify_windows_install(None, Some(Path::new(r"C:\Program Files\Zastava")), true),
+        WindowsInstallKind::Nsis
+    );
+    // Program Files without NSIS uninstaller => MSI install.
+    assert_eq!(
+        classify_windows_install(None, Some(Path::new(r"C:\Program Files\Zastava")), false),
+        WindowsInstallKind::Msi
+    );
+    assert_eq!(
+        classify_windows_install(
+            None,
+            Some(Path::new(r"D:\Program Files (x86)\Zastava")),
+            false
+        ),
+        WindowsInstallKind::Msi
+    );
+    // LocalAppData or unknown path without bundle_type() => NSIS fallback.
+    assert_eq!(
+        classify_windows_install(
+            None,
+            Some(Path::new(r"C:\Users\Ivan\AppData\Local\Zastava")),
+            false
+        ),
+        WindowsInstallKind::Nsis
+    );
+    assert_eq!(
+        classify_windows_install(None, None, false),
+        WindowsInstallKind::Nsis
+    );
+
+    assert_eq!(
+        windows_rollback_target(WindowsInstallKind::Nsis),
+        WINDOWS_NSIS_TARGET
+    );
+    assert_eq!(
+        windows_rollback_target(WindowsInstallKind::Msi),
+        WINDOWS_MSI_TARGET
+    );
+}
+
+#[test]
+fn test_msi_pre_3_2_1_rollback_rejected_with_actionable_error() {
+    use super::install::{WindowsInstallKind, validate_windows_rollback_compatibility};
+
+    // NSIS installs can roll back to pre-3.2.1 (v3.1.1, v3.2.0) via -setup.exe.
+    assert_eq!(
+        validate_windows_rollback_compatibility(WindowsInstallKind::Nsis, "3.1.1"),
+        Ok(())
+    );
+    assert_eq!(
+        validate_windows_rollback_compatibility(WindowsInstallKind::Nsis, "3.2.0"),
+        Ok(())
+    );
+
+    // MSI installs cannot downgrade to < 3.2.1 without hitting exit 1638 after exit(0).
+    for legacy in ["3.1.1", "v3.2.0", "2.2.0", "3.2.1-rc.1"] {
+        let err = validate_windows_rollback_compatibility(WindowsInstallKind::Msi, legacy)
+            .expect_err("MSI rollback to pre-3.2.1 must fail before teardown");
+        match err {
+            UpdateFailure::Install(msg) => {
+                assert!(
+                    msg.contains("Защита не отключалась"),
+                    "must reassure protection stayed active: {msg}"
+                );
+                assert!(
+                    msg.contains("NSIS") && msg.contains("-setup.exe") && msg.contains("GitHub"),
+                    "must instruct user to install NSIS -setup.exe from GitHub: {msg}"
+                );
+            }
+            other => panic!("expected UpdateFailure::Install, got {other:?}"),
+        }
+    }
+
+    // 3.2.1+ MSI rollbacks are permitted.
+    assert_eq!(
+        validate_windows_rollback_compatibility(WindowsInstallKind::Msi, "3.2.1"),
+        Ok(())
+    );
+    assert_eq!(
+        validate_windows_rollback_compatibility(WindowsInstallKind::Msi, "3.2.2"),
+        Ok(())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_windows_rollback_builder_selects_nsis_target_and_blocks_msi_pre_3_2_1_before_teardown()
+ {
+    use super::install::{
+        WindowsInstallKind, configure_rollback_builder, validate_windows_rollback_compatibility,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tauri::test::{mock_builder, mock_context, noop_assets};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let manifest = serde_json::json!({
+        "version": "3.1.1",
+        "notes": "legacy v3.1.1",
+        "platforms": {
+            "windows-x86_64": {
+                "url": "http://127.0.0.1:1/Zastava_3.1.1_x64_en-US.msi",
+                "signature": "sig-msi"
+            },
+            "windows-x86_64-msi": {
+                "url": "http://127.0.0.1:1/Zastava_3.1.1_x64_en-US.msi",
+                "signature": "sig-msi"
+            },
+            "windows-x86_64-nsis": {
+                "url": "http://127.0.0.1:1/Zastava_3.1.1_x64-setup.exe",
+                "signature": "sig-nsis"
+            }
+        }
+    })
+    .to_string();
+
+    tokio::spawn(async move {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                manifest.len(),
+                manifest
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+
+    let mut ctx = mock_context(noop_assets());
+    ctx.config_mut().plugins.0.insert(
+        "updater".to_string(),
+        serde_json::json!({
+            "pubkey": UPDATER_PUBKEY,
+            "endpoints": [],
+            "dangerousInsecureTransportProtocol": true
+        }),
+    );
+    let app = mock_builder()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .build(ctx)
+        .unwrap();
+
+    let url: url::Url = format!("http://{addr}/latest.json").parse().unwrap();
+    let updater = configure_rollback_builder(
+        app.handle(),
+        url,
+        "3.1.1".to_string(),
+        Some(WindowsInstallKind::Nsis),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let update = updater
+        .check()
+        .await
+        .unwrap()
+        .expect("v3.1.1 rollback must be resolved");
+    assert_eq!(
+        update.download_url.as_str(),
+        "http://127.0.0.1:1/Zastava_3.1.1_x64-setup.exe"
+    );
+
+    // Simulate MSI pre-teardown guard before download_verify_install:
+    // protection_off and install must never run.
+    let teardown_calls = AtomicUsize::new(0);
+    let install_calls = AtomicUsize::new(0);
+    let pre_check =
+        validate_windows_rollback_compatibility(WindowsInstallKind::Msi, &update.version);
+    assert!(matches!(pre_check, Err(UpdateFailure::Install(_))));
+    if pre_check.is_ok() {
+        let _ = download_verify_install(
+            &update,
+            |_, _| {},
+            || {
+                teardown_calls.fetch_add(1, Ordering::SeqCst);
+            },
+            |_, _| {
+                install_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            || RestoreOutcome::NotNeeded,
+        )
+        .await;
+    }
+    assert_eq!(teardown_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(install_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn test_release_workflow_points_windows_x86_64_to_nsis_exe_entry() {
+    let workflow = include_str!("../../../.github/workflows/release.yml");
+    assert!(
+        workflow.contains("\"windows-x86_64\": exeEntry"),
+        "release.yml must point windows-x86_64 to exeEntry"
+    );
+    assert!(
+        workflow.contains("\"windows-x86_64-nsis\": exeEntry"),
+        "release.yml must keep windows-x86_64-nsis"
+    );
+    assert!(
+        workflow.contains("\"windows-x86_64-msi\": msiEntry"),
+        "release.yml must keep windows-x86_64-msi"
+    );
+}

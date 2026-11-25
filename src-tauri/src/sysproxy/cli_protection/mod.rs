@@ -174,7 +174,7 @@ fn finish_enable(
     st.set_cli_protection_active(true);
 
     let mut shell_command = format!(
-        "export HTTP_PROXY=\"{proxy_url}\" HTTPS_PROXY=\"{proxy_url}\" ALL_PROXY=\"{proxy_url}\" NO_PROXY=\"{NO_PROXY_VALUE}\""
+        "export HTTP_PROXY=\"{proxy_url}\" HTTPS_PROXY=\"{proxy_url}\" ALL_PROXY=\"{proxy_url}\" NO_PROXY=\"{NO_PROXY_VALUE}\" NODE_USE_ENV_PROXY=\"1\""
     );
     if let Some(zone) = &tz {
         shell_command.push_str(&format!(
@@ -241,6 +241,38 @@ fn finish_disable(st: &SysState, run: Run<FilesApplied>, report: &mut RecoveryRe
     }
     st.set_cli_protection_active(false);
     st.set_cli_proxy(None);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn apply_cli_files_in(
+    j: &mut super::journal::Journal,
+    p: &dyn super::platform::Platform,
+    ctx: &super::FileCtx,
+    proxy_url: Option<&str>,
+    port: u16,
+    tz: Option<&str>,
+    mode: CliMode,
+) -> (Vec<String>, RecoveryReport) {
+    let plan = FilePlan {
+        proxy_url,
+        port,
+        tz,
+        mode,
+        os: HostOs::current(),
+        strip_unjournaled_blocks: false,
+    };
+    let applied = apply_files(j, p, ctx, &plan);
+    (applied.targets, applied.report)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn disable_cli_files_in(
+    j: &mut super::journal::Journal,
+    p: &dyn super::platform::Platform,
+    ctx: &super::FileCtx,
+    mode: CliMode,
+) -> RecoveryReport {
+    files::disable_files(j, p, Some(ctx), mode)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { toast as t } from "../copy/ru";
-import type { RiskInterceptPayload } from "../../types";
+import type { CheckResult, RiskInterceptPayload, RiskReport } from "../../types";
 import {
   createNetworkChangedCoalescer,
   handleInterceptorResolvedEvent,
@@ -95,7 +95,7 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
     expect(order).toEqual(["invalidate", "audit"]);
   });
 
-  it("handleRiskDetectedEvent при phase=detecting сбрасывает кэш отчётов и обновляет state", () => {
+  it("handleRiskDetectedEvent при phase=detecting НЕ сбрасывает отчёты (без шторма 0 из 14), но обновляет state и payload", () => {
     const invalidateReports = vi.fn();
     const refreshState = vi.fn(async () => ({}));
     const setInterceptPayload = vi.fn();
@@ -111,9 +111,31 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
     };
 
     handleRiskDetectedEvent({ invalidateReports, refreshState, setInterceptPayload }, payload);
-    expect(invalidateReports).toHaveBeenCalledWith(undefined, false);
+    expect(invalidateReports).not.toHaveBeenCalled();
     expect(refreshState).toHaveBeenCalledTimes(1);
     expect(setInterceptPayload).toHaveBeenCalledTimes(1);
+  });
+
+  it("handleRiskDetectedEvent при phase=ready (scope=network) и phase=failed сбрасывает устаревшие отчёты", () => {
+    for (const phase of ["ready", "failed"] as const) {
+      const invalidateReports = vi.fn();
+      const refreshState = vi.fn(async () => ({}));
+      const setInterceptPayload = vi.fn();
+      const payload: RiskInterceptPayload = {
+        id: `alert-${phase}`,
+        provider: "anthropic",
+        host: "claude.ai",
+        report: null,
+        ttl_seconds: 90,
+        scope: "network",
+        detected_at_ms: 1,
+        phase,
+      };
+
+      handleRiskDetectedEvent({ invalidateReports, refreshState, setInterceptPayload }, payload);
+      expect(invalidateReports).toHaveBeenCalledWith(undefined, false);
+      expect(refreshState).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("handleInterceptorResolvedEvent сбрасывает устаревшие отчёты, обновляет state и запускает аудит", () => {
@@ -217,7 +239,7 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
     }
   });
 
-  it("createNetworkChangedCoalescer склеивает всплеск network://changed в один runFullAudit(true)", () => {
+  it("createNetworkChangedCoalescer склеивает всплеск network://changed в один runFullAudit(true) без сброса отчётов при неизвестном IP", () => {
     vi.useFakeTimers();
     try {
       const invalidateReports = vi.fn();
@@ -230,13 +252,82 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
       vi.advanceTimersByTime(50);
       coalescer.trigger();
 
-      expect(invalidateReports).toHaveBeenCalledTimes(1);
+      expect(invalidateReports).not.toHaveBeenCalled();
       expect(runFullAudit).not.toHaveBeenCalled();
 
       vi.advanceTimersByTime(249);
       expect(runFullAudit).not.toHaveBeenCalled();
 
       vi.advanceTimersByTime(1);
+      expect(runFullAudit).toHaveBeenCalledTimes(1);
+      expect(runFullAudit).toHaveBeenCalledWith(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("createNetworkChangedCoalescer НЕ сбрасывает отчёты и НЕ вызывает лишний runFullAudit(true) после audit://refreshed для того же IP", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(100_000);
+      const invalidateReports = vi.fn();
+      const runFullAudit = vi.fn(async () => {});
+      const ok: CheckResult = { status: "ok", code: "OK", message: "ok" };
+      const report: RiskReport = {
+        provider: "anthropic",
+        overall_status: "green",
+        trust_score: 100,
+        telemetry: { ip: "178.168.12.86", country_code: "IL", resolved_at: 1 },
+        geo_result: ok,
+        pinning_result: ok,
+        travel_result: ok,
+        dnsbl_result: ok,
+        dnsbl_clean_count: "4/4",
+        asn_result: ok,
+        ipv6_result: ok,
+        timezone_result: ok,
+        checks: [],
+      };
+      const coalescer = createNetworkChangedCoalescer(
+        () => ({
+          invalidateReports,
+          runFullAudit,
+          currentIp: "178.168.12.86",
+          lastAuditRefreshed: { ip: "178.168.12.86", at: 99_800 },
+        }),
+        250,
+      );
+
+      coalescer.trigger(report);
+      vi.advanceTimersByTime(300);
+
+      expect(invalidateReports).not.toHaveBeenCalled();
+      expect(runFullAudit).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("createNetworkChangedCoalescer инвалидирует и переаудирует при подтверждённой смене IP без свежего audit://refreshed", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(100_000);
+      const invalidateReports = vi.fn();
+      const runFullAudit = vi.fn(async () => {});
+      const coalescer = createNetworkChangedCoalescer(
+        () => ({
+          invalidateReports,
+          runFullAudit,
+          currentIp: "178.168.12.86",
+          lastAuditRefreshed: { ip: "178.168.12.86", at: 99_800 },
+        }),
+        250,
+      );
+
+      coalescer.trigger({ telemetry: { ip: "185.212.102.40", country_code: "NL", resolved_at: 2 } });
+      expect(invalidateReports).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(250);
       expect(runFullAudit).toHaveBeenCalledTimes(1);
       expect(runFullAudit).toHaveBeenCalledWith(true);
     } finally {

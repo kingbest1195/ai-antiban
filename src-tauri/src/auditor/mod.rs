@@ -9,6 +9,7 @@ pub mod geo_matrix;
 pub mod history;
 pub mod ip_type;
 pub mod leaks;
+pub mod matrix_sync;
 pub mod network;
 pub mod os_env;
 pub mod payment_advisor;

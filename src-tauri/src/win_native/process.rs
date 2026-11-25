@@ -9,13 +9,10 @@ pub struct ProcessEntry {
 
 #[cfg(target_os = "windows")]
 mod win {
-    use super::ProcessEntry;
+    use super::{ProcessEntry, validate_unicode_string_span};
     use crate::win_native::decode_utf16_nul_slice;
     use core::ffi::c_void;
-    use windows::Wdk::System::Threading::{
-        NtQueryInformationProcess, ProcessCommandLineInformation,
-    };
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH, UNICODE_STRING};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH, NTSTATUS, UNICODE_STRING};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
@@ -25,6 +22,40 @@ mod win {
         QueryFullProcessImageNameW, TerminateProcess,
     };
     use windows::core::PWSTR;
+
+    const PROCESS_COMMAND_LINE_INFORMATION: i32 = 60;
+
+    type NtQueryInformationProcessFn = unsafe extern "system" fn(
+        process_handle: HANDLE,
+        process_information_class: i32,
+        process_information: *mut c_void,
+        process_information_length: u32,
+        return_length: *mut u32,
+    ) -> NTSTATUS;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(lp_module_name: *const u16) -> *mut c_void;
+        fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const u8) -> *const c_void;
+    }
+
+    /// Resolves `NtQueryInformationProcess` dynamically from already-loaded `ntdll.dll` on demand,
+    /// avoiding a static WDK IAT import entry while keeping Clean Room behavior intact.
+    fn resolve_nt_query_information_process() -> Result<NtQueryInformationProcessFn, String> {
+        let ntdll_w = crate::win_native::encode_wide_nul("ntdll.dll");
+        // SAFETY: `ntdll_w` is NUL-terminated and `ntdll.dll` is loaded in every Win32 process.
+        let hmod = unsafe { GetModuleHandleW(ntdll_w.as_ptr()) };
+        if hmod.is_null() {
+            return Err("GetModuleHandleW(ntdll.dll) returned null".to_string());
+        }
+        // SAFETY: `hmod` is a valid module handle and the symbol name is NUL-terminated ASCII.
+        let sym = unsafe { GetProcAddress(hmod, b"NtQueryInformationProcess\0".as_ptr()) };
+        if sym.is_null() {
+            return Err("GetProcAddress(NtQueryInformationProcess) returned null".to_string());
+        }
+        // SAFETY: `NtQueryInformationProcess` matches `NtQueryInformationProcessFn` on Windows.
+        Ok(unsafe { core::mem::transmute::<*const c_void, NtQueryInformationProcessFn>(sym) })
+    }
 
     struct HandleGuard(HANDLE);
 
@@ -94,6 +125,8 @@ mod win {
         const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023_u32 as i32;
         const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005_u32 as i32;
 
+        let nt_query = resolve_nt_query_information_process()?;
+
         // SAFETY: Opens target process only for limited query rights.
         let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
             .map_err(|e| format!("OpenProcess({pid}) failed: {e}"))?;
@@ -102,9 +135,9 @@ mod win {
         let mut needed: u32 = 0;
         // SAFETY: Null buffer query returns required byte length in `needed`.
         let st = unsafe {
-            NtQueryInformationProcess(
+            nt_query(
                 handle,
-                ProcessCommandLineInformation,
+                PROCESS_COMMAND_LINE_INFORMATION,
                 core::ptr::null_mut(),
                 0,
                 &mut needed,
@@ -132,9 +165,9 @@ mod win {
         let mut ret_len: u32 = 0;
         // SAFETY: `aligned_buf` is pointer-aligned and `byte_len` bytes long.
         let st2 = unsafe {
-            NtQueryInformationProcess(
+            nt_query(
                 handle,
-                ProcessCommandLineInformation,
+                PROCESS_COMMAND_LINE_INFORMATION,
                 aligned_buf.as_mut_ptr().cast::<c_void>(),
                 byte_len,
                 &mut ret_len,
@@ -152,15 +185,14 @@ mod win {
         if us.Buffer.is_null() || us.Length == 0 {
             return Ok(None);
         }
-        let buf_start = aligned_buf.as_ptr() as usize;
-        let buf_end = buf_start + byte_len as usize;
-        let str_ptr = us.Buffer.0 as usize;
-        let str_bytes = us.Length as usize;
-        if str_ptr < buf_start || str_ptr.saturating_add(str_bytes) > buf_end {
-            return Err("NtQueryInformationProcess returned out-of-bounds UNICODE_STRING".into());
-        }
-        // SAFETY: `us.Buffer` points within `aligned_buf` and has `us.Length / 2` UTF-16 code units.
-        let units = unsafe { core::slice::from_raw_parts(us.Buffer.0, str_bytes / 2) };
+        let unit_count = validate_unicode_string_span(
+            aligned_buf.as_ptr() as usize,
+            byte_len as usize,
+            us.Buffer.0 as usize,
+            us.Length as usize,
+        )?;
+        // SAFETY: `us.Buffer` points within `aligned_buf` and has `unit_count` UTF-16 code units.
+        let units = unsafe { core::slice::from_raw_parts(us.Buffer.0, unit_count) };
         Ok(Some(String::from_utf16_lossy(units)))
     }
 
@@ -233,5 +265,43 @@ pub fn terminate_process_by_pid(pid: u32, exit_code: u32) -> Result<(), String> 
     {
         let _ = (pid, exit_code);
         Err("terminate_process_by_pid is only supported on Windows".to_string())
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn validate_unicode_string_span(
+    buf_start: usize,
+    byte_len: usize,
+    str_ptr: usize,
+    str_bytes: usize,
+) -> Result<usize, String> {
+    let Some(buf_end) = buf_start.checked_add(byte_len) else {
+        return Err("NtQueryInformationProcess buffer span overflow".into());
+    };
+    let Some(str_end) = str_ptr.checked_add(str_bytes) else {
+        return Err("NtQueryInformationProcess UNICODE_STRING span overflow".into());
+    };
+    if str_ptr < buf_start || str_end > buf_end {
+        return Err("NtQueryInformationProcess returned out-of-bounds UNICODE_STRING".into());
+    }
+    Ok(str_bytes / 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_unicode_string_command_line_spans() {
+        assert_eq!(validate_unicode_string_span(1000, 64, 1016, 20), Ok(10));
+        assert!(validate_unicode_string_span(1000, 64, 992, 16).is_err());
+        assert!(validate_unicode_string_span(1000, 64, 1056, 16).is_err());
+        assert!(validate_unicode_string_span(1000, 64, usize::MAX - 4, 16).is_err());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn non_windows_command_line_query_is_noop() {
+        assert_eq!(query_process_command_line(1234), Ok(None));
     }
 }

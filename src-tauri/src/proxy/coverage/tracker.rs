@@ -183,6 +183,12 @@ impl CoverageTracker {
             return Step::Done;
         }
 
+        // Only AI provider requests ever trigger OS-level TCP table / OpenProcess PID lookup.
+        // PAC fetches without a recognizable User-Agent (e.g. WinHTTP / CFNetwork) never probe OS sockets.
+        if kind != TrafficKind::AiRequest {
+            return Step::Done;
+        }
+
         // 3. Debounce and rate limit: a lookup for this port is already running / too many
         //    lookups lately -> no new process, attribute by User-Agent only.
         let Ok(mut l) = self.lookups.lock() else {

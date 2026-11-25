@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -10,6 +9,8 @@ use crate::proxy::hold_queue::HoldQueue;
 #[cfg(any(test, feature = "test-support"))]
 use crate::state::AppState;
 
+use super::diag;
+use super::fingerprint::{default_udp_route_changed, is_default_udp_route_dropped};
 #[cfg(any(test, feature = "test-support"))]
 use super::types::{AUDIT_TIMEOUT_SECS, AuditFn, GuardIo, ProbeFn, ResolveFn};
 use super::types::{
@@ -116,10 +117,9 @@ impl NetworkGuard {
             let mut sync_tracker = super::fingerprint::PeriodicSysproxySync::default();
             loop {
                 if let Some(env) = guard.env.get() {
-                    guard.check_route_and_tick(env).await;
+                    let current_fp = guard.check_route_and_tick_with_fp(env).await;
                     #[cfg(not(test))]
                     {
-                        let current_fp = guard.current_local_route_fingerprint();
                         let sysproxy_active = crate::sysproxy::is_sysproxy_active();
                         let os_pac_deferred = crate::sysproxy::is_os_pac_deferred();
                         let sync_busy = guard.sysproxy_sync_in_flight.load(Ordering::SeqCst);
@@ -130,7 +130,7 @@ impl NetworkGuard {
                                 os_pac_deferred,
                             );
                         let should_reconcile_prefs =
-                            !sync_busy && !cfg!(target_os = "windows") && n.is_multiple_of(20);
+                            !sync_busy && !cfg!(target_os = "windows") && n.is_multiple_of(40);
 
                         if needs_refresh || should_reconcile_prefs {
                             if !guard.sysproxy_sync_in_flight.swap(true, Ordering::SeqCst) {
@@ -158,11 +158,13 @@ impl NetworkGuard {
                                     env_sync.auditor.set_protection_flags(flags);
                                 });
                             }
-                        } else if n.is_multiple_of(20) {
+                        } else if n.is_multiple_of(40) {
                             let flags = crate::sysproxy::read_runtime_protection_flags().await;
                             env.auditor.set_protection_flags(flags);
                         }
                     }
+                    #[cfg(test)]
+                    let _ = current_fp;
                 }
                 #[cfg(not(test))]
                 {
@@ -190,104 +192,6 @@ impl NetworkGuard {
         self.register_self_weak();
         if let Some(env) = self.env.get() {
             self.check_route_and_tick(env).await;
-        }
-    }
-
-    /// Fetches the current egress IP (Cloudflare trace, falls back to ipify),
-    /// honoring an active external `chained_proxy` when configured (caching its `reqwest::Client`).
-    /// When `fast_fail` is true and the primary 500ms-connect probe fails with a connect/timeout
-    /// error, returns `None` immediately so the guard can freeze gates and show the popup first.
-    async fn probe_ip_with_fast_fail(&self, fast_fail: bool) -> Option<String> {
-        let proxied = match crate::sysproxy::get_chained_proxy() {
-            Some(cp) => {
-                let cached = {
-                    let cache = self
-                        .chained_client
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    cache
-                        .as_ref()
-                        .filter(|(cached_cp, _)| *cached_cp == cp)
-                        .map(|(_, client)| client.clone())
-                };
-                if let Some(client) = cached {
-                    Some(client)
-                } else {
-                    reqwest::Proxy::all(&cp).ok().and_then(|proxy| {
-                        let client = reqwest::Client::builder()
-                            .proxy(proxy)
-                            .connect_timeout(Duration::from_millis(400))
-                            .timeout(Duration::from_millis(900))
-                            .tcp_nodelay(true)
-                            .pool_max_idle_per_host(0)
-                            .user_agent(crate::auditor::network::NEUTRAL_USER_AGENT)
-                            .build()
-                            .ok()?;
-                        let mut cache = self
-                            .chained_client
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner());
-                        *cache = Some((cp, client.clone()));
-                        Some(client)
-                    })
-                }
-            }
-            None => {
-                let mut cache = self
-                    .chained_client
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                *cache = None;
-                None
-            }
-        };
-        let client = proxied.as_ref().unwrap_or(&self.client);
-        match client.get("https://1.1.1.1/cdn-cgi/trace").send().await {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => {
-                    for line in text.lines() {
-                        if let Some(val) = line.strip_prefix("ip=") {
-                            let val = val.trim();
-                            if val.parse::<IpAddr>().is_ok() {
-                                return Some(val.to_string());
-                            }
-                        }
-                    }
-                }
-                Err(_) if fast_fail => return None,
-                Err(_) => {}
-            },
-            Err(err) if fast_fail && (err.is_connect() || err.is_timeout() || err.is_request()) => {
-                return None;
-            }
-            Err(_) => {}
-        }
-        if let Ok(resp) = client.get("https://api.ipify.org").send().await
-            && let Ok(text) = resp.text().await
-        {
-            let val = text.trim();
-            if val.parse::<IpAddr>().is_ok() {
-                return Some(val.to_string());
-            }
-        }
-        None
-    }
-
-    pub(super) async fn probe(&self, env: &Env) -> Option<String> {
-        match &env.probe {
-            Some(probe) => probe().await,
-            None => self.probe_ip_with_fast_fail(false).await,
-        }
-    }
-
-    pub(super) async fn probe_for_regular_tick(
-        &self,
-        env: &Env,
-        fast_fail: bool,
-    ) -> Option<String> {
-        match &env.probe {
-            Some(probe) => probe().await,
-            None => self.probe_ip_with_fast_fail(fast_fail).await,
         }
     }
 
@@ -396,6 +300,15 @@ impl NetworkGuard {
         };
 
         if route_changed {
+            let default_moved = inner.default_route_moved
+                || inner.last_route_fp.as_ref().is_some_and(|old_fp| {
+                    default_udp_route_changed(old_fp, &current_fp)
+                        || is_default_udp_route_dropped(&current_fp)
+                });
+            if fp_moved && let Some(ref old_fp) = inner.last_route_fp {
+                diag::record_fp_change(old_fp, &current_fp);
+            }
+            inner.default_route_moved = default_moved;
             inner.last_route_fp = Some(current_fp.clone());
             if fp_moved {
                 inner.last_fp_change_at = Some(Instant::now());
@@ -418,6 +331,7 @@ impl NetworkGuard {
             return TickPlan::ProbeChanged(dirty_since.unwrap_or_else(Instant::now), current_fp);
         }
 
+        inner.default_route_moved = false;
         inner.last_route_fp = Some(current_fp.clone());
 
         if inner.probe_in_flight || self.regular_probe_in_flight.load(Ordering::SeqCst) {
@@ -433,6 +347,10 @@ impl NetworkGuard {
     }
 
     pub(super) async fn check_route_and_tick(self: &Arc<Self>, env: &Env) {
+        let _ = self.check_route_and_tick_with_fp(env).await;
+    }
+
+    pub(super) async fn check_route_and_tick_with_fp(self: &Arc<Self>, env: &Env) -> String {
         self.register_self_weak();
         let tick_guard = self.tick_lock.lock().await;
         // Include external system proxy (`chained_proxy`) so switching Clash/v2rayN/Happ
@@ -445,12 +363,12 @@ impl NetworkGuard {
         let was_blocked = self.any_provider_gate_blocked() || !st_data.blocked_providers.is_empty();
 
         match self
-            .plan_tick(env, current_fp, &st_data, &enabled_unrouted)
+            .plan_tick(env, current_fp.clone(), &st_data, &enabled_unrouted)
             .await
         {
             TickPlan::Done => {}
             TickPlan::ProbeChanged(t0, planned_fp) => {
-                // Window-first: freeze gates, abort tunnels, emit risk-detected (`phase: detecting`),
+                // Window-first: freeze gates, emit risk-detected (`phase: detecting`),
                 // and spawn the background probe + audit without holding `tick_lock` or `inner`.
                 self.begin_changed_probe(env, t0, planned_fp, was_blocked)
                     .await;
@@ -459,21 +377,23 @@ impl NetworkGuard {
                 let Some(_regular_guard) =
                     RegularProbeInFlightGuard::try_enter(&self.regular_probe_in_flight)
                 else {
-                    return;
+                    return current_fp;
                 };
-                let fast_fail = self.gate() == Gate::Open && !self.is_paused();
                 drop(tick_guard);
                 let mut fp_interval =
                     tokio::time::interval(Duration::from_millis(ROUTE_CHECK_INTERVAL_MS));
                 fp_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 fp_interval.tick().await;
-                let probe_fut = self.probe_for_regular_tick(env, fast_fail);
+                let probe_fut = self.probe(env);
                 tokio::pin!(probe_fut);
                 let probed = loop {
                     tokio::select! {
                         res = &mut probe_fut => break Some(res),
                         _ = fp_interval.tick() => {
-                            if self.current_local_route_fingerprint() != planned_fp {
+                            let cur_fp = self.current_local_route_fingerprint();
+                            if default_udp_route_changed(&planned_fp, &cur_fp)
+                                || is_default_udp_route_dropped(&cur_fp)
+                            {
                                 break None;
                             }
                         }
@@ -491,5 +411,6 @@ impl NetworkGuard {
                 }
             }
         }
+        current_fp
     }
 }

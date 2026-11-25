@@ -1,9 +1,10 @@
 use super::super::EnableReport;
 use super::super::journal::{ApplyOutcome, EntryState, Journal, JournalError, Resource, Value};
 use super::super::platform::{PacState, Platform, PlatformError};
-use super::planner::plan_physical_pac;
+use super::planner::{MSG_ALL_HEAL_SUSPENDED_PREFIX, plan_physical_pac};
 use super::{HealGuard, MSG_ADMIN_AUTH_REQUIRED};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const DIAG_DEDUP_TTL: Duration = Duration::from_secs(300);
@@ -15,6 +16,28 @@ pub(super) struct MacosDiagState {
 }
 
 static LAST_MACOS_DIAG_STATE: Mutex<Option<MacosDiagState>> = Mutex::new(None);
+static LAST_MACOS_SUMMARY_STATE: Mutex<Option<String>> = Mutex::new(None);
+static VPN_BROWSER_PAC_NOTED: AtomicBool = AtomicBool::new(false);
+
+fn record_state_change(
+    summary_state: Option<&Mutex<Option<String>>>,
+    key: &str,
+    msg: Option<&str>,
+    record: &mut dyn FnMut(&str, &str),
+) {
+    let Some(state) = summary_state else {
+        return;
+    };
+    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.as_deref() == Some(key) {
+        return;
+    }
+    *guard = Some(key.to_string());
+    drop(guard);
+    if let Some(line) = msg {
+        record("sysproxy:macos", line);
+    }
+}
 
 fn should_record_diag(state: &Mutex<Option<MacosDiagState>>, key: &str, now: Instant) -> bool {
     let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -48,16 +71,21 @@ pub(super) fn apply_pac(
     pac_url: &str,
     heal: Option<(&HealGuard, Instant)>,
 ) -> Result<EnableReport, String> {
-    apply_pac_with(
+    let browser_pac_policy_active = super::super::state().browser_pac_policy_active();
+    apply_pac_with_summary(
         j,
         p,
         pac_url,
         heal,
         &LAST_MACOS_DIAG_STATE,
+        Some(&LAST_MACOS_SUMMARY_STATE),
+        &VPN_BROWSER_PAC_NOTED,
+        browser_pac_policy_active,
         &mut crate::diagnostics::record,
     )
 }
 
+#[allow(dead_code)]
 pub(super) fn apply_pac_with(
     j: &mut Journal,
     p: &dyn Platform,
@@ -66,11 +94,62 @@ pub(super) fn apply_pac_with(
     diag_state: &Mutex<Option<MacosDiagState>>,
     record: &mut dyn FnMut(&str, &str),
 ) -> Result<EnableReport, String> {
+    let never_noted = AtomicBool::new(false);
+    apply_pac_with_options(j, p, pac_url, heal, diag_state, &never_noted, false, record)
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(super) fn apply_pac_with_options(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    heal: Option<(&HealGuard, Instant)>,
+    diag_state: &Mutex<Option<MacosDiagState>>,
+    vpn_browser_pac_noted: &AtomicBool,
+    browser_pac_policy_active: bool,
+    record: &mut dyn FnMut(&str, &str),
+) -> Result<EnableReport, String> {
+    apply_pac_with_summary(
+        j,
+        p,
+        pac_url,
+        heal,
+        diag_state,
+        None,
+        vpn_browser_pac_noted,
+        browser_pac_policy_active,
+        record,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_pac_with_summary(
+    j: &mut Journal,
+    p: &dyn Platform,
+    pac_url: &str,
+    heal: Option<(&HealGuard, Instant)>,
+    diag_state: &Mutex<Option<MacosDiagState>>,
+    summary_state: Option<&Mutex<Option<String>>>,
+    vpn_browser_pac_noted: &AtomicBool,
+    browser_pac_policy_active: bool,
+    record: &mut dyn FnMut(&str, &str),
+) -> Result<EnableReport, String> {
     if super::super::os_effects_enabled() {
         super::super::platform::clear_last_os_error();
     }
     let now = heal.map(|(_, t)| t).unwrap_or_else(Instant::now);
-    let planned = plan_physical_pac(p, pac_url, heal, Some(j))?;
+    let planned = match plan_physical_pac(p, pac_url, heal, Some(j)) {
+        Ok(planned) => planned,
+        Err(err) => {
+            let msg = if err.starts_with(MSG_ALL_HEAL_SUSPENDED_PREFIX) {
+                format!("all physical services suspended by HealGuard: {err}")
+            } else {
+                format!("pac plan failed: {err}")
+            };
+            record_state_change(summary_state, &format!("err:{err}"), Some(&msg), record);
+            return Err(err);
+        }
+    };
 
     // Phase 2: write, service by service; one failure does not stop the others.
     let want = Value::Pac(PacState {
@@ -208,6 +287,7 @@ pub(super) fn apply_pac_with(
                 ),
             );
         }
+        record_state_change(summary_state, "admin_auth", None, record);
         return Err(MSG_ADMIN_AUTH_REQUIRED.to_string());
     }
     if report.configured.is_empty() && (failed > 0 || planned.unreadable > 0) {
@@ -230,6 +310,7 @@ pub(super) fn apply_pac_with(
                 ),
             );
         }
+        record_state_change(summary_state, "all_failed", None, record);
         if super::super::os_effects_enabled()
             && let Some(detail) = super::super::platform::last_os_error()
         {
@@ -243,25 +324,47 @@ pub(super) fn apply_pac_with(
         && let Ok(eff) = p.effective_proxy()
         && (eff.pac_enabled != Some(true) || eff.pac_url.as_deref() != Some(pac_url))
     {
-        let url_matches = eff.pac_url.as_deref() == Some(pac_url);
-        let key = format!(
-            "vpn_eff_diff:{}:pac={:?}:url={url_matches}:fails={}",
-            report.skipped_vpn.join(","),
-            eff.pac_enabled,
-            fail_msgs.join(";")
-        );
-        if should_record_diag(diag_state, &key, now) {
-            for msg in &fail_msgs {
-                record("sysproxy:macos", msg);
+        if browser_pac_policy_active {
+            if !vpn_browser_pac_noted.swap(true, Ordering::SeqCst) {
+                record(
+                    "sysproxy:macos",
+                    &format!(
+                        "vpn active ({}) owns primary effective proxy; browser PAC policies active",
+                        report.skipped_vpn.join(","),
+                    ),
+                );
             }
-            record(
-                "sysproxy:macos",
-                &format!(
-                    "effective proxy differs while vpn active ({}): pac_enabled={:?}, url_matches={url_matches}",
-                    report.skipped_vpn.join(","),
-                    eff.pac_enabled,
-                ),
+            if !fail_msgs.is_empty() {
+                let key = format!("partial_fail:{}", fail_msgs.join(";"));
+                if should_record_diag(diag_state, &key, now) {
+                    for msg in &fail_msgs {
+                        record("sysproxy:macos", msg);
+                    }
+                }
+            } else {
+                clear_diag_state(diag_state);
+            }
+        } else {
+            let url_matches = eff.pac_url.as_deref() == Some(pac_url);
+            let key = format!(
+                "vpn_eff_diff:{}:pac={:?}:url={url_matches}:fails={}",
+                report.skipped_vpn.join(","),
+                eff.pac_enabled,
+                fail_msgs.join(";")
             );
+            if should_record_diag(diag_state, &key, now) {
+                for msg in &fail_msgs {
+                    record("sysproxy:macos", msg);
+                }
+                record(
+                    "sysproxy:macos",
+                    &format!(
+                        "effective proxy differs while vpn active ({}): pac_enabled={:?}, url_matches={url_matches}",
+                        report.skipped_vpn.join(","),
+                        eff.pac_enabled,
+                    ),
+                );
+            }
         }
     } else if !fail_msgs.is_empty() {
         let key = format!("partial_fail:{}", fail_msgs.join(";"));
@@ -273,5 +376,32 @@ pub(super) fn apply_pac_with(
     } else {
         clear_diag_state(diag_state);
     }
+    let summary_key = if report.os_pac_deferred {
+        let reason = planned.os_pac_defer_reason.as_deref().unwrap_or("unknown");
+        format!("deferred:{reason}:vpn={}", report.skipped_vpn.join(","))
+    } else {
+        format!(
+            "active:applied={}:vpn={}:suspended={}:failed={failed}:unreadable={}",
+            report.configured.join(","),
+            report.skipped_vpn.join(","),
+            planned.suspended_services.join(","),
+            planned.unreadable
+        )
+    };
+    let summary_msg = if report.os_pac_deferred {
+        let reason = planned.os_pac_defer_reason.as_deref().unwrap_or("unknown");
+        format!(
+            "pac deferred ({reason}): skipped_vpn=[{}]",
+            report.skipped_vpn.join(", ")
+        )
+    } else {
+        format!(
+            "pac active: applied=[{}], skipped_vpn=[{}], suspended=[{}]",
+            report.configured.join(", "),
+            report.skipped_vpn.join(", "),
+            planned.suspended_services.join(", ")
+        )
+    };
+    record_state_change(summary_state, &summary_key, Some(&summary_msg), record);
     Ok(report)
 }

@@ -1,5 +1,6 @@
 //! Application bootstrap: Tauri builder, setup sequence and background tasks.
 
+mod cowork_watcher;
 mod deep_links;
 mod rlimit;
 mod watchers;
@@ -16,16 +17,14 @@ pub use watchers::try_silent_paused_recovery;
 
 use crate::startup::{self, StartupSink, StartupSnapshot, StartupState, StartupSteps};
 use crate::{auditor, bin_checker, commands, os_tz, proxy, state, sysproxy, tray};
+use cowork_watcher::spawn_cowork_guard_watcher;
 use deep_links::{
     handle_initial_deep_links, handle_single_instance_launch, reconcile_active_profile_on_startup,
     register_deep_link_handlers,
 };
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
-use watchers::{
-    spawn_bunker_scheduler, spawn_cowork_guard_watcher, spawn_route_subscription_refresher,
-    spawn_tray_status_watcher, spawn_update_checker,
-};
+use watchers::spawn_background_watchers;
 
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -69,6 +68,10 @@ pub fn run() {
                 crate::tray::update_tray_from_guard_status,
             );
             let (app_state, risk_auditor) = init_services(app)?;
+            auditor::matrix_sync::init_provider_matrix_sync(
+                data_dir.as_deref(),
+                &risk_auditor.rules,
+            );
             reconcile_active_profile_on_startup(&app_state);
             let (guard_for_watcher, pac_url) = start_proxy(app, &risk_auditor, &app_state);
             app.manage(guard_for_watcher.clone());
@@ -92,11 +95,8 @@ pub fn run() {
 
             tray::build_tray(app)?;
 
-            spawn_tray_status_watcher(app, &risk_auditor, &app_state, guard_for_watcher.clone());
-            spawn_update_checker(app, &app_state);
+            spawn_background_watchers(app, &risk_auditor, &app_state, guard_for_watcher.clone());
             spawn_cowork_guard_watcher(app);
-            spawn_bunker_scheduler(app, &app_state);
-            spawn_route_subscription_refresher(app, &risk_auditor, &app_state);
 
             // Window starts hidden (`visible: false` in tauri.conf.json) so `--minimized`
             // keeps Zastava strictly in the tray; show it on interactive launches.

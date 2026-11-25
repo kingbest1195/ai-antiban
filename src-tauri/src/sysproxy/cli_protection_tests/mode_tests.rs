@@ -21,8 +21,20 @@ fn the_time_zone_switch_is_independent_of_the_proxy_protection_in_all_four_combi
             (json_of(&e, &e.ctx.claude_settings()), "env"),
             (e.text(&ide), key),
         ] {
-            for var in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+            for var in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "NO_PROXY",
+                "NODE_USE_ENV_PROXY",
+            ] {
                 assert_eq!(raw(&text, &[container, var]).is_some(), proxy, "{var}");
+            }
+            if proxy {
+                assert_eq!(
+                    raw(&text, &[container, "NODE_USE_ENV_PROXY"]),
+                    Some("\"1\"".into())
+                );
             }
             for var in ["TZ", "LANG", "LC_TIME"] {
                 assert_eq!(raw(&text, &[container, var]).is_some(), tz, "{var}");

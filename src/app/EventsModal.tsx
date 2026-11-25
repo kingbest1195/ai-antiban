@@ -1,7 +1,7 @@
 import type { GatewayStatsSnapshot } from "../types";
 import { Badge, Button, Modal, Mono, Row, Rows } from "../ui";
 import { overview as copy, status as words } from "../shared/copy/ru";
-import { formatCountryWithCode } from "../shared/lib/country";
+import { formatCountryWithCode, isBlockedGeoCode } from "../shared/lib/country";
 import { formatClock } from "../shared/lib/format";
 
 interface EventsModalProps {
@@ -12,7 +12,10 @@ interface EventsModalProps {
 
 /** Лента событий шлюза: хосты, время и что с ними сделала Застава. */
 export function EventsModal({ open, onClose, stats }: EventsModalProps) {
-  const events = (stats?.recent_events ?? []).slice().reverse();
+  const events = (stats?.recent_events ?? [])
+    .filter((ev) => ev.host?.trim().toLowerCase() !== "all")
+    .slice()
+    .reverse();
   return (
     <Modal
       open={open}
@@ -34,12 +37,16 @@ export function EventsModal({ open, onClose, stats }: EventsModalProps) {
       ) : (
         <Rows>
           {events.map((ev, idx) => {
+            const action = ev.action?.trim().toUpperCase() ?? "";
             const isDirect =
-              ev.action?.toUpperCase() === "DIRECT" ||
+              action === "DIRECT" ||
               ev.kind === "direct" ||
               ev.provider?.toLowerCase() === "non-ai" ||
               ev.country === "DIRECT";
-            const isProtected = ev.action?.toUpperCase() === "PROTECTED";
+            const isManualAllow =
+              action === "MANUAL_ALLOW" || (action === "PROTECTED" && isBlockedGeoCode(ev.country));
+            const isProtected = action === "PROTECTED" && !isManualAllow;
+            const countryLabel = ev.country ? formatCountryWithCode(ev.country) || ev.country : "";
             return (
               <Row
                 key={idx}
@@ -48,10 +55,15 @@ export function EventsModal({ open, onClose, stats }: EventsModalProps) {
                 trail={
                   isDirect ? (
                     <Badge>{words.direct}</Badge>
+                  ) : isManualAllow ? (
+                    <Badge tone="warn" icon="alert">
+                      {words.manualAllow}
+                      {countryLabel ? ` · ${countryLabel}` : ""}
+                    </Badge>
                   ) : isProtected ? (
                     <Badge tone="ok" icon="check">
                       {words.protected}
-                      {ev.country ? ` · ${formatCountryWithCode(ev.country) || ev.country}` : ""}
+                      {countryLabel ? ` · ${countryLabel}` : ""}
                     </Badge>
                   ) : (
                     <Badge tone="danger" icon="alert">

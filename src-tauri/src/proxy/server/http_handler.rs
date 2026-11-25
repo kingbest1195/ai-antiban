@@ -27,10 +27,12 @@ use super::{
 impl ProxyServer {
     /// Builds the live PAC script excluding domains of any disabled providers.
     pub async fn build_pac_script(&self) -> String {
-        let matrix = self.auditor.rules.provider_matrix.read().await;
+        let runtime_snap = crate::auditor::rules::runtime_provider_matrix_snapshot();
+        let matrix_guard = self.auditor.rules.provider_matrix.read().await;
+        let matrix = runtime_snap.as_deref().unwrap_or(&matrix_guard);
         let st = self.state.get_data().await;
         let domains = crate::proxy::pac::get_all_ai_domains_filtered(
-            &matrix,
+            matrix,
             &st.custom_ai_domains,
             &st.disabled_providers,
         );
@@ -193,6 +195,11 @@ impl ProxyServer {
                 .await;
         }
 
+        if !crate::auditor::geo_matrix::is_payment_or_kyc_host(&host)
+            && ProviderId::from_host(&host).is_none()
+        {
+            crate::proxy::domain_drift::observe_direct_host(&host);
+        }
         self.state.stats().record_direct_bypassed_host(&host);
         self.forward_plain_http(client, &req, &buf[head_end..])
             .await
@@ -232,9 +239,12 @@ impl ProxyServer {
         req: &ParsedRequest,
         body_prefix: &[u8],
     ) -> Result<(), std::io::Error> {
-        // The manual kill-switch ("СТОП СЕТИ") stops everything that goes through Zastava.
+        // Scope `manual_killswitch` strictly to AI/payment/KYC hosts — never block or 503
+        // non-AI plain HTTP traffic (Discord, PUBG, RDP). Shutdown still aborts transfers.
+        let guard_kill = crate::auditor::geo_matrix::is_payment_or_kyc_host(&req.host);
         let mut kill_rx = self.guard.subscribe_killswitch();
-        if *kill_rx.borrow_and_update() {
+        let mut shutdown_rx = self.guard.subscribe_shutdown_abort();
+        if *shutdown_rx.borrow_and_update() || (guard_kill && *kill_rx.borrow_and_update()) {
             return send_status(client, "503 Service Unavailable", KILLSWITCH_MESSAGE).await;
         }
 
@@ -269,7 +279,7 @@ impl ProxyServer {
         };
 
         // Transit traffic is not tied to the gate: a network re-check never cuts a transfer.
-        // Only the manual kill-switch cuts it (and the idle timeout).
+        // Non-AI traffic is not cut by `manual_killswitch` either; payment/KYC hosts and shutdown still cut it.
         let relay = relay_exchange(
             client,
             &mut upstream,
@@ -277,14 +287,91 @@ impl ProxyServer {
             body_prefix,
             Duration::from_secs(PLAIN_HTTP_IDLE_TIMEOUT_SECS),
         );
-        let res = tokio::select! {
-            res = relay => res,
-            _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+        let res = if guard_kill {
+            tokio::select! {
+                res = relay => res,
+                _ = killswitch_engaged(&mut kill_rx) => Err(killswitch_stopped()),
+                _ = crate::proxy::guard::shutdown_aborted(&mut shutdown_rx) => Err(killswitch_stopped()),
+            }
+        } else {
+            tokio::select! {
+                res = relay => res,
+                _ = crate::proxy::guard::shutdown_aborted(&mut shutdown_rx) => Err(killswitch_stopped()),
+            }
         };
         match res {
             Err(e) if is_peer_gone(&e) => Ok(()),
             other => other,
         }
+    }
+
+    pub(super) async fn handle_payment_connect(
+        &self,
+        client: &mut TcpStream,
+        host: &str,
+        port: u16,
+        st_snapshot: &crate::state::AppStateData,
+        is_canary: bool,
+    ) -> Result<(), std::io::Error> {
+        let Some((matched_provider, pay_selection)) =
+            active_payment_route_selection(&self.state, st_snapshot).await
+        else {
+            return self
+                .tunnel_to_target(
+                    client,
+                    host,
+                    port,
+                    None,
+                    &crate::routing::RouteSelection::Direct,
+                )
+                .await;
+        };
+        match &pay_selection {
+            crate::routing::RouteSelection::Missing(id) => {
+                return self
+                    .refuse_route_down(
+                        client,
+                        host,
+                        matched_provider,
+                        id,
+                        crate::routing::RouteDownReason::Missing,
+                        None,
+                        is_canary,
+                    )
+                    .await;
+            }
+            crate::routing::RouteSelection::Invalid(why) => {
+                return self
+                    .refuse_route_down(
+                        client,
+                        host,
+                        matched_provider,
+                        crate::routing::INVALID_PROFILE_ROUTE_ID,
+                        crate::routing::RouteDownReason::Invalid,
+                        Some(why),
+                        is_canary,
+                    )
+                    .await;
+            }
+            crate::routing::RouteSelection::Route(r) => {
+                if let Err(reason) = r.check_usable(crate::auditor::network::current_timestamp()) {
+                    return self
+                        .refuse_route_down(
+                            client,
+                            host,
+                            matched_provider,
+                            &r.id,
+                            reason,
+                            None,
+                            is_canary,
+                        )
+                        .await;
+                }
+            }
+            crate::routing::RouteSelection::Direct => {}
+        }
+        self.tunnel_to_target(client, host, port, Some(matched_provider), &pay_selection)
+            .await
     }
 
     pub(super) async fn should_hold_studio_session(
@@ -309,7 +396,8 @@ impl ProxyServer {
 pub(super) async fn active_payment_route_selection(
     state: &crate::state::AppState,
     snapshot: &crate::state::AppStateData,
-) -> crate::routing::RouteSelection {
+) -> Option<(ProviderId, crate::routing::RouteSelection)> {
+    let mut fallback_non_direct = None;
     for provider in [
         ProviderId::Anthropic,
         ProviderId::Openai,
@@ -318,7 +406,16 @@ pub(super) async fn active_payment_route_selection(
         if snapshot.is_provider_disabled(provider.as_str()) {
             continue;
         }
-        return state.route_selection(provider.as_str()).await;
+        let sel = state.route_selection(provider.as_str()).await;
+        match sel {
+            crate::routing::RouteSelection::Route(_) => return Some((provider, sel)),
+            crate::routing::RouteSelection::Direct => {}
+            other => {
+                if fallback_non_direct.is_none() {
+                    fallback_non_direct = Some((provider, other));
+                }
+            }
+        }
     }
-    crate::routing::RouteSelection::Direct
+    fallback_non_direct
 }

@@ -6,6 +6,7 @@ fn test_upsert_shell_rc_idempotent() {
     let updated1 = upsert_shell_rc_content(initial, "http://127.0.0.1:8899", 8899);
     assert!(updated1.contains("nc -z 127.0.0.1 8899"));
     assert!(updated1.contains("export HTTPS_PROXY=\"http://127.0.0.1:8899\""));
+    assert!(updated1.contains("export NODE_USE_ENV_PROXY=\"1\""));
 
     // Second upsert with fallback port 8900 replaces the block without duplicating it
     let updated2 = upsert_shell_rc_content(&updated1, "http://127.0.0.1:8900", 8900);
@@ -67,6 +68,7 @@ fn test_powershell_profile_with_timezone() {
     assert!(updated.contains("GetActiveTcpListeners()"));
     assert!(updated.contains("Port -eq 8899"));
     assert!(updated.contains("$env:HTTP_PROXY = \"http://127.0.0.1:8899\""));
+    assert!(updated.contains("$env:NODE_USE_ENV_PROXY = \"1\""));
     assert!(updated.contains("$env:TZ = \"Europe/Warsaw\""));
     assert!(updated.contains("$env:LANG = \"en_US.UTF-8\""));
     assert!(updated.contains("$env:LC_TIME = \"en_US.UTF-8\""));
@@ -266,14 +268,33 @@ fn shell_block_parts_are_independent_and_never_export_lc_all() {
     let proxy = build_shell_block(8899, Some(url), None);
     let tz = build_shell_block(8899, None, Some("Europe/Berlin"));
     let none = build_shell_block(8899, None, None);
-    assert!(both.contains("HTTPS_PROXY") && both.contains("export TZ="));
-    assert!(proxy.contains("HTTPS_PROXY") && !proxy.contains("TZ") && !proxy.contains("LANG"));
-    assert!(!tz.contains("PROXY") && !tz.contains("proxy") && tz.contains("export LC_TIME="));
+    assert!(
+        both.contains("HTTPS_PROXY")
+            && both.contains("export NODE_USE_ENV_PROXY=\"1\"")
+            && both.contains("export TZ=")
+    );
+    assert!(
+        proxy.contains("HTTPS_PROXY")
+            && proxy.contains("export NODE_USE_ENV_PROXY=\"1\"")
+            && !proxy.contains("TZ")
+            && !proxy.contains("LANG")
+    );
+    assert!(
+        !tz.contains("PROXY")
+            && !tz.contains("proxy")
+            && !tz.contains("NODE_USE_ENV_PROXY")
+            && tz.contains("export LC_TIME=")
+    );
     assert!(!none.contains("export"));
     for b in [&both, &proxy, &tz, &none] {
         assert!(!b.contains("LC_ALL"), "{b}");
         assert!(is_generated_block(b), "{b}");
     }
+    let tampered_node = proxy.replace(
+        "export NODE_USE_ENV_PROXY=\"1\"",
+        "export NODE_USE_ENV_PROXY=\"0\"",
+    );
+    assert!(!is_generated_block(&tampered_node));
     // The block guards on the gateway port also without a proxy part.
     assert!(tz.contains("nc -z 127.0.0.1 8899"));
     // A time zone that is not a zone name is not exported.
@@ -285,9 +306,15 @@ fn powershell_block_writes_locale_variables_only_with_a_zone() {
     let url = "http://127.0.0.1:8899";
     let proxy_only = build_powershell_guard_block_with_tz(url, None);
     assert!(proxy_only.contains("$env:HTTPS_PROXY"));
+    assert!(proxy_only.contains("$env:NODE_USE_ENV_PROXY = \"1\""));
     for var in ["LANG", "LC_TIME", "TZ", "LC_ALL"] {
         assert!(!proxy_only.contains(var), "{var}");
     }
+    let tampered_ps_node = proxy_only.replace(
+        "$env:NODE_USE_ENV_PROXY = \"1\"",
+        "$env:NODE_USE_ENV_PROXY = \"0\"",
+    );
+    assert!(!is_generated_block(&tampered_ps_node));
     let with_tz = build_powershell_guard_block_with_tz(url, Some("Asia/Tokyo"));
     assert!(with_tz.contains("$env:TZ = \"Asia/Tokyo\""));
     assert!(with_tz.contains("$env:LANG = \"en_US.UTF-8\""));

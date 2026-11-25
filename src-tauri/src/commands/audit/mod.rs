@@ -20,6 +20,21 @@ pub(crate) use helpers::{allow_provider_session_inner, pin_ip_inner, unpin_ip_in
 /// Event with the pieces of a running audit (see `audit_connection`, argument `run_id`).
 pub const AUDIT_PROGRESS_EVENT: &str = "audit://progress";
 
+/// Canonical tray provider: first enabled provider (`Anthropic` when enabled, falling back
+/// to the next enabled provider in `KNOWN_PROVIDERS` order when `Anthropic` is disabled).
+pub(crate) fn primary_tray_provider(st: &state::AppStateData) -> Option<auditor::ProviderId> {
+    st.enabled_providers()
+        .into_iter()
+        .find_map(auditor::ProviderId::from_id)
+}
+
+pub(crate) fn should_sync_tray_for_audit(
+    st: &state::AppStateData,
+    provider_id: auditor::ProviderId,
+) -> bool {
+    primary_tray_provider(st) == Some(provider_id)
+}
+
 #[tauri::command]
 pub async fn get_state(
     state: tauri::State<'_, state::AppState>,
@@ -79,7 +94,8 @@ pub async fn audit_connection(
         Err(e) => {
             // A failed primary audit must not overwrite paused/pending/blocked states or
             // leave the previous (possibly green) tray state (`tray/mod.rs` enforces priority).
-            if provider_id == auditor::ProviderId::Anthropic
+            let st = state.get_data().await;
+            if should_sync_tray_for_audit(&st, provider_id)
                 && !guard.is_network_transition_active()
                 && !guard.is_paused()
             {
@@ -96,8 +112,8 @@ pub async fn audit_connection(
     let st = state.get_data().await;
     let is_pinned = finalize_audit_report_for_state(&st, provider_id, &mut report);
 
-    // Sync system tray status via strict guard priority whenever Anthropic or primary audit runs
-    if provider_id == auditor::ProviderId::Anthropic || force_refresh.unwrap_or(false) {
+    // Sync system tray status only for the canonical primary enabled provider (matches watcher)
+    if should_sync_tray_for_audit(&st, provider_id) {
         sync_tray_with_guard_priority(&app, &guard, &st, &report, is_pinned);
     }
 

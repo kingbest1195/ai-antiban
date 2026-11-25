@@ -256,4 +256,52 @@ describe("WP-4 & WP-5: OverviewScreen, CoverageSection и CLI sync", () => {
     expect(pinnedHtml).toContain(copy.service.pinnedTravel);
     expect(pinnedHtml).not.toContain("исключение в Настройках");
   });
+
+  it("ServiceRow маскирует IPv4 и dash/dot PTR-токены в first.result.message при hideIpMode=true", () => {
+    const ptrMessage =
+      "Выход 185.220.101.5 через ip64-176-194-110.isp.net и ec2-54-12-34-56.compute-1.amazonaws.com (дата 2026-11-25)";
+    const warnChecks = Array.from({ length: 14 }, (_, i) => ok(`C${i}`));
+    warnChecks[0] = { status: "warning", code: "GEO_WARN", message: ptrMessage };
+    const warnReport = report({
+      provider: "openai",
+      overall_status: "yellow",
+      geo_result: warnChecks[0],
+      checks: warnChecks,
+    });
+
+    const maskedHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "openai", status: "warn" },
+        report: warnReport,
+        state: null,
+        blockedByUser: false,
+        hideIpMode: true,
+        defaultOpen: true,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(maskedHtml).not.toContain("185.220.101.5");
+    expect(maskedHtml).not.toContain("64-176-194-110");
+    expect(maskedHtml).not.toContain("54-12-34-56");
+    expect(maskedHtml).toContain("•••.•••.•••.5");
+    expect(maskedHtml).toContain("ip•••-•••-•••-110.isp.net");
+    expect(maskedHtml).toContain("ec2-•••-•••-•••-56.compute-1.amazonaws.com");
+    expect(maskedHtml).toContain("2026-11-25");
+
+    const rawHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "openai", status: "warn" },
+        report: warnReport,
+        state: null,
+        blockedByUser: false,
+        hideIpMode: false,
+        defaultOpen: true,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(rawHtml).toContain("185.220.101.5");
+    expect(rawHtml).toContain("ip64-176-194-110.isp.net");
+  });
 });

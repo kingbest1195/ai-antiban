@@ -147,7 +147,7 @@ fn a_comment_inside_the_object_we_made_keeps_the_object() {
     e.enable(None);
     // The user removed our variables and left a note in the (now empty) object.
     let mut t = e.text(&ide);
-    for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+    for k in crate::sysproxy::ide::PROXY_VARS {
         t = jsonc::remove(&t, &[ide_env_key(), k]).unwrap();
     }
     let key = ide_env_key();
@@ -349,6 +349,31 @@ fn gemini_is_configured_only_when_its_directory_exists() {
     assert!(e.text(&e.ctx.gemini_settings()).contains("HTTPS_PROXY"));
     e.disable();
     assert!(e.fs.get(&e.ctx.gemini_settings()).is_none());
+}
+
+#[test]
+fn codex_is_configured_only_when_dot_codex_exists_and_restored_cleanly() {
+    let e = env();
+    let codex_settings = e.ctx.home.join(".codex").join("settings.json");
+    assert!(!e.enable(None).contains(&"Codex CLI".to_string()));
+    assert!(e.fs.get(&codex_settings).is_none());
+    e.disable();
+
+    e.fs.create_private_dir_all(&e.ctx.home.join(".codex"))
+        .unwrap();
+    assert!(e.enable(None).contains(&"Codex CLI".to_string()));
+    let text = e.text(&codex_settings);
+    assert_eq!(
+        raw(&text, &["env", "HTTPS_PROXY"]),
+        Some(format!("\"{URL}\""))
+    );
+    assert_eq!(
+        raw(&text, &["env", "NODE_USE_ENV_PROXY"]),
+        Some("\"1\"".into())
+    );
+    assert!(files_show_protection(&e.ctx));
+    e.disable();
+    assert!(e.fs.get(&codex_settings).is_none());
 }
 
 #[test]

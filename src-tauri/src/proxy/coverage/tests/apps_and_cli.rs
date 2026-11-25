@@ -563,11 +563,44 @@ fn installed_check_uses_only_the_given_file_system() {
         .create_private_dir_all(&home().join(".claude"))
         .unwrap();
     assert!(check_app_installed_in("claude-code", &rig.ctx));
+    assert!(!check_app_installed_in("codex-cli", &rig.ctx));
+    rig.fs
+        .create_private_dir_all(&home().join(".codex"))
+        .unwrap();
+    assert!(check_app_installed_in("codex-cli", &rig.ctx));
     assert!(!check_app_installed_in("cursor", &rig.ctx));
     make_editor(&rig.fs, "Cursor", None);
     assert!(check_app_installed_in("cursor", &rig.ctx));
     assert!(check_app_installed_in("browsers", &rig.ctx));
     assert!(!check_app_installed_in("no-such-app", &rig.ctx));
+}
+
+#[test]
+fn codex_cli_catalog_process_and_settings_detection() {
+    let info = get_known_app_info("codex-cli").expect("codex-cli in catalog");
+    assert_eq!(info.id, "codex-cli");
+    assert_eq!(info.name, "Codex CLI");
+    assert_eq!(info.category, "cli");
+    assert_eq!(classify_process_name("codex"), "codex-cli");
+    assert_eq!(classify_process_name("codex.exe"), "codex-cli");
+    assert_eq!(
+        resolve_app_identity("node", Some("codex-cli/0.1.0")).0,
+        "codex-cli"
+    );
+
+    let rig = Rig::new();
+    let dir = home().join(".codex");
+    rig.fs.create_private_dir_all(&dir).unwrap();
+    let env = rig.env(PacSource::Services, true);
+    let (status_off, _, _) =
+        super::super::cli_scanners::cli_fact("codex-cli", &env, Some(gw(8899)), CliMode::AiOnly);
+    assert_eq!(status_off, CoverageStatus::Off);
+
+    rig.fs
+        .put(&dir.join("settings.json"), CLAUDE_OURS.as_bytes(), 0o600);
+    let (status_on, _, _) =
+        super::super::cli_scanners::cli_fact("codex-cli", &env, Some(gw(8899)), CliMode::AiOnly);
+    assert_eq!(status_on, CoverageStatus::Configured);
 }
 
 // ----- WP-28: VPN services and the effective system proxy --------------------------------------

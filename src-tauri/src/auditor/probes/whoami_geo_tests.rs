@@ -141,8 +141,28 @@ fn unmeasured_resolver_or_exit_is_unknown_never_ok() {
     });
     let r = evaluate_dns_country(&u, "NL");
     assert_eq!(
-        (r.status, r.reason),
-        (CheckStatus::Unknown, Some(UnknownReason::Timeout))
+        (r.status, r.reason, r.code.as_str()),
+        (
+            CheckStatus::Unknown,
+            Some(UnknownReason::NotApplicable),
+            "DNS_COUNTRY_UNMEASURED"
+        )
+    );
+    assert!(r.is_not_applicable());
+    let single = ResolverView::Unmeasured(Unmeasured {
+        code: "DNS_WHOAMI_SINGLE_SOURCE",
+        reason: UnknownReason::NoData,
+        detail: "ответил только один источник (Akamai)".into(),
+        sources: vec![],
+    });
+    let r_single = evaluate_dns_country(&single, "NL");
+    assert_eq!(
+        (r_single.status, r_single.reason, r_single.code.as_str()),
+        (
+            CheckStatus::Unknown,
+            Some(UnknownReason::NotApplicable),
+            "DNS_COUNTRY_UNMEASURED"
+        )
     );
     for exit in ["", "  ", "T1", "XXX"] {
         let r = evaluate_dns_country(&located("9.9.9.9", "NL"), exit);
@@ -290,7 +310,7 @@ fn bug2_and_bug3_dns_country_guide_ref_and_zastava_key_preconditions() {
         let ru_ok = evaluate_dns_country_for_route_with_protection(&ru_view, "NL", true, ctx);
         assert_eq!(
             (ru_ok.status, ru_ok.code.as_str()),
-            (CheckStatus::Ok, "DNS_KEY_REMOTE_RESOLVE")
+            (CheckStatus::Ok, "DNS_COUNTRY_KEY_ISOLATED")
         );
         assert!(ru_ok.message.contains("non-AI") && ru_ok.message.contains("DNS ОС"));
 

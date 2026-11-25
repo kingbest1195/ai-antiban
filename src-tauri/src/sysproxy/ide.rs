@@ -123,7 +123,13 @@ pub(super) const IDE_ENV_KEYS: [&str; 3] = [
 ];
 
 /// Names of the proxy variables Zastava writes into an `env` object.
-pub(super) const PROXY_VARS: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
+pub(super) const PROXY_VARS: [&str; 5] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "NODE_USE_ENV_PROXY",
+];
 
 /// Names of the timezone / locale variables, written only while a timezone is synced. `LC_ALL` is
 /// never among them: it overrides every other `LC_*` and breaks Ruby / Homebrew.
@@ -332,15 +338,16 @@ pub(super) fn ide_keys(
     (keys, retire)
 }
 
-/// The proxy variables of one `env` object: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`.
+/// The proxy variables of one `env` object: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`,
+/// and `NODE_USE_ENV_PROXY=1` (so Node 22.21+/24 `fetch` honors `HTTPS_PROXY`).
 pub(super) fn proxy_env_keys(container: &str, proxy_url: &str) -> Vec<KeySpec> {
     PROXY_VARS
         .iter()
         .map(|v| {
-            let value = if *v == "NO_PROXY" {
-                NO_PROXY_VALUE
-            } else {
-                proxy_url
+            let value = match *v {
+                "NO_PROXY" => NO_PROXY_VALUE,
+                "NODE_USE_ENV_PROXY" => "1",
+                _ => proxy_url,
             };
             KeySpec::new(&[container, v], value)
         })

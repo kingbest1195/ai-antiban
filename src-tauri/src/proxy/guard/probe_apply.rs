@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::MutexGuard;
 
+use super::diag;
+use super::fingerprint::{default_udp_route_changed, is_default_udp_route_dropped};
 use super::policy::{
     all_pinned_or_excepted_for, all_unrouted_session_or_excepted,
     any_blocked_pinned_or_excepted_for, is_blocked_geo_code,
@@ -224,10 +226,25 @@ impl NetworkGuard {
         inner.last_probe = Some(Instant::now());
         let t0 = Instant::now();
         let Some(ip) = probed else {
-            self.handle_regular_probe_offline_locked(env, &mut inner, planned_fp, was_blocked, t0)
+            inner.consecutive_probe_failures = inner.consecutive_probe_failures.saturating_add(1);
+            let failures = inner.consecutive_probe_failures;
+            let cur_fp = self.current_local_route_fingerprint();
+            let route_dropped = default_udp_route_changed(planned_fp, &cur_fp)
+                || is_default_udp_route_dropped(&cur_fp);
+            diag::record_probe_failure("regular_tick", "probe_none", 0, failures);
+            if failures >= 2 || route_dropped {
+                self.handle_regular_probe_offline_locked(
+                    env,
+                    &mut inner,
+                    planned_fp,
+                    was_blocked,
+                    t0,
+                )
                 .await;
+            }
             return;
         };
+        inner.consecutive_probe_failures = 0;
         if inner.probe_in_flight {
             return;
         }

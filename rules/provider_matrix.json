@@ -22,7 +22,17 @@
     "newassets.hcaptcha.com",
     "arkoselabs.com",
     "pay.google.com",
-    "payments.google.com"
+    "payments.google.com",
+    "paddle.com",
+    "stripe.network",
+    "stripecdn.com",
+    "funcaptcha.com",
+    "recaptcha.net",
+    "lemonsqueezy.com",
+    "veriff.com",
+    "veriff.me",
+    "sumsub.com",
+    "onfido.com"
   ],
   "global_blocked_countries": [
     "RU",
@@ -77,7 +87,18 @@
         "openrouter.ai",
         "poe.com",
         "perplexity.ai",
-        "pplx.ai"
+        "pplx.ai",
+        "clau.de",
+        "cursorapi.com",
+        "statsigapi.net",
+        "featuregates.org",
+        "ingest.sentry.io",
+        "ingest.us.sentry.io",
+        "ingest.de.sentry.io",
+        "api.segment.io",
+        "api-iam.intercom.io",
+        "workos.com",
+        "authkit.com"
       ],
       "blocked_countries": [
         "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU",
@@ -129,7 +150,12 @@
         "x.ai",
         "api.x.ai",
         "mistral.ai",
-        "chat.mistral.ai"
+        "chat.mistral.ai",
+        "sora.com",
+        "featureassets.org",
+        "prodregistryv2.org",
+        "livekit.cloud",
+        "exafunction.com"
       ],
       "blocked_countries": [
         "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU", "VE"
@@ -177,7 +203,18 @@
         "opal.google.com",
         "labs.google",
         "oauth2.googleapis.com",
-        "iamcredentials.googleapis.com"
+        "iamcredentials.googleapis.com",
+        "jnn-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "apis.google.com",
+        "autopush-cloudcode-pa.googleapis.com",
+        "geller-pa.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "serviceusage.googleapis.com",
+        "daily-antigravity.sandbox.googleapis.com",
+        "antigravity-unleash.goog",
+        "stitch.withgoogle.com",
+        "firebase.studio"
       ],
       "blocked_countries": [
         "RU", "BY", "CN", "HK", "MO", "IR", "KP", "SY", "CU"

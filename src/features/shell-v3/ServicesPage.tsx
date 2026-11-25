@@ -139,6 +139,7 @@ export function ServicesPage({
                     service={service}
                     report={overview.reports[service.id]}
                     state={overview.state}
+                    hideIpMode={overview.hideIpMode}
                     onFix={overview.onFixService}
                     onAllow={requestAllow}
                     blockedByUser={Boolean(overview.state?.blocked_providers?.includes(service.id))}

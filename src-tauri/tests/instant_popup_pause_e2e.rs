@@ -103,6 +103,10 @@ async fn e2e_pause_during_detecting_stays_paused_after_probe_resolves() {
 
     let current_ip = Arc::new(std::sync::Mutex::new(Some("1.1.1.1".to_string())));
     let probe_ip = Arc::clone(&current_ip);
+    let fixed_fp = zastava_lib::proxy::guard::compute_local_route_fingerprint(None);
+    server
+        .guard
+        .set_route_fingerprint_fn_for_test(Some(Arc::new(move |_| fixed_fp.clone())));
     server.guard.start_with_test_env(
         auditor.clone(),
         state.clone(),
@@ -131,8 +135,11 @@ async fn e2e_pause_during_detecting_stays_paused_after_probe_resolves() {
     assert_eq!(&echo, b"ok");
     assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
 
-    // 2. Simulate VPN drop (offline probe -> instant Gate::Pending + detecting alert).
+    // 2. Simulate VPN drop (2 consecutive offline probes -> instant Gate::Pending + detecting alert).
     *current_ip.lock().unwrap() = None;
+    server.guard.wake_immediate_probe().await;
+    server.guard.ensure_fresh().await;
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
     server.guard.wake_immediate_probe().await;
     server.guard.ensure_fresh().await;
     assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Pending);
@@ -186,6 +193,10 @@ async fn e2e_fast_fail_offline_transition_freezes_gate_and_emits_detecting_witho
 
     let current_ip = Arc::new(std::sync::Mutex::new(Some("1.1.1.1".to_string())));
     let probe_ip = Arc::clone(&current_ip);
+    let fixed_fp = zastava_lib::proxy::guard::compute_local_route_fingerprint(None);
+    server
+        .guard
+        .set_route_fingerprint_fn_for_test(Some(Arc::new(move |_| fixed_fp.clone())));
     server.guard.start_with_test_env(
         auditor,
         state.clone(),
@@ -201,8 +212,11 @@ async fn e2e_fast_fail_offline_transition_freezes_gate_and_emits_detecting_witho
         .seed_baseline_for_test("1.1.1.1", "NL", None)
         .await;
 
-    // Simulate dead keep-alive / VPN server switch inside TUN (probe returns None).
+    // Simulate dead keep-alive / VPN server switch inside TUN (2 consecutive probe() == None).
     *current_ip.lock().unwrap() = None;
+    server.guard.wake_immediate_probe().await;
+    server.guard.ensure_fresh().await;
+    assert_eq!(server.guard.gate_for(ProviderId::Anthropic), Gate::Open);
     let t0 = std::time::Instant::now();
     server.guard.wake_immediate_probe().await;
     server.guard.ensure_fresh().await;

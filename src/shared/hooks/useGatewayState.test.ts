@@ -6,6 +6,14 @@ import {
   shouldInvalidateOnPauseStatus,
   shouldSuppressSelfHeal,
 } from "./useGatewayState";
+import {
+  findMissingEnabledProviders,
+  isConfirmedIpChange,
+  isRedundantNetworkAudit,
+  needsStartupSelfHeal,
+  pickActiveReport,
+  shouldRefreshOnFocus,
+} from "./gatewayReports";
 
 const okCheck: CheckResult = {
   status: "ok",
@@ -114,7 +122,7 @@ describe("shouldInvalidateOnPauseStatus", () => {
     ).toBe(false);
   });
 
-  it("сбрасывает отчёты только при переходе в pending (свежая проверка)", () => {
+  it("НЕ сбрасывает отчёты при транзиентном gate === 'pending' (устраняет шторм 11 из 11 -> 0 из 14)", () => {
     expect(
       shouldInvalidateOnPauseStatus({
         paused: false,
@@ -123,7 +131,7 @@ describe("shouldInvalidateOnPauseStatus", () => {
         manual_killswitch: false,
         pending_providers: ["anthropic"],
       }),
-    ).toEqual({ invalidate: true, onlyProviders: ["anthropic"], includeAll: false });
+    ).toEqual({ invalidate: false, includeAll: false });
 
     expect(
       shouldInvalidateOnPauseStatus({
@@ -136,6 +144,45 @@ describe("shouldInvalidateOnPauseStatus", () => {
       }).invalidate,
     ).toBe(false);
   });
+
+  it("сбрасывает отчёты при включённом ручном kill-switch", () => {
+    expect(
+      shouldInvalidateOnPauseStatus({
+        paused: false,
+        mode: "manual",
+        gate: "blocked",
+        manual_killswitch: true,
+        pending_providers: [],
+      }).invalidate,
+    ).toBe(false);
+
+    expect(
+      shouldInvalidateOnPauseStatus({
+        paused: false,
+        mode: "manual",
+        gate: "open",
+        manual_killswitch: true,
+        pending_providers: ["anthropic"],
+      }),
+    ).toEqual({ invalidate: true, onlyProviders: ["anthropic"], includeAll: true });
+  });
+});
+
+describe("isRedundantNetworkAudit & isConfirmedIpChange", () => {
+  it("считает network://changed избыточным, если audit://refreshed недавно пришёл для того же IP", () => {
+    const now = 100_000;
+    expect(isRedundantNetworkAudit({ ip: "178.168.12.86", at: now - 500 }, "178.168.12.86", now)).toBe(true);
+    expect(isRedundantNetworkAudit({ ip: "178.168.12.86", at: now - 6000 }, "178.168.12.86", now)).toBe(false);
+    expect(isRedundantNetworkAudit({ ip: "178.168.12.86", at: now - 500 }, "185.212.102.40", now)).toBe(false);
+    expect(isRedundantNetworkAudit({ ip: "178.168.12.86", at: now - 500 }, null, now)).toBe(false);
+  });
+
+  it("распознаёт подтверждённую смену IP только при двух разных валидных IP", () => {
+    expect(isConfirmedIpChange("1.1.1.1", "2.2.2.2")).toBe(true);
+    expect(isConfirmedIpChange("1.1.1.1", "1.1.1.1")).toBe(false);
+    expect(isConfirmedIpChange("--", "2.2.2.2")).toBe(false);
+    expect(isConfirmedIpChange("1.1.1.1", null)).toBe(false);
+  });
 });
 
 describe("shouldSuppressSelfHeal", () => {
@@ -144,5 +191,54 @@ describe("shouldSuppressSelfHeal", () => {
     expect(shouldSuppressSelfHeal({ paused: false, mode: "none", gate: "pending", manual_killswitch: false })).toBe(true);
     expect(shouldSuppressSelfHeal({ paused: false, mode: "none", gate: "open", manual_killswitch: false })).toBe(false);
     expect(shouldSuppressSelfHeal(null)).toBe(false);
+  });
+});
+
+describe("startup/visibility self-heal для всех включённых провайдеров (устранение «Проверить: Gemini»)", () => {
+  it("выявляет отсутствующий отчёт у любого включённого провайдера, даже когда activeReport здоров", () => {
+    const anthropicOk = {
+      ...makeReport("anthropic", "green", "1.1.1.1"),
+      telemetry: { ip: "1.1.1.1", country_code: "NL", asn: 13335, resolved_at: 1 },
+    };
+    const openaiOk = {
+      ...makeReport("openai", "green", "1.1.1.1"),
+      telemetry: { ip: "1.1.1.1", country_code: "NL", asn: 13335, resolved_at: 1 },
+    };
+
+    const reports = { anthropic: anthropicOk, openai: openaiOk };
+    expect(findMissingEnabledProviders(reports)).toEqual(["gemini"]);
+
+    const plan = needsStartupSelfHeal(anthropicOk, reports, []);
+    expect(plan).toEqual({
+      needed: true,
+      missingIpOrProvider: false,
+      missingProviders: ["gemini"],
+    });
+
+    // Отключённый пользователем провайдер не триггерит self-heal.
+    expect(findMissingEnabledProviders(reports, ["gemini"])).toEqual([]);
+    expect(needsStartupSelfHeal(anthropicOk, reports, ["gemini"])).toEqual({
+      needed: false,
+      missingIpOrProvider: false,
+      missingProviders: [],
+    });
+
+    // При наличии всех трёх отчётов self-heal не требуется.
+    const full = { ...reports, gemini: openaiOk };
+    expect(needsStartupSelfHeal(anthropicOk, full, [])).toEqual({
+      needed: false,
+      missingIpOrProvider: false,
+      missingProviders: [],
+    });
+  });
+
+  it("pickActiveReport и shouldRefreshOnFocus корректно реагируют на пропущенные отчёты", () => {
+    const openaiOk = makeReport("openai", "green", "2.2.2.2");
+    expect(pickActiveReport({ openai: openaiOk }, ["anthropic"])).toBe(openaiOk);
+
+    expect(shouldRefreshOnFocus(null, 100_000, true)).toBe(false);
+    expect(shouldRefreshOnFocus(99_000, 100_000, true)).toBe(true);
+    expect(shouldRefreshOnFocus(99_000, 100_000, false)).toBe(false);
+    expect(shouldRefreshOnFocus(1_000, 200_000, false)).toBe(true);
   });
 });

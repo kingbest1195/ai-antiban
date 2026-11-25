@@ -141,6 +141,17 @@ fn gemini_domains_match_across_matrix_and_pac_defaults() {
         "accounts.google.com",
         "oauth2.googleapis.com",
         "iamcredentials.googleapis.com",
+        "jnn-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "apis.google.com",
+        "autopush-cloudcode-pa.googleapis.com",
+        "geller-pa.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "serviceusage.googleapis.com",
+        "daily-antigravity.sandbox.googleapis.com",
+        "antigravity-unleash.goog",
+        "stitch.withgoogle.com",
+        "firebase.studio",
     ];
 
     for domain in expected {
@@ -165,11 +176,8 @@ fn gemini_domains_match_across_matrix_and_pac_defaults() {
         "www.google.com",
         "play.google.com",
         "ogs.google.com",
-        "apis.google.com",
         "footprints-pa.googleapis.com",
         "people-pa.googleapis.com",
-        "signaler-pa.googleapis.com",
-        "jnn-pa.googleapis.com",
         "myactivity.google.com",
         "myaccount.google.com",
     ] {
@@ -385,4 +393,120 @@ fn provider_matrix_payment_kyc_domains_matches_constant() {
         .map(|s| (*s).to_string())
         .collect();
     assert_eq!(json_domains, expected);
+}
+
+#[test]
+fn v3_2_1_restored_and_expanded_domains_route_through_pac_and_matrix_deserializes_legacy() {
+    let matrix = ProviderMatrix::load_bundled().unwrap();
+    let domains = get_all_ai_domains(&matrix);
+    let pac = generate_pac_script(&domains, "127.0.0.1:8899", None);
+
+    for host in [
+        "clau.de",
+        "cursorapi.com",
+        "statsigapi.net",
+        "featuregates.org",
+        "ingest.sentry.io",
+        "api.segment.io",
+        "api-iam.intercom.io",
+        "workos.com",
+        "authkit.com",
+        "sora.com",
+        "featureassets.org",
+        "prodregistryv2.org",
+        "livekit.cloud",
+        "exafunction.com",
+        "jnn-pa.googleapis.com",
+        "signaler-pa.googleapis.com",
+        "apis.google.com",
+        "antigravity-unleash.goog",
+        "stitch.withgoogle.com",
+        "firebase.studio",
+        "paddle.com",
+        "stripe.network",
+        "stripecdn.com",
+        "funcaptcha.com",
+        "recaptcha.net",
+        "lemonsqueezy.com",
+        "veriff.com",
+        "veriff.me",
+        "sumsub.com",
+        "onfido.com",
+    ] {
+        assert_eq!(
+            eval_pac_find_proxy(&pac, host),
+            "PROXY 127.0.0.1:8899",
+            "PAC must proxy {host}"
+        );
+    }
+
+    // Backward-compatibility: legacy ProviderMatrix JSON without `payment_kyc_domains` deserializes.
+    let legacy_json = r#"{
+        "version": "1.1.0",
+        "updated_at": "2026-01-01",
+        "global_blocked_countries": ["RU"],
+        "providers": {}
+    }"#;
+    let legacy: ProviderMatrix = serde_json::from_str(legacy_json).unwrap();
+    assert!(legacy.payment_kyc_domains.is_empty());
+}
+
+#[tokio::test]
+async fn build_pac_script_reflects_live_runtime_provider_matrix_snapshot() {
+    use crate::auditor::Auditor;
+    use crate::auditor::rules::{
+        RUNTIME_MATRIX_TEST_LOCK, clear_runtime_provider_matrix_for_test,
+        publish_runtime_provider_matrix,
+    };
+    use crate::proxy::hold_queue::HoldQueue;
+    use crate::proxy::server::ProxyServer;
+    use crate::state::AppState;
+    use std::sync::Arc;
+
+    struct RestoreGuard;
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            if let Ok(bundled) = ProviderMatrix::load_bundled() {
+                publish_runtime_provider_matrix(Arc::new(bundled));
+            } else {
+                clear_runtime_provider_matrix_for_test();
+            }
+        }
+    }
+
+    let _lock = RUNTIME_MATRIX_TEST_LOCK.lock().await;
+    let _restore = RestoreGuard;
+
+    let auditor = Auditor::new().unwrap();
+    let state = AppState::new_in_memory();
+    let hold_queue = Arc::new(HoldQueue::new());
+    let server = ProxyServer::bind_ephemeral(auditor, state, hold_queue, None)
+        .await
+        .unwrap();
+
+    let pac_before = server.build_pac_script().await;
+    assert!(!pac_before.contains("\"hot-pac-ai.example\""));
+    assert!(!pac_before.contains("\"hot-pac-pay.example\""));
+
+    let mut next = ProviderMatrix::load_bundled().unwrap();
+    next.providers
+        .get_mut("gemini")
+        .unwrap()
+        .domains
+        .push("hot-pac-ai.example".to_string());
+    next.payment_kyc_domains
+        .push("hot-pac-pay.example".to_string());
+    publish_runtime_provider_matrix(Arc::new(next));
+
+    let pac_after = server.build_pac_script().await;
+    assert!(pac_after.contains("\"hot-pac-ai.example\""));
+    assert!(pac_after.contains("\"hot-pac-pay.example\""));
+    assert_eq!(
+        eval_pac_find_proxy(&pac_after, "api.hot-pac-ai.example"),
+        "PROXY 127.0.0.1:8899"
+    );
+    assert_eq!(
+        eval_pac_find_proxy(&pac_after, "pay.hot-pac-pay.example"),
+        "PROXY 127.0.0.1:8899"
+    );
 }

@@ -384,6 +384,48 @@ fn diagnostic_bundle_serializes_routes_and_checks_without_secrets_or_ips() {
 }
 
 #[test]
+fn diagnostic_bundle_surfaces_unmapped_companion_domains() {
+    let _lock = crate::proxy::domain_drift::DRIFT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::proxy::domain_drift::clear_for_test();
+    assert!(crate::proxy::domain_drift::observe_direct_host(
+        "new-telemetry.claude-edge.example"
+    ));
+
+    let data = state::AppStateData::default();
+    let stats = state::GatewayStatsSnapshot {
+        protected_ai_requests: 0,
+        intercepted_leaks: 0,
+        direct_bypassed_requests: 1,
+        active_ai_tunnels: 0,
+        uptime_seconds: 10,
+        last_protected_host: None,
+        recent_events: Vec::new(),
+    };
+    let bundle = build_sanitized_diagnostic_bundle(
+        &data,
+        &stats,
+        &HashMap::new(),
+        true,
+        false,
+        8899,
+        None,
+        &[],
+    );
+    assert_eq!(
+        bundle.unmapped_companion_domains,
+        vec!["new-telemetry.claude-edge.example".to_string()]
+    );
+    let parsed: serde_json::Value = serde_json::to_value(&bundle).unwrap();
+    assert_eq!(
+        parsed["unmapped_companion_domains"],
+        serde_json::json!(["new-telemetry.claude-edge.example"])
+    );
+    crate::proxy::domain_drift::clear_for_test();
+}
+
+#[test]
 fn preview_protection_changes_covers_all_layers_and_marks_all_reversible() {
     let items = build_protection_changes_preview(
         8899,

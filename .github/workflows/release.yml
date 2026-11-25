@@ -359,7 +359,7 @@ jobs:
               platforms: {
                 "darwin-aarch64": macEntry,
                 "darwin-x86_64": macEntry,
-                "windows-x86_64": msiEntry,
+                "windows-x86_64": exeEntry,
                 "windows-x86_64-msi": msiEntry,
                 "windows-x86_64-nsis": exeEntry,
               },

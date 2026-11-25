@@ -232,6 +232,7 @@ pub(super) fn clean_legacy_json(
                 };
                 let ours = match *var {
                     "NO_PROXY" => KNOWN_NO_PROXY_VALUES.iter().any(|v| f.raw == json_str(v)),
+                    "NODE_USE_ENV_PROXY" => f.raw == json_str("1"),
                     // The zone only next to a signed proxy variable (checked above).
                     "TZ" => serde_json::from_str::<String>(f.raw)
                         .ok()
@@ -323,6 +324,8 @@ pub(super) fn migrate_legacy_files(
     let mut complete =
         clean_legacy_json(j, fs, &ctx.claude_settings(), false, &[AGENT_ENV_KEY], gw);
     complete &= clean_legacy_json(j, fs, &ctx.gemini_settings(), false, &[AGENT_ENV_KEY], gw);
+    let codex_settings = ctx.home.join(".codex").join("settings.json");
+    complete &= clean_legacy_json(j, fs, &codex_settings, false, &[AGENT_ENV_KEY], gw);
     for (_, file) in ide_candidates(ctx) {
         complete &= clean_legacy_json(j, fs, &file, true, &IDE_ENV_KEYS, gw);
     }
