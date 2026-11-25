@@ -424,18 +424,18 @@ pub(super) fn cached_interfaces_and_dns(udp_ips: &[&str], udp_sig: &str) -> (Str
             .unwrap_or_else(|p| p.into_inner())
             .updated_at
             .is_none_or(|t| now.saturating_duration_since(t) >= DNS_CACHE_TTL);
-        if iface_stale || dns_stale {
-            if let Ok(adapters) = crate::win_native::network::get_adapters_addresses() {
-                if iface_stale {
-                    let mut ic = iface_lock.lock().unwrap_or_else(|p| p.into_inner());
-                    ic.value = format_windows_interfaces_signature(&adapters);
-                    ic.updated_at = Some(now);
-                }
-                if dns_stale {
-                    let mut dc = dns_lock.lock().unwrap_or_else(|p| p.into_inner());
-                    dc.value = format_windows_dns_signature(&adapters);
-                    dc.updated_at = Some(now);
-                }
+        if (iface_stale || dns_stale)
+            && let Ok(adapters) = crate::win_native::network::get_adapters_addresses()
+        {
+            if iface_stale {
+                let mut ic = iface_lock.lock().unwrap_or_else(|p| p.into_inner());
+                ic.value = format_windows_interfaces_signature(&adapters);
+                ic.updated_at = Some(now);
+            }
+            if dns_stale {
+                let mut dc = dns_lock.lock().unwrap_or_else(|p| p.into_inner());
+                dc.value = format_windows_dns_signature(&adapters);
+                dc.updated_at = Some(now);
             }
         }
         let if_sig = iface_lock

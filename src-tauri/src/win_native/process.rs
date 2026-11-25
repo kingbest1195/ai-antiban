@@ -49,7 +49,8 @@ mod win {
             return Err("GetModuleHandleW(ntdll.dll) returned null".to_string());
         }
         // SAFETY: `hmod` is a valid module handle and the symbol name is NUL-terminated ASCII.
-        let sym = unsafe { GetProcAddress(hmod, b"NtQueryInformationProcess\0".as_ptr()) };
+        let sym =
+            unsafe { GetProcAddress(hmod, c"NtQueryInformationProcess".as_ptr().cast::<u8>()) };
         if sym.is_null() {
             return Err("GetProcAddress(NtQueryInformationProcess) returned null".to_string());
         }

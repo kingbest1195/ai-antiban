@@ -42,6 +42,7 @@ pub(crate) fn last_known_nameserver_sig() -> String {
         .clone()
 }
 
+#[cfg(target_os = "macos")]
 fn set_last_known_nameserver_sig(sig: &str) {
     let mut guard = LAST_SCUTIL_NAMESERVER_SIG
         .lock()
