@@ -153,10 +153,23 @@ impl NetworkGuard {
                 let country_ok = baseline_country.is_some_and(|c| !is_blocked_geo_code(c));
                 let st_check = env.state.get_data().await;
                 let enabled_unrouted = st_check.enabled_unrouted_providers();
+                let explicit_reaudit = self.force_reaudit.load(Ordering::SeqCst);
+                let already_settled_same_ip = !needs_reaudit
+                    && !explicit_reaudit
+                    && !returning_from_other_ip
+                    && inner.pending.is_none()
+                    && !self.any_provider_gate_pending()
+                    && inner.handled_ip.as_deref() == Some(ip);
+                if already_settled_same_ip
+                    && (self.is_manual_killswitch()
+                        || !any_blocked_pinned_or_excepted_for(&st_check, &enabled_unrouted, ip))
+                {
+                    self.sync_gates_with_state_and_pending_inner(&st_check, None, false);
+                    return true;
+                }
                 let all_pinned_match = all_pinned_or_excepted_for(&st_check, &enabled_unrouted, ip);
                 let has_explicit_pin_mismatch =
                     was_blocked && st_check.strict_pinning_enabled && !all_pinned_match;
-                let explicit_reaudit = self.force_reaudit.load(Ordering::SeqCst);
                 if returning_from_other_ip
                     && (!needs_reaudit || (all_pinned_match && !explicit_reaudit))
                     && country_ok

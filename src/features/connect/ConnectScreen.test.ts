@@ -1,10 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { connect as copy } from "../../shared/copy/ru";
+import { connect as copy, PROMO_COPY } from "../../shared/copy/ru";
 import { formatCountryWithCode } from "../../shared/lib/country";
 import type { RouteView, RoutesSnapshot } from "../../types";
 import { DIRECT_ROUTE_ID } from "../../utils/api";
+import { ConnectSalesCards } from "./ConnectSalesCards";
 import { ConnectScreen, getAffectedProvidersForRoute, resolveProviderExitCountry } from "./ConnectScreen";
 import { HOSTINGS } from "./hostings";
 import { RouteDisableModals } from "./RouteDisableModals";
@@ -444,5 +445,36 @@ describe("Bug #6: Route Toggle OFF UX, profile_route_id guard и Disabled banner
     expect(html).toContain(copy.key.refreshSub);
     expect(html).toContain(copy.key.graceExtendedBadge);
     expect(html).not.toContain(copy.key.expired);
+  });
+
+  it("Bug #3: уточняет Timeweb как РФ-узел, честный статический IP и 1-строчный ориентир в ConnectSalesCards", () => {
+    const timeweb = HOSTINGS.find((h) => h.id === "timeweb");
+    const hostvds = HOSTINGS.find((h) => h.id === "hostvds");
+    expect(timeweb?.sub).toContain("РФ-узел для Каскада");
+    expect(timeweb?.sub).toContain("180 ₽/мес");
+    expect(hostvds?.sub).toContain("Зарубежный VPS (NL, US, FI)");
+    expect(hostvds?.sub).toContain("190 ₽/мес");
+
+    const benefitsText = PROMO_COPY.keyBenefits.join(" ");
+    expect(benefitsText).not.toContain("резидентский");
+    expect(benefitsText).toContain("Выделенный статический IP с высоким доверием (один и тот же адрес)");
+
+    const salesHtml = renderToStaticMarkup(
+      createElement(ConnectSalesCards, {
+        routes: [],
+        hasRoutes: false,
+        isLegacyConfigured: false,
+        inputKey: "",
+        addScope: "all",
+        error: null,
+        connecting: false,
+        onInputKeyChange: vi.fn(),
+        onAddScopeChange: vi.fn(),
+        onAddKey: vi.fn(),
+        onOpenGuide: vi.fn(),
+      }),
+    );
+    expect(salesHtml).toContain(PROMO_COPY.salesOrientation);
+    expect(salesHtml).toContain("РФ-узел для Каскада");
   });
 });

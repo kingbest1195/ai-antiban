@@ -152,8 +152,10 @@ export function handleRiskDetectedEvent(
   if (payload.phase === "detecting") {
     void handlers.refreshState();
   } else if (payload.phase === "failed" || payload.scope === "network") {
-    const only = payload.scope === "provider" ? [payload.provider] : undefined;
-    handlers.invalidateReports?.(only, false);
+    if (!(payload.phase === "ready" && payload.report)) {
+      const only = payload.scope === "provider" ? [payload.provider] : undefined;
+      handlers.invalidateReports?.(only, false);
+    }
     void handlers.refreshState();
   }
   handlers.setInterceptPayload((prev) =>
@@ -161,20 +163,20 @@ export function handleRiskDetectedEvent(
   );
 }
 
-/** После закрытия/разрешения алерта обновляет state; при паузе/блокировке не сбрасывает отчёты и не запускает аудит. */
+/** После закрытия/разрешения алерта обновляет state; при пустом payload, паузе или блокировке не сбрасывает отчёты и не запускает аудит. */
 export function handleInterceptorResolvedEvent(
   handlers: Pick<TrayEventHandlers, "invalidateReports" | "refreshState" | "setInterceptPayload" | "runFullAudit">,
-  payload?: InterceptorResolvedPayload | null,
+  payload?: InterceptorResolvedPayload | string | null,
 ): void {
   handlers.setInterceptPayload(null);
   void handlers.refreshState();
+  if (!payload || typeof payload !== "object") return;
   const skipReaudit =
-    payload?.should_reaudit === false ||
-    payload?.decision === "block_until_network_change" ||
-    payload?.decision === "block" ||
-    payload?.decision === "block_always";
+    payload.should_reaudit === false ||
+    payload.decision === "block_until_network_change" ||
+    payload.decision === "block" ||
+    payload.decision === "block_always";
   if (skipReaudit) return;
-  handlers.invalidateReports?.();
   void handlers.runFullAudit(false);
 }
 
@@ -344,7 +346,7 @@ export function useTrayEvents(handlers: TrayEventHandlers) {
       });
     });
 
-    on<InterceptorResolvedPayload | undefined>("interceptor://resolved", (payload) => {
+    on<InterceptorResolvedPayload | string | null | undefined>("interceptor://resolved", (payload) => {
       handleInterceptorResolvedEvent(ref.current, payload);
     });
 

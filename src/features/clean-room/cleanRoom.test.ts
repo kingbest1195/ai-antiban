@@ -183,11 +183,27 @@ describe("CleanRoomScreen — вкладки, CooldownBanner и EmptyState", () 
     );
 
     expect(html).toContain('data-hint-id="clean_room_intro"');
+    expect(html).toContain('data-hint-id="sandbox_chrome_flag_note"');
+    expect(html).toContain(copy.sandbox.chromeFlagHint.title);
+    expect(copy.sandbox.toast.launchedText("chrome", 18091)).toContain("--host-resolver-rules");
     expect(html).toContain(copy.tabs.launchpad);
     expect(html).toContain(copy.tabs.payment);
     expect(html).toContain(copy.sandbox.title);
     expect(html).toContain("zs-anim-radar");
     expect(html).toContain(copy.launchpad.title);
+    expect(html).toContain("Выбирайте одну стабильную страну (например, США или Нидерланды) на всё время прогрева и оплаты.");
+  });
+
+  it("скрывает подсказку sandbox_chrome_flag_note, если она уже в dismissed_hints", () => {
+    const html = renderToStaticMarkup(
+      createElement(CleanRoomScreen, {
+        state: makeState({ dismissed_hints: ["sandbox_chrome_flag_note"] }),
+        initialTab: "launchpad",
+        initialAudit: makeAudit(),
+        initialBrowsers: AVAILABLE_BROWSERS,
+      }),
+    );
+    expect(html).not.toContain('data-hint-id="sandbox_chrome_flag_note"');
   });
 
   it("рендерит быструю вкладку «Оплата и прогрев» с переключателем сценария (App Store -> US-адрес, Картой на сайте -> CardCheck) и Warmup", () => {
@@ -325,6 +341,8 @@ describe("LaunchpadSteps — Шаги 2, 3 и 4", () => {
     );
 
     expect(html).toContain(copy.launchpad.step2.launchBtn);
+    expect(html).toContain(copy.launchpad.step2.chromeFlagNote);
+    expect(html).toContain("cr-inline-note");
     expect(html).toContain("gmail.com");
     expect(html).toContain("VoIP/SMS-активаторы");
   });

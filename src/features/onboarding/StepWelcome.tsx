@@ -54,6 +54,7 @@ export function StepWelcome({ goal, onSelectGoal, onNext }: StepWelcomeProps) {
             );
           })}
         </div>
+        {selected === "protect" && <p className="zs-onb__note">{copy.welcome.goals.protect.note}</p>}
       </Section>
     </StepFrame>
   );

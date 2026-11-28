@@ -251,6 +251,8 @@ export function CleanRoomScreen({
             onProfilesChanged={refreshCleanProfiles}
             openCreateTrigger={createTrigger}
             quarantineRefreshKey={quarantineRefreshKey}
+            dismissedHints={localDismissed}
+            onDismissHint={(id) => void handleDismissHint(id)}
             toast={toast}
           />
 

@@ -56,6 +56,9 @@ describe("PaymentGuide inside GuidesScreen", () => {
     expect(html).toContain("Apple Pay");
     expect(html).toContain("US Apple ID");
     expect(html).toContain("подарочной картой");
+    expect(html).toContain("виртуальные SMS-активаторы");
+    expect(html).toContain("+7");
+    expect(html).toContain("Не покупайте готовые US Apple ID и аккаунты ИИ на маркетплейсах");
     expect(html).toMatch(/96\s*(?:ч|час)/);
     expect(html).toMatch(/72\s*(?:ч|час)/);
     expect(html).not.toContain("равен нулю");

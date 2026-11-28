@@ -2,16 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type { CleanRoomProfile, CleanRoomState, DetectedBrowser, RouteView } from "../../types";
 import {
-  createCleanProfile,
-  deleteCleanProfile,
-  discoverCleanBrowsers,
-  launchCleanBrowser,
-  markCleanProfileTainted,
-  untaintCleanRoomIp,
-  updateCleanProfileRoute,
+  createCleanProfile, deleteCleanProfile, discoverCleanBrowsers, launchCleanBrowser,
+  markCleanProfileTainted, untaintCleanRoomIp, updateCleanProfileRoute,
 } from "../../utils/api";
 import { openExternal } from "../../utils/opener";
-import { Badge, Button, Card, ConfirmModal, EmptyState, ExpandRow, Field, InfoTip, Mono, Rows, Select } from "../../ui";
+import { Badge, Button, Card, ConfirmModal, EmptyState, ExpandRow, Field, HintCard, InfoTip, Mono, Rows, Select } from "../../ui";
 import type { ShowToast } from "../../shared/hooks";
 import { cleanRoom as copy } from "../../shared/copy/ru/cleanRoom";
 import { countryName } from "../../shared/lib/country";
@@ -20,13 +15,8 @@ import { QuarantineOverrideModal } from "../subscription/QuarantineOverrideModal
 import { useQuarantineGuard } from "../subscription/useQuarantineGuard";
 import { QuotaProfileSwitcher } from "./QuotaProfileSwitcher";
 import {
-  DIRECT_VALUE,
-  STATUS_TONE,
-  buildRouteSelectOptions,
-  nextScenarioLabel,
-  providerLabel,
-  resolveBoundRouteLabel,
-  resolveSandboxBlockReason,
+  DIRECT_VALUE, STATUS_TONE, buildRouteSelectOptions, nextScenarioLabel,
+  providerLabel, resolveBoundRouteLabel, resolveSandboxBlockReason,
 } from "./sandboxProfileHelpers";
 
 export { resolveSandboxBlockReason };
@@ -46,6 +36,8 @@ export interface SandboxProfilesCardProps {
   onProfileLaunched?: (profile: CleanRoomProfile) => void;
   openCreateTrigger?: number;
   quarantineRefreshKey?: number;
+  dismissedHints?: readonly string[];
+  onDismissHint?: (hintId: string) => void;
   toast?: ShowToast;
 }
 
@@ -64,6 +56,8 @@ export function SandboxProfilesCard({
   onProfileLaunched,
   openCreateTrigger = 0,
   quarantineRefreshKey = 0,
+  dismissedHints,
+  onDismissHint,
   toast,
 }: SandboxProfilesCardProps) {
   const [browsers, setBrowsers] = useState<DetectedBrowser[]>(initialBrowsers ?? []);
@@ -399,6 +393,15 @@ export function SandboxProfilesCard({
               </ul>
             </>
           )}
+
+          <HintCard
+            hintId={copy.sandbox.chromeFlagHint.id}
+            title={copy.sandbox.chromeFlagHint.title}
+            body={copy.sandbox.chromeFlagHint.body}
+            dismissedHints={dismissedHints}
+            onDismiss={(id) => onDismissHint?.(id)}
+            className="cr-sandbox-hint"
+          />
 
           <p className="cr-honesty-note">{copy.audit.honestyNote}</p>
 

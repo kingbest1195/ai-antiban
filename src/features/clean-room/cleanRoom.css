@@ -146,6 +146,10 @@
   color: var(--ink-2);
 }
 
+.cr-sandbox-hint {
+  margin-top: var(--space-3);
+}
+
 .cr-checkbox-label {
   display: flex;
   align-items: flex-start;

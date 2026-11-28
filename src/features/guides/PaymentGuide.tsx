@@ -211,6 +211,16 @@ export function PaymentGuide({ onOpenPaymentTools }: PaymentGuideProps) {
         <p className="guides-note guides-note--tight">
           <Rich text={t.appStoreAside} />
         </p>
+        <div className="guides-points mb-3" aria-label={t.appStoreRulesTitle}>
+          <p className="guides-points__title">{t.appStoreRulesTitle}</p>
+          <ul className="guides-points__list">
+            {t.appStoreRules.map((rule) => (
+              <li key={rule}>
+                <Rich text={rule} />
+              </li>
+            ))}
+          </ul>
+        </div>
         <ProviderOfferList
           providers={appStoreProviders}
           manifestMap={manifestMap}

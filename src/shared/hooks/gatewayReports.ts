@@ -228,3 +228,169 @@ export async function fetchMissingProviderReports(
   }
   return out;
 }
+
+/** Сливает отчёты пропущенных провайдеров, отбрасывая те, чей `activeRuns[id]` уже сменился. */
+export function mergeFreshProviderUpdates(
+  prev: ReportsMap,
+  updates: Array<[ProviderId, RiskReport]>,
+  activeRuns: Partial<Record<ProviderId, string>>,
+  prevRuns: Partial<Record<ProviderId, string>>,
+): ReportsMap {
+  let next = prev;
+  for (const [id, rep] of updates) {
+    if (activeRuns[id] === prevRuns[id]) {
+      next = mergeProviderReport(next, id, rep);
+    }
+  }
+  return next;
+}
+
+export type PartialsMap = Partial<Record<ProviderId, PartialAudit>>;
+
+/** Очищает прогресс одного провайдера только если `runId` совпадает с завершённым запуском. */
+export function clearProviderPartial(
+  prev: PartialsMap,
+  provider: ProviderId,
+  runId?: string,
+): PartialsMap {
+  const cur = prev[provider];
+  if (!cur) return prev;
+  if (runId && cur.runId !== runId) return prev;
+  return { ...prev, [provider]: undefined };
+}
+
+/** Очищает прогресс пачки провайдеров только для заданных `runIds`, не затирая чужой запуск. */
+export function clearBatchPartials(
+  prev: PartialsMap,
+  runIds?: Partial<Record<ProviderId, string>>,
+): PartialsMap {
+  let changed = false;
+  const next: PartialsMap = { ...prev };
+  for (const id of PROVIDER_IDS) {
+    const cur = next[id];
+    if (!cur) continue;
+    if (runIds && runIds[id] !== undefined && cur.runId !== runIds[id]) continue;
+    next[id] = undefined;
+    changed = true;
+  }
+  return changed ? next : prev;
+}
+
+/** Сбрасывает activeRuns и partials при инвалидации отчётов (не трогая un-targeted при частичном сбросе). */
+export function resetInvalidatedPartials(
+  prev: PartialsMap,
+  activeRuns: Partial<Record<ProviderId, string>>,
+  onlyProviders?: string[],
+  includeAll = false,
+): PartialsMap {
+  const targetSet =
+    !includeAll && onlyProviders && onlyProviders.length > 0
+      ? new Set(onlyProviders.map((p) => p.toLowerCase()))
+      : null;
+  let changed = false;
+  const next: PartialsMap = { ...prev };
+  for (const id of PROVIDER_IDS) {
+    if (targetSet && !targetSet.has(id)) continue;
+    delete activeRuns[id];
+    if (next[id]) {
+      next[id] = undefined;
+      changed = true;
+    }
+  }
+  return changed ? next : prev;
+}
+
+export interface ConcurrentFullAuditResult {
+  updates: ReportsMap;
+  primaryLatencyMs: number | null;
+  error: unknown | null;
+  runIds?: Partial<Record<ProviderId, string>>;
+  stale?: boolean;
+}
+
+/**
+ * Запускает аудит всех трёх провайдеров конкурентно (вместе с `beginRun`),
+ * сохраняя retry для `anthropic` при холодном сбое. Возвращает только
+ * успешно полученные отчёты, чтобы при повторном аудите не затирать
+ * валидные отчёты других провайдеров. При `isStale()` отменяет retry.
+ */
+export async function runConcurrentFullAudit(
+  force: boolean,
+  auditFn: (provider: ProviderId, forceRefresh: boolean, runId?: string) => Promise<RiskReport>,
+  beginRun: (provider: ProviderId) => string,
+  retryDelayMs = 600,
+  isStale?: () => boolean,
+): Promise<ConcurrentFullAuditResult> {
+  const runIds: Partial<Record<ProviderId, string>> = {};
+  const startProvider = (provider: ProviderId): string => {
+    const id = beginRun(provider);
+    runIds[provider] = id;
+    return id;
+  };
+
+  const runAnthropic = async (): Promise<RiskReport> => {
+    try {
+      return await auditFn("anthropic", force, startProvider("anthropic"));
+    } catch (err) {
+      if (isStale?.()) throw err;
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+      if (isStale?.()) throw err;
+      return await auditFn("anthropic", true, startProvider("anthropic"));
+    }
+  };
+
+  const [anthropicRes, openaiRes, geminiRes] = await Promise.allSettled([
+    runAnthropic(),
+    auditFn("openai", force, startProvider("openai")),
+    auditFn("gemini", force, startProvider("gemini")),
+  ]);
+
+  if (isStale?.()) {
+    return { updates: {}, primaryLatencyMs: null, error: null, runIds, stale: true };
+  }
+
+  const updates: ReportsMap = {};
+  if (anthropicRes.status === "fulfilled") updates.anthropic = anthropicRes.value;
+  if (openaiRes.status === "fulfilled") updates.openai = openaiRes.value;
+  if (geminiRes.status === "fulfilled") updates.gemini = geminiRes.value;
+
+  const primary = updates.anthropic ?? updates.openai ?? updates.gemini ?? null;
+  if (!primary) {
+    const reason =
+      anthropicRes.status === "rejected"
+        ? anthropicRes.reason
+        : openaiRes.status === "rejected"
+          ? openaiRes.reason
+          : geminiRes.status === "rejected"
+            ? geminiRes.reason
+            : new Error("Audit failed");
+    return { updates, primaryLatencyMs: null, error: reason, runIds, stale: false };
+  }
+
+  return {
+    updates,
+    primaryLatencyMs: isValidGatewayLatency(primary.gateway_latency_ms)
+      ? Math.round(primary.gateway_latency_ms)
+      : null,
+    error: null,
+    runIds,
+    stale: false,
+  };
+}
+
+/**
+ * Атомарно сливает пачку свежих отчётов с предыдущими, не стирая валидные
+ * отчёты провайдеров, чей повторный запрос завершился ошибкой.
+ */
+export function mergeBatchReports(prev: ReportsMap, updates: ReportsMap): ReportsMap {
+  let changed = false;
+  const next: ReportsMap = { ...prev };
+  for (const id of PROVIDER_IDS) {
+    const rep = updates[id];
+    if (rep) {
+      next[id] = rep;
+      changed = true;
+    }
+  }
+  return changed ? next : prev;
+}

@@ -299,6 +299,13 @@ describe("Onboarding v3 steps & OnboardingFlow", () => {
     expect(html).toContain('data-onb-goal="clean_room"');
     expect(html).toContain('aria-checked="true"');
     expect(html).toContain(copy.welcome.next);
+
+    const protectHtml = renderToStaticMarkup(
+      createElement(StepWelcome, { goal: "protect", onSelectGoal: () => {}, onNext: () => {} }),
+    );
+    expect(protectHtml).toContain(copy.welcome.goals.protect.note);
+    expect(protectHtml).toContain("Чистой комнате");
+    expect(protectHtml).toContain("Claude Desktop");
   });
 
   it("StepNetwork embeds SplitRoutingAnim, live network verdict, and SmartScreenGuide", () => {
@@ -338,6 +345,9 @@ describe("Onboarding v3 steps & OnboardingFlow", () => {
     expect(htmlBoth).toContain("Браузеры и десктопные приложения");
     expect(htmlBoth).toContain("Редакторы кода и терминал");
     expect(htmlBoth).toContain("Бесплатный локальный Бункер данных");
+    expect(htmlBoth).toContain("Claude Desktop и обычные браузеры видят системный часовой пояс ОС");
+    expect(htmlBoth).toContain("синхронизируйте часовой пояс ОС на главном экране");
+    expect(htmlBoth).not.toContain("В 1 клик");
     expect(htmlBoth).toContain(copy.protect.state.both);
 
     const htmlNone = renderToStaticMarkup(

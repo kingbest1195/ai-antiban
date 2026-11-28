@@ -25,8 +25,7 @@ async fn refresh_sibling_unrouted_providers(
     tray_report: &mut auditor::RiskReport,
     tray_is_pinned: &mut bool,
     update_tray_on_worse: bool,
-) -> bool {
-    let mut sibling_status_changed = false;
+) {
     for &other_pid in ctx.enabled_pids.iter().skip(1) {
         if ctx.guard.any_provider_gate_pending() {
             break;
@@ -63,11 +62,9 @@ async fn refresh_sibling_unrouted_providers(
                     proxy::guard::effective_tray_report(&other_report, ctx.has_blocked, ctx.st)
                         .into_owned();
                 *tray_is_pinned = other_pinned;
-                sibling_status_changed = true;
             }
         }
     }
-    sibling_status_changed
 }
 
 async fn wait_next_tray_tick(
@@ -214,18 +211,15 @@ pub(super) fn spawn_tray_status_watcher(
                         has_blocked,
                         protection,
                     };
-                    let sibling_status_changed =
-                        if !initial_synced || ip_changed || observed_changed || has_blocked {
-                            refresh_sibling_unrouted_providers(
-                                &sibling_ctx,
-                                &mut tray_report,
-                                &mut tray_is_pinned,
-                                true,
-                            )
-                            .await
-                        } else {
-                            false
-                        };
+                    if !initial_synced || ip_changed || observed_changed || has_blocked {
+                        refresh_sibling_unrouted_providers(
+                            &sibling_ctx,
+                            &mut tray_report,
+                            &mut tray_is_pinned,
+                            true,
+                        )
+                        .await;
+                    }
 
                     if sync_tray_if_guard_active(&watcher_handle, &watcher_guard) {
                         wait_next_tray_tick(
@@ -244,8 +238,7 @@ pub(super) fn spawn_tray_status_watcher(
                     );
 
                     let cur_status = (tray_report.overall_status, has_blocked);
-                    let status_changed = last_synced_status.is_some_and(|prev| prev != cur_status)
-                        || sibling_status_changed;
+                    let status_changed = last_synced_status.is_some_and(|prev| prev != cur_status);
 
                     // If status changed on the same IP, still refresh sibling unrouted providers
                     // when they were not already refreshed above.

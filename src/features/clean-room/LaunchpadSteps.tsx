@@ -249,6 +249,9 @@ export function LaunchpadSteps({
               {launching ? copy.sandbox.profileCard.launching : copy.launchpad.step2.launchBtn}
             </Button>
           </div>
+          <div className="cr-inline-note">
+            <p className="zs-t-caption" style={{ margin: 0 }}>{copy.launchpad.step2.chromeFlagNote}</p>
+          </div>
           {activeProfile?.provider === "gemini" && (
             <div className="cr-quota-switcher">
               <p className="cr-form__title">{copy.launchpad.step2.geminiLinksTitle}</p>

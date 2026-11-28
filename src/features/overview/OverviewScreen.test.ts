@@ -304,4 +304,68 @@ describe("WP-4 & WP-5: OverviewScreen, CoverageSection и CLI sync", () => {
     expect(rawHtml).toContain("185.220.101.5");
     expect(rawHtml).toContain("ip64-176-194-110.isp.net");
   });
+
+  it("Баг #1: при неблокирующем warn показывает «Принять замечание» и спокойную подпись вместо «Разрешить принудительно»", () => {
+    const warnReport = report({
+      provider: "openai",
+      overall_status: "yellow",
+      asn_result: { status: "warning", code: "ASN_WARN", message: "shared pool" },
+    });
+    warnReport.checks[4] = { status: "warning", code: "ASN_WARN", message: "shared pool" };
+
+    const warnHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "openai", status: "warn" },
+        report: warnReport,
+        state: null,
+        blockedByUser: false,
+        defaultOpen: true,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(warnHtml).toContain(copy.service.acceptWarn);
+    expect(warnHtml).toContain(copy.service.warnAllowHint);
+    expect(warnHtml).toContain(copy.service.fix);
+    expect(warnHtml).not.toContain(copy.service.forceAllow);
+    expect(warnHtml).not.toContain(copy.service.forceHint);
+
+    const criticalReport = report({
+      provider: "anthropic",
+      overall_status: "red",
+      geo_result: { status: "critical", code: "GEO_BLOCKED", message: "blocked" },
+    });
+    criticalReport.checks[0] = { status: "critical", code: "GEO_BLOCKED", message: "blocked" };
+
+    const criticalHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "anthropic", status: "critical" },
+        report: criticalReport,
+        state: null,
+        blockedByUser: false,
+        defaultOpen: true,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(criticalHtml).toContain(copy.service.forceAllow);
+    expect(criticalHtml).toContain(copy.service.forceHint);
+    expect(criticalHtml).not.toContain(copy.service.acceptWarn);
+
+    const blockedHtml = renderToStaticMarkup(
+      createElement(ServiceRow, {
+        service: { id: "openai", status: "warn" },
+        report: warnReport,
+        state: null,
+        blockedByUser: true,
+        defaultOpen: true,
+        onFix: noop,
+        onAllow: noop,
+      }),
+    );
+    expect(blockedHtml).toContain(copy.service.unblock);
+    expect(blockedHtml).toContain(copy.service.unblockHint);
+    expect(blockedHtml).not.toContain(copy.service.acceptWarn);
+    expect(blockedHtml).not.toContain(copy.service.forceAllow);
+  });
 });

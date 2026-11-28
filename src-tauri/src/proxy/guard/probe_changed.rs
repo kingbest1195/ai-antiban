@@ -102,6 +102,8 @@ impl NetworkGuard {
             .filter(|p| !was_blocked_set.contains(*p))
             .collect();
 
+        let had_popup = inner.pending.as_ref().is_some_and(|p| p.alert_emitted)
+            || inner.popup_shown_alert_id.is_some();
         if let Some(p) = inner.invalidate_alert() {
             env.hold_queue.remove(&p.id).await;
         }
@@ -115,6 +117,7 @@ impl NetworkGuard {
         }
 
         let epoch = inner.epoch;
+        let mut need_hide_popup = false;
         let alert_id = if st.interception_behavior == crate::state::InterceptionBehavior::AskPopup
             && !non_blocked.is_empty()
             && !paused_until_change
@@ -153,6 +156,7 @@ impl NetworkGuard {
                 .await;
             Some(id)
         } else {
+            need_hide_popup = had_popup;
             if !non_blocked.is_empty() {
                 let msg = match st.interception_behavior {
                     crate::state::InterceptionBehavior::AutoLockSilent => {
@@ -187,6 +191,10 @@ impl NetworkGuard {
                 .await;
         });
         inner.probe_abort = Some(handle.abort_handle());
+        drop(inner);
+        if need_hide_popup {
+            self.hide_popup(env);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

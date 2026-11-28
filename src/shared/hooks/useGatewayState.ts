@@ -28,14 +28,20 @@ import {
   FOCUS_REFRESH_MS,
   STALE_REPORT_MS,
   applyProgress,
+  clearBatchPartials,
+  clearProviderPartial,
   dataAge,
   emptyPartial,
   fetchMissingProviderReports,
   invalidateStaleReports,
   isValidGatewayLatency,
+  mergeBatchReports,
+  mergeFreshProviderUpdates,
   mergeProviderReport,
   needsStartupSelfHeal,
   pickActiveReport,
+  resetInvalidatedPartials,
+  runConcurrentFullAudit,
   shouldInvalidateOnPauseStatus,
   shouldRefreshOnFocus,
   shouldSuppressSelfHeal,
@@ -81,6 +87,8 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
   /** Что уже готово в идущем первом аудите: показываем по мере прихода, не дожидаясь отчёта. */
   const [partials, setPartials] = useState<Partial<Record<ProviderId, PartialAudit>>>({});
   const runSeq = useRef(0);
+  /** Монотонный epoch аудитов и инвалидаций: устаревшие ответы/retry старой сети отбрасываются. */
+  const auditEpochRef = useRef(0);
   /** Текущий запуск по сервису: события других запусков (самолечение, повтор) игнорируются. */
   const activeRuns = useRef<Partial<Record<ProviderId, string>>>({});
   /** Сколько аудитов идёт прямо сейчас: самолечение не плодит параллельные запуски. */
@@ -114,6 +122,10 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
 
   /** Инвалидирует устаревшие отчёты (по умолчанию — только unrouted-сервисы при смене сети). */
   const invalidateReports = useCallback((onlyProviders?: string[], includeAll = false) => {
+    auditEpochRef.current += 1;
+    setPartials((prev) =>
+      resetInvalidatedPartials(prev, activeRuns.current, onlyProviders, includeAll),
+    );
     setReports((prev) =>
       invalidateStaleReports(prev, routesSnapshotRef.current, onlyProviders, includeAll),
     );
@@ -140,8 +152,31 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
     return runId;
   }, []);
 
+  const applyAppState = useCallback((st: AppStateData) => {
+    setState(st);
+    if (st.auto_update_enabled !== undefined) setAutoUpdateEnabled(st.auto_update_enabled);
+  }, []);
+
+  const finishAuditSuccess = useCallback(
+    async (latencyMs: number | null, isStale: () => boolean) => {
+      setAuditError(null);
+      const refreshedAt = Date.now();
+      reportAtRef.current = refreshedAt;
+      setReportAt(refreshedAt);
+      if (latencyMs !== null) setScanLatencyMs(latencyMs);
+      try {
+        const freshState = await fetchAppState();
+        if (!isStale()) applyAppState(freshState);
+      } catch {}
+      if (!isStale()) await refreshGatewayStats();
+    },
+    [applyAppState, refreshGatewayStats],
+  );
+
   const runFullAudit = useCallback(
     async (force: boolean = false, silentError: boolean = false) => {
+      const epoch = ++auditEpochRef.current;
+      const isStale = () => epoch !== auditEpochRef.current;
       const startTime = performance.now();
       setRefreshing(true);
       inFlight.current += 1;
@@ -149,66 +184,35 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
       try {
         // Сопутствующие чтения идут рядом с аудитом, а не перед ним: ни одно из них не задерживает проверки.
         const sideReads = Promise.allSettled([
-          fetchAppState().then((st) => {
-            setState(st);
-            if (st.auto_update_enabled !== undefined) setAutoUpdateEnabled(st.auto_update_enabled);
-          }),
-          getSysproxyStatus().then(setSysproxyActive),
+          fetchAppState().then((st) => { if (!isStale()) applyAppState(st); }),
+          getSysproxyStatus().then((active) => { if (!isStale()) setSysproxyActive(active); }),
           refreshRoutes(),
           refreshCoverage(),
         ]);
 
-        let claudeReport: RiskReport;
-        try {
-          claudeReport = await auditConnection("anthropic", force, beginRun("anthropic"));
-        } catch {
-          await new Promise((r) => setTimeout(r, 600));
-          claudeReport = await auditConnection("anthropic", true, beginRun("anthropic"));
-        }
-
-        // Основной отчёт сразу: IP, провайдер и проверки рисуются, не дожидаясь остальных сервисов.
-        setReports((prev) => ({
-          ...prev,
-          anthropic: claudeReport,
-        }));
-        setPartials((prev) => ({ ...prev, anthropic: undefined }));
-        setAuditError(null);
-        const refreshedAt = Date.now();
-        reportAtRef.current = refreshedAt;
-        setReportAt(refreshedAt);
-
-        const [gptSettled, geminiSettled] = await Promise.allSettled([
-          auditConnection("openai", force),
-          auditConnection("gemini", force),
-        ]);
-
-        setReports((prev) => ({
-          ...prev,
-          anthropic: claudeReport,
-          ...(gptSettled.status === "fulfilled" ? { openai: gptSettled.value } : {}),
-          ...(geminiSettled.status === "fulfilled" ? { gemini: geminiSettled.value } : {}),
-        }));
-
-        const gwMs = claudeReport.gateway_latency_ms;
-        const elapsed = Math.round(performance.now() - startTime);
-        setScanLatencyMs(
-          isValidGatewayLatency(gwMs) ? Math.round(gwMs) : Math.max(18, elapsed),
+        const auditResult = await runConcurrentFullAudit(
+          force,
+          auditConnection,
+          beginRun,
+          600,
+          isStale,
         );
+        setPartials((prev) => clearBatchPartials(prev, auditResult.runIds));
+        if (isStale()) return;
+        if (auditResult.error) throw auditResult.error;
+
+        // Атомарно сливаем свежие отчёты: при фоновом обновлении валидные отчёты не сбрасываются в undefined.
+        setReports((prev) => mergeBatchReports(prev, auditResult.updates));
+        const elapsed = Math.round(performance.now() - startTime);
+        const latencyMs = auditResult.primaryLatencyMs !== null ? auditResult.primaryLatencyMs : Math.max(18, elapsed);
         await sideReads;
-        // Повторно читаем AppStateData после завершения аудита, чтобы blocked_providers всегда был актуален.
-        try {
-          const freshState = await fetchAppState();
-          setState(freshState);
-          if (freshState.auto_update_enabled !== undefined) setAutoUpdateEnabled(freshState.auto_update_enabled);
-        } catch {}
-        await refreshGatewayStats();
+        if (isStale()) return;
+        await finishAuditSuccess(latencyMs, isStale);
       } catch (err: any) {
+        if (isStale()) return;
         console.error("Failed to run audit:", err);
-        setPartials((prev) => ({ ...prev, anthropic: undefined }));
         setAuditError(err?.message || String(err));
-        if (!silentError) {
-          showToast(t.auditError, err?.message || String(err), "error");
-        }
+        if (!silentError) showToast(t.auditError, err?.message || String(err), "error");
       } finally {
         inFlight.current -= 1;
         // Пока идёт другой запуск, «обновление» не снимаем: экран не должен мигать готовым состоянием.
@@ -216,34 +220,28 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
         refreshGatewayStats();
       }
     },
-    [showToast, refreshGatewayStats, beginRun, refreshRoutes, refreshCoverage],
+    [applyAppState, finishAuditSuccess, showToast, refreshGatewayStats, beginRun, refreshRoutes, refreshCoverage],
   );
 
   /** Точечный аудит одного сервиса: обновляет только его отчёт, не трогая остальные. */
   const runProviderAudit = useCallback(
     async (providerId: ProviderId, forceRefresh: boolean = true) => {
+      const epoch = auditEpochRef.current;
+      const runId = beginRun(providerId);
+      const isStale = () => epoch !== auditEpochRef.current || activeRuns.current[providerId] !== runId;
       setRefreshing(true);
       inFlight.current += 1;
       try {
-        const report = await auditConnection(providerId, forceRefresh, beginRun(providerId));
+        const report = await auditConnection(providerId, forceRefresh, runId);
+        setPartials((prev) => clearProviderPartial(prev, providerId, runId));
+        if (isStale()) return;
         setReports((prev) => mergeProviderReport(prev, providerId, report));
-        if (isValidGatewayLatency(report.gateway_latency_ms)) {
-          setScanLatencyMs(Math.round(report.gateway_latency_ms));
-        }
-        setPartials((prev) => ({ ...prev, [providerId]: undefined }));
-        setAuditError(null);
-        const refreshedAt = Date.now();
-        reportAtRef.current = refreshedAt;
-        setReportAt(refreshedAt);
-        try {
-          const freshState = await fetchAppState();
-          setState(freshState);
-          if (freshState.auto_update_enabled !== undefined) setAutoUpdateEnabled(freshState.auto_update_enabled);
-        } catch {}
-        await refreshGatewayStats();
+        const latencyMs = isValidGatewayLatency(report.gateway_latency_ms) ? Math.round(report.gateway_latency_ms) : null;
+        await finishAuditSuccess(latencyMs, isStale);
       } catch (err: any) {
+        setPartials((prev) => clearProviderPartial(prev, providerId, runId));
+        if (isStale()) return;
         console.error(`Failed to run audit for ${providerId}:`, err);
-        setPartials((prev) => ({ ...prev, [providerId]: undefined }));
         setAuditError(err?.message || String(err));
         showToast(t.auditError, err?.message || String(err), "error");
       } finally {
@@ -252,7 +250,7 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
         refreshGatewayStats();
       }
     },
-    [showToast, refreshGatewayStats, beginRun],
+    [finishAuditSuccess, showToast, refreshGatewayStats, beginRun],
   );
 
   // Куски идущего аудита: адрес выхода и каждая проверка приходят, как только готовы.
@@ -361,13 +359,14 @@ export function useGatewayState({ showToast, refreshGatewayStats, onManualKillsw
 
   const refreshMissingProviders = useCallback(async (providers: ProviderId[]) => {
     if (providers.length === 0) return;
+    const epoch = auditEpochRef.current;
+    const prevRuns = { ...activeRuns.current };
     inFlight.current += 1;
     setRefreshing(true);
     try {
       const updates = await fetchMissingProviderReports(providers, auditConnection);
-      if (updates.length > 0) {
-        setReports((prev) => updates.reduce((acc, [id, rep]) => mergeProviderReport(acc, id, rep), prev));
-      }
+      if (epoch !== auditEpochRef.current || updates.length === 0) return;
+      setReports((prev) => mergeFreshProviderUpdates(prev, updates, activeRuns.current, prevRuns));
     } finally {
       inFlight.current -= 1;
       if (inFlight.current <= 0) setRefreshing(false);

@@ -30,6 +30,7 @@ export function ConnectSalesCards({
 }: ConnectSalesCardsProps) {
   return (
     <>
+      <p className="zs-t-caption text-ink-3">{PROMO_COPY.salesOrientation}</p>
       <Card
         title={copy.key.title}
         aside={<Badge tone="neutral">{PROMO_COPY.keyPriceLabel}</Badge>}

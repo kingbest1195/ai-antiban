@@ -81,7 +81,7 @@ export function HomeHub({
     refreshing: overview.refreshing,
     sysproxyActive: overview.sysproxyActive,
     killswitchFrozen: overview.killswitchFrozen,
-    overallStatus: overview.activeReport?.overall_status,
+    overallStatus: model.tone === "danger" ? "red" : overview.activeReport?.overall_status,
     routeUnavailable: routeBroken,
     guardGate: overview.guardPauseStatus?.gate,
   });

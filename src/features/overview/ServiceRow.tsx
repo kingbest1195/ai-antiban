@@ -135,11 +135,21 @@ export function ServiceRow({
           </Button>
         )}
         <Button variant="quiet" size="sm" disabled={verifying} onClick={() => onAllow(service, report, blockedByUser)}>
-          {blockedByUser ? copy.service.unblock : copy.service.forceAllow}
+          {blockedByUser
+            ? copy.service.unblock
+            : status === "warn"
+              ? copy.service.acceptWarn
+              : copy.service.forceAllow}
         </Button>
       </div>
       <p className="zs-t-caption">
-        {blockedByUser && !needsForceConfirm(service.status, report) ? copy.service.unblockHint : copy.service.forceHint}
+        {blockedByUser
+          ? !needsForceConfirm(service.status, report)
+            ? copy.service.unblockHint
+            : copy.service.forceHint
+          : status === "warn"
+            ? copy.service.warnAllowHint
+            : copy.service.forceHint}
       </p>
     </ExpandRow>
   );

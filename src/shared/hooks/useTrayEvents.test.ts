@@ -138,22 +138,64 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
     }
   });
 
-  it("handleInterceptorResolvedEvent сбрасывает устаревшие отчёты, обновляет state и запускает аудит", () => {
+  it("handleRiskDetectedEvent при phase=ready с готовым payload.report НЕ сбрасывает отчёты (без прыжка в 0 из 14)", () => {
     const invalidateReports = vi.fn();
     const refreshState = vi.fn(async () => ({}));
     const setInterceptPayload = vi.fn();
-    const runFullAudit = vi.fn(async () => {});
+    const ok: CheckResult = { status: "ok", code: "OK", message: "ok" };
+    const report: RiskReport = {
+      provider: "gemini",
+      overall_status: "red",
+      trust_score: 40,
+      telemetry: { ip: "103.139.51.30", country_code: "SE", resolved_at: 1 },
+      geo_result: ok,
+      pinning_result: ok,
+      travel_result: { status: "critical", code: "IMPOSSIBLE_TRAVEL_CRITICAL", message: "Смена страны за 4 часа" },
+      dnsbl_result: ok,
+      dnsbl_clean_count: "4/4",
+      asn_result: ok,
+      ipv6_result: ok,
+      timezone_result: ok,
+      checks: [],
+    };
+    const payload: RiskInterceptPayload = {
+      id: "alert-ready-with-report",
+      provider: "gemini",
+      host: "aistudio.google.com",
+      report,
+      ttl_seconds: 90,
+      scope: "network",
+      detected_at_ms: 1,
+      phase: "ready",
+    };
 
-    handleInterceptorResolvedEvent({
-      invalidateReports,
-      refreshState,
-      setInterceptPayload,
-      runFullAudit,
-    });
-    expect(setInterceptPayload).toHaveBeenCalledWith(null);
-    expect(invalidateReports).toHaveBeenCalledTimes(1);
+    handleRiskDetectedEvent({ invalidateReports, refreshState, setInterceptPayload }, payload);
+    expect(invalidateReports).not.toHaveBeenCalled();
     expect(refreshState).toHaveBeenCalledTimes(1);
-    expect(runFullAudit).toHaveBeenCalledWith(false);
+    expect(setInterceptPayload).toHaveBeenCalledTimes(1);
+  });
+
+  it("handleInterceptorResolvedEvent с пустым/необъектным payload (включая '' от hide_popup) очищает payload и обновляет state, но НЕ сбрасывает отчёты и НЕ запускает аудит", () => {
+    for (const emptyPayload of ["", null, undefined] as const) {
+      const invalidateReports = vi.fn();
+      const refreshState = vi.fn(async () => ({}));
+      const setInterceptPayload = vi.fn();
+      const runFullAudit = vi.fn(async () => {});
+
+      handleInterceptorResolvedEvent(
+        {
+          invalidateReports,
+          refreshState,
+          setInterceptPayload,
+          runFullAudit,
+        },
+        emptyPayload,
+      );
+      expect(setInterceptPayload).toHaveBeenCalledWith(null);
+      expect(refreshState).toHaveBeenCalledTimes(1);
+      expect(invalidateReports).not.toHaveBeenCalled();
+      expect(runFullAudit).not.toHaveBeenCalled();
+    }
   });
 
   it("handleRiskDetectedEvent игнорирует событие и очищает payload, когда guardPauseStatus.paused === true", () => {
@@ -217,7 +259,7 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
     }
   });
 
-  it("handleInterceptorResolvedEvent при allow_session или legacy-форме { id } сбрасывает отчёты и запускает аудит", () => {
+  it("handleInterceptorResolvedEvent при allow_session или legacy-форме { id } запускает аудит БЕЗ предварительного сброса валидных отчётов", () => {
     for (const payload of [
       { id: "a1", provider: "anthropic", decision: "allow_session", should_reaudit: true },
       { id: "a2" },
@@ -234,7 +276,7 @@ describe("§7.7 fail-closed invalidation on network/guard events", () => {
 
       expect(setInterceptPayload).toHaveBeenCalledWith(null);
       expect(refreshState).toHaveBeenCalledTimes(1);
-      expect(invalidateReports).toHaveBeenCalledTimes(1);
+      expect(invalidateReports).not.toHaveBeenCalled();
       expect(runFullAudit).toHaveBeenCalledWith(false);
     }
   });

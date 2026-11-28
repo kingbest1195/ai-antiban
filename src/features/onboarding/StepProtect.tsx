@@ -1,4 +1,4 @@
-import { Badge, Banner, Card, Row, Rows, Switch } from "../../ui";
+import { Banner, Card, Row, Rows, Switch } from "../../ui";
 import { onboarding as copy } from "../../shared/copy/ru";
 import { CleanRoomRadarAnim } from "../mascot";
 import { StepFooter, StepFrame } from "./parts";
@@ -57,7 +57,6 @@ export function StepProtect({ sysproxyActive, cliProtected, onToggleSysproxy, on
             icon="shield"
             title={copy.protect.timezone.title}
             sub={copy.protect.timezone.sub}
-            trail={<Badge tone="neutral">{copy.protect.timezone.badge}</Badge>}
           />
           <Row icon="lock" title={copy.protect.bunker.title} sub={copy.protect.bunker.sub} />
         </Rows>

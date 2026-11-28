@@ -239,6 +239,7 @@ impl NetworkGuard {
                 }
                 return;
             }
+            let had_alert = inner.pending.as_ref().is_some_and(|p| p.alert_emitted);
             if let Some(p) = inner.invalidate_alert() {
                 env.hold_queue.remove(&p.id).await;
             }
@@ -247,14 +248,20 @@ impl NetworkGuard {
                     let _ = env.state.block_provider(p).await;
                 }
             }
+            let mut pause_cleared = false;
             if !summary.healthy_providers.is_empty() && !self.is_manual_killswitch() {
-                self.clear_until_network_change_locked(inner);
+                pause_cleared = self.clear_until_network_change_locked(inner);
                 inner.baseline = Some(Baseline {
                     ip: new_ip.clone(),
                     country: Some(summary.tel.country_code.clone()),
                     trusted: true,
                 });
             }
+            let unblocked_any = !summary.healthy_providers.is_empty()
+                && summary
+                    .healthy_providers
+                    .iter()
+                    .any(|p| was_blocked_set.contains(*p));
             let st_after = env.state.get_data().await;
             let any_blocked_pinned =
                 any_blocked_pinned_or_excepted_for(&st_after, &enabled_unrouted, &new_ip);
@@ -279,9 +286,24 @@ impl NetworkGuard {
                 }
             }
             self.sync_gates_with_state_and_pending(&st_after, None);
-            self.hide_popup(env);
+            if had_alert
+                || existing_alert_emitted
+                || pause_cleared
+                || unblocked_any
+                || env
+                    .hold_queue
+                    .has_active_non_checkout_alerts_or_holds()
+                    .await
+            {
+                self.hide_popup(env);
+            }
             self.update_tray(env, &summary.tray).await;
-            env.emit("network://changed", &summary.worst);
+            if !matches!(mode, AuditOutcomeMode::BaselineRestore { .. })
+                || unblocked_any
+                || pause_cleared
+            {
+                env.emit("network://changed", &summary.worst);
+            }
             return;
         }
 

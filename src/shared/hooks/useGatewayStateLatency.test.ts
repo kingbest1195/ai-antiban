@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CheckResult, ProviderId, RiskReport } from "../../types";
+import type { AppStateData, CheckResult, ProviderId, RiskReport } from "../../types";
 
 const hookRuntime = vi.hoisted(() => {
   type Slot =
@@ -133,20 +133,30 @@ function makeReport(provider: ProviderId, gatewayLatencyMs?: number | null): Ris
 
 const latencyHolder = vi.hoisted(() => ({ value: 48 as number | null }));
 
+const apiOverrides = vi.hoisted(() => ({
+  auditImpl: null as ((provider: ProviderId) => Promise<RiskReport>) | null,
+  stateOverride: null as AppStateData | null,
+}));
+
 vi.mock("../../utils/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../utils/api")>();
   return {
     ...actual,
-    auditConnection: vi.fn(async (provider: ProviderId) => makeReport(provider, latencyHolder.value)),
-    fetchAppState: vi.fn(async () => ({
-      pinned_ip: null,
-      strict_pinning_enabled: true,
-      ip_history: {},
-      session_allowed_providers: [],
-      blocked_providers: [],
-      dismissed_hints: [],
-      auto_update_enabled: true,
-    })),
+    auditConnection: vi.fn(async (provider: ProviderId) =>
+      apiOverrides.auditImpl ? apiOverrides.auditImpl(provider) : makeReport(provider, latencyHolder.value),
+    ),
+    fetchAppState: vi.fn(
+      async () =>
+        apiOverrides.stateOverride ?? {
+          pinned_ip: null,
+          strict_pinning_enabled: true,
+          ip_history: {},
+          session_allowed_providers: [],
+          blocked_providers: [],
+          dismissed_hints: [],
+          auto_update_enabled: true,
+        },
+    ),
     getCoverageSnapshot: vi.fn(async () => ({ items: [] })),
     getRoutesSnapshot: vi.fn(async () => ({ routes: [], provider_routes: {}, effective: {}, dangling: [] })),
     getStartupState: vi.fn(async () => ({ phase: "ready" })),
@@ -207,6 +217,78 @@ describe("useGatewayState — gateway_latency_ms (4252 мс regression)", () => 
       await result!.runProviderAudit("gemini", true);
       expect(result!.scanLatencyMs).toBe(0);
     } finally {
+      Object.defineProperty(globalThis, "window", { configurable: true, value: prevWindow });
+      Object.defineProperty(globalThis, "document", { configurable: true, value: prevDocument });
+    }
+  });
+
+  it("runFullAudit запускает все 3 провайдера конкурентно и не сбрасывает activeReport / reports во время фонового refreshing", async () => {
+    const prevWindow = (globalThis as { window?: unknown }).window;
+    const prevDocument = (globalThis as { document?: unknown }).document;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: { visibilityState: "visible", addEventListener: vi.fn(), removeEventListener: vi.fn() },
+    });
+
+    try {
+      apiOverrides.stateOverride = {
+        pinned_ip: null,
+        strict_pinning_enabled: true,
+        ip_history: {},
+        session_allowed_providers: [],
+        blocked_providers: ["gemini"],
+        trusted_exceptions: { anthropic: ["185.212.102.40"] },
+        dismissed_hints: [],
+        auto_update_enabled: true,
+      };
+      apiOverrides.auditImpl = null;
+
+      let result: ReturnType<typeof useGatewayState> | null = null;
+      const render = () => {
+        hookRuntime.beginRender();
+        result = useGatewayState({ showToast: vi.fn(), refreshGatewayStats: vi.fn(async () => {}) });
+      };
+
+      hookRuntime.reset(render);
+      render();
+      hookRuntime.flush();
+      await result!.runFullAudit(true, true);
+
+      expect(result!.activeReport).not.toBeNull();
+      expect(result!.reports.openai).toBeDefined();
+      expect(result!.reports.gemini).toBeDefined();
+
+      const started: ProviderId[] = [];
+      const pendingResolvers: Partial<Record<ProviderId, (r: RiskReport) => void>> = {};
+      apiOverrides.auditImpl = (provider) =>
+        new Promise<RiskReport>((resolve) => {
+          started.push(provider);
+          pendingResolvers[provider] = resolve;
+        });
+
+      const reauditPromise = result!.runFullAudit(false, true);
+      expect(started).toEqual(["anthropic", "openai", "gemini"]);
+      // Во время фонового обновления ни activeReport, ни отчёты провайдеров не зануляются.
+      expect(result!.refreshing).toBe(true);
+      expect(result!.activeReport).not.toBeNull();
+      expect(result!.reports.anthropic).toBeDefined();
+      expect(result!.reports.openai).toBeDefined();
+      expect(result!.reports.gemini).toBeDefined();
+
+      pendingResolvers.anthropic!(makeReport("anthropic", 35));
+      pendingResolvers.openai!(makeReport("openai", 35));
+      pendingResolvers.gemini!(makeReport("gemini", 35));
+      await reauditPromise;
+
+      expect(result!.refreshing).toBe(false);
+      expect(result!.activeReport).not.toBeNull();
+    } finally {
+      apiOverrides.auditImpl = null;
+      apiOverrides.stateOverride = null;
       Object.defineProperty(globalThis, "window", { configurable: true, value: prevWindow });
       Object.defineProperty(globalThis, "document", { configurable: true, value: prevDocument });
     }

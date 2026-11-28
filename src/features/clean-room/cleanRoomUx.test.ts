@@ -174,7 +174,7 @@ vi.mock("../../utils/api", async (importOriginal) => {
   };
 });
 
-import { Button, ConfirmModal, Select } from "../../ui";
+import { Button, ConfirmModal, HintCard, Select } from "../../ui";
 import { PreFlightAuditCard, buildRadarLayers } from "./PreFlightAuditCard";
 import { SandboxProfilesCard } from "./SandboxProfilesCard";
 import { LaunchpadSteps } from "./LaunchpadSteps";
@@ -613,5 +613,55 @@ describe("Clean Room UX & Privacy v3.0.1 (mounted + element tree)", () => {
       (el) => typeof el.type === "function" && el.type.name === "Banner" && el.props.tone === "info",
     );
     expect(infoBanners.length).toBeLessThanOrEqual(1);
+  });
+
+  it("Баг #2: закрытие HintCard sandbox_chrome_flag_note вызывает onDismissHint('sandbox_chrome_flag_note') и скрывает подсказку", async () => {
+    const onDismissHint = vi.fn();
+    let tree: ReactElement | null = null;
+    const state: AppStateData = {
+      pinned_ip: "185.212.102.40",
+      strict_pinning_enabled: true,
+      ip_history: {},
+      session_allowed_providers: [],
+      blocked_providers: [],
+      dismissed_hints: [],
+      clean_room: { profiles: [makeProfile()], active_profile_id: "cr-1", tainted_ips: {} },
+    };
+    const render = () => {
+      hookRuntime.beginRender();
+      tree = CleanRoomScreen({
+        state,
+        initialTab: "launchpad",
+        initialAudit: makeAudit(),
+        initialBrowsers: BROWSERS,
+        onDismissHint,
+      }) as ReactElement;
+    };
+    hookRuntime.reset(render);
+    render();
+
+    const sandboxEl = collectElements(tree, (el) => el.type === SandboxProfilesCard)[0];
+    expect(sandboxEl).toBeTruthy();
+
+    let sandboxTree: ReactElement | null = null;
+    const renderSandbox = () => {
+      hookRuntime.beginRender();
+      sandboxTree = SandboxProfilesCard(
+        sandboxEl.props as unknown as Parameters<typeof SandboxProfilesCard>[0],
+      ) as ReactElement;
+    };
+    hookRuntime.reset(renderSandbox);
+    renderSandbox();
+
+    const flagHint = collectElements(
+      sandboxTree,
+      (el) => el.type === HintCard && el.props.hintId === "sandbox_chrome_flag_note",
+    )[0];
+    expect(flagHint).toBeTruthy();
+    expect(flagHint.props.title).toBe(copy.sandbox.chromeFlagHint.title);
+
+    (flagHint.props as { onDismiss: (id: string) => void }).onDismiss("sandbox_chrome_flag_note");
+    await Promise.resolve();
+    expect(onDismissHint).toHaveBeenCalledWith("sandbox_chrome_flag_note");
   });
 });
